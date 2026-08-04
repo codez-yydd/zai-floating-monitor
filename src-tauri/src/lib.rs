@@ -481,8 +481,9 @@ fn today_tray_title(app: &AppHandle) -> String {
     let stats = db::query_stats(today_start, now_ms);
     let pricing = load_pricing().unwrap_or_default();
 
-    let total = stats.as_ref().map(|s| s.overall.total_tokens).unwrap_or(0);
-    let cost = stats
+    // 本机数据
+    let mut total = stats.as_ref().map(|s| s.overall.total_tokens).unwrap_or(0);
+    let mut cost = stats
         .as_ref()
         .map(|s| {
             s.by_model
@@ -491,6 +492,43 @@ fn today_tray_title(app: &AppHandle) -> String {
                 .sum::<f64>()
         })
         .unwrap_or(0.0);
+
+    // 多设备同步：合并远端（其他设备）今日数据
+    let cfg = sync::load_sync_config().unwrap_or_default();
+    if cfg.enabled && !cfg.device_token.is_empty() {
+        let req = sync::RemoteUsageRequest {
+            from_ms: today_start,
+            to_ms: now_ms,
+            bucket: "day".to_string(),
+            exclude_device: cfg.device_id.clone(),
+            devices: String::new(),
+        };
+        // 远端请求失败时静默降级（服务器不可达不影响菜单栏显示）
+        if let Ok(remote) = sync::fetch_remote_usage(req) {
+            total += remote.overall.total_tokens;
+            // 远端不含花费，按 pricing 自算
+            cost += remote
+                .by_model
+                .iter()
+                .map(|m| {
+                    cost_for(
+                        &db::ModelStat {
+                            model_id: m.model_id.clone(),
+                            provider_id: m.provider_id.clone(),
+                            requests: m.requests,
+                            input_tokens: m.input_tokens,
+                            output_tokens: m.output_tokens,
+                            cache_read_tokens: m.cache_read_tokens,
+                            cache_write_tokens: m.cache_write_tokens,
+                            reasoning_tokens: m.reasoning_tokens,
+                            total_tokens: m.total_tokens,
+                        },
+                        &pricing.cny,
+                    )
+                })
+                .sum::<f64>();
+        }
+    }
 
     let _ = app; // 占位
     if total > 0 {
