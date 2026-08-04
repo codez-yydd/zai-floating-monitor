@@ -24,16 +24,16 @@ body,
 }
 
 /*
- * 面板容器：用半透明白色表面压住后方文字，再交给原生材质和 backdrop-filter
- * 做模糊。这样背景颜色仍有层次，但不会把后面的页面内容直接叠到面板上。
+ * 面板容器：用半透明白色表面压住后方文字，模糊完全交给原生 popover
+ * 材质（windowEffects.effects: popover）提供。
+ * 不再叠加 CSS backdrop-filter，避免与原生材质双重模糊、合成时序竞争
+ * 导致面板 show 出来时偶发白闪（首帧采样不到背后内容会渲染成偏白）。
  */
 .panel-shell {
   height: 100%;
   border-radius: 16px;
   overflow: hidden;
-  background: rgba(255, 255, 255, 0.68);
-  -webkit-backdrop-filter: blur(28px) saturate(160%);
-  backdrop-filter: blur(28px) saturate(160%);
+  background: rgba(255, 255, 255, 0.55);
   border: 1px solid rgba(15, 23, 42, 0.14);
   box-shadow:
     0 18px 48px rgba(15, 23, 42, 0.16),
