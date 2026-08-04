@@ -19,6 +19,7 @@
 - **原生体验** — macOS 使用 `popover` 毛玻璃材质 + 透明窗口；Windows/Linux 面板贴近任务栏展开。
 - **自动刷新** — 面板数据每 30 秒自动拉取一次。
 - **Coding Plan 额度监控** — 订阅用户可在面板顶部查看 **5 小时窗口**与**每周额度**的用量进度条，颜色随用量警示（绿→琥珀→红），并显示下次重置倒计时；支持**国内 / 国际**双端点切换。
+- **🔄 多设备同步** — 自托管同步服务（`server/`），让公司 / 家里等多台电脑汇总查看全量用量。明细增量上传 + `(device, rowid)` 去重，支持**设备筛选**（全部 / 本机 / 指定设备）和**数据清理**（按设备 / 按时间 / 全清 + 可配置自动定时清理）。详见 [server/README.md](./server/README.md)。
 
 ---
 
@@ -39,22 +40,32 @@
 ```
 zai-floating-monitor/
 ├── src/                      # 前端（React）
-│   ├── App.tsx               # 视图路由：统计 / 价格设置
-│   ├── StatsPanel.tsx        # 统计面板
+│   ├── App.tsx               # 视图路由：统计 / 价格设置 / 设备同步
+│   ├── StatsPanel.tsx        # 统计面板（含设备筛选器 + 本地/远端数据合并）
 │   ├── PricingPanel.tsx      # 价格配置面板
+│   ├── QuotaPanel.tsx        # Coding Plan 额度监控
+│   ├── SyncPanel.tsx         # 设备同步设置面板（注册 / 数据管理）
 │   ├── RangePicker.tsx       # 时间范围选择器
 │   ├── api.ts                # invoke 封装（调用 Rust 命令）
 │   ├── types.ts              # 与 Rust 结构一一对应的 TS 类型
 │   ├── format.ts             # Token / 金额 / 百分比格式化
 │   └── main.tsx              # 入口
-├── src-tauri/                # Rust 后端
+├── src-tauri/                # Rust 后端（客户端）
 │   ├── src/
 │   │   ├── lib.rs            # 应用入口、托盘、面板逻辑、Tauri 命令
-│   │   ├── db.rs             # SQLite 只读查询（统计 / 模型列表）
+│   │   ├── db.rs             # SQLite 只读查询（统计 / 模型列表 / 增量查询）
 │   │   ├── pricing.rs        # 价格配置读写
+│   │   ├── quota.rs          # Coding Plan 额度查询
+│   │   ├── sync.rs           # 多设备同步（配置 / 增量上传 / 远端查询 / 清理）
 │   │   └── main.rs
 │   ├── capabilities/         # Tauri 权限配置
 │   └── tauri.conf.json       # 窗口 / 打包配置
+├── server/                   # 自托管同步服务（Python + Flask）
+│   ├── app.py                # Flask 应用 + 所有接口
+│   ├── db.py                 # SQLite 操作（自动建库建表）
+│   ├── auth.py               # 鉴权（master token / device token）
+│   ├── config.py             # 配置（端口 / 数据目录）
+│   └── README.md             # 部署文档
 ├── index.html
 └── vite.config.ts
 ```
@@ -174,6 +185,45 @@ ZBar 以 **只读** 方式访问 ZCode 的 SQLite 数据库，不会干扰 ZCode
 
 额度数据通过 `GET /api/monitor/usage/quota/limit` 接口实时获取，每 30 秒自动刷新。未配置 Token 时面板显示「去配置」引导，不影响其他功能。
 
+### 多设备同步
+
+多台电脑（公司 / 家里）汇总查看全量用量。通过自托管同步服务实现，数据存在你自己的服务器上。
+
+**部署服务端**（Python + Flask，装个依赖直接跑）：
+
+```bash
+cd server
+pip3 install -r requirements.txt   # 只需 Flask
+python3 app.py                      # 启动后日志会打印 Master Token
+```
+
+详见 [server/README.md](./server/README.md)。
+
+**客户端配置**：点击面板顶部 **⇅** 图标进入「设备同步」设置，填写服务器地址 + Master Token + 设备名称（如 `work` / `home`），点「连接并注册」。
+
+注册成功后：
+
+- **设备筛选器** — 统计面板顶部出现设备下拉，可选「全部（汇总）」「本机」或指定设备。
+- **同步模式** — 手动（点「立即同步」）或自动（按间隔自动上传）。
+- **数据管理** — 按设备 / 按时间 / 全部清空，可配置服务端自动定时清理。
+
+配置保存在 **`~/.zbar/sync.json`**（Master Token 不持久化，注册后即丢弃）：
+
+```json
+{
+  "enabled": true,
+  "mode": "auto",
+  "interval_seconds": 60,
+  "server_url": "http://192.168.1.100:3838",
+  "device_id": "uuid-xxx",
+  "device_name": "work",
+  "device_token": "...",
+  "last_uploaded_rowid": 12345
+}
+```
+
+**同步原理**：ZCode 的用量记录是只增不删的，客户端按 `rowid` 增量上传，服务端用 `(device_id, local_rowid)` 去重。查询时本机数据查本地、其他设备数据查远端，合并展示，避免重复计算。
+
 ---
 
 ## 🧮 计费规则
@@ -197,6 +247,7 @@ ZBar 以 **只读** 方式访问 ZCode 的 SQLite 数据库，不会干扰 ZCode
 
 - 数据库连接使用 `SQLITE_OPEN_READ_ONLY`，**只读不写**，绝不影响 ZCode 数据。
 - 价格配置仅保存在用户本地 `~/.zbar/` 目录，不上传任何数据。
+- **多设备同步**为可选功能，默认关闭。启用后仅同步模型名、Token 数量、时间戳，**不含代码和对话内容**。服务端自托管，数据存在你自己的服务器上。
 - 面板失焦自动隐藏，窗口常驻不销毁，点击托盘即可重新唤出。
 
 ---

@@ -198,6 +198,80 @@ pub fn list_models() -> Result<Vec<ModelInfo>, String> {
     Ok(models)
 }
 
+// ===== 增量查询（多设备同步用） =====
+
+/// 单条明细记录（供同步上传用）。
+/// 字段与 zcode 的 model_usage 表对齐，多带一个 local_rowid 作为去重键。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageRow {
+    pub local_rowid: i64,
+    pub started_at: i64,
+    #[serde(default)]
+    pub model_id: String,
+    #[serde(default)]
+    pub provider_id: String,
+    #[serde(default)]
+    pub input_tokens: i64,
+    #[serde(default)]
+    pub output_tokens: i64,
+    #[serde(default)]
+    pub cache_read_input_tokens: i64,
+    #[serde(default)]
+    pub cache_creation_input_tokens: i64,
+    #[serde(default)]
+    pub reasoning_tokens: i64,
+    #[serde(default)]
+    pub computed_total_tokens: i64,
+}
+
+/// 查询 rowid > since 的明细记录（增量上传用）。
+/// 只读连接也能 SELECT rowid。按 rowid 升序，便于游标推进。
+pub fn query_since(since: i64, limit: usize) -> Result<Vec<UsageRow>, String> {
+    let conn = open_db()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT rowid, started_at, model_id, provider_id,
+                    COALESCE(input_tokens,0), COALESCE(output_tokens,0),
+                    COALESCE(cache_read_input_tokens,0), COALESCE(cache_creation_input_tokens,0),
+                    COALESCE(reasoning_tokens,0), COALESCE(computed_total_tokens,0)
+             FROM model_usage
+             WHERE rowid > ?1
+             ORDER BY rowid ASC
+             LIMIT ?2",
+        )
+        .map_err(|e| format!("准备增量查询失败: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params![since, limit as i64], |row| {
+            Ok(UsageRow {
+                local_rowid: row.get(0)?,
+                started_at: row.get(1)?,
+                model_id: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                provider_id: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                input_tokens: row.get(4)?,
+                output_tokens: row.get(5)?,
+                cache_read_input_tokens: row.get(6)?,
+                cache_creation_input_tokens: row.get(7)?,
+                reasoning_tokens: row.get(8)?,
+                computed_total_tokens: row.get(9)?,
+            })
+        })
+        .map_err(|e| format!("读取增量记录失败: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("读取增量记录失败: {e}"))?;
+    Ok(rows)
+}
+
+/// 当前本地库的最大 rowid（供「待上传条数」显示用）。
+pub fn max_rowid() -> Result<i64, String> {
+    let conn = open_db()?;
+    let max: i64 = conn
+        .query_row("SELECT COALESCE(MAX(rowid), 0) FROM model_usage", [], |row| {
+            row.get(0)
+        })
+        .map_err(|e| format!("查询最大 rowid 失败: {e}"))?;
+    Ok(max)
+}
+
 // ===== 时间序列分桶聚合（趋势图用） =====
 
 /// 某个桶内某模型的聚合。计费所需字段齐全，供 lib.rs 计算 cost。

@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { StatsPanel } from "./StatsPanel";
 import { PricingPanel } from "./PricingPanel";
+import { SyncPanel } from "./SyncPanel";
 import { fetchPricing } from "./api";
 import type { Currency, PricingConfig } from "./types";
 
-type View = "stats" | "pricing";
+type View = "stats" | "pricing" | "sync";
 
 export default function App() {
   const [view, setView] = useState<View>("stats");
@@ -26,6 +27,13 @@ export default function App() {
       .catch(() => {});
   }, []);
 
+  const backToStats = () => {
+    fetchPricing()
+      .then(setPricing)
+      .catch(() => {});
+    setView("stats");
+  };
+
   return (
     <div className="panel-shell">
       {view === "stats" ? (
@@ -33,18 +41,16 @@ export default function App() {
           currency={currency}
           pricing={pricing}
           onGoPricing={() => setView("pricing")}
+          onGoSync={() => setView("sync")}
         />
-      ) : (
+      ) : view === "pricing" ? (
         <PricingPanel
           currency={currency}
           onCurrencyChange={setCurrency}
-          onBack={() => {
-            fetchPricing()
-              .then(setPricing)
-              .catch(() => {});
-            setView("stats");
-          }}
+          onBack={backToStats}
         />
+      ) : (
+        <SyncPanel onBack={backToStats} />
       )}
     </div>
   );

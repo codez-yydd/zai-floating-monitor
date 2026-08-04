@@ -125,3 +125,117 @@ export interface QuotaResult {
   /** MCP 月度用量（已用次数 + 总量 + 百分比） */
   mcp: QuotaLimit | null;
 }
+
+// ===== 多设备同步（与 Rust sync.rs 结构一一对应） =====
+
+export type SyncMode = "manual" | "auto";
+
+/** 同步配置（~/.zbar/sync.json） */
+export interface SyncConfig {
+  enabled: boolean;
+  mode: SyncMode;
+  interval_seconds: number;
+  server_url: string;
+  device_id: string;
+  device_name: string;
+  device_token: string;
+  last_uploaded_rowid: number;
+  last_sync_at: number;
+}
+
+/** 注册请求（UI 填写 server_url + master_token + name） */
+export interface RegisterRequest {
+  server_url: string;
+  master_token: string;
+  device_name: string;
+}
+
+/** 手动同步结果 */
+export interface SyncOutcome {
+  uploaded: number;
+  new_max_rowid: number;
+  last_sync_at: number;
+}
+
+/** 设备信息 */
+export interface DeviceInfo {
+  device_id: string;
+  device_name: string;
+  created_at: number;
+  record_count?: number;
+}
+
+/** 远端整体汇总（与本地 OverallStat 字段一致） */
+export interface RemoteOverall {
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  reasoning_tokens: number;
+  total_tokens: number;
+}
+
+/** 远端模型分组（与本地 ModelStat 字段一致） */
+export interface RemoteModelStat {
+  model_id: string;
+  provider_id: string;
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  reasoning_tokens: number;
+  total_tokens: number;
+}
+
+/** 远端趋势桶内模型 */
+export interface RemoteTrendBucketModel {
+  model_id: string;
+  provider_id: string;
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  total_tokens: number;
+}
+
+/** 远端趋势桶（服务端按 UTC 分桶，label 为 ISO 字符串） */
+export interface RemoteTrendBucket {
+  label: string;
+  by_model: RemoteTrendBucketModel[];
+  total_tokens: number;
+  requests: number;
+}
+
+/** /usage 返回的远端聚合 */
+export interface RemoteUsage {
+  from_ms: number;
+  to_ms: number;
+  overall: RemoteOverall;
+  by_model: RemoteModelStat[];
+  trend: RemoteTrendBucket[];
+}
+
+/** 清理状态 */
+export interface AutoCleanupConfig {
+  auto_enabled: boolean;
+  auto_days: number;
+}
+
+export interface CleanupStatus {
+  total_records: number;
+  devices: DeviceInfo[];
+  auto_config: AutoCleanupConfig;
+}
+
+/** 清理执行结果 */
+export interface CleanupResult {
+  action: string;
+  records_deleted: number;
+  devices_deleted?: number;
+}
+
+/** 设备筛选选项 */
+export type DeviceFilter = "all" | "local" | string; // string 为具体 device_id
+

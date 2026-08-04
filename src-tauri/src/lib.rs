@@ -1,6 +1,7 @@
 mod db;
 mod pricing;
 mod quota;
+mod sync;
 
 use pricing::{load_pricing, save_pricing, ModelPrice, PricingConfig};
 use quota::{load_quota, save_quota, QuotaConfig, QuotaResult};
@@ -168,6 +169,81 @@ fn open_config_dir() -> Result<(), String> {
     let dir = pricing::config_dir()?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("{e}"))?;
     open::that(dir).map_err(|e| format!("打开目录失败: {e}"))
+}
+
+// ===== 多设备同步命令 =====
+
+use sync::{
+    AutoCleanupServerRequest, CleanupServerRequest, CleanupStatus, DeviceInfo,
+    RemoteUsage, RemoteUsageRequest, SyncConfig, SyncOutcome,
+};
+
+/// 读取同步配置
+#[tauri::command]
+fn get_sync_config() -> Result<SyncConfig, String> {
+    sync::load_sync_config()
+}
+
+/// 保存同步配置（仅持久化，不触发网络请求）
+#[tauri::command]
+fn set_sync_config(config: SyncConfig) -> Result<(), String> {
+    sync::save_sync_config(&config)
+}
+
+/// 向服务器注册设备（UI 填写 server_url + master_token + name 后调用）
+#[tauri::command]
+fn register_device(req: sync::RegisterRequest) -> Result<SyncConfig, String> {
+    sync::register_device(req)
+}
+
+/// 手动触发一次增量上传
+#[tauri::command]
+fn sync_now() -> Result<SyncOutcome, String> {
+    sync::upload_incremental()
+}
+
+/// 断开连接（清凭证，不删服务器数据）
+#[tauri::command]
+fn disconnect_device() -> Result<(), String> {
+    sync::disconnect()
+}
+
+/// 拉取远端聚合数据（其他设备）
+#[tauri::command]
+fn remote_usage(req: RemoteUsageRequest) -> Result<RemoteUsage, String> {
+    sync::fetch_remote_usage(req)
+}
+
+/// 拉取设备列表
+#[tauri::command]
+fn list_remote_devices() -> Result<Vec<DeviceInfo>, String> {
+    sync::fetch_devices()
+}
+
+/// 查询清理状态
+#[tauri::command]
+fn get_cleanup_status() -> Result<CleanupStatus, String> {
+    sync::fetch_cleanup_status()
+}
+
+/// 执行服务端清理
+#[tauri::command]
+fn cleanup_server(req: CleanupServerRequest) -> Result<sync::CleanupResult, String> {
+    sync::cleanup_server(req)
+}
+
+/// 配置服务端自动清理
+#[tauri::command]
+fn set_auto_cleanup(req: AutoCleanupServerRequest) -> Result<sync::AutoCleanupConfig, String> {
+    sync::set_auto_cleanup(req)
+}
+
+/// 查询本机待上传的记录数（本机 max_rowid - 已上传游标），供同步面板显示。
+#[tauri::command]
+fn pending_upload_count() -> Result<i64, String> {
+    let local_max = db::max_rowid()?;
+    let cfg = sync::load_sync_config().unwrap_or_default();
+    Ok((local_max - cfg.last_uploaded_rowid).max(0))
 }
 
 /// get_trend 的入参：时间范围 + 分桶粒度
@@ -449,6 +525,7 @@ pub fn run() {
             }
             setup_tray(app.handle())?;
             spawn_title_updater(app.handle().clone());
+            sync::spawn_sync_worker();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -461,7 +538,18 @@ pub fn run() {
             fetch_quota,
             compute_cost,
             get_trend,
-            open_config_dir
+            open_config_dir,
+            get_sync_config,
+            set_sync_config,
+            register_device,
+            sync_now,
+            disconnect_device,
+            remote_usage,
+            list_remote_devices,
+            get_cleanup_status,
+            cleanup_server,
+            set_auto_cleanup,
+            pending_upload_count
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
