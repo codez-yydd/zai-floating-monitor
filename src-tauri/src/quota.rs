@@ -60,10 +60,22 @@ pub fn save_quota(cfg: &QuotaConfig) -> Result<(), String> {
 
 // ===== 额度接口返回结构 =====
 
+/// MCP 工具用量明细（usageDetails[] 元素）
+/// 仅 type=TIME_LIMIT（即 MCP 月度额度）会出现。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpUsageDetail {
+    /// 工具代号：search-prime / web-reader / zread ...
+    #[serde(default)]
+    pub model_code: String,
+    /// 该工具已用次数
+    #[serde(default)]
+    pub usage: i64,
+}
+
 /// 单条用量限制（与 BigModel 接口的 limits[] 元素对应）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuotaLimit {
-    /// "TOKENS_LIMIT" | "TIME_LIMIT"
+    /// "TOKENS_LIMIT" | "TIME_LIMIT"（TIME_LIMIT 即 MCP 月度额度）
     #[serde(rename = "type")]
     pub kind: String,
     /// 接口窗口单位：3 = 小时，6 = 周。
@@ -78,6 +90,15 @@ pub struct QuotaLimit {
     /// 下次重置时间（毫秒时间戳，接口字段为驼峰 nextResetTime）
     #[serde(default, rename = "nextResetTime")]
     pub next_reset_time: Option<i64>,
+    /// MCP 已用次数（仅 TIME_LIMIT 有，接口字段 currentValue）
+    #[serde(default, rename = "currentValue")]
+    pub current_value: Option<i64>,
+    /// MCP 总额度次数（仅 TIME_LIMIT 有；注意接口字段名是 usage，不是 total）
+    #[serde(default)]
+    pub usage: Option<i64>,
+    /// MCP 按工具拆分明细（仅 TIME_LIMIT 有）
+    #[serde(default, rename = "usageDetails")]
+    pub usage_details: Option<Vec<McpUsageDetail>>,
 }
 
 /// BigModel 接口原始返回里的 data 字段
@@ -101,7 +122,7 @@ struct QuotaResponse {
     success: bool,
 }
 
-/// 解析后供前端使用的结果：把 limits 拆成「5小时」与「每周」两组
+/// 解析后供前端使用的结果：把 limits 拆成「5小时」「每周」「MCP 月度」三组
 #[derive(Debug, Clone, Serialize)]
 pub struct QuotaResult {
     /// 套餐等级
@@ -110,6 +131,8 @@ pub struct QuotaResult {
     pub hour5: Option<QuotaLimit>,
     /// 每周用量（已用百分比）
     pub weekly: Option<QuotaLimit>,
+    /// MCP 月度用量（已用次数 + 总量 + 百分比）
+    pub mcp: Option<QuotaLimit>,
 }
 
 /// 根据 endpoint 选择 base URL
@@ -150,7 +173,14 @@ pub fn fetch_quota(cfg: &QuotaConfig) -> Result<QuotaResult, String> {
 
     let data = resp.data.ok_or("额度响应缺少 data 字段")?;
 
-    // 仅取 TOKENS_LIMIT。窗口类型由 unit + number 识别：
+    // MCP 月度额度：type=TIME_LIMIT（与 token 额度区分开，先单独取）
+    let mcp = data
+        .limits
+        .iter()
+        .find(|l| l.kind == "TIME_LIMIT")
+        .cloned();
+
+    // token 额度（TOKENS_LIMIT），窗口类型由 unit + number 识别：
     // (3, 5) = 5 小时；(6, 1) = 每周。
     let token_limits: Vec<QuotaLimit> = data
         .limits
@@ -191,5 +221,6 @@ pub fn fetch_quota(cfg: &QuotaConfig) -> Result<QuotaResult, String> {
         level: data.level,
         hour5,
         weekly,
+        mcp,
     })
 }

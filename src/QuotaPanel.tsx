@@ -124,6 +124,18 @@ export function QuotaPanel({ onGoSettings }: Props) {
           className="mt-1.5"
         />
       )}
+
+      {/* MCP 月度额度 */}
+      {quota.mcp && (
+        <McpBar
+          usedPct={quota.mcp.percentage}
+          resetAt={quota.mcp.nextResetTime}
+          now={now}
+          currentValue={quota.mcp.currentValue}
+          total={quota.mcp.usage}
+          className="mt-1.5"
+        />
+      )}
     </div>
   );
 }
@@ -193,4 +205,78 @@ function formatCountdown(ms: number): string {
   if (days > 0) return `${days}d ${hours}h 后刷新`;
   if (hours > 0) return `${hours}h ${mins}m 后刷新`;
   return `${mins}m 后刷新`;
+}
+
+/** MCP 月度额度条：与 QuotaBar 同款进度条。
+ *  - 中间列显示刷新倒计时（与 5h/周 一致；若接口无 nextResetTime 则留空）
+ *  - 进度条下方副信息行：绝对值「已用 / 总量」 + 不足时的「仅剩 X%」 */
+function McpBar({
+  usedPct,
+  resetAt,
+  now,
+  currentValue,
+  total,
+  className = "",
+}: {
+  usedPct: number;
+  resetAt?: number | null;
+  now: number;
+  currentValue?: number;
+  total?: number;
+  className?: string;
+}) {
+  const pct = Math.min(Math.max(usedPct, 0), 100);
+  const remaining = 100 - pct;
+
+  const color =
+    pct >= 90
+      ? "bg-red-400"
+      : pct >= 70
+        ? "bg-amber-400"
+        : "bg-sky-400";
+
+  // 有绝对值时显示 "已用 / 总量"
+  const hasAbs =
+    typeof currentValue === "number" && typeof total === "number";
+
+  // 副信息：绝对值 + 不足警示，合并成一行
+  const subParts: string[] = [];
+  if (hasAbs) {
+    subParts.push(`${currentValue} / ${total}`);
+  }
+  if (remaining < 20 && remaining > 0) {
+    subParts.push(`仅剩 ${remaining.toFixed(0)}%`);
+  }
+
+  return (
+    <div className={className}>
+      <div className="grid grid-cols-[3.25rem_minmax(0,1fr)_2.75rem] items-center gap-2 text-[10px] mb-0.5">
+        <span className="text-slate-700/60">MCP</span>
+        {resetAt && resetAt > now ? (
+          <span className="num text-slate-700/40 text-right pr-1 whitespace-nowrap">
+            ↻ {formatCountdown(resetAt - now)}
+          </span>
+        ) : (
+          <span />
+        )}
+        <span className="num font-semibold text-slate-900/85 text-right">
+          {pct}%
+        </span>
+      </div>
+      <div className="h-1.5 rounded-full bg-slate-900/8 overflow-hidden">
+        <div
+          className={`h-full rounded-full ${color} opacity-80 transition-all duration-500`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      {subParts.length > 0 && (
+        <div className="text-[9px] text-slate-700/50 mt-0.5 flex items-center gap-2">
+          {hasAbs && <span className="num">{currentValue} / {total}</span>}
+          {remaining < 20 && remaining > 0 && (
+            <span className="text-red-600/80">仅剩 {remaining.toFixed(0)}%</span>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
