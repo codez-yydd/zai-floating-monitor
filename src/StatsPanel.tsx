@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import type {
   CostResult,
   Currency,
@@ -198,8 +199,27 @@ export function StatsPanel({ currency, pricing, onGoPricing, onGoSync }: Props) 
     <div className="flex flex-col h-full">
       {/* 顶部 */}
       <div className="px-3.5 pt-3 pb-2.5 border-b border-slate-900/10">
-        <div className="flex items-center justify-between mb-2.5">
-          <h1 className="text-[13px] font-semibold text-slate-900/90">
+        {/* Windows 无边框窗口拖动：整行都可作为手柄。
+            用 JS API startDragging 而非 data-tauri-drag-region——后者会让容器内
+            按钮因 closest() 命中而失效。这里在 mousedown 时判断是否点在按钮上，
+            只有非按钮区域才触发原生拖动，按钮点击不受影响。macOS 的 popover
+            固定在菜单栏下方，不需要拖动。 */}
+        <div
+          className={`flex items-center justify-between mb-2.5 ${
+            isWindows ? "cursor-default" : ""
+          }`}
+          onMouseDown={
+            isWindows
+              ? (e) => {
+                  // 点在按钮（或其子元素）上时不拖动，交给按钮 onClick 处理
+                  if (!(e.target as HTMLElement).closest("button")) {
+                    getCurrentWindow().startDragging();
+                  }
+                }
+              : undefined
+          }
+        >
+          <h1 className="text-[13px] font-semibold text-slate-900/90 select-none">
             ZCode Token
           </h1>
           <div className="flex items-center gap-2.5">
