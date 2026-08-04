@@ -18,6 +18,7 @@ A lightweight menu-bar floating panel that tracks the Token usage and cost of th
 - **Cache-aware billing** — `input_tokens` already includes cache-read tokens; cache-read is billed at the cache rate and non-cache input at the input rate, avoiding double counting.
 - **Native feel** — macOS uses the `popover` vibrancy material + transparent window; Windows/Linux panels unfold near the taskbar.
 - **Auto refresh** — panel data is re-fetched every 30 seconds.
+- **Coding Plan quota monitor** — subscribers can view the **5-hour window** and **weekly quota** usage progress bars at the top of the panel; the color escalates with usage (green → amber → red) and shows a reset countdown. Supports **China / Global** endpoint switching.
 
 ---
 
@@ -152,6 +153,26 @@ Edit visually via the "⚙ Pricing" page inside the panel, or edit the file dire
 - Only fill in the models you want billed; unpriced models show `—` and are flagged ⚠
 
 In the panel, "⚙ Pricing → open directory" opens `~/.zbar/` directly in Finder.
+
+### Coding Plan Quota Monitor
+
+GLM Coding Plan subscribers can view real-time usage of the 5-hour window and weekly quota at the top of the stats panel.
+
+**Setup**: open "⚙ Pricing" and fill in the "Coding Plan quota monitor" section:
+
+- **API Token**: your Coding Plan token from the BigModel platform
+- **Endpoint**: "🇨🇳 China" (`open.bigmodel.cn`) for mainland users, "🌐 Global" (`api.z.ai`) for overseas
+
+The config is stored at **`~/.zbar/quota.json`**:
+
+```json
+{
+  "token": "your-coding-plan-api-token",
+  "endpoint": "cn"
+}
+```
+
+Quota data is fetched live via `GET /api/monitor/usage/quota/limit` and auto-refreshes every 30 seconds. Without a configured token the panel shows a "configure" prompt without affecting other features.
 
 ---
 

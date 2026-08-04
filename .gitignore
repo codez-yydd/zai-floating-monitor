@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# ZCode 本地工具目录（plans 等，不应入库）
+.zcode/

@@ -8,6 +8,7 @@ import type {
 } from "./types";
 import { computeCost, fetchStats } from "./api";
 import { formatCost, formatPct, formatTokens } from "./format";
+import { QuotaPanel } from "./QuotaPanel";
 import { RangePicker, resolveRange } from "./RangePicker";
 
 interface Props {
@@ -96,6 +97,9 @@ export function StatsPanel({ currency, pricing, onGoPricing }: Props) {
         />
       </div>
 
+      {/* Coding Plan 额度监控 */}
+      <QuotaPanel onGoSettings={onGoPricing} />
+
       {error && (
         <div className="mx-3 mt-2 px-2.5 py-1.5 rounded-lg bg-red-500/15 text-red-700 text-xs">
           {error}
@@ -151,7 +155,7 @@ export function StatsPanel({ currency, pricing, onGoPricing }: Props) {
               color="bg-sky-400"
             />
             <DetailRow
-              label="缓存读"
+              label="缓存"
               value={formatTokens(stats.overall.cache_read_tokens)}
               pct={cacheRate}
               color="bg-emerald-400"

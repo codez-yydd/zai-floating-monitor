@@ -3,6 +3,8 @@ import type {
   CostResult,
   ModelInfo,
   PricingConfig,
+  QuotaConfig,
+  QuotaResult,
   Stats,
 } from "./types";
 
@@ -25,6 +27,18 @@ export async function fetchPricing(): Promise<PricingConfig> {
 
 export async function savePricing(config: PricingConfig): Promise<void> {
   await invoke("set_pricing", { config });
+}
+
+export async function fetchQuotaConfig(): Promise<QuotaConfig> {
+  return invoke<QuotaConfig>("get_quota_config");
+}
+
+export async function saveQuotaConfig(config: QuotaConfig): Promise<void> {
+  await invoke("set_quota_config", { config });
+}
+
+export async function fetchQuota(): Promise<QuotaResult> {
+  return invoke<QuotaResult>("fetch_quota");
 }
 
 export async function computeCost(

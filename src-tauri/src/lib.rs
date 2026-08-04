@@ -1,7 +1,9 @@
 mod db;
 mod pricing;
+mod quota;
 
 use pricing::{load_pricing, save_pricing, ModelPrice, PricingConfig};
+use quota::{load_quota, save_quota, QuotaConfig, QuotaResult};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use tauri::{
@@ -39,6 +41,25 @@ fn get_pricing() -> Result<PricingConfig, String> {
 #[tauri::command]
 fn set_pricing(config: PricingConfig) -> Result<(), String> {
     save_pricing(&config)
+}
+
+/// get_quota_config：读取额度查询配置（token + 端点）
+#[tauri::command]
+fn get_quota_config() -> Result<QuotaConfig, String> {
+    load_quota()
+}
+
+/// set_quota_config：保存额度查询配置
+#[tauri::command]
+fn set_quota_config(config: QuotaConfig) -> Result<(), String> {
+    save_quota(&config)
+}
+
+/// fetch_quota：实时查询 Coding Plan 额度（5小时窗口 + 每周）
+#[tauri::command]
+fn fetch_quota() -> Result<QuotaResult, String> {
+    let cfg = load_quota()?;
+    quota::fetch_quota(&cfg)
 }
 
 /// compute_cost：根据统计 + 价格，计算花费（前端也会自己算，这里提供一份供托盘文字用）
@@ -173,7 +194,7 @@ fn toggle_panel(app: &AppHandle, click_pos: Option<(f64, f64)>) {
         let mon_h = mon.size().height as f64 / scale;
 
         // 水平：面板右边对齐点击位置（图标在菜单栏右端，面板向左展开），不溢出
-        let mut x = cx - win_w + 18.0; // +18 让面板右边略过图标中心
+        let mut x = cx - win_w + 36.0; // +36 让面板右边略过图标中心，整体更靠右
         let max_x = mon_w - win_w - 4.0;
         if x > max_x {
             x = max_x;
@@ -350,6 +371,9 @@ pub fn run() {
             list_models,
             get_pricing,
             set_pricing,
+            get_quota_config,
+            set_quota_config,
+            fetch_quota,
             compute_cost,
             open_config_dir
         ])

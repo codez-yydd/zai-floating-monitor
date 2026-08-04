@@ -57,3 +57,30 @@ export interface CostResult {
 export type Currency = "cny" | "usd";
 
 export type RangePreset = "today" | "1d" | "7d" | "30d" | "custom";
+
+// ===== Coding Plan 额度查询（与 Rust quota.rs 结构一一对应） =====
+
+export type QuotaEndpoint = "cn" | "global";
+
+/** 额度查询配置（token + 端点） */
+export interface QuotaConfig {
+  token: string;
+  endpoint: QuotaEndpoint;
+}
+
+/** 单条用量限制 */
+export interface QuotaLimit {
+  /** 已用百分比 0-100 */
+  percentage: number;
+  /** 下次重置时间（毫秒时间戳，可能为 null）
+   *  注：后端 serde 用 rename 对齐 API 的驼峰字段，输出给前端也是 nextResetTime */
+  nextResetTime: number | null;
+}
+
+/** 额度查询结果：套餐等级 + 5小时/每周用量 */
+export interface QuotaResult {
+  /** 套餐等级："pro" / "max" ... */
+  level: string;
+  hour5: QuotaLimit | null;
+  weekly: QuotaLimit | null;
+}

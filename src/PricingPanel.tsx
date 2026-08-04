@@ -1,6 +1,19 @@
 import { useEffect, useState } from "react";
-import type { Currency, ModelInfo, ModelPrice, PricingConfig } from "./types";
-import { fetchModels, fetchPricing, savePricing } from "./api";
+import type {
+  Currency,
+  ModelInfo,
+  ModelPrice,
+  PricingConfig,
+  QuotaConfig,
+  QuotaEndpoint,
+} from "./types";
+import {
+  fetchModels,
+  fetchPricing,
+  fetchQuotaConfig,
+  savePricing,
+  saveQuotaConfig,
+} from "./api";
 
 interface Props {
   currency: Currency;
@@ -24,14 +37,45 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
   // key = `${modelId}|${field}`
   const [draft, setDraft] = useState<Record<string, string>>({});
 
+  // ===== Coding Plan 额度查询配置 =====
+  const [quotaCfg, setQuotaCfg] = useState<QuotaConfig>({
+    token: "",
+    endpoint: "cn",
+  });
+  const [tokenDraft, setTokenDraft] = useState<string>("");
+  const [showToken, setShowToken] = useState(false);
+  const [savingQuota, setSavingQuota] = useState(false);
+  const [quotaSavedFlash, setQuotaSavedFlash] = useState(false);
+
   useEffect(() => {
-    Promise.all([fetchPricing(), fetchModels()])
-      .then(([p, m]) => {
+    Promise.all([fetchPricing(), fetchModels(), fetchQuotaConfig()])
+      .then(([p, m, q]) => {
         setPricing(p);
         setModels(m);
+        setQuotaCfg(q);
+        setTokenDraft(q.token);
       })
       .catch((e) => setError(String(e)));
   }, []);
+
+  const handleSaveQuota = async () => {
+    const merged: QuotaConfig = {
+      ...quotaCfg,
+      token: tokenDraft.trim(),
+    };
+    setSavingQuota(true);
+    setError(null);
+    try {
+      await saveQuotaConfig(merged);
+      setQuotaCfg(merged);
+      setQuotaSavedFlash(true);
+      setTimeout(() => setQuotaSavedFlash(false), 1500);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSavingQuota(false);
+    }
+  };
 
   // 把草稿字符串解析回数字。非法/空 → 0。
   const parseDraft = (val: string): number => {
@@ -153,6 +197,70 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
         <p className="text-[10px] text-slate-700/50 mt-1.5">
           单位：{symbol}/百万 token。只填需要计费的模型即可。
         </p>
+
+        {/* ===== Coding Plan 额度查询配置 ===== */}
+        <div className="mt-3 rounded-lg bg-slate-900/5 border border-slate-900/10 p-2.5">
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-[11px] font-medium text-slate-900/85">
+              Coding Plan 额度监控
+            </span>
+            <button
+              onClick={handleSaveQuota}
+              disabled={savingQuota}
+              className="text-[10px] px-2 py-0.5 rounded-md bg-violet-500 text-white hover:bg-violet-600 disabled:opacity-40 transition-colors"
+            >
+              {savingQuota
+                ? "保存中…"
+                : quotaSavedFlash
+                  ? "已保存 ✓"
+                  : "保存"}
+            </button>
+          </div>
+          {/* Token 输入 */}
+          <label className="flex flex-col gap-0.5 text-[10px]">
+            <span className="text-slate-700/55">API Token</span>
+            <div className="flex items-center rounded-md bg-slate-900/5 border border-slate-900/10 focus-within:border-violet-400/60 focus-within:ring-1 focus-within:ring-violet-400/40 transition-colors">
+              <input
+                type={showToken ? "text" : "password"}
+                value={tokenDraft}
+                placeholder="粘贴 Coding Plan API Token"
+                onChange={(e) => setTokenDraft(e.target.value)}
+                className="num w-full px-1.5 py-1 text-left bg-transparent text-slate-900/90 placeholder:text-slate-700/35 focus:outline-none text-[11px]"
+              />
+              <button
+                onClick={() => setShowToken((v) => !v)}
+                className="px-1.5 text-slate-700/40 hover:text-slate-900/70 transition-colors text-[10px] shrink-0"
+                title={showToken ? "隐藏" : "显示"}
+              >
+                {showToken ? "🙈" : "👁"}
+              </button>
+            </div>
+          </label>
+          {/* 端点切换 */}
+          <div className="flex items-center justify-between mt-2">
+            <span className="text-[10px] text-slate-700/55">端点</span>
+            <div className="flex gap-1">
+              {(["cn", "global"] as QuotaEndpoint[]).map((ep) => (
+                <button
+                  key={ep}
+                  onClick={() =>
+                    setQuotaCfg((c) => ({ ...c, endpoint: ep }))
+                  }
+                  className={`px-2 py-0.5 rounded-md text-[10px] transition-colors ${
+                    quotaCfg.endpoint === ep
+                      ? "bg-violet-500 text-white"
+                      : "bg-slate-900/5 text-slate-700/65 hover:bg-slate-900/10"
+                  }`}
+                >
+                  {ep === "cn" ? "🇨🇳 国内" : "🌐 国际"}
+                </button>
+              ))}
+            </div>
+          </div>
+          <p className="text-[9px] text-slate-700/45 mt-1.5 leading-relaxed">
+            Token 从智谱开放平台获取。国内用户选「国内」端点。
+          </p>
+        </div>
       </div>
 
       {error && (
