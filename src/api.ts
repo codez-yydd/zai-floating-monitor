@@ -156,3 +156,15 @@ export async function setAutoCleanup(
 export async function pendingUploadCount(): Promise<number> {
   return invoke<number>("pending_upload_count");
 }
+
+// ===== 窗口置顶常驻（仅 Windows 有意义）=====
+
+/** 读取窗口置顶状态 */
+export async function fetchPin(): Promise<boolean> {
+  return invoke<boolean>("get_pin");
+}
+
+/** 设置窗口置顶状态并立即应用到原生窗口 */
+export async function setPin(enabled: boolean): Promise<void> {
+  await invoke("set_pin", { enabled });
+}

@@ -15,11 +15,13 @@ import type {
 } from "./types";
 import {
   computeCost,
+  fetchPin,
   fetchStats,
   fetchTrend,
   getSyncConfig,
   listRemoteDevices,
   remoteUsage,
+  setPin,
 } from "./api";
 import { formatCost, formatPct, formatTokens } from "./format";
 import { QuotaPanel } from "./QuotaPanel";
@@ -57,6 +59,22 @@ export function StatsPanel({ currency, pricing, onGoPricing, onGoSync }: Props) 
   const [remoteDevices, setRemoteDevices] = useState<DeviceInfo[]>([]);
   // 设备筛选："all" 汇总 | "local" 仅本机 | 具体 device_id 仅远端该设备
   const [deviceFilter, setDeviceFilter] = useState<string>("all");
+
+  // ===== 窗口置顶常驻（仅 Windows）=====
+  // 平台判断：仅 Windows 显示置顶开关，macOS 完全不渲染该功能
+  const isWindows =
+    typeof navigator !== "undefined" &&
+    /windows/i.test(navigator.userAgent);
+  // pinned：是否已开启常驻置顶（失焦不隐藏 + 始终置顶）
+  const [pinned, setPinned] = useState(false);
+
+  // 初始化时读取持久化的 pin 状态，恢复上次开关状态
+  useEffect(() => {
+    if (!isWindows) return;
+    fetchPin()
+      .then(setPinned)
+      .catch(() => {});
+  }, [isWindows]);
 
   // preset → 桶粒度：今日/24h 按小时，更长范围按日
   const trendBucket: TrendBucket =
@@ -196,6 +214,25 @@ export function StatsPanel({ currency, pricing, onGoPricing, onGoSync }: Props) 
             >
               {syncEnabled ? "⇅" : "⇅"}
             </button>
+            {/* Windows 专属：置顶常驻开关。开启后面板失焦不隐藏、始终置顶 */}
+            {isWindows && (
+              <button
+                onClick={() => {
+                  const next = !pinned;
+                  setPinned(next);
+                  // 先乐观更新 UI，失败则回滚状态
+                  setPin(next).catch(() => setPinned(!next));
+                }}
+                className={`text-xs transition-colors ${
+                  pinned
+                    ? "text-sky-600 hover:text-sky-700"
+                    : "text-slate-700/40 hover:text-slate-900/70"
+                }`}
+                title={pinned ? "取消常驻" : "常驻置顶"}
+              >
+                📌
+              </button>
+            )}
             <button
               onClick={load}
               disabled={loading}

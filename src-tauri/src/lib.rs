@@ -171,6 +171,61 @@ fn open_config_dir() -> Result<(), String> {
     open::that(dir).map_err(|e| format!("打开目录失败: {e}"))
 }
 
+// ===== 窗口置顶常驻（仅 Windows）=====
+
+/// 置顶状态配置文件路径：~/.zbar/pin.json
+fn pin_config_path() -> Result<std::path::PathBuf, String> {
+    Ok(pricing::config_dir()?.join("pin.json"))
+}
+
+/// 读取置顶状态。文件不存在或解析失败时默认返回 false（不置顶），
+/// 保证首次运行与异常情况下面板行为与原版一致。
+fn load_pin() -> Result<bool, String> {
+    let path = pin_config_path()?;
+    if !path.exists() {
+        return Ok(false);
+    }
+    let data = std::fs::read_to_string(&path)
+        .map_err(|e| format!("读取置顶配置失败: {e}"))?;
+    // 用 serde_json 解析 { "enabled": true }，兼容缺省字段
+    let v: serde_json::Value =
+        serde_json::from_str(&data).map_err(|e| format!("解析置顶配置失败: {e}"))?;
+    Ok(v.get("enabled").and_then(|b| b.as_bool()).unwrap_or(false))
+}
+
+/// 写入置顶状态到 pin.json，持久化以便重启后恢复常驻。
+fn save_pin(enabled: bool) -> Result<(), String> {
+    let dir = pricing::config_dir()?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建配置目录失败: {e}"))?;
+    let path = pin_config_path()?;
+    let data = serde_json::json!({ "enabled": enabled }).to_string();
+    std::fs::write(&path, data).map_err(|e| format!("写入置顶配置失败: {e}"))
+}
+
+/// get_pin：读取当前窗口置顶状态
+#[tauri::command]
+fn get_pin() -> Result<bool, String> {
+    load_pin()
+}
+
+/// set_pin：保存置顶状态并立即应用到 panel 窗口。
+/// - enabled=true：保持 always_on_top + 立即显示，确保用户切换后立刻可见常驻
+/// - enabled=false：仅取消 always_on_top（面板本就配 alwaysOnTop，此处恢复默认），
+///   不主动隐藏，让随后的失焦事件按原逻辑隐藏
+#[tauri::command]
+fn set_pin(enabled: bool, app: AppHandle) -> Result<(), String> {
+    save_pin(enabled)?;
+    if let Some(window) = app.get_webview_window("panel") {
+        let _ = window.set_always_on_top(enabled);
+        if enabled {
+            // 开启常驻：立即显示并聚焦，让用户切换后即刻可见
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }
+    Ok(())
+}
+
 // ===== 多设备同步命令 =====
 
 use sync::{
@@ -504,6 +559,11 @@ pub fn run() {
             // 失焦时自动隐藏面板（保留窗口本身，不销毁）
             if let WindowEvent::Focused(false) = event {
                 if window.label() == "panel" {
+                    // Windows 置顶常驻模式：读取持久化的 pin 状态，
+                    // 若已置顶则跳过隐藏，让面板持续可见不被其它窗口遮挡。
+                    if load_pin().unwrap_or(false) {
+                        return;
+                    }
                     let _ = window.hide();
                 }
             }
@@ -525,6 +585,21 @@ pub fn run() {
             }
             setup_tray(app.handle())?;
             spawn_title_updater(app.handle().clone());
+
+            // Windows 启动时恢复置顶常驻状态：若用户上次开启了置顶，
+            // 启动后面板自动显示并常驻（不再因失焦隐藏）。
+            // 用条件编译确保 macOS 完全不执行此分支。
+            #[cfg(target_os = "windows")]
+            {
+                if load_pin().unwrap_or(false) {
+                    if let Some(panel) = app.get_webview_window("panel") {
+                        let _ = panel.set_always_on_top(true);
+                        let _ = panel.show();
+                        let _ = panel.set_focus();
+                    }
+                }
+            }
+
             sync::spawn_sync_worker();
             Ok(())
         })
@@ -549,7 +624,9 @@ pub fn run() {
             get_cleanup_status,
             cleanup_server,
             set_auto_cleanup,
-            pending_upload_count
+            pending_upload_count,
+            get_pin,
+            set_pin
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
