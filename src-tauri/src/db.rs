@@ -1,6 +1,8 @@
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+// TimeZone trait 提供 timestamp_millis_opt 等方法，用于把毫秒转回本地时间
+use chrono::TimeZone;
 
 /// 单个模型在指定时间范围内的聚合统计
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,7 +71,7 @@ pub fn db_path() -> Result<PathBuf, String> {
 }
 
 /// 以只读方式打开数据库，避免干扰 ZCode 的写入。
-fn open_db() -> Result<Connection, String> {
+pub(crate) fn open_db() -> Result<Connection, String> {
     let path = db_path()?;
     let conn = Connection::open_with_flags(
         &path,
@@ -194,4 +196,140 @@ pub fn list_models() -> Result<Vec<ModelInfo>, String> {
         .map_err(|e| format!("读取模型列表失败: {e}"))?;
 
     Ok(models)
+}
+
+// ===== 时间序列分桶聚合（趋势图用） =====
+
+/// 某个桶内某模型的聚合。计费所需字段齐全，供 lib.rs 计算 cost。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BucketModelStat {
+    pub model_id: String,
+    pub provider_id: String,
+    pub requests: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub total_tokens: i64,
+}
+
+/// 单个桶的原始聚合结果（db 层不含花费，cost 在 lib.rs 结合 pricing 计算）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrendBucketRaw {
+    /// 桶标签："14:00"（小时桶）或 "08-04"（日桶）
+    pub label: String,
+    /// 桶内按模型聚合（用于算 cost）
+    pub by_model: Vec<BucketModelStat>,
+    /// 桶内总 token
+    pub total_tokens: i64,
+    /// 桶内总请求数
+    pub requests: i64,
+}
+
+/// 把毫秒时间戳对齐到桶起点。
+/// - hour：对齐到所在小时的整点（按 UTC 毫秒取整，配合本地时区偏移）
+/// - day ：对齐到本地 0 点
+fn align_bucket_start(ms: i64, bucket: &str) -> i64 {
+    if bucket == "hour" {
+        // 1 小时 = 3600000ms，直接按整除对齐到整点。
+        // started_at 是 UTC 毫秒，整点对齐后用本地时区格式化标签，
+        // 因此桶边界与本地时钟的整点是一致的。
+        (ms / 3_600_000) * 3_600_000
+    } else {
+        // 本地 0 点对齐：取本地日期，重设为 0 点。
+        chrono::Local
+            .timestamp_millis_opt(ms)
+            .single()
+            .map(|d| {
+                d.date_naive()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap()
+                    .and_local_timezone(chrono::Local)
+                    .single()
+                    .map(|dt| dt.timestamp_millis())
+                    .unwrap_or(ms)
+            })
+            .unwrap_or(ms)
+    }
+}
+
+/// 桶起始毫秒 → 标签字符串。
+fn bucket_label(start_ms: i64, bucket: &str) -> String {
+    chrono::Local
+        .timestamp_millis_opt(start_ms)
+        .single()
+        .map(|d| {
+            if bucket == "hour" {
+                d.format("%H:00").to_string()
+            } else {
+                d.format("%m-%d").to_string()
+            }
+        })
+        .unwrap_or_default()
+}
+
+/// 查询 [from_ms, to_ms) 内的分桶统计。
+///
+/// `bucket` 为 "hour" 或 "day"。采用逐桶循环查询：
+/// 把 from 对齐到桶起点，按桶宽逐步推进直到覆盖 to。
+/// 桶数 = (to - aligned_from) / 桶宽，通常 ≤31（日）或 ≤24（小时），开销可接受。
+pub fn query_trend(
+    from_ms: i64,
+    to_ms: i64,
+    bucket: &str,
+) -> Result<Vec<TrendBucketRaw>, String> {
+    let conn = open_db()?;
+    let width = if bucket == "hour" { 3_600_000 } else { 86_400_000 };
+
+    let mut start = align_bucket_start(from_ms, bucket);
+    let sql = "SELECT
+                model_id,
+                provider_id,
+                COUNT(*),
+                COALESCE(SUM(input_tokens),0),
+                COALESCE(SUM(output_tokens),0),
+                COALESCE(SUM(cache_read_input_tokens),0),
+                COALESCE(SUM(computed_total_tokens),0)
+             FROM model_usage
+             WHERE started_at >= ?1 AND started_at < ?2
+             GROUP BY provider_id, model_id";
+
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| format!("准备趋势查询失败: {e}"))?;
+
+    let mut out: Vec<TrendBucketRaw> = Vec::new();
+    while start < to_ms {
+        let end = start + width;
+        // 查询区间与桶对齐；最后一桶的 end 可能超过 to_ms，但 SQL 用 < end，
+        // 而 to_ms 之后的本就没有数据，不影响结果。
+        let by_model: Vec<BucketModelStat> = stmt
+            .query_map(rusqlite::params![start, end], |row| {
+                Ok(BucketModelStat {
+                    model_id: row.get(0)?,
+                    provider_id: row.get(1)?,
+                    requests: row.get(2)?,
+                    input_tokens: row.get(3)?,
+                    output_tokens: row.get(4)?,
+                    cache_read_tokens: row.get(5)?,
+                    total_tokens: row.get(6)?,
+                })
+            })
+            .map_err(|e| format!("读取趋势统计失败: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("读取趋势统计失败: {e}"))?;
+
+        let total_tokens = by_model.iter().map(|m| m.total_tokens).sum();
+        let requests = by_model.iter().map(|m| m.requests).sum();
+
+        out.push(TrendBucketRaw {
+            label: bucket_label(start, bucket),
+            by_model,
+            total_tokens,
+            requests,
+        });
+
+        start = end;
+    }
+
+    Ok(out)
 }

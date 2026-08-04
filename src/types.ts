@@ -58,6 +58,25 @@ export type Currency = "cny" | "usd";
 
 export type RangePreset = "today" | "1d" | "7d" | "30d" | "custom";
 
+// ===== 趋势图：时间序列分桶（与 Rust lib.rs TrendBucket 结构一一对应） =====
+
+/** 趋势图分桶粒度 */
+export type TrendBucket = "hour" | "day";
+
+/** 单个桶的汇总（含两种货币花费，前端无需再算） */
+export interface TrendPoint {
+  /** 桶标签："14:00"（小时）或 "08-04"（日） */
+  label: string;
+  /** 桶内总 token */
+  total_tokens: number;
+  /** 桶内总请求数 */
+  requests: number;
+  /** 桶内人民币花费 */
+  cost_cny: number;
+  /** 桶内美元花费 */
+  cost_usd: number;
+}
+
 // ===== Coding Plan 额度查询（与 Rust quota.rs 结构一一对应） =====
 
 export type QuotaEndpoint = "cn" | "global";

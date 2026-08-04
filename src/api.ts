@@ -6,6 +6,8 @@ import type {
   QuotaConfig,
   QuotaResult,
   Stats,
+  TrendBucket,
+  TrendPoint,
 } from "./types";
 
 export async function fetchStats(
@@ -39,6 +41,16 @@ export async function saveQuotaConfig(config: QuotaConfig): Promise<void> {
 
 export async function fetchQuota(): Promise<QuotaResult> {
   return invoke<QuotaResult>("fetch_quota");
+}
+
+export async function fetchTrend(
+  fromMs: number,
+  toMs: number,
+  bucket: TrendBucket
+): Promise<TrendPoint[]> {
+  return invoke<TrendPoint[]>("get_trend", {
+    req: { from_ms: fromMs, to_ms: toMs, bucket },
+  });
 }
 
 export async function computeCost(

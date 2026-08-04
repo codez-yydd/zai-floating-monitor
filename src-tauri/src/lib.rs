@@ -12,6 +12,61 @@ use tauri::{
     AppHandle, LogicalPosition, Manager, PhysicalSize, WindowEvent,
 };
 
+/// 计费所需的字段抽象。ModelStat 与 DailyModelStat 都实现它，
+/// 这样 cost_for 可同时服务 compute_cost 和 get_daily_stats。
+trait Billable {
+    fn model_id(&self) -> &str;
+    fn input_tokens(&self) -> i64;
+    fn output_tokens(&self) -> i64;
+    fn cache_read_tokens(&self) -> i64;
+}
+
+impl Billable for db::ModelStat {
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+    fn input_tokens(&self) -> i64 {
+        self.input_tokens
+    }
+    fn output_tokens(&self) -> i64 {
+        self.output_tokens
+    }
+    fn cache_read_tokens(&self) -> i64 {
+        self.cache_read_tokens
+    }
+}
+
+impl Billable for db::BucketModelStat {
+    fn model_id(&self) -> &str {
+        &self.model_id
+    }
+    fn input_tokens(&self) -> i64 {
+        self.input_tokens
+    }
+    fn output_tokens(&self) -> i64 {
+        self.output_tokens
+    }
+    fn cache_read_tokens(&self) -> i64 {
+        self.cache_read_tokens
+    }
+}
+
+/// 按 price map 计算单个模型的花费（每百万 token 计价）。
+/// input_tokens 已包含 cache_read_tokens，缓存读部分按缓存价计费，
+/// 剩余非缓存输入部分才按输入价计费。
+fn cost_for<B: Billable>(s: &B, map: &BTreeMap<String, ModelPrice>) -> f64 {
+    map.get(s.model_id())
+        .map(|p| {
+            let non_cache_input =
+                (s.input_tokens() - s.cache_read_tokens()).max(0) as f64;
+            (non_cache_input * p.input
+                + s.output_tokens() as f64 * p.output
+                + s.cache_read_tokens() as f64 * p.cache_read)
+                / 1_000_000.0
+        })
+        .unwrap_or(0.0)
+}
+
 /// get_stats 命令的入参
 #[derive(Debug, Deserialize)]
 struct StatsRequest {
@@ -82,24 +137,6 @@ fn compute_cost(req: StatsRequest) -> Result<CostResult, String> {
     let stats = db::query_stats(req.from_ms, req.to_ms)?;
     let pricing = load_pricing().unwrap_or_default();
 
-    fn cost_for(
-        s: &db::ModelStat,
-        map: &BTreeMap<String, ModelPrice>,
-    ) -> f64 {
-        map.get(&s.model_id)
-            .map(|p| {
-                // input_tokens 已包含 cache_read_tokens，缓存读部分按缓存价计费，
-                // 剩余非缓存输入部分才按输入价计费。
-                let non_cache_input =
-                    (s.input_tokens - s.cache_read_tokens).max(0) as f64;
-                (non_cache_input * p.input
-                    + s.output_tokens as f64 * p.output
-                    + s.cache_read_tokens as f64 * p.cache_read)
-                    / 1_000_000.0
-            })
-            .unwrap_or(0.0)
-    }
-
     let per_model_cny: Vec<ModelCost> = stats
         .by_model
         .iter()
@@ -131,6 +168,63 @@ fn open_config_dir() -> Result<(), String> {
     let dir = pricing::config_dir()?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("{e}"))?;
     open::that(dir).map_err(|e| format!("打开目录失败: {e}"))
+}
+
+/// get_trend 的入参：时间范围 + 分桶粒度
+#[derive(Debug, Deserialize)]
+struct TrendRequest {
+    from_ms: i64,
+    to_ms: i64,
+    /// "hour" | "day"
+    bucket: String,
+}
+
+/// 趋势图用：单个桶的汇总（含两种货币花费，前端无需再算）
+#[derive(Debug, Serialize)]
+struct TrendBucket {
+    /// 桶标签："14:00"（小时）或 "08-04"（日）
+    label: String,
+    /// 桶内总 token
+    total_tokens: i64,
+    /// 桶内总请求数
+    requests: i64,
+    /// 桶内人民币花费
+    cost_cny: f64,
+    /// 桶内美元花费
+    cost_usd: f64,
+}
+
+/// get_trend：返回时间范围内的分桶统计，供趋势图使用。
+/// 粒度由 bucket 决定（hour/day），桶数随范围自适应。
+#[tauri::command]
+fn get_trend(req: TrendRequest) -> Result<Vec<TrendBucket>, String> {
+    let buckets = db::query_trend(req.from_ms, req.to_ms, &req.bucket)?;
+    let pricing = load_pricing().unwrap_or_default();
+
+    let out = buckets
+        .into_iter()
+        .map(|b| {
+            let cost_cny = b
+                .by_model
+                .iter()
+                .map(|m| cost_for(m, &pricing.cny))
+                .sum::<f64>();
+            let cost_usd = b
+                .by_model
+                .iter()
+                .map(|m| cost_for(m, &pricing.usd))
+                .sum::<f64>();
+            TrendBucket {
+                label: b.label,
+                total_tokens: b.total_tokens,
+                requests: b.requests,
+                cost_cny,
+                cost_usd,
+            }
+        })
+        .collect();
+
+    Ok(out)
 }
 
 /// 调整原生毛玻璃视图的不透明度，让背景保持柔和透出而不让文字穿透。
@@ -257,24 +351,15 @@ fn today_tray_title(app: &AppHandle) -> String {
     let pricing = load_pricing().unwrap_or_default();
 
     let total = stats.as_ref().map(|s| s.overall.total_tokens).unwrap_or(0);
-    let cost = stats.as_ref().map(|s| {
-        let map = &pricing.cny;
-        s.by_model
-            .iter()
-            .map(|m| {
-                map.get(&m.model_id)
-                    .map(|p| {
-                        let non_cache_input =
-                            (m.input_tokens - m.cache_read_tokens).max(0) as f64;
-                        (non_cache_input * p.input
-                            + m.output_tokens as f64 * p.output
-                            + m.cache_read_tokens as f64 * p.cache_read)
-                            / 1_000_000.0
-                    })
-                    .unwrap_or(0.0)
-            })
-            .sum::<f64>()
-    }).unwrap_or(0.0);
+    let cost = stats
+        .as_ref()
+        .map(|s| {
+            s.by_model
+                .iter()
+                .map(|m| cost_for(m, &pricing.cny))
+                .sum::<f64>()
+        })
+        .unwrap_or(0.0);
 
     let _ = app; // 占位
     if total > 0 {
@@ -375,6 +460,7 @@ pub fn run() {
             set_quota_config,
             fetch_quota,
             compute_cost,
+            get_trend,
             open_config_dir
         ])
         .run(tauri::generate_context!())
