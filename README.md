@@ -182,4 +182,4 @@ ZBar 以 **只读** 方式访问 ZCode 的 SQLite 数据库，不会干扰 ZCode
 
 ## 📄 License
 
-私有项目，保留所有权利。
+[MIT License](./LICENSE) · Copyright © 2026 小轩

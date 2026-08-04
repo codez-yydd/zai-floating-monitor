@@ -182,4 +182,4 @@ The panel and the menu-bar title share the same Rust calculation logic, so the n
 
 ## 📄 License
 
-Proprietary — all rights reserved.
+[MIT License](./LICENSE) · Copyright © 2026 小轩
