@@ -144,45 +144,46 @@ export function ReportPanel({ onBack, pricing }: Props) {
 
     try {
       await Promise.all(tasks);
+
+      // 合并 stats + cost
+      let mergedStats: Stats | null = null;
+      let mergedCost: CostResult | null = null;
+      if (wantLocal && localStats && remote) {
+        mergedStats = mergeStats(localStats, remote);
+        mergedCost = mergeCost(localCost, remote, pricing, currency);
+      } else if (wantLocal && localStats) {
+        mergedStats = localStats;
+        mergedCost = localCost;
+      } else if (remote) {
+        mergedStats = remoteToStats(remote);
+        mergedCost = computeRemoteCost(remote, pricing, currency);
+      }
+
+      setStats(mergedStats);
+      setCost(mergedCost);
+
+      // 合并快照：本地 + 远端（额度是账户级，多设备采样可互补补全）
+      // 远端快照去掉 device_id 字段以匹配 QuotaSnapshot 结构
+      const mergedSnaps: QuotaSnapshot[] = [
+        ...(wantLocal ? localSnaps : []),
+        ...remoteSnaps.map((s) => ({
+          ts: s.ts,
+          level: s.level,
+          weekly_pct: s.weekly_pct,
+          weekly_reset: s.weekly_reset,
+          hour5_pct: s.hour5_pct,
+          mcp_pct: s.mcp_pct,
+          mcp_used: s.mcp_used,
+          mcp_total: s.mcp_total,
+        })),
+      ].sort((a, b) => a.ts - b.ts);
+      setSnaps(mergedSnaps);
     } catch (e) {
       setError(String(e));
+    } finally {
+      // 关键：无论成功/失败都要结束 loading，否则页面永远停在"生成中…"
       setLoading(false);
-      return;
     }
-
-    // 合并 stats + cost
-    let mergedStats: Stats | null = null;
-    let mergedCost: CostResult | null = null;
-    if (wantLocal && localStats && remote) {
-      mergedStats = mergeStats(localStats, remote);
-      mergedCost = mergeCost(localCost, remote, pricing, currency);
-    } else if (wantLocal && localStats) {
-      mergedStats = localStats;
-      mergedCost = localCost;
-    } else if (remote) {
-      mergedStats = remoteToStats(remote);
-      mergedCost = computeRemoteCost(remote, pricing, currency);
-    }
-
-    setStats(mergedStats);
-    setCost(mergedCost);
-
-    // 合并快照：本地 + 远端（额度是账户级，多设备采样可互补补全）
-    // 远端快照去掉 device_id 字段以匹配 QuotaSnapshot 结构
-    const mergedSnaps: QuotaSnapshot[] = [
-      ...(wantLocal ? localSnaps : []),
-      ...remoteSnaps.map((s) => ({
-        ts: s.ts,
-        level: s.level,
-        weekly_pct: s.weekly_pct,
-        weekly_reset: s.weekly_reset,
-        hour5_pct: s.hour5_pct,
-        mcp_pct: s.mcp_pct,
-        mcp_used: s.mcp_used,
-        mcp_total: s.mcp_total,
-      })),
-    ].sort((a, b) => a.ts - b.ts);
-    setSnaps(mergedSnaps);
   }, [kind, deviceFilter, syncConfig, syncEnabled, pricing, currency]);
 
   useEffect(() => {
