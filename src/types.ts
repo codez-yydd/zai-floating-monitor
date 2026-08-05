@@ -279,6 +279,31 @@ export interface WeeklyPeriod {
   sample_count: number;
 }
 
+// ===== 远端额度快照 / 周期明细（多设备跨设备支持）=====
+
+/** 远端额度快照（带 device_id，字段与 QuotaSnapshot 对齐 + device_id） */
+export interface RemoteSnapshot extends QuotaSnapshot {
+  /** 来源设备 id */
+  device_id: string;
+}
+
+/** 远端周期内单条用量明细（折算消耗用，字段与本地 db 口径一致） */
+export interface RemoteDetailRow {
+  started_at: number;
+  model_id: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  total_tokens: number;
+}
+
+/** 一个周期的远端明细聚合（供前端用本地 peak 配置折算） */
+export interface RemotePeriodDetail {
+  reset_at: number;
+  end_at: number;
+  rows: RemoteDetailRow[];
+}
+
 /** 对比页：单个周期的 token 聚合结果 */
 export interface WeeklyTokenBucket {
   reset_at: number;

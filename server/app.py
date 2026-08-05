@@ -94,24 +94,48 @@ def register():
 
 @app.post("/sync")
 def sync():
-    """增量上传明细。"""
+    """增量上传明细 + 额度快照。
+
+    body 字段（snapshots 可选，向后兼容旧客户端）：
+    - records: 用量明细数组
+    - last_rowid: 本批记录游标
+    - snapshots: 额度快照数组（可选）
+    - last_snapshot_ts: 快照游标（可选）
+    """
     err, device_id = require_device_token()
     if err:
         return err
 
     data = request.get_json(force=True)
     records = data.get("records", [])
+    snapshots = data.get("snapshots", [])
 
-    if not records:
-        return jsonify({"accepted": 0, "max_rowid": db.max_rowid_of(device_id)})
+    now = db.now_ms()
 
-    accepted = db.insert_usage_records(device_id, records, db.now_ms())
+    # 明细
+    accepted = 0
+    if records:
+        accepted = db.insert_usage_records(device_id, records, now)
     last_rowid = data.get("last_rowid")
     if last_rowid is None:
         max_rowid = db.max_rowid_of(device_id)
     else:
         max_rowid = last_rowid
-    return jsonify({"accepted": accepted, "max_rowid": max_rowid})
+
+    # 快照（可选；旧客户端不传 snapshots，跳过）
+    accepted_snaps = 0
+    max_snapshot_ts = None
+    if snapshots:
+        accepted_snaps = db.insert_snapshots(device_id, snapshots, now)
+        last_ts = data.get("last_snapshot_ts")
+        max_snapshot_ts = last_ts if last_ts is not None else db.max_snapshot_ts_of(device_id)
+
+    return jsonify({
+        "accepted": accepted,
+        "max_rowid": max_rowid,
+        "accepted_snapshots": accepted_snaps,
+        "max_snapshot_ts": max_snapshot_ts,
+    })
 
 
 def _resolve_device_filter(q_args, all_ids):
@@ -155,6 +179,58 @@ def usage():
 
     result = db.query_usage(from_ms, to_ms, bucket, filter_ids)
     return jsonify(result)
+
+
+@app.get("/snapshots")
+def snapshots():
+    """额度快照查询：返回指定设备集合在时间范围内的快照（带 device_id）。
+
+    复用 /usage 的 devices/exclude_device 过滤语义。
+    用于对比页/报告页的跨设备周额度周期解析。
+    """
+    err, _ = require_device_token()
+    if err:
+        return err
+
+    from_ms = int(request.args.get("from_ms", "0"))
+    to_ms = int(request.args.get("to_ms", str(db.now_ms())))
+
+    all_devices = db.list_devices()
+    all_ids = [d["device_id"] for d in all_devices]
+    filter_ids, has_filter_param = _resolve_device_filter(request.args, all_ids)
+
+    if has_filter_param and not filter_ids:
+        return jsonify({"snapshots": []})
+
+    snaps = db.query_snapshots(from_ms, to_ms, filter_ids)
+    return jsonify({"snapshots": snaps})
+
+
+@app.post("/period_detail")
+def period_detail():
+    """按一组周期 [start, end) 返回远端逐条用量明细。
+
+    供客户端用本地 peak 配置折算消耗（服务端无 peak 配置）。
+    body: {periods: [[start,end],...], devices?, exclude_device?}
+    """
+    err, _ = require_device_token()
+    if err:
+        return err
+
+    data = request.get_json(force=True)
+    periods = data.get("periods", [])
+    if not periods:
+        return jsonify({"buckets": []})
+
+    all_devices = db.list_devices()
+    all_ids = [d["device_id"] for d in all_devices]
+    filter_ids, has_filter_param = _resolve_device_filter(data, all_ids)
+    if has_filter_param and not filter_ids:
+        empty = [{"reset_at": s, "end_at": e, "rows": []} for s, e in periods]
+        return jsonify({"buckets": empty})
+
+    buckets = db.query_period_detail(periods, filter_ids)
+    return jsonify({"buckets": buckets})
 
 
 @app.get("/devices")

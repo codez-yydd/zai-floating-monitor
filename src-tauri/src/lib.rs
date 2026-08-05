@@ -455,7 +455,8 @@ fn set_pin(enabled: bool, app: AppHandle) -> Result<(), String> {
 
 use sync::{
     AutoCleanupServerRequest, CleanupServerRequest, CleanupStatus, DeviceInfo,
-    RemoteUsage, RemoteUsageRequest, SyncConfig, SyncOutcome,
+    RemotePeriodDetail, RemotePeriodDetailRequest, RemoteSnapshot,
+    RemoteSnapshotRequest, RemoteUsage, RemoteUsageRequest, SyncConfig, SyncOutcome,
 };
 
 /// 读取同步配置
@@ -492,6 +493,20 @@ fn disconnect_device() -> Result<(), String> {
 #[tauri::command]
 fn remote_usage(req: RemoteUsageRequest) -> Result<RemoteUsage, String> {
     sync::fetch_remote_usage(req)
+}
+
+/// 拉取远端额度快照（带 device_id，供对比页/报告页跨设备周额度解析）
+#[tauri::command]
+fn remote_snapshots(req: RemoteSnapshotRequest) -> Result<Vec<RemoteSnapshot>, String> {
+    sync::fetch_remote_snapshots(req)
+}
+
+/// 拉取远端各周期逐条用量明细（前端用本地 peak 配置折算消耗）
+#[tauri::command]
+fn remote_period_detail(
+    req: RemotePeriodDetailRequest,
+) -> Result<Vec<RemotePeriodDetail>, String> {
+    sync::fetch_remote_period_detail(req)
 }
 
 /// 拉取设备列表
@@ -945,6 +960,8 @@ pub fn run() {
             sync_now,
             disconnect_device,
             remote_usage,
+            remote_snapshots,
+            remote_period_detail,
             list_remote_devices,
             get_cleanup_status,
             cleanup_server,

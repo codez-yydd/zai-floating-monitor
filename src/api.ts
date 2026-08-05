@@ -18,6 +18,8 @@ import type {
   QuotaResult,
   QuotaSnapshot,
   RegisterRequest,
+  RemotePeriodDetail,
+  RemoteSnapshot,
   RemoteUsage,
   ShortcutConfig,
   Stats,
@@ -172,6 +174,36 @@ export async function remoteUsage(
       from_ms: fromMs,
       to_ms: toMs,
       bucket,
+      exclude_device: options.excludeDevice ?? "",
+      devices: options.devices ?? "",
+    },
+  });
+}
+
+/** 拉取远端额度快照（带 device_id）。options 同 remoteUsage。 */
+export async function remoteSnapshots(
+  fromMs: number,
+  toMs: number,
+  options: { excludeDevice?: string; devices?: string } = {}
+): Promise<RemoteSnapshot[]> {
+  return invoke<RemoteSnapshot[]>("remote_snapshots", {
+    req: {
+      from_ms: fromMs,
+      to_ms: toMs,
+      exclude_device: options.excludeDevice ?? "",
+      devices: options.devices ?? "",
+    },
+  });
+}
+
+/** 拉取远端各周期逐条用量明细（前端用本地 peak 配置折算消耗）。 */
+export async function remotePeriodDetail(
+  periods: [number, number][],
+  options: { excludeDevice?: string; devices?: string } = {}
+): Promise<RemotePeriodDetail[]> {
+  return invoke<RemotePeriodDetail[]>("remote_period_detail", {
+    req: {
+      periods,
       exclude_device: options.excludeDevice ?? "",
       devices: options.devices ?? "",
     },

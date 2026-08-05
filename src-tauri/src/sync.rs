@@ -51,6 +51,9 @@ pub struct SyncConfig {
     /// 已上传到的本机 rowid 游标。
     #[serde(default)]
     pub last_uploaded_rowid: i64,
+    /// 已上传到的快照 ts 游标（额度快照）。
+    #[serde(default)]
+    pub last_uploaded_snapshot_ts: i64,
     /// 上次成功同步的毫秒时间戳。
     #[serde(default)]
     pub last_sync_at: i64,
@@ -71,6 +74,7 @@ impl Default for SyncConfig {
             device_name: String::new(),
             device_token: String::new(),
             last_uploaded_rowid: 0,
+            last_uploaded_snapshot_ts: 0,
             last_sync_at: 0,
         }
     }
@@ -116,12 +120,23 @@ pub struct RegisterResponse {
 struct SyncResponse {
     accepted: usize,
     max_rowid: i64,
+    /// 新版服务端返回；旧服务端不返回 → 用默认 0。保留字段以正确反序列化协议。
+    #[serde(default)]
+    #[allow(dead_code)]
+    accepted_snapshots: usize,
+    #[serde(default)]
+    max_snapshot_ts: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
 struct SyncPayload {
     records: Vec<UsageRow>,
     last_rowid: Option<i64>,
+    /// 额度快照（可选；旧服务端会忽略，向后兼容）
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    snapshots: Vec<crate::quota_history::QuotaSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_snapshot_ts: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -298,7 +313,7 @@ pub struct SyncOutcome {
 }
 
 /// 执行一次增量上传：循环分批上传直到无新数据。
-/// 返回总上传条数。失败时返回 Err，游标不前进（下次重试）。
+/// 额度快照随首批发送（量小，无需分批）。失败时返回 Err，游标不前进（下次重试）。
 pub fn upload_incremental() -> Result<SyncOutcome, String> {
     let mut cfg = load_sync_config()?;
     if !cfg.enabled || cfg.device_token.is_empty() {
@@ -307,20 +322,47 @@ pub fn upload_incremental() -> Result<SyncOutcome, String> {
     let base = &cfg.server_url;
     let token = &cfg.device_token;
 
+    // 读取待上传的快照（ts > 游标）。读失败不阻断明细同步。
+    let mut pending_snaps = crate::quota_history::load_all()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| s.ts > cfg.last_uploaded_snapshot_ts)
+        .collect::<Vec<_>>();
+    let snap_max_ts = pending_snaps.iter().map(|s| s.ts).max();
+    let mut snapshot_cursor_advanced = false;
+
     let mut since = cfg.last_uploaded_rowid;
     let mut total_uploaded = 0usize;
     const BATCH: usize = 500;
+    let mut first_batch = true;
 
     loop {
         let records = db::query_since(since, BATCH)?;
-        if records.is_empty() {
+        // 明细耗尽，且还有未发的快照 → 发一个空 records 的批次把快照送出
+        let records_empty = records.is_empty();
+        if records_empty && pending_snaps.is_empty() {
+            break;
+        }
+        if records_empty && !first_batch {
+            // 明细已发完，快照在首批已随带；无更多数据
             break;
         }
         // 本批最大 rowid（游标必须至少推进到这里，否则死循环）
         let batch_max = records.last().map(|r| r.local_rowid).unwrap_or(since);
+
+        // 快照只在首批携带（一次性发完）；之后清空避免重复发
+        let snaps_to_send = if first_batch {
+            std::mem::take(&mut pending_snaps)
+        } else {
+            Vec::new()
+        };
+        let last_snapshot_ts = if first_batch { snap_max_ts } else { None };
+
         let payload = SyncPayload {
             records,
             last_rowid: Some(batch_max),
+            snapshots: snaps_to_send,
+            last_snapshot_ts,
         };
         let resp: SyncResponse = ureq::post(&format!("{base}/sync"))
             .set("Authorization", &format!("Bearer {token}"))
@@ -331,11 +373,26 @@ pub fn upload_incremental() -> Result<SyncOutcome, String> {
             .map_err(|e| format!("解析上传响应失败: {e}"))?;
 
         total_uploaded += resp.accepted;
+        // 快照游标：取服务端返回值（新服务端）或本批最大 ts（旧服务端不回填）。
+        if first_batch {
+            if let Some(ts) = resp.max_snapshot_ts {
+                cfg.last_uploaded_snapshot_ts = ts;
+            } else if let Some(ts) = snap_max_ts {
+                cfg.last_uploaded_snapshot_ts = ts;
+            }
+            snapshot_cursor_advanced = true;
+        }
         // 游标必须推进到本批最大 rowid（无论服务端是否接受，本地都已处理过这些记录）。
         // 取 max 防止服务端返回的旧游标回退。
         since = resp.max_rowid.max(batch_max);
+        first_batch = false;
+        // 明细空 + 快照发完 → 结束
+        if records_empty {
+            break;
+        }
     }
 
+    let _ = snapshot_cursor_advanced; // 标记已用，避免未读警告
     let now = chrono::Local::now().timestamp_millis();
     cfg.last_uploaded_rowid = since;
     cfg.last_sync_at = now;
@@ -396,6 +453,156 @@ pub fn fetch_remote_usage(req: RemoteUsageRequest) -> Result<RemoteUsage, String
         .into_json()
         .map_err(|e| format!("解析远端数据失败: {e}"))?;
     Ok(resp)
+}
+
+// ===== 远端额度快照查询（对比页/报告页用）=====
+
+/// 远端单条快照（带 device_id，供前端按设备筛选）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteSnapshot {
+    #[serde(default)]
+    pub device_id: String,
+    #[serde(default)]
+    pub ts: i64,
+    #[serde(default)]
+    pub level: String,
+    #[serde(default)]
+    pub weekly_pct: u32,
+    #[serde(default)]
+    pub weekly_reset: Option<i64>,
+    #[serde(default)]
+    pub hour5_pct: u32,
+    #[serde(default)]
+    pub mcp_pct: u32,
+    #[serde(default)]
+    pub mcp_used: Option<i64>,
+    #[serde(default)]
+    pub mcp_total: Option<i64>,
+}
+
+/// /snapshots 返回包装
+#[derive(Debug, Deserialize)]
+struct SnapshotsResponse {
+    #[serde(default)]
+    snapshots: Vec<RemoteSnapshot>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct RemoteSnapshotRequest {
+    pub from_ms: i64,
+    pub to_ms: i64,
+    #[serde(default)]
+    pub exclude_device: String,
+    #[serde(default)]
+    pub devices: String,
+}
+
+/// 拉取远端额度快照（带 device_id）。
+pub fn fetch_remote_snapshots(req: RemoteSnapshotRequest) -> Result<Vec<RemoteSnapshot>, String> {
+    let cfg = load_sync_config()?;
+    if !cfg.enabled || cfg.device_token.is_empty() {
+        return Ok(Vec::new());
+    }
+    let base = &cfg.server_url;
+    let token = &cfg.device_token;
+
+    let mut url = format!(
+        "{base}/snapshots?from_ms={}&to_ms={}",
+        req.from_ms, req.to_ms
+    );
+    if !req.devices.is_empty() {
+        url.push_str(&format!("&devices={}", req.devices));
+    } else if !req.exclude_device.is_empty() {
+        url.push_str(&format!("&exclude_device={}", req.exclude_device));
+    }
+
+    let resp: SnapshotsResponse = ureq::get(&url)
+        .set("Authorization", &format!("Bearer {token}"))
+        .timeout(Duration::from_secs(10))
+        .call()
+        .map_err(map_http_err("查询远端快照"))?
+        .into_json()
+        .map_err(|e| format!("解析远端快照失败: {e}"))?;
+    Ok(resp.snapshots)
+}
+
+// ===== 远端周期明细查询（供客户端本地折算消耗）=====
+
+/// 远端周期内单条用量明细（折算用，字段与本地 db::query_period_consumed 对齐）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteDetailRow {
+    #[serde(default)]
+    pub started_at: i64,
+    #[serde(default)]
+    pub model_id: String,
+    #[serde(default)]
+    pub input_tokens: i64,
+    #[serde(default)]
+    pub output_tokens: i64,
+    #[serde(default)]
+    pub cache_read_tokens: i64,
+    #[serde(default)]
+    pub total_tokens: i64,
+}
+
+/// 一个周期的明细聚合
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemotePeriodDetail {
+    #[serde(default)]
+    pub reset_at: i64,
+    #[serde(default)]
+    pub end_at: i64,
+    #[serde(default)]
+    pub rows: Vec<RemoteDetailRow>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PeriodDetailResponse {
+    #[serde(default)]
+    buckets: Vec<RemotePeriodDetail>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RemotePeriodDetailRequest {
+    /// 周期区间列表 [[reset_at, end_at], ...]
+    pub periods: Vec<(i64, i64)>,
+    #[serde(default)]
+    pub exclude_device: String,
+    #[serde(default)]
+    pub devices: String,
+}
+
+/// 拉取远端各周期的逐条用量明细（前端用本地 peak 配置折算）。
+pub fn fetch_remote_period_detail(
+    req: RemotePeriodDetailRequest,
+) -> Result<Vec<RemotePeriodDetail>, String> {
+    let cfg = load_sync_config()?;
+    if !cfg.enabled || cfg.device_token.is_empty() {
+        return Ok(Vec::new());
+    }
+    let base = &cfg.server_url;
+    let token = &cfg.device_token;
+
+    #[derive(Serialize)]
+    struct Body {
+        periods: Vec<(i64, i64)>,
+        devices: String,
+        exclude_device: String,
+    }
+    let body = Body {
+        periods: req.periods,
+        devices: req.devices,
+        exclude_device: req.exclude_device,
+    };
+
+    let resp: PeriodDetailResponse = ureq::post(&format!("{base}/period_detail"))
+        .set("Authorization", &format!("Bearer {token}"))
+        .timeout(Duration::from_secs(15))
+        .send_json(&body)
+        .map_err(map_http_err("查询远端折算明细"))?
+        .into_json()
+        .map_err(|e| format!("解析远端折算明细失败: {e}"))?;
+    Ok(resp.buckets)
 }
 
 /// 拉取设备列表（供前端设备筛选器）。

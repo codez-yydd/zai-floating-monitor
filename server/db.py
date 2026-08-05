@@ -45,8 +45,26 @@ CREATE TABLE IF NOT EXISTS usage_records (
 )
 """
 
+# 额度快照表：客户端每次查询额度后追加一条，周期解析靠 weekly_reset 跳变。
+# 与客户端本地 quota_history.jsonl 字段对齐，多一个 device_id 用于按设备筛选。
+SCHEMA_QUOTA_SNAPSHOTS = """
+CREATE TABLE IF NOT EXISTS quota_snapshots (
+    device_id    TEXT    NOT NULL,
+    ts           INTEGER NOT NULL,
+    level        TEXT,
+    weekly_pct   INTEGER NOT NULL DEFAULT 0,
+    weekly_reset INTEGER,
+    hour5_pct    INTEGER NOT NULL DEFAULT 0,
+    mcp_pct      INTEGER NOT NULL DEFAULT 0,
+    mcp_used     INTEGER,
+    mcp_total    INTEGER,
+    PRIMARY KEY (device_id, ts)
+)
+"""
+
 INDEX_STARTED = "CREATE INDEX IF NOT EXISTS idx_started ON usage_records(started_at)"
 INDEX_DEVICE_STARTED = "CREATE INDEX IF NOT EXISTS idx_device_started ON usage_records(device_id, started_at)"
+INDEX_SNAPSHOT_TS = "CREATE INDEX IF NOT EXISTS idx_snapshot_ts ON quota_snapshots(ts)"
 
 SCHEMA_CONFIG = """
 CREATE TABLE IF NOT EXISTS config (
@@ -58,8 +76,10 @@ CREATE TABLE IF NOT EXISTS config (
 ALL_SCHEMA = [
     SCHEMA_DEVICES,
     SCHEMA_USAGE_RECORDS,
+    SCHEMA_QUOTA_SNAPSHOTS,
     INDEX_STARTED,
     INDEX_DEVICE_STARTED,
+    INDEX_SNAPSHOT_TS,
     SCHEMA_CONFIG,
 ]
 
@@ -377,6 +397,136 @@ def empty_usage_result(from_ms, to_ms):
     }
 
 
+# ===== 额度快照（quota_snapshots）=====
+
+def insert_snapshots(device_id, snaps, uploaded_at):
+    """批量插入额度快照（INSERT OR IGNORE 去重，按 device_id+ts 主键）。
+    返回实际写入条数。单条字段缺失时用默认值兜底。
+    """
+    if not snaps:
+        return 0
+    with _db_lock:
+        conn = get_conn()
+        try:
+            cur = conn.cursor()
+            accepted = 0
+            for s in snaps:
+                cur.execute(
+                    """
+                    INSERT OR IGNORE INTO quota_snapshots
+                        (device_id, ts, level, weekly_pct, weekly_reset,
+                         hour5_pct, mcp_pct, mcp_used, mcp_total)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        device_id,
+                        s.get("ts", 0),
+                        s.get("level", ""),
+                        s.get("weekly_pct", 0),
+                        s.get("weekly_reset"),
+                        s.get("hour5_pct", 0),
+                        s.get("mcp_pct", 0),
+                        s.get("mcp_used"),
+                        s.get("mcp_total"),
+                    ),
+                )
+                accepted += cur.rowcount
+            conn.commit()
+            return accepted
+        finally:
+            conn.close()
+
+
+def max_snapshot_ts_of(device_id):
+    """查询某设备已上传快照的最大 ts（游标用）。无数据返回 0。"""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(ts), 0) FROM quota_snapshots WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()
+        return row[0] if row else 0
+    finally:
+        conn.close()
+
+
+def query_snapshots(from_ms, to_ms, device_ids):
+    """查询时间范围内的快照（带 device_id，按 ts 升序）。
+    device_ids 为空 = 全部设备；非空 = 仅这些设备。
+    """
+    dev_frag, dev_params = _build_device_filter(device_ids)
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT device_id, ts, level, weekly_pct, weekly_reset,
+                   hour5_pct, mcp_pct, mcp_used, mcp_total
+            FROM quota_snapshots
+            WHERE ts >= ? AND ts < ? {dev_frag}
+            ORDER BY ts ASC
+            """,
+            [from_ms, to_ms] + dev_params,
+        ).fetchall()
+        return [
+            {
+                "device_id": r["device_id"],
+                "ts": r["ts"],
+                "level": r["level"] or "",
+                "weekly_pct": r["weekly_pct"],
+                "weekly_reset": r["weekly_reset"],
+                "hour5_pct": r["hour5_pct"],
+                "mcp_pct": r["mcp_pct"],
+                "mcp_used": r["mcp_used"],
+                "mcp_total": r["mcp_total"],
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def query_period_detail(periods, device_ids):
+    """按一组周期 [start, end) 返回远端各周期内的逐条用量明细。
+    供客户端用本地 peak 配置折算消耗（服务端无 peak 配置）。
+    每条含 started_at/model_id/各 token 字段，与本地 db::query_period_consumed 口径一致。
+    """
+    dev_frag, dev_params = _build_device_filter(device_ids)
+    conn = get_conn()
+    try:
+        out = []
+        for start, end in periods:
+            rows = conn.execute(
+                f"""
+                SELECT started_at, model_id,
+                       COALESCE(input_tokens,0), COALESCE(output_tokens,0),
+                       COALESCE(cache_read_input_tokens,0), COALESCE(computed_total_tokens,0)
+                FROM usage_records
+                WHERE started_at >= ? AND started_at < ? {dev_frag}
+                """,
+                [start, end] + dev_params,
+            ).fetchall()
+            out.append(
+                {
+                    "reset_at": start,
+                    "end_at": end,
+                    "rows": [
+                        {
+                            "started_at": r[0],
+                            "model_id": r[1] or "",
+                            "input_tokens": r[2],
+                            "output_tokens": r[3],
+                            "cache_read_tokens": r[4],
+                            "total_tokens": r[5],
+                        }
+                        for r in rows
+                    ],
+                }
+            )
+        return out
+    finally:
+        conn.close()
+
+
 # ===== 配置表（自动清理用）=====
 
 def get_config(key):
@@ -414,26 +564,32 @@ def total_records():
 
 
 def delete_before(cutoff_ms):
-    """按时间清理：删除 started_at < cutoff_ms 的记录，返回删除条数。"""
+    """按时间清理：删除 started_at < cutoff_ms 的明细 + ts < cutoff 的快照，返回删除条数。"""
     with _db_lock:
         conn = get_conn()
         try:
-            cur = conn.execute(
+            n = conn.execute(
                 "DELETE FROM usage_records WHERE started_at < ?", (cutoff_ms,)
+            ).rowcount
+            conn.execute(
+                "DELETE FROM quota_snapshots WHERE ts < ?", (cutoff_ms,)
             )
             conn.commit()
-            return cur.rowcount
+            return n
         finally:
             conn.close()
 
 
 def delete_device_records(device_id):
-    """按设备清理：删除指定设备的全部明细，返回删除条数。"""
+    """按设备清理：删除指定设备的全部明细 + 快照，返回删除条数。"""
     with _db_lock:
         conn = get_conn()
         try:
             cur = conn.execute(
                 "DELETE FROM usage_records WHERE device_id = ?", (device_id,)
+            )
+            conn.execute(
+                "DELETE FROM quota_snapshots WHERE device_id = ?", (device_id,)
             )
             conn.commit()
             return cur.rowcount
@@ -442,11 +598,12 @@ def delete_device_records(device_id):
 
 
 def delete_all_usage():
-    """全部清空：只清 usage_records，保留设备注册。返回删除条数。"""
+    """全部清空：清 usage_records + quota_snapshots，保留设备注册。返回删除条数。"""
     with _db_lock:
         conn = get_conn()
         try:
             cur = conn.execute("DELETE FROM usage_records")
+            conn.execute("DELETE FROM quota_snapshots")
             conn.commit()
             return cur.rowcount
         finally:
@@ -459,6 +616,7 @@ def reset_all():
         conn = get_conn()
         try:
             u = conn.execute("DELETE FROM usage_records").rowcount
+            conn.execute("DELETE FROM quota_snapshots")
             d = conn.execute("DELETE FROM devices").rowcount
             conn.commit()
             return u, d
@@ -467,13 +625,16 @@ def reset_all():
 
 
 def revoke_device(device_id):
-    """撤销设备：同时删 devices 表记录和明细。返回 (devices_deleted, usage_deleted)。"""
+    """撤销设备：同时删 devices 表记录、明细和快照。返回 (devices_deleted, usage_deleted)。"""
     with _db_lock:
         conn = get_conn()
         try:
             u = conn.execute(
                 "DELETE FROM usage_records WHERE device_id = ?", (device_id,)
             ).rowcount
+            conn.execute(
+                "DELETE FROM quota_snapshots WHERE device_id = ?", (device_id,)
+            )
             d = conn.execute(
                 "DELETE FROM devices WHERE device_id = ?", (device_id,)
             ).rowcount

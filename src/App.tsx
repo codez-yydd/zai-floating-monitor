@@ -71,7 +71,10 @@ export default function App() {
       ) : view === "compare" ? (
         <ComparePanel onBack={() => setView("stats")} />
       ) : view === "report" ? (
-        <ReportPanel onBack={() => setView("stats")} />
+        <ReportPanel
+          onBack={() => setView("stats")}
+          pricing={pricing}
+        />
       ) : (
         <SyncPanel onBack={backToStats} />
       )}

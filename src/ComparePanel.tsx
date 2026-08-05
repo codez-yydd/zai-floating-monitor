@@ -14,9 +14,11 @@ import {
   getSyncConfig,
   getWeeklyCompare,
   listRemoteDevices,
+  remotePeriodDetail,
   remoteUsage,
 } from "./api";
 import { formatTokens } from "./format";
+import { detailToConsumed } from "./peak";
 
 interface Props {
   onBack: () => void;
@@ -58,7 +60,7 @@ export function ComparePanel({ onBack }: Props) {
     setLoading(true);
     setError(null);
     try {
-      // 1. 周期列表
+      // 1. 周期列表（账户级，本机快照解析即代表全局额度周期）
       const ps = await getWeeklyCompare();
       setPeriods(ps);
 
@@ -68,76 +70,151 @@ export function ComparePanel({ onBack }: Props) {
         return;
       }
 
-      // 2. 本地 token + 折算消耗（一次请求各自）
-      const periodPairs: [number, number][] = ps.map((p) => [p.reset_at, p.end_at]);
-      const [localTokens, localConsumed] = await Promise.all([
-        getCompareTokens(periodPairs),
-        getCompareConsumed(periodPairs),
+      // 周期区间
+      const periodPairs: [number, number][] = ps.map((p) => [
+        p.reset_at,
+        p.end_at,
       ]);
+      const fromMs = ps[0].reset_at;
+      const toMs = ps[ps.length - 1].end_at;
 
-      // 3. 远端 token 合并（按设备筛选）
+      // 数据来源：all=本地+远端(排除本机)；local=仅本地；具体id=仅远端该设备
       const wantLocal = deviceFilter === "all" || deviceFilter === "local";
       const wantRemote =
         syncEnabled &&
-        (deviceFilter === "all" || (deviceFilter !== "local" && deviceFilter !== "all"));
+        (deviceFilter === "all" ||
+          (deviceFilter !== "local" && deviceFilter !== "all"));
 
-      // 远端：对整段时间跨度调一次 trend(day)，按 reset_at 归属到周期累加
-      let remoteByPeriod: Map<number, number> = new Map();
-      const fromMs = ps[0].reset_at;
-      const toMs = ps[ps.length - 1].end_at;
-      if (wantRemote && syncConfig && toMs > fromMs) {
-        const opts =
-          deviceFilter === "all"
-            ? { excludeDevice: syncConfig.device_id }
-            : { devices: deviceFilter };
-        try {
-          const remote = await remoteUsage(fromMs, toMs, "day", opts);
-          // 远端 trend 桶 label 是毫秒字符串，按归属周期累加
-          for (const b of remote.trend) {
-            const ms = parseInt(b.label, 10);
-            if (isNaN(ms)) continue;
-            // 找到 ms 所属的周期
-            const idx = ps.findIndex((p) => ms >= p.reset_at && ms < p.end_at);
-            if (idx >= 0) {
-              remoteByPeriod.set(
-                idx,
-                (remoteByPeriod.get(idx) ?? 0) + b.total_tokens
-              );
-            }
-          }
-        } catch {
-          // 远端失败静默降级
-          if (deviceFilter !== "all") throw new Error("远端数据获取失败");
+      const opts =
+        syncConfig &&
+        (deviceFilter === "all"
+          ? { excludeDevice: syncConfig.device_id }
+          : { devices: deviceFilter });
+
+      // 2. 并发：本地（token+折算）+ 远端（trend 折 token + 明细折折算）
+      const tasks: Promise<unknown>[] = [];
+
+      // 本地 token + 折算
+      let localTokens: WeeklyTokenBucket[] = [];
+      let localConsumed: ConsumedBucket[] = [];
+      if (wantLocal) {
+        tasks.push(
+          getCompareTokens(periodPairs).then((t) => (localTokens = t)),
+          getCompareConsumed(periodPairs).then((c) => (localConsumed = c))
+        );
+      } else {
+        // 仅远端：构造空本地骨架，后面填远端值
+        localTokens = periodPairs.map(([reset_at, end_at]) => ({
+          reset_at,
+          end_at,
+          total_tokens: 0,
+          requests: 0,
+        }));
+        localConsumed = periodPairs.map(([reset_at, end_at]) => ({
+          reset_at,
+          end_at,
+          consumed: 0,
+          requests: 0,
+        }));
+      }
+
+      // 远端 token（按周期累加 trend.total_tokens）
+      let remoteTokenByPeriod = new Map<number, number>();
+      let remoteReqByPeriod = new Map<number, number>();
+      // 远端折算消耗（拉逐条明细，本地 peak 折算）
+      let remoteConsumedByPeriod = new Map<number, { consumed: number; requests: number }>();
+
+      if (wantRemote && syncConfig && opts && toMs > fromMs) {
+        // token：trend(day) 按归属周期累加
+        tasks.push(
+          remoteUsage(fromMs, toMs, "day", opts)
+            .then((remote) => {
+              for (const b of remote.trend) {
+                const ms = parseInt(b.label, 10);
+                if (isNaN(ms)) continue;
+                const idx = ps.findIndex(
+                  (p) => ms >= p.reset_at && ms < p.end_at
+                );
+                if (idx >= 0) {
+                  remoteTokenByPeriod.set(
+                    idx,
+                    (remoteTokenByPeriod.get(idx) ?? 0) + b.total_tokens
+                  );
+                  remoteReqByPeriod.set(
+                    idx,
+                    (remoteReqByPeriod.get(idx) ?? 0) + b.requests
+                  );
+                }
+              }
+            })
+            .catch(() => {
+              // "全部"模式远端失败静默降级；具体设备失败透出
+              if (deviceFilter !== "all") throw new Error("远端数据获取失败");
+            })
+        );
+
+        // 折算消耗：远端逐条明细 + 本地 peak 配置折算（仅配置了 plan_type 才拉）
+        const peak = peakCfg;
+        if (peak?.plan_type) {
+          tasks.push(
+            remotePeriodDetail(periodPairs, opts)
+              .then((buckets) => {
+                const consumed = detailToConsumed(
+                  buckets.map((b) => ({
+                    rows: b.rows.map((r) => ({
+                      started_at: r.started_at,
+                      model_id: r.model_id,
+                      input_tokens: r.input_tokens,
+                      output_tokens: r.output_tokens,
+                      cache_read_tokens: r.cache_read_tokens,
+                      total_tokens: r.total_tokens,
+                    })),
+                  })),
+                  peak
+                );
+                consumed.forEach((c, i) => {
+                  remoteConsumedByPeriod.set(i, c);
+                });
+              })
+              .catch(() => {
+                if (deviceFilter !== "all")
+                  throw new Error("远端折算明细获取失败");
+              })
+          );
         }
       }
 
-      // 4. 合并：本地 token + 远端 token
+      await Promise.all(tasks);
+
+      // 3. 合并 token
       const mergedTokens: WeeklyTokenBucket[] = localTokens.map((t, i) => ({
         ...t,
         total_tokens:
-          t.total_tokens + (wantLocal ? 0 : 0) + (remoteByPeriod.get(i) ?? 0),
+          (wantLocal ? t.total_tokens : 0) +
+          (remoteTokenByPeriod.get(i) ?? 0),
+        requests:
+          (wantLocal ? t.requests : 0) + (remoteReqByPeriod.get(i) ?? 0),
       }));
-      // 若选了"仅远端某设备"，本地不该算 → 重置为远端值
-      if (!wantLocal) {
-        for (let i = 0; i < mergedTokens.length; i++) {
-          mergedTokens[i] = {
-            ...mergedTokens[i],
-            total_tokens: remoteByPeriod.get(i) ?? 0,
-            requests: 0,
-          };
-        }
-      }
-
       setTokens(mergedTokens);
-      // 折算消耗只基于本地（远端明细不足以做折算）
-      setConsumed(localConsumed);
+
+      // 4. 合并折算消耗
+      const mergedConsumed: ConsumedBucket[] = localConsumed.map((c, i) => {
+        const rc = remoteConsumedByPeriod.get(i);
+        return {
+          ...c,
+          consumed: (wantLocal ? c.consumed : 0) + (rc?.consumed ?? 0),
+          requests: (wantLocal ? c.requests : 0) + (rc?.requests ?? 0),
+        };
+      });
+      setConsumed(mergedConsumed);
+
       setSelectedIdx(ps.length - 1); // 默认选中当前周期
     } catch (e) {
       setError(String(e));
     } finally {
       setLoading(false);
     }
-  }, [deviceFilter, syncConfig, syncEnabled]);
+  }, [deviceFilter, syncConfig, syncEnabled, peakCfg]);
 
   useEffect(() => {
     load();
