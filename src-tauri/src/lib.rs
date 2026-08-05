@@ -1,8 +1,10 @@
 mod db;
+mod notify;
 mod peak;
 mod pricing;
 mod quota;
 mod quota_history;
+mod shortcut;
 mod sync;
 
 use pricing::{load_pricing, save_pricing, ModelPrice, PricingConfig};
@@ -101,6 +103,56 @@ fn set_pricing(config: PricingConfig) -> Result<(), String> {
     save_pricing(&config)
 }
 
+/// get_currency：读取货币偏好（"cny" | "usd"），供前端初始化
+#[tauri::command]
+fn get_currency() -> String {
+    pricing::load_currency()
+}
+
+/// set_currency：保存货币偏好。前端切换货币时同步给后端，菜单栏标题据此显示。
+/// 保存后立即刷新一次菜单栏标题，避免用户切换后还要等 30 秒后台周期。
+#[tauri::command]
+fn set_currency(currency: String, app: AppHandle) -> Result<(), String> {
+    pricing::save_currency(&currency)?;
+    let title = today_tray_title(&app);
+    let _ = app.tray_by_id("main").map(|t| t.set_title(Some(title)));
+    Ok(())
+}
+
+/// check_pricing_updates：对比内置默认价格表与用户当前配置，返回差异。
+/// 仅用于"检查更新"提示，绝不自动覆盖。
+/// 仅对「数据库出现过 ∪ 用户已手动配置」的模型做对比，避免提示用户没用过的模型。
+#[tauri::command]
+fn check_pricing_updates() -> Result<pricing::PricingDiff, String> {
+    let user = load_pricing()?;
+    // 相关模型 = 数据库里出现过的 + 用户已配置（任一货币）的
+    let mut relevant: std::collections::HashSet<String> = std::collections::HashSet::new();
+    db::list_models()?.into_iter().for_each(|m| {
+        relevant.insert(m.model_id);
+    });
+    relevant.extend(user.cny.keys().cloned());
+    relevant.extend(user.usd.keys().cloned());
+    Ok(pricing::diff_with_defaults(&user, &relevant))
+}
+
+/// apply_pricing_updates：把用户勾选的价格项合并进 pricing 并保存。
+/// items: Vec<{model_id, currency, price}>
+#[derive(Debug, Deserialize)]
+struct ApplyPriceItem {
+    model_id: String,
+    currency: String,
+    price: pricing::ModelPrice,
+}
+
+#[tauri::command]
+fn apply_pricing_updates(items: Vec<ApplyPriceItem>) -> Result<PricingConfig, String> {
+    let tuples: Vec<(String, String, pricing::ModelPrice)> = items
+        .into_iter()
+        .map(|i| (i.model_id, i.currency, i.price))
+        .collect();
+    pricing::apply_updates(&tuples)
+}
+
 /// get_quota_config：读取额度查询配置（token + 端点）
 #[tauri::command]
 fn get_quota_config() -> Result<QuotaConfig, String> {
@@ -111,6 +163,53 @@ fn get_quota_config() -> Result<QuotaConfig, String> {
 #[tauri::command]
 fn set_quota_config(config: QuotaConfig) -> Result<(), String> {
     save_quota(&config)
+}
+
+/// get_notify_config：读取额度预警配置
+#[tauri::command]
+fn get_notify_config() -> Result<notify::NotifyConfig, String> {
+    Ok(notify::load_notify())
+}
+
+/// set_notify_config：保存额度预警配置
+#[tauri::command]
+fn set_notify_config(config: notify::NotifyConfig) -> Result<(), String> {
+    notify::save_notify(&config)
+}
+
+/// get_shortcut_config：读取全局快捷键配置
+#[tauri::command]
+fn get_shortcut_config() -> Result<shortcut::ShortcutConfig, String> {
+    Ok(shortcut::load_shortcut())
+}
+
+/// set_shortcut_config：先验证再应用，成功后才持久化。
+/// 顺序很重要：若先保存非法 accelerator，会导致后续启动永久注册失败。
+/// apply 失败时（如 accelerator 非法/被占用），回滚到之前已保存的旧配置，
+/// 保证运行时快捷键不会因一次失败的尝试而彻底失效。
+#[tauri::command]
+fn set_shortcut_config(
+    config: shortcut::ShortcutConfig,
+    app: AppHandle,
+) -> Result<(), String> {
+    // 记住旧配置，用于失败回滚
+    let old = shortcut::load_shortcut();
+    // 先应用（内部会先 unregister_all 再 register，注册失败返回 Err）
+    if let Err(e) = apply_shortcut(&app, &config) {
+        // 回滚：重新注册旧配置（旧配置此前已验证可用）
+        let _ = apply_shortcut(&app, &old);
+        return Err(e);
+    }
+    // 应用成功才保存，避免非法配置落盘
+    shortcut::save_shortcut(&config)
+}
+
+/// 注销当前快捷键（设置关闭时用）。
+#[tauri::command]
+fn unregister_shortcut(app: AppHandle) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    let gs = app.global_shortcut();
+    gs.unregister_all().map_err(|e| format!("注销快捷键失败: {e}"))
 }
 
 /// fetch_quota：实时查询 Coding Plan 额度（5小时窗口 + 每周）
@@ -282,6 +381,19 @@ fn open_config_dir() -> Result<(), String> {
     let dir = pricing::config_dir()?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("{e}"))?;
     open::that(dir).map_err(|e| format!("打开目录失败: {e}"))
+}
+
+/// 把报告内容写入 ~/.zbar/reports/<filename>，并在系统文件管理器中打开该目录。
+/// content: Markdown 文本；filename: 如 "周报-2026-08-05.md"
+#[tauri::command]
+fn save_report(content: String, filename: String) -> Result<String, String> {
+    let dir = pricing::config_dir()?.join("reports");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建报告目录失败: {e}"))?;
+    let path = dir.join(&filename);
+    std::fs::write(&path, content).map_err(|e| format!("写入报告失败: {e}"))?;
+    // 打开所在目录（而非文件本身），便于用户查看
+    open::that(&dir).map_err(|e| format!("打开目录失败: {e}"))?;
+    Ok(path.display().to_string())
 }
 
 // ===== 窗口置顶常驻（仅 Windows）=====
@@ -560,6 +672,28 @@ fn toggle_panel(app: &AppHandle, click_pos: Option<(f64, f64)>) {
             }
         };
         let _ = window.set_position(LogicalPosition::new(x, y));
+    } else if let Some(mon) = window.current_monitor().ok().flatten() {
+        // 无点击位置（如全局快捷键唤起）：定位到屏幕右上角（macOS）/右下角（Windows）
+        let mon_w = mon.size().width as f64 / scale;
+        #[cfg(not(target_os = "macos"))]
+        let mon_h = mon.size().height as f64 / scale;
+
+        let x = (mon_w - win_w - 4.0).max(4.0);
+        let y = {
+            #[cfg(target_os = "macos")]
+            {
+                25.0
+            }
+            #[cfg(target_os = "windows")]
+            {
+                mon_h - win_h - 48.0
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            {
+                mon_h - win_h - 48.0
+            }
+        };
+        let _ = window.set_position(LogicalPosition::new(x, y));
     }
 
     let _ = window.show();
@@ -593,6 +727,10 @@ fn today_tray_title(app: &AppHandle) -> String {
 
     let stats = db::query_stats(today_start, now_ms);
     let pricing = load_pricing().unwrap_or_default();
+    // 货币偏好决定菜单栏显示 ¥ 还是 $，以及用哪套价格表
+    let cur = pricing::load_currency();
+    let is_usd = cur == "usd";
+    let price_map = if is_usd { &pricing.usd } else { &pricing.cny };
 
     // 本机数据
     let mut total = stats.as_ref().map(|s| s.overall.total_tokens).unwrap_or(0);
@@ -601,7 +739,7 @@ fn today_tray_title(app: &AppHandle) -> String {
         .map(|s| {
             s.by_model
                 .iter()
-                .map(|m| cost_for(m, &pricing.cny))
+                .map(|m| cost_for(m, price_map))
                 .sum::<f64>()
         })
         .unwrap_or(0.0);
@@ -636,7 +774,7 @@ fn today_tray_title(app: &AppHandle) -> String {
                             reasoning_tokens: m.reasoning_tokens,
                             total_tokens: m.total_tokens,
                         },
-                        &pricing.cny,
+                        price_map,
                     )
                 })
                 .sum::<f64>();
@@ -644,11 +782,29 @@ fn today_tray_title(app: &AppHandle) -> String {
     }
 
     let _ = app; // 占位
+    let sym = if is_usd { "$" } else { "¥" };
     if total > 0 {
-        format!("¥{:.2}  {}", cost, fmt_tok(total))
+        format!("{sym}{:.2}  {}", cost, fmt_tok(total))
     } else {
         "ZBar".to_string()
     }
+}
+
+/// 应用快捷键配置：先注销全部，再按配置注册。
+/// 注册的 handler 调用 toggle_panel 唤起/隐藏面板。
+fn apply_shortcut(app: &AppHandle, cfg: &shortcut::ShortcutConfig) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    let gs = app.global_shortcut();
+    // 先清掉旧注册，避免重复
+    let _ = gs.unregister_all();
+    if !cfg.enabled {
+        return Ok(());
+    }
+    gs.on_shortcut(cfg.accelerator.as_str(), move |app, _shortcut, _event| {
+        toggle_panel(app, None);
+    })
+    .map_err(|e| format!("注册快捷键失败（可能被占用或格式非法）: {e}"))?;
+    Ok(())
 }
 
 /// 后台线程：每 30 秒刷新一次菜单栏标题。
@@ -706,6 +862,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .on_window_event(|window, event| {
             // 失焦时自动隐藏面板（保留窗口本身，不销毁）
             if let WindowEvent::Focused(false) = event {
@@ -737,6 +895,12 @@ pub fn run() {
             setup_tray(app.handle())?;
             spawn_title_updater(app.handle().clone());
 
+            // 应用全局快捷键配置（启动时若已启用则注册）
+            let sc = shortcut::load_shortcut();
+            if let Err(e) = apply_shortcut(app.handle(), &sc) {
+                eprintln!("[zbar-shortcut] {e}");
+            }
+
             // Windows 启动时恢复置顶常驻状态：若用户上次开启了置顶，
             // 启动后面板自动显示并常驻（不再因失焦隐藏）。
             // 用条件编译确保 macOS 完全不执行此分支。
@@ -759,12 +923,22 @@ pub fn run() {
             list_models,
             get_pricing,
             set_pricing,
+            get_currency,
+            set_currency,
+            check_pricing_updates,
+            apply_pricing_updates,
             get_quota_config,
             set_quota_config,
+            get_notify_config,
+            set_notify_config,
+            get_shortcut_config,
+            set_shortcut_config,
+            unregister_shortcut,
             fetch_quota,
             compute_cost,
             get_trend,
             open_config_dir,
+            save_report,
             get_sync_config,
             set_sync_config,
             register_device,

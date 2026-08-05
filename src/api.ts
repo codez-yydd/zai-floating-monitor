@@ -5,16 +5,21 @@ import type {
   CleanupStatus,
   ConsumedBucket,
   CostResult,
+  Currency,
   DeviceInfo,
   ModelInfo,
+  NotifyConfig,
   PeakConfig,
   PlanType,
   PricingConfig,
+  PricingDiff,
+  ApplyPriceItem,
   QuotaConfig,
   QuotaResult,
   QuotaSnapshot,
   RegisterRequest,
   RemoteUsage,
+  ShortcutConfig,
   Stats,
   SyncConfig,
   SyncOutcome,
@@ -45,6 +50,28 @@ export async function savePricing(config: PricingConfig): Promise<void> {
   await invoke("set_pricing", { config });
 }
 
+/** 读取货币偏好（"cny" | "usd"），后端据此决定菜单栏显示 ¥ 还是 $ */
+export async function fetchCurrency(): Promise<Currency> {
+  return invoke<Currency>("get_currency");
+}
+
+/** 保存货币偏好，同步给后端（菜单栏标题随之刷新） */
+export async function saveCurrency(currency: Currency): Promise<void> {
+  await invoke("set_currency", { currency });
+}
+
+/** 对比内置默认价格表与用户当前配置，返回差异（不修改任何文件） */
+export async function checkPricingUpdates(): Promise<PricingDiff> {
+  return invoke<PricingDiff>("check_pricing_updates");
+}
+
+/** 把用户勾选的价格项合并进 pricing 并保存 */
+export async function applyPricingUpdates(
+  items: ApplyPriceItem[]
+): Promise<PricingConfig> {
+  return invoke<PricingConfig>("apply_pricing_updates", { items });
+}
+
 export async function fetchQuotaConfig(): Promise<QuotaConfig> {
   return invoke<QuotaConfig>("get_quota_config");
 }
@@ -55,6 +82,28 @@ export async function saveQuotaConfig(config: QuotaConfig): Promise<void> {
 
 export async function fetchQuota(): Promise<QuotaResult> {
   return invoke<QuotaResult>("fetch_quota");
+}
+
+/** 读取额度预警配置 */
+export async function getNotifyConfig(): Promise<NotifyConfig> {
+  return invoke<NotifyConfig>("get_notify_config");
+}
+
+/** 保存额度预警配置 */
+export async function setNotifyConfig(config: NotifyConfig): Promise<void> {
+  await invoke("set_notify_config", { config });
+}
+
+/** 读取全局快捷键配置 */
+export async function getShortcutConfig(): Promise<ShortcutConfig> {
+  return invoke<ShortcutConfig>("get_shortcut_config");
+}
+
+/** 保存并立即应用快捷键（失败抛错，前端提示用户改键） */
+export async function setShortcutConfig(
+  config: ShortcutConfig
+): Promise<void> {
+  await invoke("set_shortcut_config", { config });
 }
 
 export async function fetchTrend(
@@ -78,6 +127,14 @@ export async function computeCost(
 
 export async function openConfigDir(): Promise<void> {
   await invoke("open_config_dir");
+}
+
+/** 把报告保存为 .md 文件并在文件管理器打开所在目录 */
+export async function saveReport(
+  content: string,
+  filename: string
+): Promise<string> {
+  return invoke<string>("save_report", { content, filename });
 }
 
 // ===== 多设备同步 =====

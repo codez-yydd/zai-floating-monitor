@@ -34,9 +34,10 @@ interface Props {
   onGoPricing: () => void;
   onGoSync: () => void;
   onGoCompare: () => void;
+  onGoReport: () => void;
 }
 
-export function StatsPanel({ currency, pricing, onGoPricing, onGoSync, onGoCompare }: Props) {
+export function StatsPanel({ currency, pricing, onGoPricing, onGoSync, onGoCompare, onGoReport }: Props) {
   const [preset, setPreset] = useState<RangePreset>("today");
   const [custom, setCustom] = useState(() => {
     const today = new Date().toISOString().slice(0, 10);
@@ -53,6 +54,8 @@ export function StatsPanel({ currency, pricing, onGoPricing, onGoSync, onGoCompa
   const [trend, setTrend] = useState<TrendPoint[]>([]);
   // 趋势图度量切换：花费 / Token
   const [trendMetric, setTrendMetric] = useState<"cost" | "token">("cost");
+  // 按模型排行榜：排序维度 + 排序后带占比的数据
+  const [sortBy, setSortBy] = useState<"cost" | "token" | "requests">("cost");
 
   // ===== 多设备同步相关状态 =====
   // syncConfig：判断是否启用同步（null=未读取/未启用）
@@ -232,6 +235,13 @@ export function StatsPanel({ currency, pricing, onGoPricing, onGoSync, onGoCompa
               📊
             </button>
             <button
+              onClick={onGoReport}
+              className="text-xs text-slate-700/40 hover:text-slate-900/70 transition-colors"
+              title="用量报告"
+            >
+              📄
+            </button>
+            <button
               onClick={onGoSync}
               className={`text-xs transition-colors ${
                 syncEnabled
@@ -401,56 +411,114 @@ export function StatsPanel({ currency, pricing, onGoPricing, onGoSync, onGoCompa
             )}
           </div>
 
-          {/* 按模型分组 */}
+          {/* 按模型分组（排行榜） */}
           <div>
-            <div className="text-[10px] uppercase tracking-wide text-slate-700/55 mb-1.5 mt-1">
-              按模型
-            </div>
-            <div className="space-y-0.5">
-              {stats.by_model.map((m) => {
-                const mc = perModelCost?.find(
-                  (x) => x.model_id === m.model_id
-                );
-                const hasPrice = Boolean(
-                  pricing[currency][m.model_id] &&
-                    (pricing[currency][m.model_id].input > 0 ||
-                      pricing[currency][m.model_id].output > 0)
-                );
-                return (
-                  <div
-                    key={m.provider_id + m.model_id}
-                    className="flex items-center justify-between text-xs py-1.5 px-2 -mx-2 rounded-lg hover:bg-slate-900/5 transition-colors"
+            <div className="flex items-center justify-between mb-1.5 mt-1">
+              <span className="text-[10px] uppercase tracking-wide text-slate-700/55">
+                按模型
+              </span>
+              {/* 排序维度切换：花费 / Token / 请求 */}
+              <div className="flex gap-0.5 text-[10px]">
+                {(["cost", "token", "requests"] as const).map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => setSortBy(s)}
+                    className={`px-1.5 py-0.5 rounded transition-colors ${
+                      sortBy === s
+                        ? "bg-sky-500/20 text-sky-700"
+                        : "text-slate-700/45 hover:text-slate-900/70"
+                    }`}
                   >
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      <span className="font-medium text-slate-900/90 truncate">
-                        {m.model_id}
-                      </span>
-                      {!hasPrice && (
-                        <span
-                          className="text-[10px] text-amber-600/90"
-                          title="未配置价格"
-                        >
-                          ⚠
-                        </span>
-                      )}
+                    {s === "cost" ? "花费" : s === "token" ? "Token" : "请求"}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="space-y-1">
+              {(() => {
+                // per_model_cost 在多设备合并时同一 model_id 可能有多条（本地+远端），
+                // 需先按 model_id 聚合求和，再与 by_model 对应，否则花费会被低估。
+                const costById = new Map<string, number>();
+                perModelCost?.forEach((x) => {
+                  costById.set(
+                    x.model_id,
+                    (costById.get(x.model_id) ?? 0) + x.cost
+                  );
+                });
+
+                // 合并 by_model 与聚合后的 cost，按 sortBy 降序排序
+                const rows = stats.by_model.map((m) => {
+                  const hasPrice = Boolean(
+                    pricing[currency][m.model_id] &&
+                      (pricing[currency][m.model_id].input > 0 ||
+                        pricing[currency][m.model_id].output > 0)
+                  );
+                  const costVal = costById.get(m.model_id) ?? 0;
+                  return {
+                    m,
+                    hasPrice,
+                    costVal,
+                    sortVal:
+                      sortBy === "cost"
+                        ? costVal
+                        : sortBy === "token"
+                        ? m.total_tokens
+                        : m.requests,
+                  };
+                });
+                rows.sort((a, b) => b.sortVal - a.sortVal);
+
+                // 占比条基准：当前维度的最大值（归一化到最大值 100%）
+                const maxVal = rows.length ? rows[0].sortVal : 0;
+
+                return rows.map(({ m, hasPrice, costVal, sortVal }) => {
+                  const pct =
+                    maxVal > 0 ? Math.max(sortVal / maxVal, 0.02) : 0;
+                  return (
+                    <div
+                      key={m.provider_id + m.model_id}
+                      className="relative rounded-lg hover:bg-slate-900/5 transition-colors py-1.5 px-2 -mx-2 overflow-hidden"
+                    >
+                      {/* 占比条背景：按当前排序维度归一化 */}
+                      <div
+                        className="absolute inset-y-0 left-0 bg-sky-500/10 rounded-lg pointer-events-none"
+                        style={{ width: `${pct * 100}%` }}
+                      />
+                      <div className="relative flex items-center justify-between text-xs">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="font-medium text-slate-900/90 truncate">
+                            {m.model_id}
+                          </span>
+                          {!hasPrice && (
+                            <span
+                              className="text-[10px] text-amber-600/90"
+                              title="未配置价格"
+                            >
+                              ⚠
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 text-slate-700/60 num shrink-0">
+                          <span>{m.requests}</span>
+                          <span className="text-slate-700/25">·</span>
+                          <span>{formatTokens(m.total_tokens)}</span>
+                          <span
+                            className={`w-12 text-right ${
+                              hasPrice
+                                ? "text-slate-900/90"
+                                : "text-slate-700/35"
+                            }`}
+                          >
+                            {hasPrice
+                              ? formatCost(costVal, currency)
+                              : "—"}
+                          </span>
+                        </div>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-2 text-slate-700/60 num shrink-0">
-                      <span>{m.requests}</span>
-                      <span className="text-slate-700/25">·</span>
-                      <span>{formatTokens(m.total_tokens)}</span>
-                      <span
-                        className={`w-12 text-right ${
-                          hasPrice
-                            ? "text-slate-900/90"
-                            : "text-slate-700/35"
-                        }`}
-                      >
-                        {hasPrice ? formatCost(mc?.cost ?? 0, currency) : "—"}
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
+                  );
+                });
+              })()}
             </div>
           </div>
         </div>

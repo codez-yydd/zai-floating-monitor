@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import type { QuotaResult } from "./types";
-import { fetchQuota, getTodayDelta } from "./api";
+import type { NotifyConfig, QuotaResult } from "./types";
+import { fetchQuota, getNotifyConfig, getTodayDelta } from "./api";
 
 interface Props {
   /** 点击「去设置」回调 */
@@ -14,8 +14,12 @@ const LEVEL_LABEL: Record<string, string> = {
   ultra: "Ultra",
 };
 
+/** 默认阈值（与后端 notify.rs 一致），配置加载前/失败时兜底 */
+const DEFAULT_THRESHOLDS = { hour5: 75, weekly: 80, mcp: 75 };
+
 export function QuotaPanel({ onGoSettings }: Props) {
   const [quota, setQuota] = useState<QuotaResult | null>(null);
+  const [notifyCfg, setNotifyCfg] = useState<NotifyConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [now, setNow] = useState(Date.now());
@@ -41,6 +45,10 @@ export function QuotaPanel({ onGoSettings }: Props) {
 
   useEffect(() => {
     load();
+    // 阈值配置只加载一次（设置页保存后会重新拉，这里初值即可）
+    getNotifyConfig()
+      .then(setNotifyCfg)
+      .catch(() => {});
   }, [load]);
 
   // 每 30 秒刷新额度 + 每秒更新倒计时
@@ -88,6 +96,11 @@ export function QuotaPanel({ onGoSettings }: Props) {
 
   const levelLabel = LEVEL_LABEL[quota.level] || quota.level || "—";
 
+  // 阈值：优先用设置页配置，未加载时用默认值
+  const t5 = notifyCfg?.hour5_threshold ?? DEFAULT_THRESHOLDS.hour5;
+  const tw = notifyCfg?.weekly_threshold ?? DEFAULT_THRESHOLDS.weekly;
+  const tm = notifyCfg?.mcp_threshold ?? DEFAULT_THRESHOLDS.mcp;
+
   return (
     <div className="mx-3.5 mb-1 rounded-lg bg-white/30 border border-white/40 px-2.5 py-2">
       {/* 标题行 */}
@@ -117,6 +130,7 @@ export function QuotaPanel({ onGoSettings }: Props) {
           usedPct={quota.hour5.percentage}
           resetAt={quota.hour5.nextResetTime}
           now={now}
+          threshold={t5}
         />
       )}
 
@@ -127,6 +141,7 @@ export function QuotaPanel({ onGoSettings }: Props) {
           usedPct={quota.weekly.percentage}
           resetAt={quota.weekly.nextResetTime}
           now={now}
+          threshold={tw}
           className="mt-1.5"
           delta={todayDelta}
         />
@@ -138,6 +153,7 @@ export function QuotaPanel({ onGoSettings }: Props) {
           usedPct={quota.mcp.percentage}
           resetAt={quota.mcp.nextResetTime}
           now={now}
+          threshold={tm}
           currentValue={quota.mcp.currentValue}
           total={quota.mcp.usage}
           className="mt-1.5"
@@ -153,6 +169,7 @@ function QuotaBar({
   usedPct,
   resetAt,
   now,
+  threshold,
   className = "",
   delta,
 }: {
@@ -160,6 +177,8 @@ function QuotaBar({
   usedPct: number;
   resetAt: number | null;
   now: number;
+  /** 警告阈值（百分比，来自设置页）。≥ threshold 黄，≥ threshold+15 红 */
+  threshold: number;
   className?: string;
   /** 今日增量：[增量百分比, 采样数]。仅 weekly 传入 */
   delta?: [number, number] | null;
@@ -167,13 +186,8 @@ function QuotaBar({
   const pct = Math.min(Math.max(usedPct, 0), 100);
   const remaining = 100 - pct;
 
-  // 颜色：用量越高越警示
-  const color =
-    pct >= 90
-      ? "bg-red-400"
-      : pct >= 70
-        ? "bg-amber-400"
-        : "bg-emerald-400";
+  // 颜色按设置页阈值：< threshold 绿；[threshold, threshold+15) 黄；≥ threshold+15 红
+  const color = pctColorClass(pct, threshold);
 
   // 今日增量徽标：采样不足(<2)不显示数字
   const deltaPct = delta ? delta[0] : 0;
@@ -204,7 +218,7 @@ function QuotaBar({
       {(hasDelta || (remaining < 20 && remaining > 0)) && (
         <div className="text-[9px] mt-0.5 flex items-center gap-2">
           {hasDelta && (
-            <span className={`num ${pctColor(pct)}`}>
+            <span className={`num ${pctTextClass(pct, threshold)}`}>
               ↑今日 {deltaPct}%
             </span>
           )}
@@ -229,10 +243,18 @@ function formatCountdown(ms: number): string {
   return `${mins}m 后刷新`;
 }
 
-/** 百分比对应的文字颜色（与进度条颜色阈值一致） */
-function pctColor(pct: number): string {
-  if (pct >= 90) return "text-red-600/90";
-  if (pct >= 70) return "text-amber-600/90";
+/** 百分比 → 进度条背景色 class，按阈值驱动：
+ * < threshold 绿 / [threshold, threshold+15) 黄 / ≥ threshold+15 红 */
+function pctColorClass(pct: number, threshold: number): string {
+  if (pct >= threshold + 15) return "bg-red-400";
+  if (pct >= threshold) return "bg-amber-400";
+  return "bg-emerald-400";
+}
+
+/** 百分比 → 文字色 class（与进度条同阈值） */
+function pctTextClass(pct: number, threshold: number): string {
+  if (pct >= threshold + 15) return "text-red-600/90";
+  if (pct >= threshold) return "text-amber-600/90";
   return "text-emerald-600/90";
 }
 
@@ -243,6 +265,7 @@ function McpBar({
   usedPct,
   resetAt,
   now,
+  threshold,
   currentValue,
   total,
   className = "",
@@ -250,6 +273,8 @@ function McpBar({
   usedPct: number;
   resetAt?: number | null;
   now: number;
+  /** 警告阈值（百分比，来自设置页） */
+  threshold: number;
   currentValue?: number;
   total?: number;
   className?: string;
@@ -257,12 +282,8 @@ function McpBar({
   const pct = Math.min(Math.max(usedPct, 0), 100);
   const remaining = 100 - pct;
 
-  const color =
-    pct >= 90
-      ? "bg-red-400"
-      : pct >= 70
-        ? "bg-amber-400"
-        : "bg-sky-400";
+  // 与 QuotaBar 统一阈值驱动（原本用 sky-400，现改为绿/黄/红）
+  const color = pctColorClass(pct, threshold);
 
   // 有绝对值时显示 "已用 / 总量"
   const hasAbs =

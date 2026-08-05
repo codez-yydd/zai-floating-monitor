@@ -322,3 +322,51 @@ export interface ConsumedBucket {
   requests: number;
 }
 
+// ===== 价格同步（内置默认表 diff 提示，不自动覆盖）=====
+
+/** 单条价格差异（某个货币维度上，用户价与默认价不一致） */
+export interface PriceDiffItem {
+  /** 模型 id */
+  model_id: string;
+  /** "cny" | "usd" */
+  currency: Currency;
+  /** 用户当前价格（新增模型时为 null） */
+  user: ModelPrice | null;
+  /** 内置默认价格 */
+  default: ModelPrice;
+}
+
+/** 完整差异结果 */
+export interface PricingDiff {
+  /** 内置表的版本号 */
+  version: string;
+  /** 新增模型（默认有、用户无） */
+  new_models: PriceDiffItem[];
+  /** 价格变动（两边都有但不同） */
+  changed: PriceDiffItem[];
+}
+
+/** 应用价格更新的单条请求 */
+export interface ApplyPriceItem {
+  model_id: string;
+  currency: Currency;
+  price: ModelPrice;
+}
+
+// ===== 额度阈值通知（~/.zbar/notify.json）=====
+
+/** 额度预警配置 */
+export interface NotifyConfig {
+  enabled: boolean;
+  hour5_threshold: number;
+  weekly_threshold: number;
+  mcp_threshold: number;
+}
+
+/** 全局快捷键配置（~/.zbar/shortcut.json） */
+export interface ShortcutConfig {
+  enabled: boolean;
+  /** Tauri accelerator 格式，如 "alt+shift+z" */
+  accelerator: string;
+}
+

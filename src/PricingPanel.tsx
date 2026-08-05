@@ -1,25 +1,35 @@
 import { useEffect, useState } from "react";
 import type {
+  ApplyPriceItem,
   Currency,
   ModelInfo,
   ModelPrice,
+  NotifyConfig,
   PeakConfig,
   PeakSegment,
   PlanType,
   PricingConfig,
+  PricingDiff,
   QuotaConfig,
   QuotaEndpoint,
+  ShortcutConfig,
 } from "./types";
 import { MASK_WEEKDAY } from "./types";
 import {
+  applyPricingUpdates,
+  checkPricingUpdates,
   fetchModels,
   fetchPricing,
   fetchQuotaConfig,
+  getNotifyConfig,
   getPeakConfig,
+  getShortcutConfig,
   savePricing,
   saveQuotaConfig,
+  setNotifyConfig,
   setPeakConfig,
   setPlanType,
+  setShortcutConfig,
 } from "./api";
 
 interface Props {
@@ -54,15 +64,62 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
   const [savingQuota, setSavingQuota] = useState(false);
   const [quotaSavedFlash, setQuotaSavedFlash] = useState(false);
 
+  // ===== 额度阈值通知配置 =====
+  const [notifyCfg, setNotifyCfg] = useState<NotifyConfig | null>(null);
+  const [savingNotify, setSavingNotify] = useState(false);
+  const [notifySavedFlash, setNotifySavedFlash] = useState(false);
+
+  // ===== 全局快捷键配置 =====
+  const [shortcutCfg, setShortcutCfg] = useState<ShortcutConfig | null>(null);
+  const [shortcutDraft, setShortcutDraft] = useState("");
+  const [savingShortcut, setSavingShortcut] = useState(false);
+  const [shortcutSavedFlash, setShortcutSavedFlash] = useState(false);
+  const [shortcutError, setShortcutError] = useState<string | null>(null);
+
+  // ===== 价格同步（内置默认表 diff 提示）=====
+  // updateCount：待应用的差异总数（用于按钮红点）；diffPanel：是否展开差异面板
+  const [updateCount, setUpdateCount] = useState(0);
+  const [diffPanel, setDiffPanel] = useState(false);
+  const [diff, setDiff] = useState<PricingDiff | null>(null);
+  // 用户勾选的项 key：`${model_id}|${currency}`（区分 cny/usd）
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [applying, setApplying] = useState(false);
+
   useEffect(() => {
-    Promise.all([fetchPricing(), fetchModels(), fetchQuotaConfig()])
-      .then(([p, m, q]) => {
+    Promise.all([
+      fetchPricing(),
+      fetchModels(),
+      fetchQuotaConfig(),
+      getNotifyConfig(),
+      getShortcutConfig(),
+    ])
+      .then(([p, m, q, n, s]) => {
         setPricing(p);
         setModels(m);
         setQuotaCfg(q);
         setTokenDraft(q.token);
+        setNotifyCfg(n);
+        setShortcutCfg(s);
+        setShortcutDraft(s.accelerator);
       })
       .catch((e) => setError(String(e)));
+  }, []);
+
+  // 进入价格设置时静默检查一次更新，有差异则在按钮显示红点（不弹窗打扰）
+  useEffect(() => {
+    checkPricingUpdates()
+      .then((d) => {
+        const n = d.new_models.length + d.changed.length;
+        setUpdateCount(n);
+        setDiff(d);
+        // 默认勾选：新增模型全勾，变动项默认不勾（保护用户自定义）
+        const sel = new Set<string>();
+        d.new_models.forEach(
+          (i) => sel.add(`${i.model_id}|${i.currency}`)
+        );
+        setSelected(sel);
+      })
+      .catch(() => {});
   }, []);
 
   const handleSaveQuota = async () => {
@@ -81,6 +138,99 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
       setError(String(e));
     } finally {
       setSavingQuota(false);
+    }
+  };
+
+  // 保存额度预警配置
+  const handleSaveNotify = async () => {
+    if (!notifyCfg) return;
+    setSavingNotify(true);
+    setError(null);
+    try {
+      await setNotifyConfig(notifyCfg);
+      setNotifySavedFlash(true);
+      setTimeout(() => setNotifySavedFlash(false), 1500);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSavingNotify(false);
+    }
+  };
+
+  // 保存并应用快捷键（注册失败时提示用户改键）
+  const handleSaveShortcut = async () => {
+    if (!shortcutCfg) return;
+    setSavingShortcut(true);
+    setShortcutError(null);
+    try {
+      const next = { ...shortcutCfg, accelerator: shortcutDraft.trim() };
+      await setShortcutConfig(next);
+      setShortcutCfg(next);
+      setShortcutSavedFlash(true);
+      setTimeout(() => setShortcutSavedFlash(false), 1500);
+    } catch (e) {
+      setShortcutError(String(e));
+    } finally {
+      setSavingShortcut(false);
+    }
+  };
+
+  // 切换某条差异的勾选状态
+  const toggleSelect = (key: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  // 应用勾选的价格更新：把勾选项合并进 pricing 并保存，绝不自动覆盖未勾选项
+  const handleApplyUpdates = async () => {
+    if (!diff) return;
+    setApplying(true);
+    setError(null);
+    try {
+      const all = [...diff.new_models, ...diff.changed];
+      const items: ApplyPriceItem[] = all
+        .filter((i) => selected.has(`${i.model_id}|${i.currency}`))
+        .map((i) => ({
+          model_id: i.model_id,
+          currency: i.currency,
+          price: i.default,
+        }));
+      if (items.length === 0) {
+        setDiffPanel(false);
+        return;
+      }
+      const updated = await applyPricingUpdates(items);
+      setPricing(updated);
+      setDraft({});
+      // 重新检查差异
+      const d = await checkPricingUpdates();
+      const n = d.new_models.length + d.changed.length;
+      setDiff(d);
+      setUpdateCount(n);
+      setSelected(new Set(d.new_models.map((i) => `${i.model_id}|${i.currency}`)));
+      if (n === 0) setDiffPanel(false);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  // 手动点「检查更新」按钮：强制重新拉取
+  const handleCheckUpdates = async () => {
+    setError(null);
+    try {
+      const d = await checkPricingUpdates();
+      setDiff(d);
+      setUpdateCount(d.new_models.length + d.changed.length);
+      setSelected(new Set(d.new_models.map((i) => `${i.model_id}|${i.currency}`)));
+      setDiffPanel(true);
+    } catch (e) {
+      setError(String(e));
     }
   };
 
@@ -163,7 +313,8 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
   const symbol = currency === "cny" ? "¥" : "$";
 
   return (
-    <div className="flex flex-col h-full">
+    // 整页单一滚动：配置区 + 模型列表一起滚，避免配置区撑爆固定高度后下方被截断
+    <div className="h-full overflow-y-auto">
       {/* 顶部 */}
       <div className="px-3.5 py-2.5 border-b border-slate-900/10">
         <div className="flex items-center justify-between mb-2">
@@ -204,6 +355,117 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
         <p className="text-[10px] text-slate-700/50 mt-1.5">
           单位：{symbol}/百万 token。只填需要计费的模型即可。
         </p>
+
+        {/* ===== 价格同步（内置默认表 diff 提示，不自动覆盖）===== */}
+        <div className="mt-2 flex items-center justify-between">
+          <button
+            onClick={handleCheckUpdates}
+            className="relative text-[11px] px-2 py-0.5 rounded-md bg-slate-900/5 text-slate-700/70 hover:bg-slate-900/10 hover:text-slate-900/90 transition-colors"
+          >
+            🔄 检查价格更新
+            {updateCount > 0 && (
+              <span className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-1 flex items-center justify-center rounded-full bg-rose-500 text-white text-[9px] leading-none">
+                {updateCount}
+              </span>
+            )}
+          </button>
+          {diff && updateCount === 0 && !diffPanel && (
+            <span className="text-[10px] text-emerald-600/80">已是最新 ✓</span>
+          )}
+        </div>
+
+        {/* 差异面板：展开时显示可勾选的新增/变动项 */}
+        {diffPanel && diff && (
+          <div className="mt-2 rounded-lg bg-slate-900/5 border border-slate-900/10 p-2.5">
+            <div className="text-[11px] font-medium text-slate-900/85 mb-1.5">
+              价格更新（内置参考表{diff.version ? ` v${diff.version}` : ""}）
+            </div>
+            <p className="text-[9px] text-slate-700/50 mb-2 leading-relaxed">
+              勾选后点「应用选中」才会写入。新增项默认勾选，变动项默认不勾（保护你的自定义）。
+            </p>
+            <div className="space-y-1 max-h-44 overflow-y-auto">
+              {/* 新增模型 */}
+              {diff.new_models.map((i) => {
+                const key = `${i.model_id}|${i.currency}`;
+                return (
+                  <label
+                    key={`new-${key}`}
+                    className="flex items-center gap-2 text-[10px] py-0.5 cursor-pointer"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selected.has(key)}
+                      onChange={() => toggleSelect(key)}
+                      className="accent-sky-500 w-3 h-3"
+                    />
+                    <span className="text-emerald-600/90">新增</span>
+                    <span className="font-medium text-slate-900/85 truncate">
+                      {i.model_id}
+                    </span>
+                    <span className="text-slate-700/40">{i.currency.toUpperCase()}</span>
+                    <span className="ml-auto text-slate-700/55 num">
+                      {i.default.input}/{i.default.output}/{i.default.cache_read}
+                    </span>
+                  </label>
+                );
+              })}
+              {/* 价格变动 */}
+              {diff.changed.map((i) => {
+                const key = `${i.model_id}|${i.currency}`;
+                const u = i.user;
+                return (
+                  <label
+                    key={`chg-${key}`}
+                    className="flex items-center gap-2 text-[10px] py-0.5 cursor-pointer"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selected.has(key)}
+                      onChange={() => toggleSelect(key)}
+                      className="accent-sky-500 w-3 h-3"
+                    />
+                    <span className="text-amber-600/90">变动</span>
+                    <span className="font-medium text-slate-900/85 truncate">
+                      {i.model_id}
+                    </span>
+                    <span className="text-slate-700/40">{i.currency.toUpperCase()}</span>
+                    <span className="ml-auto text-slate-700/55 num">
+                      {u
+                        ? `${u.input}/${u.output}/${u.cache_read}`
+                        : "—"}
+                      <span className="text-slate-700/35 mx-0.5">→</span>
+                      <span className="text-sky-600/90">
+                        {i.default.input}/{i.default.output}/{i.default.cache_read}
+                      </span>
+                    </span>
+                  </label>
+                );
+              })}
+              {diff.new_models.length === 0 && diff.changed.length === 0 && (
+                <div className="text-[10px] text-slate-700/50 text-center py-2">
+                  无差异，价格已是最新
+                </div>
+              )}
+            </div>
+            <div className="flex items-center justify-between mt-2">
+              <button
+                onClick={() => setDiffPanel(false)}
+                className="text-[10px] text-slate-700/50 hover:text-slate-900/70 transition-colors"
+              >
+                收起
+              </button>
+              <button
+                onClick={handleApplyUpdates}
+                disabled={applying || selected.size === 0}
+                className="text-[10px] px-2 py-0.5 rounded-md bg-sky-500 text-white hover:bg-sky-600 disabled:opacity-40 transition-colors"
+              >
+                {applying
+                  ? "应用中…"
+                  : `应用选中${selected.size > 0 ? ` (${selected.size})` : ""}`}
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* ===== Coding Plan 额度查询配置 ===== */}
         <div className="mt-3 rounded-lg bg-slate-900/5 border border-slate-900/10 p-2.5">
@@ -268,6 +530,132 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
             Token 从智谱开放平台获取。国内用户选「国内」端点。
           </p>
         </div>
+
+        {/* ===== 额度阈值通知 ===== */}
+        {notifyCfg && (
+          <div className="mt-2 rounded-lg bg-slate-900/5 border border-slate-900/10 p-2.5">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[11px] font-medium text-slate-900/85">
+                额度颜色阈值
+              </span>
+              <div className="flex items-center gap-2">
+                <label className="flex items-center gap-1 text-[10px] text-slate-700/60 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={notifyCfg.enabled}
+                    onChange={(e) =>
+                      setNotifyCfg({ ...notifyCfg, enabled: e.target.checked })
+                    }
+                    className="accent-rose-500 w-3 h-3"
+                  />
+                  启用
+                </label>
+                <button
+                  onClick={handleSaveNotify}
+                  disabled={savingNotify}
+                  className="text-[10px] px-2 py-0.5 rounded-md bg-rose-500 text-white hover:bg-rose-600 disabled:opacity-40 transition-colors"
+                >
+                  {savingNotify
+                    ? "保存中…"
+                    : notifySavedFlash
+                      ? "已保存 ✓"
+                      : "保存"}
+                </button>
+              </div>
+            </div>
+            <p className="text-[9px] text-slate-700/45 mb-2 leading-relaxed">
+              用量达到阈值时进度条变黄，超出阈值 +15% 变红。各项阈值对应面板里的 5h / 周 / MCP 进度条。
+            </p>
+            <div className="grid grid-cols-3 gap-2">
+              {(
+                [
+                  { key: "hour5_threshold", label: "5h 窗口" },
+                  { key: "weekly_threshold", label: "每周额度" },
+                  { key: "mcp_threshold", label: "MCP 月度" },
+                ] as const
+              ).map((f) => (
+                <label
+                  key={f.key}
+                  className="flex flex-col gap-0.5 text-[10px]"
+                >
+                  <span className="text-slate-700/55">{f.label}</span>
+                  <div className="flex items-center rounded-md bg-slate-900/5 border border-slate-900/10 focus-within:border-rose-400/60 focus-within:ring-1 focus-within:ring-rose-400/40 transition-colors">
+                    <input
+                      type="number"
+                      min={1}
+                      max={99}
+                      value={notifyCfg[f.key]}
+                      onChange={(e) => {
+                        const v = Math.min(
+                          99,
+                          Math.max(1, parseInt(e.target.value) || 0)
+                        );
+                        setNotifyCfg({ ...notifyCfg, [f.key]: v });
+                      }}
+                      className="num w-full px-1.5 py-1 text-right bg-transparent text-slate-900/90 focus:outline-none text-[11px]"
+                    />
+                    <span className="text-slate-700/50 pr-1.5">%</span>
+                  </div>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ===== 全局快捷键 ===== */}
+        {shortcutCfg && (
+          <div className="mt-2 rounded-lg bg-slate-900/5 border border-slate-900/10 p-2.5">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[11px] font-medium text-slate-900/85">
+                ⌨ 全局快捷键
+              </span>
+              <div className="flex items-center gap-2">
+                <label className="flex items-center gap-1 text-[10px] text-slate-700/60 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={shortcutCfg.enabled}
+                    onChange={(e) =>
+                      setShortcutCfg({
+                        ...shortcutCfg,
+                        enabled: e.target.checked,
+                      })
+                    }
+                    className="accent-amber-500 w-3 h-3"
+                  />
+                  启用
+                </label>
+                <button
+                  onClick={handleSaveShortcut}
+                  disabled={savingShortcut}
+                  className="text-[10px] px-2 py-0.5 rounded-md bg-amber-500 text-white hover:bg-amber-600 disabled:opacity-40 transition-colors"
+                >
+                  {savingShortcut
+                    ? "应用中…"
+                    : shortcutSavedFlash
+                      ? "已应用 ✓"
+                      : "应用"}
+                </button>
+              </div>
+            </div>
+            <p className="text-[9px] text-slate-700/45 mb-2 leading-relaxed">
+              唤起/隐藏面板。格式如 alt+shift+z（修饰键用 ctrl/alt/shift/cmd，主键用字母/数字）。
+            </p>
+            <div className="flex items-center rounded-md bg-slate-900/5 border border-slate-900/10 focus-within:border-amber-400/60 focus-within:ring-1 focus-within:ring-amber-400/40 transition-colors">
+              <input
+                type="text"
+                value={shortcutDraft}
+                placeholder="alt+shift+z"
+                onChange={(e) => setShortcutDraft(e.target.value)}
+                className="num w-full px-2 py-1 text-left bg-transparent text-slate-900/90 placeholder:text-slate-700/35 focus:outline-none text-[11px]"
+              />
+            </div>
+            {shortcutError && (
+              <p className="text-[10px] text-rose-600 mt-1.5 leading-relaxed">
+                {shortcutError}
+              </p>
+            )}
+          </div>
+        )}
       </div>
 
       {error && (
@@ -277,7 +665,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
       )}
 
       {/* 模型列表 */}
-      <div className="flex-1 overflow-y-auto px-3.5 py-2.5">
+      <div className="px-3.5 py-2.5">
         <div className="space-y-2">
           {/* 高峰期倍率设置 */}
           <PeakConfigEditor />

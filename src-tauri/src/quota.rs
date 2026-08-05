@@ -144,11 +144,14 @@ pub fn endpoint_base(endpoint: &str) -> &str {
     }
 }
 
-/// 请求额度接口并解析。
+/// 请求额度接口并解析（纯查询，不写快照）。
 ///
 /// 接口返回的 limits 中包含多个类型和窗口，不能只按 nextResetTime 排序：
 /// 5 小时窗口刚刷新后可能没有 nextResetTime，反而会被排序到最后。
-pub fn fetch_quota(cfg: &QuotaConfig) -> Result<QuotaResult, String> {
+///
+/// 注意：本函数不写 quota_history 快照。仅前端 QuotaPanel 的主动刷新（fetch_quota）
+/// 才写快照；后台 notify watcher 应调用本函数，避免高频轮询污染历史。
+pub fn query_quota(cfg: &QuotaConfig) -> Result<QuotaResult, String> {
     if cfg.token.trim().is_empty() {
         return Err("未配置 Token，请在设置中填写 Coding Plan API Token".into());
     }
@@ -217,24 +220,29 @@ pub fn fetch_quota(cfg: &QuotaConfig) -> Result<QuotaResult, String> {
                 .cloned()
         });
 
-    let result = QuotaResult {
-        level: data.level.clone(),
-        hour5: hour5.clone(),
-        weekly: weekly.clone(),
-        mcp: mcp.clone(),
-    };
+    Ok(QuotaResult {
+        level: data.level,
+        hour5,
+        weekly,
+        mcp,
+    })
+}
+
+/// 查询额度并写一条历史快照（供前端 fetch_quota 命令调用）。
+pub fn fetch_quota(cfg: &QuotaConfig) -> Result<QuotaResult, String> {
+    let result = query_quota(cfg)?;
 
     // 采样：每次成功查询追加一条快照（静默失败，不影响额度查询本身）。
     // 用本地时间作为采样 ts，与 model_usage.started_at (UTC) 保持同口径。
     let snap = crate::quota_history::QuotaSnapshot {
         ts: chrono::Local::now().timestamp_millis(),
-        level: data.level,
-        weekly_pct: weekly.as_ref().map(|w| w.percentage).unwrap_or(0),
-        weekly_reset: weekly.as_ref().and_then(|w| w.next_reset_time),
-        hour5_pct: hour5.as_ref().map(|h| h.percentage).unwrap_or(0),
-        mcp_pct: mcp.as_ref().map(|m| m.percentage).unwrap_or(0),
-        mcp_used: mcp.as_ref().and_then(|m| m.current_value),
-        mcp_total: mcp.as_ref().and_then(|m| m.usage),
+        level: result.level.clone(),
+        weekly_pct: result.weekly.as_ref().map(|w| w.percentage).unwrap_or(0),
+        weekly_reset: result.weekly.as_ref().and_then(|w| w.next_reset_time),
+        hour5_pct: result.hour5.as_ref().map(|h| h.percentage).unwrap_or(0),
+        mcp_pct: result.mcp.as_ref().map(|m| m.percentage).unwrap_or(0),
+        mcp_used: result.mcp.as_ref().and_then(|m| m.current_value),
+        mcp_total: result.mcp.as_ref().and_then(|m| m.usage),
     };
     crate::quota_history::append_snapshot(&snap);
 
