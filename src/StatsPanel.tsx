@@ -33,9 +33,10 @@ interface Props {
   pricing: PricingConfig;
   onGoPricing: () => void;
   onGoSync: () => void;
+  onGoCompare: () => void;
 }
 
-export function StatsPanel({ currency, pricing, onGoPricing, onGoSync }: Props) {
+export function StatsPanel({ currency, pricing, onGoPricing, onGoSync, onGoCompare }: Props) {
   const [preset, setPreset] = useState<RangePreset>("today");
   const [custom, setCustom] = useState(() => {
     const today = new Date().toISOString().slice(0, 10);
@@ -223,6 +224,13 @@ export function StatsPanel({ currency, pricing, onGoPricing, onGoSync }: Props) 
             ZCode Token
           </h1>
           <div className="flex items-center gap-2.5">
+            <button
+              onClick={onGoCompare}
+              className="text-xs text-slate-700/40 hover:text-slate-900/70 transition-colors"
+              title="周额度对比"
+            >
+              📊
+            </button>
             <button
               onClick={onGoSync}
               className={`text-xs transition-colors ${

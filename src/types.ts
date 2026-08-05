@@ -239,3 +239,86 @@ export interface CleanupResult {
 /** 设备筛选选项 */
 export type DeviceFilter = "all" | "local" | string; // string 为具体 device_id
 
+// ===== 周额度追踪 / 对比页 / 高峰期（与 Rust quota_history.rs / peak.rs 一一对应）=====
+
+/** 单条额度快照（jsonl 一行） */
+export interface QuotaSnapshot {
+  /** 采样毫秒时间戳 */
+  ts: number;
+  /** 套餐等级："pro" / "max" ... */
+  level: string;
+  /** weekly 已用百分比 0-100 */
+  weekly_pct: number;
+  /** weekly 下次重置时间（毫秒） */
+  weekly_reset: number | null;
+  /** 5 小时窗口已用百分比 */
+  hour5_pct: number;
+  /** MCP 月度已用百分比 */
+  mcp_pct: number;
+  /** MCP 已用次数 */
+  mcp_used: number | null;
+  /** MCP 总额度次数 */
+  mcp_total: number | null;
+}
+
+/** 一个"智谱重置周期"的汇总 */
+export interface WeeklyPeriod {
+  /** 周期开始（重置时间） */
+  reset_at: number;
+  /** 周期结束时间 */
+  end_at: number;
+  /** 是否当前未结束的周期 */
+  is_current: boolean;
+  /** 周期内 weekly 起始百分比 */
+  pct_start: number;
+  /** 周期内 weekly 峰值百分比 */
+  pct_peak: number;
+  /** 周期内 weekly 结束百分比 */
+  pct_end: number;
+  /** 周期内采样数 */
+  sample_count: number;
+}
+
+/** 对比页：单个周期的 token 聚合结果 */
+export interface WeeklyTokenBucket {
+  reset_at: number;
+  end_at: number;
+  total_tokens: number;
+  requests: number;
+}
+
+/** 订阅类型：决定折算口径 */
+export type PlanType = "v2" | "v3";
+
+/** 高峰时段单段配置 */
+export interface PeakSegment {
+  start: string; // "HH:MM"
+  end: string; // "HH:MM"
+  /** 倍率：V2 高峰3.0/非高峰1.0；V3 高峰1.0/非高峰0.5 */
+  multiplier: number;
+  /** 周几位掩码：bit0=周日...bit6=周六；用 WEEKDAY_MASK=62/WEEKEND_MASK=65 */
+  weekday_mask: number;
+}
+
+/** 高峰期整体配置 */
+export interface PeakConfig {
+  /** 订阅类型：null=未选择（不折算） */
+  plan_type: PlanType | null;
+  /** ZCode 150% 提额优惠开关（对 V2/V3 都生效） */
+  zcode_discount: boolean;
+  enabled: boolean;
+  segments: PeakSegment[];
+}
+
+/** 周几位掩码常量（与后端 peak.rs 一致，避免手算二进制） */
+export const MASK_WEEKDAY = 62; // 周一~周五
+export const MASK_WEEKEND = 65; // 周六+周日
+
+/** 对比页：折算消耗结果（V2=等效token, V3=积分） */
+export interface ConsumedBucket {
+  reset_at: number;
+  end_at: number;
+  consumed: number;
+  requests: number;
+}
+

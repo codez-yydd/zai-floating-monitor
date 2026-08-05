@@ -1,6 +1,8 @@
 mod db;
+mod peak;
 mod pricing;
 mod quota;
+mod quota_history;
 mod sync;
 
 use pricing::{load_pricing, save_pricing, ModelPrice, PricingConfig};
@@ -116,6 +118,117 @@ fn set_quota_config(config: QuotaConfig) -> Result<(), String> {
 fn fetch_quota() -> Result<QuotaResult, String> {
     let cfg = load_quota()?;
     quota::fetch_quota(&cfg)
+}
+
+// ===== 周额度追踪 / 对比页 / 高峰期 =====
+
+/// 读取全部额度快照历史（按 ts 升序）。
+#[tauri::command]
+fn get_quota_history() -> Result<Vec<quota_history::QuotaSnapshot>, String> {
+    quota_history::load_all()
+}
+
+/// 解析快照为"智谱重置周期"列表（对比页用）。
+#[tauri::command]
+fn get_weekly_compare() -> Result<Vec<quota_history::WeeklyPeriod>, String> {
+    let snaps = quota_history::load_all()?;
+    Ok(quota_history::split_periods(&snaps))
+}
+
+/// 今日增量：(增量百分比, 今日采样数)。
+#[tauri::command]
+fn get_today_delta() -> Result<(u32, u32), String> {
+    quota_history::today_delta()
+}
+
+/// 清空额度快照历史（设置页"清理历史"用）。
+#[tauri::command]
+fn clear_quota_history() -> Result<(), String> {
+    quota_history::clear_history()
+}
+
+/// 对比页"实际 token"列（本地部分）：对一组周期 [reset_at, end_at)
+/// 逐周期聚合本地 model_usage 的 token。前端再合并远端。
+#[tauri::command]
+fn get_compare_tokens(
+    periods: Vec<(i64, i64)>,
+) -> Result<Vec<WeeklyTokenBucket>, String> {
+    let buckets = db::query_period_buckets(&periods)?;
+    Ok(buckets
+        .into_iter()
+        .map(|b| WeeklyTokenBucket {
+            reset_at: b.reset_at,
+            end_at: b.end_at,
+            total_tokens: b.total_tokens,
+            requests: b.requests,
+        })
+        .collect())
+}
+
+/// 对比页"折算额度消耗"列（本地部分）：按订阅类型折算。
+/// - V2：Σ token × 时段倍率（等效 token）
+/// - V3：Σ 积分公式 × 时段倍率（积分）
+/// - 都可再 × ZCode 优惠系数
+/// 返回的 consumed 字段即折算后的消耗值。
+#[tauri::command]
+fn get_compare_consumed(
+    periods: Vec<(i64, i64)>,
+) -> Result<Vec<ConsumedBucket>, String> {
+    let cfg = peak::load_peak().unwrap_or_default();
+    let buckets = db::query_period_consumed(&periods, &cfg)?;
+    Ok(buckets
+        .into_iter()
+        .map(|b| ConsumedBucket {
+            reset_at: b.reset_at,
+            end_at: b.end_at,
+            consumed: b.consumed,
+            requests: b.requests,
+        })
+        .collect())
+}
+
+/// 读取高峰期配置。
+#[tauri::command]
+fn get_peak_config() -> Result<peak::PeakConfig, String> {
+    peak::load_peak()
+}
+
+/// 保存高峰期配置。
+#[tauri::command]
+fn set_peak_config(config: peak::PeakConfig) -> Result<(), String> {
+    peak::save_peak(&config)
+}
+
+/// 切换订阅类型并重置为该类型的官方默认时段（保留 zcode_discount 设置）。
+#[tauri::command]
+fn set_plan_type(plan: peak::PlanType) -> Result<peak::PeakConfig, String> {
+    let mut cfg = peak::load_peak().unwrap_or_default();
+    cfg.reset_for_plan(plan);
+    peak::save_peak(&cfg)?;
+    Ok(cfg)
+}
+
+/// 对比页：单个周期的 token 聚合结果。
+#[derive(Debug, Serialize)]
+struct WeeklyTokenBucket {
+    /// 周期开始（重置时间），作为 label 匹配键
+    reset_at: i64,
+    /// 周期结束时间
+    end_at: i64,
+    /// 桶内总 token
+    total_tokens: i64,
+    /// 桶内总请求数
+    requests: i64,
+}
+
+/// 对比页：单个周期的折算消耗结果。
+#[derive(Debug, Serialize)]
+struct ConsumedBucket {
+    reset_at: i64,
+    end_at: i64,
+    /// 折算后的消耗（V2=等效token, V3=积分）
+    consumed: f64,
+    requests: i64,
 }
 
 /// compute_cost：根据统计 + 价格，计算花费（前端也会自己算，这里提供一份供托盘文字用）
@@ -664,7 +777,16 @@ pub fn run() {
             set_auto_cleanup,
             pending_upload_count,
             get_pin,
-            set_pin
+            set_pin,
+            get_quota_history,
+            get_weekly_compare,
+            get_today_delta,
+            clear_quota_history,
+            get_compare_tokens,
+            get_compare_consumed,
+            get_peak_config,
+            set_peak_config,
+            set_plan_type
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

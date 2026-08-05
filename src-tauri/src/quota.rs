@@ -217,10 +217,26 @@ pub fn fetch_quota(cfg: &QuotaConfig) -> Result<QuotaResult, String> {
                 .cloned()
         });
 
-    Ok(QuotaResult {
+    let result = QuotaResult {
+        level: data.level.clone(),
+        hour5: hour5.clone(),
+        weekly: weekly.clone(),
+        mcp: mcp.clone(),
+    };
+
+    // 采样：每次成功查询追加一条快照（静默失败，不影响额度查询本身）。
+    // 用本地时间作为采样 ts，与 model_usage.started_at (UTC) 保持同口径。
+    let snap = crate::quota_history::QuotaSnapshot {
+        ts: chrono::Local::now().timestamp_millis(),
         level: data.level,
-        hour5,
-        weekly,
-        mcp,
-    })
+        weekly_pct: weekly.as_ref().map(|w| w.percentage).unwrap_or(0),
+        weekly_reset: weekly.as_ref().and_then(|w| w.next_reset_time),
+        hour5_pct: hour5.as_ref().map(|h| h.percentage).unwrap_or(0),
+        mcp_pct: mcp.as_ref().map(|m| m.percentage).unwrap_or(0),
+        mcp_used: mcp.as_ref().and_then(|m| m.current_value),
+        mcp_total: mcp.as_ref().and_then(|m| m.usage),
+    };
+    crate::quota_history::append_snapshot(&snap);
+
+    Ok(result)
 }

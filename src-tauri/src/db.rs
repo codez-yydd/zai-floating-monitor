@@ -407,3 +407,133 @@ pub fn query_trend(
 
     Ok(out)
 }
+
+// ===== 按周期分桶聚合（对比页用）=====
+
+/// 单个周期的 token 聚合结果。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeriodBucket {
+    /// 周期开始（重置时间）
+    pub reset_at: i64,
+    /// 周期结束时间
+    pub end_at: i64,
+    /// 桶内总 token（原始，未折算）
+    pub total_tokens: i64,
+    /// 折算后的额度消耗（V2=等效token，V3=积分；由 query_period_consumed 填充）
+    #[serde(default)]
+    pub consumed: f64,
+    /// 桶内总请求数
+    pub requests: i64,
+}
+
+/// 对一组 [reset_at, end_at) 周期，逐周期聚合本地 model_usage 的 token。
+/// 用于对比页"实际 token"列（本地部分，远端部分由前端调用 sync 合并）。
+pub fn query_period_buckets(periods: &[(i64, i64)]) -> Result<Vec<PeriodBucket>, String> {
+    let conn = open_db()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT
+                COALESCE(SUM(computed_total_tokens),0),
+                COUNT(*)
+             FROM model_usage
+             WHERE started_at >= ?1 AND started_at < ?2",
+        )
+        .map_err(|e| format!("准备周期聚合查询失败: {e}"))?;
+
+    let mut out = Vec::with_capacity(periods.len());
+    for &(reset_at, end_at) in periods {
+        let (total_tokens, requests): (i64, i64) = stmt
+            .query_row(rusqlite::params![reset_at, end_at], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .map_err(|e| format!("查询周期聚合失败: {e}"))?;
+        out.push(PeriodBucket {
+            reset_at,
+            end_at,
+            total_tokens,
+            consumed: 0.0,
+            requests,
+        });
+    }
+    Ok(out)
+}
+
+/// 对一组周期，逐周期聚合"折算额度消耗"。
+///
+/// 口径由 peak_cfg.plan_type 决定：
+/// - V2：Σ (computed_total_tokens × 时段倍率)，结果单位=等效token
+/// - V3：Σ 积分公式 (input×in + cache×cache + output×out)/10000 × 时段倍率，结果单位=积分
+///
+/// 两种口径最后都 × ZCode 优惠系数（若启用）。
+/// 需逐条计算（V3 要按 model 分别套系数，且倍率随时段变），单周期条数通常可控。
+///
+/// 返回的 PeriodBucket.consumed 即折算后的消耗值（浮点，保留精度）。
+/// 无系数的模型（V3 下非 GLM 模型）按 0 计入（无法折算）。
+pub fn query_period_consumed(
+    periods: &[(i64, i64)],
+    peak_cfg: &crate::peak::PeakConfig,
+) -> Result<Vec<PeriodBucket>, String> {
+    use crate::peak::{credits_for_call, multiplier_at, PlanType};
+
+    let conn = open_db()?;
+    // V3 需要 model_id + input/cache/output token；V2 只需 started_at + total_tokens
+    let need_detail = peak_cfg.plan_type == Some(PlanType::V3);
+    let sql = if need_detail {
+        "SELECT started_at, model_id,
+                COALESCE(input_tokens,0), COALESCE(output_tokens,0),
+                COALESCE(cache_read_input_tokens,0), COALESCE(computed_total_tokens,0)
+         FROM model_usage
+         WHERE started_at >= ?1 AND started_at < ?2"
+    } else {
+        "SELECT started_at, '' AS model_id,
+                0, 0, 0, COALESCE(computed_total_tokens,0)
+         FROM model_usage
+         WHERE started_at >= ?1 AND started_at < ?2"
+    };
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| format!("准备折算聚合查询失败: {e}"))?;
+
+    let zcode = crate::peak::zcode_factor(peak_cfg);
+    let mut out = Vec::with_capacity(periods.len());
+    for &(reset_at, end_at) in periods {
+        let rows = stmt
+            .query_map(rusqlite::params![reset_at, end_at], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,       // started_at
+                    row.get::<_, String>(1)?,    // model_id
+                    row.get::<_, i64>(2)?,       // input_tokens
+                    row.get::<_, i64>(3)?,       // output_tokens
+                    row.get::<_, i64>(4)?,       // cache_read_tokens
+                    row.get::<_, i64>(5)?,       // total_tokens
+                ))
+            })
+            .map_err(|e| format!("读取折算明细失败: {e}"))?;
+
+        let mut consumed: f64 = 0.0;
+        let mut requests: i64 = 0;
+        for r in rows {
+            let (started_at, model_id, input, output, cache_read, total_tokens) =
+                r.map_err(|e| format!("读取折算明细失败: {e}"))?;
+            let mult = multiplier_at(started_at, peak_cfg);
+            let call_consumed = match peak_cfg.plan_type {
+                Some(PlanType::V3) => {
+                    credits_for_call(&model_id, input, cache_read, output, mult)
+                        .unwrap_or(0.0)
+                }
+                Some(PlanType::V2) => total_tokens as f64 * mult,
+                None => 0.0,
+            };
+            consumed += call_consumed * zcode;
+            requests += 1;
+        }
+        out.push(PeriodBucket {
+            reset_at,
+            end_at,
+            total_tokens: 0, // consumed 已含折算，token 原值由 query_period_buckets 单独提供
+            consumed,
+            requests,
+        });
+    }
+    Ok(out)
+}

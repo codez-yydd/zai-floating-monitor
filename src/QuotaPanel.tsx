@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { QuotaResult } from "./types";
-import { fetchQuota } from "./api";
+import { fetchQuota, getTodayDelta } from "./api";
 
 interface Props {
   /** 点击「去设置」回调 */
@@ -19,6 +19,8 @@ export function QuotaPanel({ onGoSettings }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [now, setNow] = useState(Date.now());
+  // 今日周额度增量：[增量百分比, 今日采样数]
+  const [todayDelta, setTodayDelta] = useState<[number, number] | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -26,6 +28,10 @@ export function QuotaPanel({ onGoSettings }: Props) {
     try {
       const r = await fetchQuota();
       setQuota(r);
+      // 额度刷新成功后顺带读今日增量（快照由 fetch_quota 采样写入）
+      getTodayDelta()
+        .then(setTodayDelta)
+        .catch(() => {});
     } catch (e) {
       setError(String(e));
     } finally {
@@ -122,6 +128,7 @@ export function QuotaPanel({ onGoSettings }: Props) {
           resetAt={quota.weekly.nextResetTime}
           now={now}
           className="mt-1.5"
+          delta={todayDelta}
         />
       )}
 
@@ -147,12 +154,15 @@ function QuotaBar({
   resetAt,
   now,
   className = "",
+  delta,
 }: {
   label: string;
   usedPct: number;
   resetAt: number | null;
   now: number;
   className?: string;
+  /** 今日增量：[增量百分比, 采样数]。仅 weekly 传入 */
+  delta?: [number, number] | null;
 }) {
   const pct = Math.min(Math.max(usedPct, 0), 100);
   const remaining = 100 - pct;
@@ -164,6 +174,10 @@ function QuotaBar({
       : pct >= 70
         ? "bg-amber-400"
         : "bg-emerald-400";
+
+  // 今日增量徽标：采样不足(<2)不显示数字
+  const deltaPct = delta ? delta[0] : 0;
+  const hasDelta = delta != null && delta[1] >= 2 && deltaPct > 0;
 
   return (
     <div className={className}>
@@ -186,9 +200,17 @@ function QuotaBar({
           style={{ width: `${pct}%` }}
         />
       </div>
-      {remaining < 20 && remaining > 0 && (
-        <div className="text-[9px] text-red-600/80 mt-0.5">
-          仅剩 {remaining.toFixed(0)}%
+      {/* 今日增量 + 不足警示 */}
+      {(hasDelta || (remaining < 20 && remaining > 0)) && (
+        <div className="text-[9px] mt-0.5 flex items-center gap-2">
+          {hasDelta && (
+            <span className={`num ${pctColor(pct)}`}>
+              ↑今日 {deltaPct}%
+            </span>
+          )}
+          {remaining < 20 && remaining > 0 && (
+            <span className="text-red-600/80">仅剩 {remaining.toFixed(0)}%</span>
+          )}
         </div>
       )}
     </div>
@@ -205,6 +227,13 @@ function formatCountdown(ms: number): string {
   if (days > 0) return `${days}d ${hours}h 后刷新`;
   if (hours > 0) return `${hours}h ${mins}m 后刷新`;
   return `${mins}m 后刷新`;
+}
+
+/** 百分比对应的文字颜色（与进度条颜色阈值一致） */
+function pctColor(pct: number): string {
+  if (pct >= 90) return "text-red-600/90";
+  if (pct >= 70) return "text-amber-600/90";
+  return "text-emerald-600/90";
 }
 
 /** MCP 月度额度条：与 QuotaBar 同款进度条。

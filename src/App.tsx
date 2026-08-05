@@ -2,10 +2,11 @@ import { useEffect, useState } from "react";
 import { StatsPanel } from "./StatsPanel";
 import { PricingPanel } from "./PricingPanel";
 import { SyncPanel } from "./SyncPanel";
+import { ComparePanel } from "./ComparePanel";
 import { fetchPricing } from "./api";
 import type { Currency, PricingConfig } from "./types";
 
-type View = "stats" | "pricing" | "sync";
+type View = "stats" | "pricing" | "sync" | "compare";
 
 export default function App() {
   const [view, setView] = useState<View>("stats");
@@ -42,6 +43,7 @@ export default function App() {
           pricing={pricing}
           onGoPricing={() => setView("pricing")}
           onGoSync={() => setView("sync")}
+          onGoCompare={() => setView("compare")}
         />
       ) : view === "pricing" ? (
         <PricingPanel
@@ -49,6 +51,8 @@ export default function App() {
           onCurrencyChange={setCurrency}
           onBack={backToStats}
         />
+      ) : view === "compare" ? (
+        <ComparePanel onBack={() => setView("stats")} />
       ) : (
         <SyncPanel onBack={backToStats} />
       )}
