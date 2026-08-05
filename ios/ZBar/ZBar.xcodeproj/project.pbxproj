@@ -1,0 +1,470 @@
+// !$*UTF8*$!
+//
+//  ZBar.xcodeproj  project.pbxproj
+//
+//  手写的 Xcode 工程文件。包含两个 target：
+//    1) ZBar（主 App，iOS 16.0+，SwiftUI）
+//    2) ZBarWidget（Widget Extension）
+//  两个 target 都启用 App Group: group.com.chacca.zbar
+//
+//  ⚠️ 如果此文件在你的 Xcode 版本中打不开，请改用 README 的
+//     「新建工程 + 拖入源码」方案（100% 可靠）。
+//
+
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+
+/* ===== PBXBuildFile (源文件→构建阶段) ===== */
+
+		AA0000000000000000000001 /* ZBarApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000101 /* ZBarApp.swift */; };
+		AA0000000000000000000002 /* Types.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000102 /* Types.swift */; };
+		AA0000000000000000000003 /* PricingDefaults.json in Resources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000103 /* PricingDefaults.json */; };
+		AA0000000000000000000004 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000104 /* APIClient.swift */; };
+		AA0000000000000000000005 /* QuotaClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000105 /* QuotaClient.swift */; };
+		AA0000000000000000000006 /* Billing.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000106 /* Billing.swift */; };
+		AA0000000000000000000007 /* Peak.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000107 /* Peak.swift */; };
+		AA0000000000000000000008 /* Format.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000108 /* Format.swift */; };
+		AA0000000000000000000009 /* Settings.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000109 /* Settings.swift */; };
+		AA000000000000000000000A /* RefreshService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000010A /* RefreshService.swift */; };
+		AA000000000000000000000B /* PeriodParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000010B /* PeriodParser.swift */; };
+		AA000000000000000000000C /* StatsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000010C /* StatsView.swift */; };
+		AA000000000000000000000D /* QuotaView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000010D /* QuotaView.swift */; };
+		AA000000000000000000000E /* TrendView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000010E /* TrendView.swift */; };
+		AA000000000000000000000F /* CompareView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000010F /* CompareView.swift */; };
+		AA0000000000000000000010 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000110 /* SettingsView.swift */; };
+		AA0000000000000000000011 /* SharedUI.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000111 /* SharedUI.swift */; };
+
+		BB0000000000000000000001 /* ZBarWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000101 /* ZBarWidget.swift */; };
+		BB0000000000000000000002 /* WidgetViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000102 /* WidgetViews.swift */; };
+		BB0000000000000000000003 /* WidgetShared.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000103 /* WidgetShared.swift */; };
+
+/* ===== PBXFileReference ===== */
+
+		AA0000000000000000000101 /* ZBarApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZBarApp.swift; sourceTree = "<group>"; };
+		AA0000000000000000000102 /* Types.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Types.swift; sourceTree = "<group>"; };
+		AA0000000000000000000103 /* PricingDefaults.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = PricingDefaults.json; sourceTree = "<group>"; };
+		AA0000000000000000000104 /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
+		AA0000000000000000000105 /* QuotaClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuotaClient.swift; sourceTree = "<group>"; };
+		AA0000000000000000000106 /* Billing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Billing.swift; sourceTree = "<group>"; };
+		AA0000000000000000000107 /* Peak.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Peak.swift; sourceTree = "<group>"; };
+		AA0000000000000000000108 /* Format.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Format.swift; sourceTree = "<group>"; };
+		AA0000000000000000000109 /* Settings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Settings.swift; sourceTree = "<group>"; };
+		AA000000000000000000010A /* RefreshService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RefreshService.swift; sourceTree = "<group>"; };
+		AA000000000000000000010B /* PeriodParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeriodParser.swift; sourceTree = "<group>"; };
+		AA000000000000000000010C /* StatsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatsView.swift; sourceTree = "<group>"; };
+		AA000000000000000000010D /* QuotaView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuotaView.swift; sourceTree = "<group>"; };
+		AA000000000000000000010E /* TrendView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrendView.swift; sourceTree = "<group>"; };
+		AA000000000000000000010F /* CompareView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompareView.swift; sourceTree = "<group>"; };
+		AA0000000000000000000110 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		AA0000000000000000000111 /* SharedUI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedUI.swift; sourceTree = "<group>"; };
+
+		AA0000000000000000000201 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		AA0000000000000000000202 /* ZBar.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ZBar.entitlements; sourceTree = "<group>"; };
+
+		BB0000000000000000000101 /* ZBarWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZBarWidget.swift; sourceTree = "<group>"; };
+		BB0000000000000000000102 /* WidgetViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetViews.swift; sourceTree = "<group>"; };
+		BB0000000000000000000103 /* WidgetShared.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetShared.swift; sourceTree = "<group>"; };
+		BB0000000000000000000201 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		BB0000000000000000000202 /* ZBarWidget.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ZBarWidget.entitlements; sourceTree = "<group>"; };
+
+		FF0000000000000000000001 /* ZBar.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ZBar.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		FF0000000000000000000002 /* ZBarWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ZBarWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+
+/* ===== PBXGroup ===== */
+
+		CC0000000000000000000001 /* 根目录 */ = {
+			isa = PBXGroup;
+			children = (
+				CC0000000000000000000002 /* ZBar (主 App) */,
+				CC0000000000000000000003 /* ZBarWidget */,
+				CC0000000000000000000004 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		CC0000000000000000000004 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				FF0000000000000000000001 /* ZBar.app */,
+				FF0000000000000000000002 /* ZBarWidget.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		CC0000000000000000000002 /* ZBar (主 App) */ = {
+			isa = PBXGroup;
+			children = (
+				AA0000000000000000000101 /* ZBarApp.swift */,
+				CC0000000000000000000010 /* Models */,
+				CC0000000000000000000020 /* Core */,
+				CC0000000000000000000030 /* Views */,
+				AA0000000000000000000201 /* Info.plist */,
+				AA0000000000000000000202 /* ZBar.entitlements */,
+			);
+			path = ZBar;
+			sourceTree = "<group>";
+		};
+		CC0000000000000000000010 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				AA0000000000000000000102 /* Types.swift */,
+				AA0000000000000000000103 /* PricingDefaults.json */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		CC0000000000000000000020 /* Core */ = {
+			isa = PBXGroup;
+			children = (
+				AA0000000000000000000104 /* APIClient.swift */,
+				AA0000000000000000000105 /* QuotaClient.swift */,
+				AA0000000000000000000106 /* Billing.swift */,
+				AA0000000000000000000107 /* Peak.swift */,
+				AA0000000000000000000108 /* Format.swift */,
+				AA0000000000000000000109 /* Settings.swift */,
+				AA000000000000000000010A /* RefreshService.swift */,
+				AA000000000000000000010B /* PeriodParser.swift */,
+			);
+			path = Core;
+			sourceTree = "<group>";
+		};
+		CC0000000000000000000030 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				AA000000000000000000010C /* StatsView.swift */,
+				AA000000000000000000010D /* QuotaView.swift */,
+				AA000000000000000000010E /* TrendView.swift */,
+				AA000000000000000000010F /* CompareView.swift */,
+				AA0000000000000000000110 /* SettingsView.swift */,
+				AA0000000000000000000111 /* SharedUI.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		CC0000000000000000000003 /* ZBarWidget */ = {
+			isa = PBXGroup;
+			children = (
+				BB0000000000000000000101 /* ZBarWidget.swift */,
+				BB0000000000000000000102 /* WidgetViews.swift */,
+				BB0000000000000000000103 /* WidgetShared.swift */,
+				BB0000000000000000000201 /* Info.plist */,
+				BB0000000000000000000202 /* ZBarWidget.entitlements */,
+			);
+			path = ../../ZBarWidget;
+			sourceTree = "<group>";
+		};
+
+/* ===== PBXNativeTarget ===== */
+
+		DD0000000000000000000001 /* ZBar */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = EE0000000000000000000001 /* Build configuration list for PBXNativeTarget "ZBar" */;
+			buildPhases = (
+				DD0000000000000000000011 /* Sources */,
+				DD0000000000000000000012 /* Resources */,
+				DD0000000000000000000013 /* Embed App Extensions */,
+			);
+			buildRules = ();
+			dependencies = (
+				DD0000000000000000000014 /* PBXTargetDependency */,
+			);
+			name = ZBar;
+			productName = ZBar;
+			productReference = FF0000000000000000000001 /* ZBar.app */;
+			productType = "com.apple.product-type.application";
+		};
+		DD0000000000000000000002 /* ZBarWidget */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = EE0000000000000000000002 /* Build configuration list for PBXNativeTarget "ZBarWidget" */;
+			buildPhases = (
+				DD0000000000000000000021 /* Sources */,
+			);
+			buildRules = ();
+			dependencies = ();
+			name = ZBarWidget;
+			productName = ZBarWidget;
+			productReference = FF0000000000000000000002 /* ZBarWidget.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+
+/* ===== PBXSourcesBuildPhase ===== */
+
+		DD0000000000000000000011 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AA0000000000000000000001 /* ZBarApp.swift in Sources */,
+				AA0000000000000000000002 /* Types.swift in Sources */,
+				AA0000000000000000000004 /* APIClient.swift in Sources */,
+				AA0000000000000000000005 /* QuotaClient.swift in Sources */,
+				AA0000000000000000000006 /* Billing.swift in Sources */,
+				AA0000000000000000000007 /* Peak.swift in Sources */,
+				AA0000000000000000000008 /* Format.swift in Sources */,
+				AA0000000000000000000009 /* Settings.swift in Sources */,
+				AA000000000000000000000A /* RefreshService.swift in Sources */,
+				AA000000000000000000000B /* PeriodParser.swift in Sources */,
+				AA000000000000000000000C /* StatsView.swift in Sources */,
+				AA000000000000000000000D /* QuotaView.swift in Sources */,
+				AA000000000000000000000E /* TrendView.swift in Sources */,
+				AA000000000000000000000F /* CompareView.swift in Sources */,
+				AA0000000000000000000010 /* SettingsView.swift in Sources */,
+				AA0000000000000000000011 /* SharedUI.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DD0000000000000000000021 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BB0000000000000000000001 /* ZBarWidget.swift in Sources */,
+				BB0000000000000000000002 /* WidgetViews.swift in Sources */,
+				BB0000000000000000000003 /* WidgetShared.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+
+/* ===== PBXResourcesBuildPhase ===== */
+
+		DD0000000000000000000012 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AA0000000000000000000003 /* PricingDefaults.json in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+
+/* ===== PBXCopyFilesBuildPhase (Embed Widget) ===== */
+
+		DD0000000000000000000013 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				DD0000000000000000000015 /* ZBarWidget.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DD0000000000000000000015 /* ZBarWidget.appex in Embed App Extensions */ = {
+			isa = PBXBuildFile; fileRef = FF0000000000000000000002 /* ZBarWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); };
+		};
+
+/* ===== PBXTargetDependency & ContainerItemProxy ===== */
+
+		DD0000000000000000000014 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = DD0000000000000000000002 /* ZBarWidget */;
+			targetProxy = DD0000000000000000000016 /* PBXContainerItemProxy */;
+		};
+		DD0000000000000000000016 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 000000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = DD0000000000000000000002;
+			remoteInfo = ZBarWidget;
+		};
+
+/* ===== PBXProject ===== */
+
+		000000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			buildConfigurationList = EE0000000000000000000000 /* Build configuration list for PBXProject "ZBar" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = "zh-Hans";
+			hasScannedForEncodings = 0;
+			knownRegions = ("zh-Hans", Base);
+			mainGroup = CC0000000000000000000001 /* 根目录 */;
+			productRefGroup = CC0000000000000000000004 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				DD0000000000000000000001 /* ZBar */,
+				DD0000000000000000000002 /* ZBarWidget */,
+			);
+		};
+
+/* ===== XCConfigurationList ===== */
+
+		EE0000000000000000000000 /* Build configuration list for PBXProject "ZBar" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				EE0000000000000000000010 /* Debug */,
+				EE0000000000000000000020 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		EE0000000000000000000001 /* Build configuration list for PBXNativeTarget "ZBar" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				EE0000000000000000000011 /* Debug */,
+				EE0000000000000000000021 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		EE0000000000000000000002 /* Build configuration list for PBXNativeTarget "ZBarWidget" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				EE0000000000000000000012 /* Debug */,
+				EE0000000000000000000022 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+
+/* ===== XCBuildConfiguration (Project 级) ===== */
+
+		EE0000000000000000000010 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MODULE_FORMAT = Objective-C;
+				MTL_ENABLE_DEBUG_INFO = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		EE0000000000000000000020 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+
+/* ===== XCBuildConfiguration (ZBar App Target) ===== */
+
+		EE0000000000000000000011 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = ZBar/ZBar.entitlements;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ZBar/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = ZBar;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path");
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.chacca.zbar;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		EE0000000000000000000021 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = ZBar/ZBar.entitlements;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ZBar/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = ZBar;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path");
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.chacca.zbar;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+
+/* ===== XCBuildConfiguration (ZBarWidget Target) ===== */
+
+		EE0000000000000000000012 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
+				CODE_SIGN_ENTITLEMENTS = ../../ZBarWidget/ZBarWidget.entitlements;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ../../ZBarWidget/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks");
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.chacca.zbar.widget;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		EE0000000000000000000022 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
+				CODE_SIGN_ENTITLEMENTS = ../../ZBarWidget/ZBarWidget.entitlements;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ../../ZBarWidget/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks");
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.chacca.zbar.widget;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+	};
+	rootObject = 000000000000000000000001 /* Project object */;
+}

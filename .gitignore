@@ -37,3 +37,11 @@ server/__pycache__/
 __pycache__/
 *.pyc
 
+# iOS / Xcode 构建产物与用户级配置（不入库）
+ios/**/xcuserdata/
+ios/**/xcshareddata/xcuserdata/
+ios/**/*.xcuserstate
+ios/**/DerivedData/
+ios/**/*.moved-aside
+ios/**/Pods/
+
