@@ -22,6 +22,7 @@ import {
   setPin,
 } from "./api";
 import { formatCost, formatPct, formatTokens } from "./format";
+import { loadCache, saveCache } from "./cache";
 import { QuotaPanel } from "./QuotaPanel";
 import { RangePicker, resolveRange } from "./RangePicker";
 import {
@@ -50,8 +51,8 @@ export function StatsPanel({ currency, pricing, onGoPricing, onGoSync, onGoCompa
     return { from: week, to: today };
   });
 
-  const [stats, setStats] = useState<Stats | null>(null);
-  const [cost, setCost] = useState<CostResult | null>(null);
+  const [stats, setStats] = useState<Stats | null>(() => loadCache<Stats>("zbar-stats"));
+  const [cost, setCost] = useState<CostResult | null>(() => loadCache<CostResult>("zbar-cost"));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<number>(0);
@@ -59,7 +60,9 @@ export function StatsPanel({ currency, pricing, onGoPricing, onGoSync, onGoCompa
   // 用于丢弃过期远端回调（用户在远端请求飞行期间切换了筛选/时间范围）。
   const latestReqId = useRef(0);
   // 趋势图：分桶数据（小时/日，跟随所选时间范围）
-  const [trend, setTrend] = useState<TrendPoint[]>([]);
+  const [trend, setTrend] = useState<TrendPoint[]>(
+    () => loadCache<TrendPoint[]>("zbar-trend") ?? []
+  );
   // 趋势图度量切换：花费 / Token
   const [trendMetric, setTrendMetric] = useState<"cost" | "token">("cost");
   // 按模型排行榜：排序维度 + 排序后带占比的数据
@@ -161,6 +164,10 @@ export function StatsPanel({ currency, pricing, onGoPricing, onGoSync, onGoCompa
         setCost(localCost);
         setTrend(localTrend);
         setLastUpdate(Date.now());
+        // 缓存本地数据，供下次冷启动首屏秒开（配合窗口屏幕外预热）
+        if (localStats) saveCache("zbar-stats", localStats);
+        if (localCost) saveCache("zbar-cost", localCost);
+        saveCache("zbar-trend", localTrend);
         // 本地数据已可见，首屏不再阻塞（远端随后静默合并）
         setLoading(false);
       }
@@ -178,18 +185,28 @@ export function StatsPanel({ currency, pricing, onGoPricing, onGoSync, onGoCompa
           const remote = await remoteUsage(from, to, trendBucket, opts);
           if (isStale()) return;
 
+          let finalStats: Stats | null = null;
+          let finalCost: CostResult | null = null;
+          let finalTrend: TrendPoint[] = [];
           if (deviceFilter === "all" && localStats) {
             // "全部"：合并本地 + 远端
-            setStats(mergeStats(localStats, remote));
-            setCost(mergeCost(localCost, remote, pricing, currency));
-            setTrend(mergeTrend(localTrend, remote, pricing, trendBucket));
+            finalStats = mergeStats(localStats, remote);
+            finalCost = mergeCost(localCost, remote, pricing, currency);
+            finalTrend = mergeTrend(localTrend, remote, pricing, trendBucket);
           } else {
             // 仅远端设备（wantLocal=false）：远端无 cost，用 pricing 自算
-            setStats(remoteToStats(remote));
-            setCost(computeRemoteCost(remote, pricing, currency));
-            setTrend(remoteTrendToLocal(remote, pricing, trendBucket));
+            finalStats = remoteToStats(remote);
+            finalCost = computeRemoteCost(remote, pricing, currency);
+            finalTrend = remoteTrendToLocal(remote, pricing, trendBucket);
           }
+          setStats(finalStats);
+          setCost(finalCost);
+          setTrend(finalTrend);
           setLastUpdate(Date.now());
+          // 缓存最终合并数据，供下次冷启动首屏秒开（配合窗口屏幕外预热）
+          if (finalStats) saveCache("zbar-stats", finalStats);
+          if (finalCost) saveCache("zbar-cost", finalCost);
+          saveCache("zbar-trend", finalTrend);
         } catch (e) {
           if (isSpecificRemote) throw e; // 具体远端设备失败：透出错误
           // "全部"模式：远端失败静默降级，本地数据已在阶段一渲染
@@ -585,23 +602,23 @@ function StatsSkeleton() {
       {/* 总览行 */}
       <div className="flex items-end justify-between">
         <div className="space-y-1.5">
-          <div className="h-2.5 w-10 rounded bg-slate-900/10 animate-pulse" />
-          <div className="h-6 w-24 rounded bg-slate-900/10 animate-pulse" />
+          <div className="h-2.5 w-10 rounded bg-slate-900/20 animate-pulse" />
+          <div className="h-6 w-24 rounded bg-slate-900/20 animate-pulse" />
         </div>
         <div className="space-y-1.5 flex flex-col items-end">
-          <div className="h-2.5 w-10 rounded bg-slate-900/10 animate-pulse" />
-          <div className="h-4 w-16 rounded bg-slate-900/10 animate-pulse" />
+          <div className="h-2.5 w-10 rounded bg-slate-900/20 animate-pulse" />
+          <div className="h-4 w-16 rounded bg-slate-900/20 animate-pulse" />
         </div>
       </div>
 
       {/* 趋势图框 */}
       <div className="rounded-lg bg-white/25 border border-white/30 px-2.5 py-2">
-        <div className="h-2.5 w-12 rounded bg-slate-900/10 animate-pulse mb-2" />
+        <div className="h-2.5 w-12 rounded bg-slate-900/20 animate-pulse mb-2" />
         <div className="flex items-end gap-1 h-12">
           {barHeights.map((h, i) => (
             <div
               key={i}
-              className="flex-1 rounded-t-sm bg-slate-900/8 animate-pulse"
+              className="flex-1 rounded-t-sm bg-slate-900/15 animate-pulse"
               style={{ height: `${h}%` }}
             />
           ))}
@@ -615,8 +632,8 @@ function StatsSkeleton() {
             key={i}
             className="rounded-lg bg-white/25 border border-white/30 py-2 text-center"
           >
-            <div className="h-2 w-8 rounded bg-slate-900/10 animate-pulse mx-auto mb-1.5" />
-            <div className="h-3.5 w-12 rounded bg-slate-900/10 animate-pulse mx-auto" />
+            <div className="h-2 w-8 rounded bg-slate-900/20 animate-pulse mx-auto mb-1.5" />
+            <div className="h-3.5 w-12 rounded bg-slate-900/20 animate-pulse mx-auto" />
           </div>
         ))}
       </div>
@@ -625,24 +642,24 @@ function StatsSkeleton() {
       <div className="space-y-2 pt-1">
         {[0, 1, 2].map((i) => (
           <div key={i} className="flex items-center gap-2">
-            <div className="h-2 w-10 rounded bg-slate-900/10 animate-pulse shrink-0" />
-            <div className="flex-1 h-1 rounded-full bg-slate-900/8 animate-pulse" />
-            <div className="h-2 w-10 rounded bg-slate-900/10 animate-pulse shrink-0" />
+            <div className="h-2 w-10 rounded bg-slate-900/20 animate-pulse shrink-0" />
+            <div className="flex-1 h-1 rounded-full bg-slate-900/15 animate-pulse" />
+            <div className="h-2 w-10 rounded bg-slate-900/20 animate-pulse shrink-0" />
           </div>
         ))}
       </div>
 
       {/* 排行榜 */}
       <div>
-        <div className="h-2.5 w-12 rounded bg-slate-900/10 animate-pulse mb-2" />
+        <div className="h-2.5 w-12 rounded bg-slate-900/20 animate-pulse mb-2" />
         <div className="space-y-1.5">
           {[0, 1, 2].map((i) => (
             <div
               key={i}
               className="flex items-center justify-between py-1.5 px-2 -mx-2"
             >
-              <div className="h-2.5 w-24 rounded bg-slate-900/10 animate-pulse" />
-              <div className="h-2.5 w-20 rounded bg-slate-900/10 animate-pulse" />
+              <div className="h-2.5 w-24 rounded bg-slate-900/20 animate-pulse" />
+              <div className="h-2.5 w-20 rounded bg-slate-900/20 animate-pulse" />
             </div>
           ))}
         </div>

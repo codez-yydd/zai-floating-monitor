@@ -713,6 +713,12 @@ fn toggle_panel(app: &AppHandle, click_pos: Option<(f64, f64)>) {
 
     let _ = window.show();
     let _ = window.set_focus();
+    // WKWebView 已知问题：长期隐藏的窗口 show 后首帧可能不立即重绘（白屏）。
+    // 微调窗口尺寸强制触发 layer 重新提交（Tauri 社区验证的解法，见 issue #5170）。
+    if let Ok(size) = window.outer_size() {
+        let _ = window.set_size(PhysicalSize::new(size.width, size.height + 1));
+        let _ = window.set_size(size);
+    }
 }
 
 /// 格式化 token：3.7M / 1280

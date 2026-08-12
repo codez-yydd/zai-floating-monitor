@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { NotifyConfig, QuotaResult } from "./types";
 import { fetchQuota, getNotifyConfig, getTodayDelta } from "./api";
+import { loadCache, saveCache } from "./cache";
 
 interface Props {
   /** 点击「去设置」回调 */
@@ -18,7 +19,9 @@ const LEVEL_LABEL: Record<string, string> = {
 const DEFAULT_THRESHOLDS = { hour5: 75, weekly: 80, mcp: 75 };
 
 export function QuotaPanel({ onGoSettings }: Props) {
-  const [quota, setQuota] = useState<QuotaResult | null>(null);
+  const [quota, setQuota] = useState<QuotaResult | null>(() =>
+    loadCache<QuotaResult>("zbar-quota")
+  );
   const [notifyCfg, setNotifyCfg] = useState<NotifyConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -32,6 +35,8 @@ export function QuotaPanel({ onGoSettings }: Props) {
     try {
       const r = await fetchQuota();
       setQuota(r);
+      // 缓存额度结果，供下次冷启动首屏秒开（额度是网络请求，最慢）
+      saveCache("zbar-quota", r);
       // 额度刷新成功后顺带读今日增量（快照由 fetch_quota 采样写入）
       getTodayDelta()
         .then(setTodayDelta)

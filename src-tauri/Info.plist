@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      禁用 App Nap：防止 macOS 在应用空闲（长时间不点面板）/ 系统低功耗时
+      把 WKWebView 进程休眠。否则再次唤起面板时 WebView 要从休眠中恢复渲染，
+      出现 2-3 秒白屏。LSAppNapDisabled 是 Apple 官方禁用 App Nap 的 key。
+    -->
+    <key>LSAppNapDisabled</key>
+    <true/>
+</dict>
+</plist>
