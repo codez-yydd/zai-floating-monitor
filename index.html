@@ -4,10 +4,72 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ZBar</title>
+    <!--
+      首帧占位样式：内联在 head，确保 WebView 首次绘制时（React 尚未挂载、
+      index.css 尚未加载）就有可见内容，消除点开面板瞬间的冷启动白屏。
+      React createRoot 会清空 #root 再挂载，此占位会被自动替换。
+    -->
+    <style>
+      .zbar-boot {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        /* 用 100vh 而非 100%：首帧 index.css 尚未加载，#root/body 没有
+           explicit height，100% 会塌陷；100vh 直接基于视口高度，可靠。 */
+        min-height: 100vh;
+        gap: 10px;
+        /* 透明，让原生 popover 毛玻璃透出 */
+        background: transparent;
+      }
+      .zbar-boot__name {
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+          "PingFang SC", "Microsoft YaHei", sans-serif;
+        font-size: 15px;
+        font-weight: 600;
+        color: rgba(15, 23, 42, 0.5);
+        letter-spacing: 0.5px;
+      }
+      .zbar-boot__dots {
+        display: flex;
+        gap: 5px;
+      }
+      .zbar-boot__dots span {
+        width: 5px;
+        height: 5px;
+        border-radius: 50%;
+        background: rgba(15, 23, 42, 0.32);
+        animation: zbar-pulse 1.2s infinite ease-in-out both;
+      }
+      .zbar-boot__dots span:nth-child(2) {
+        animation-delay: 0.15s;
+      }
+      .zbar-boot__dots span:nth-child(3) {
+        animation-delay: 0.3s;
+      }
+      @keyframes zbar-pulse {
+        0%,
+        80%,
+        100% {
+          opacity: 0.25;
+          transform: scale(0.8);
+        }
+        40% {
+          opacity: 1;
+          transform: scale(1);
+        }
+      }
+    </style>
   </head>
 
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <!-- React 挂载前的首帧占位：避免 WebView 冷启动期间显示空白 -->
+      <div class="zbar-boot">
+        <div class="zbar-boot__name">ZBar</div>
+        <div class="zbar-boot__dots"><span></span><span></span><span></span></div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

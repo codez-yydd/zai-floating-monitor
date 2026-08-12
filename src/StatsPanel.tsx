@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type {
   CostResult,
@@ -6,7 +6,6 @@ import type {
   DeviceInfo,
   PricingConfig,
   RangePreset,
-  RemoteUsage,
   Stats,
   SyncConfig,
   TrendBucket,
@@ -56,6 +55,9 @@ export function StatsPanel({ currency, pricing, onGoPricing, onGoSync, onGoCompa
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<number>(0);
+  // 请求版本号：本地数据先渲染、远端数据后合并的两阶段加载中，
+  // 用于丢弃过期远端回调（用户在远端请求飞行期间切换了筛选/时间范围）。
+  const latestReqId = useRef(0);
   // 趋势图：分桶数据（小时/日，跟随所选时间范围）
   const [trend, setTrend] = useState<TrendPoint[]>([]);
   // 趋势图度量切换：花费 / Token
@@ -70,6 +72,9 @@ export function StatsPanel({ currency, pricing, onGoPricing, onGoSync, onGoCompa
   const [remoteDevices, setRemoteDevices] = useState<DeviceInfo[]>([]);
   // 设备筛选："all" 汇总 | "local" 仅本机 | 具体 device_id 仅远端该设备
   const [deviceFilter, setDeviceFilter] = useState<string>("all");
+  // 上一次的设备筛选值：仅在 deviceFilter 变化时清空数据触发骨架，
+  // 避免 30s 自动刷新也清空导致闪烁。
+  const prevDeviceFilter = useRef(deviceFilter);
 
   // ===== 窗口置顶常驻（仅 Windows）=====
   // 平台判断：仅 Windows 显示置顶开关，macOS 完全不渲染该功能
@@ -112,30 +117,55 @@ export function StatsPanel({ currency, pricing, onGoPricing, onGoSync, onGoCompa
     setLoading(true);
     setError(null);
     const [from, to] = resolveRange(preset, custom);
+
+    const wantLocal = deviceFilter === "all" || deviceFilter === "local";
+    const wantRemote =
+      syncEnabled &&
+      (deviceFilter === "all" ||
+        (deviceFilter !== "local" && deviceFilter !== "all"));
+
+    // 切换设备筛选时：若进入「仅远端设备」上下文（无本地数据可先渲染），
+    // 清空上一轮数据让骨架接管，避免远端请求飞行期间短暂展示其它设备的数据，
+    // 也避免远端失败时「错误条 + 旧数据」共存。仅 deviceFilter 变化时触发，
+    // 30s 自动刷新不重置（同设备刷新保留旧值直到新值到达，可接受）。
+    if (prevDeviceFilter.current !== deviceFilter) {
+      prevDeviceFilter.current = deviceFilter;
+      if (!wantLocal) {
+        setStats(null);
+        setCost(null);
+        setTrend([]);
+      }
+    }
+
+    // 本轮请求版本号；过期回调（用户已切换筛选/范围）将被丢弃
+    const reqId = ++latestReqId.current;
+    const isStale = () => reqId !== latestReqId.current;
+
     try {
-      // 根据设备筛选决定数据来源：
-      // - "all"：本地 + 远端(排除本机) 合并
-      // - "local"：仅本地
-      // - 具体 id：仅远端该设备
+      // ===== 阶段一：本地数据（毫秒级 SQLite），先到先渲染 =====
+      // 让首屏只等本地查询，不被远端网络请求阻塞。
       let localStats: Stats | null = null;
       let localCost: CostResult | null = null;
       let localTrend: TrendPoint[] = [];
-      let remote: RemoteUsage | null = null;
 
-      const wantLocal = deviceFilter === "all" || deviceFilter === "local";
-      const wantRemote =
-        syncEnabled &&
-        (deviceFilter === "all" ||
-          (deviceFilter !== "local" && deviceFilter !== "all"));
-
-      const tasks: Promise<unknown>[] = [];
       if (wantLocal) {
-        tasks.push(
+        await Promise.all([
           fetchStats(from, to).then((s) => (localStats = s)),
           computeCost(from, to).then((c) => (localCost = c)),
-          fetchTrend(from, to, trendBucket).then((t) => (localTrend = t))
-        );
+          fetchTrend(from, to, trendBucket).then((t) => (localTrend = t)),
+        ]);
+        if (isStale()) return; // 期间用户切换了筛选/范围，丢弃这轮结果
+
+        // 本地数据立即落盘渲染：deviceFilter 为 local / all 都先显示本地
+        setStats(localStats);
+        setCost(localCost);
+        setTrend(localTrend);
+        setLastUpdate(Date.now());
+        // 本地数据已可见，首屏不再阻塞（远端随后静默合并）
+        setLoading(false);
       }
+
+      // ===== 阶段二：远端数据（网络），后台合并、不阻塞首屏 =====
       if (wantRemote && syncConfig) {
         const opts =
           deviceFilter === "all"
@@ -144,44 +174,32 @@ export function StatsPanel({ currency, pricing, onGoPricing, onGoSync, onGoCompa
         // 远端请求失败时静默降级（服务器不可达不影响本地展示）。
         // 仅当选了具体远端设备且请求失败时，才把错误透出给用户。
         const isSpecificRemote = deviceFilter !== "all";
-        tasks.push(
-          remoteUsage(from, to, trendBucket, opts)
-            .then((r) => (remote = r))
-            .catch((e) => {
-              if (isSpecificRemote) throw e;
-              // "全部"模式：远端失败静默，仅用本地数据
-            })
-        );
-      }
+        try {
+          const remote = await remoteUsage(from, to, trendBucket, opts);
+          if (isStale()) return;
 
-      await Promise.all(tasks);
-
-      // 合并
-      if (deviceFilter === "local") {
-        setStats(localStats);
-        setCost(localCost);
-        setTrend(localTrend);
-      } else if (remote && !localStats) {
-        // 仅远端：远端无 cost，需用 pricing 自算（复用本地逻辑）
-        setStats(remoteToStats(remote));
-        setCost(computeRemoteCost(remote, pricing, currency));
-        setTrend(remoteTrendToLocal(remote, pricing, trendBucket));
-      } else if (localStats && remote) {
-        // 合并：本地 + 远端
-        setStats(mergeStats(localStats, remote));
-        setCost(mergeCost(localCost, remote, pricing, currency));
-        setTrend(mergeTrend(localTrend, remote, pricing, trendBucket));
-      } else {
-        // 仅本地（未启用同步时）
-        setStats(localStats);
-        setCost(localCost);
-        setTrend(localTrend);
+          if (deviceFilter === "all" && localStats) {
+            // "全部"：合并本地 + 远端
+            setStats(mergeStats(localStats, remote));
+            setCost(mergeCost(localCost, remote, pricing, currency));
+            setTrend(mergeTrend(localTrend, remote, pricing, trendBucket));
+          } else {
+            // 仅远端设备（wantLocal=false）：远端无 cost，用 pricing 自算
+            setStats(remoteToStats(remote));
+            setCost(computeRemoteCost(remote, pricing, currency));
+            setTrend(remoteTrendToLocal(remote, pricing, trendBucket));
+          }
+          setLastUpdate(Date.now());
+        } catch (e) {
+          if (isSpecificRemote) throw e; // 具体远端设备失败：透出错误
+          // "全部"模式：远端失败静默降级，本地数据已在阶段一渲染
+        }
       }
-      setLastUpdate(Date.now());
     } catch (e) {
       setError(String(e));
     } finally {
-      setLoading(false);
+      // 仅当这是最新一轮请求时才结束 loading，避免过期回调抢关 loading
+      if (!isStale()) setLoading(false);
     }
   }, [preset, custom, trendBucket, deviceFilter, syncConfig, syncEnabled, pricing, currency]);
 
@@ -328,6 +346,10 @@ export function StatsPanel({ currency, pricing, onGoPricing, onGoSync, onGoCompa
           {error}
         </div>
       )}
+
+      {/* 数据未到时渲染与最终布局同构的骨架，避免中间区域空白（白屏主体）。
+          数据到达后由下方 {stats && ...} 无跳变地替换。 */}
+      {!stats && !error && <StatsSkeleton />}
 
       {stats && (
         <div className="flex-1 overflow-y-auto px-3.5 py-3 space-y-3">
@@ -546,6 +568,84 @@ export function StatsPanel({ currency, pricing, onGoPricing, onGoSync, onGoCompa
         >
           ⚙ 价格设置
         </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 首屏骨架屏：与真实数据区（总览/趋势/指标/明细/排行榜）布局同构，
+ * 数据到达后可无跳变地替换。仅用 animate-pulse 灰条，无依赖、无副作用。
+ */
+function StatsSkeleton() {
+  // 柱子高度：用固定伪随机模式，视觉上更像真实趋势图
+  const barHeights = [38, 55, 42, 70, 48, 62, 35, 58];
+  return (
+    <div className="flex-1 overflow-y-auto px-3.5 py-3 space-y-3">
+      {/* 总览行 */}
+      <div className="flex items-end justify-between">
+        <div className="space-y-1.5">
+          <div className="h-2.5 w-10 rounded bg-slate-900/10 animate-pulse" />
+          <div className="h-6 w-24 rounded bg-slate-900/10 animate-pulse" />
+        </div>
+        <div className="space-y-1.5 flex flex-col items-end">
+          <div className="h-2.5 w-10 rounded bg-slate-900/10 animate-pulse" />
+          <div className="h-4 w-16 rounded bg-slate-900/10 animate-pulse" />
+        </div>
+      </div>
+
+      {/* 趋势图框 */}
+      <div className="rounded-lg bg-white/25 border border-white/30 px-2.5 py-2">
+        <div className="h-2.5 w-12 rounded bg-slate-900/10 animate-pulse mb-2" />
+        <div className="flex items-end gap-1 h-12">
+          {barHeights.map((h, i) => (
+            <div
+              key={i}
+              className="flex-1 rounded-t-sm bg-slate-900/8 animate-pulse"
+              style={{ height: `${h}%` }}
+            />
+          ))}
+        </div>
+      </div>
+
+      {/* 三个指标 */}
+      <div className="grid grid-cols-3 gap-1.5">
+        {[0, 1, 2].map((i) => (
+          <div
+            key={i}
+            className="rounded-lg bg-white/25 border border-white/30 py-2 text-center"
+          >
+            <div className="h-2 w-8 rounded bg-slate-900/10 animate-pulse mx-auto mb-1.5" />
+            <div className="h-3.5 w-12 rounded bg-slate-900/10 animate-pulse mx-auto" />
+          </div>
+        ))}
+      </div>
+
+      {/* 明细条 */}
+      <div className="space-y-2 pt-1">
+        {[0, 1, 2].map((i) => (
+          <div key={i} className="flex items-center gap-2">
+            <div className="h-2 w-10 rounded bg-slate-900/10 animate-pulse shrink-0" />
+            <div className="flex-1 h-1 rounded-full bg-slate-900/8 animate-pulse" />
+            <div className="h-2 w-10 rounded bg-slate-900/10 animate-pulse shrink-0" />
+          </div>
+        ))}
+      </div>
+
+      {/* 排行榜 */}
+      <div>
+        <div className="h-2.5 w-12 rounded bg-slate-900/10 animate-pulse mb-2" />
+        <div className="space-y-1.5">
+          {[0, 1, 2].map((i) => (
+            <div
+              key={i}
+              className="flex items-center justify-between py-1.5 px-2 -mx-2"
+            >
+              <div className="h-2.5 w-24 rounded bg-slate-900/10 animate-pulse" />
+              <div className="h-2.5 w-20 rounded bg-slate-900/10 animate-pulse" />
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
