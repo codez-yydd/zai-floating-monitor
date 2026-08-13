@@ -9,5 +9,14 @@
     -->
     <key>LSAppNapDisabled</key>
     <true/>
+
+    <!--
+      作为"菜单栏工具"运行：不显示 Dock 图标、不显示主菜单栏，只保留托盘图标。
+      dev 模式下裸二进制靠 set_activation_policy(Accessory) 即可隐藏 Dock；
+      但打包成 .app 后必须靠 Info.plist 的 LSUIElement 在启动时就声明为
+      accessory 应用，否则 macOS 会先按普通应用启动、Dock 图标常驻不消失。
+    -->
+    <key>LSUIElement</key>
+    <true/>
 </dict>
 </plist>
