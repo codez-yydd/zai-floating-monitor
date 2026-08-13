@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type {
   ApplyPriceItem,
   Currency,
+  CursorConfig,
   ModelInfo,
   ModelPrice,
   NotifyConfig,
@@ -21,15 +22,19 @@ import {
   fetchModels,
   fetchPricing,
   fetchQuotaConfig,
+  getCursorConfig,
   getNotifyConfig,
   getPeakConfig,
   getShortcutConfig,
   savePricing,
   saveQuotaConfig,
+  setCursorConfig,
   setNotifyConfig,
   setPeakConfig,
   setPlanType,
   setShortcutConfig,
+  testCursorAuth,
+  cursorDebug,
 } from "./api";
 
 interface Props {
@@ -85,6 +90,19 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [applying, setApplying] = useState(false);
 
+  // ===== Cursor 配置 =====
+  const [cursorCfg, setCursorCfg] = useState<CursorConfig>({
+    cookie_source: "auto",
+    cookie_header: "",
+    usd_cny_rate: 7.2,
+  });
+  const [savingCursor, setSavingCursor] = useState(false);
+  const [cursorSavedFlash, setCursorSavedFlash] = useState(false);
+  const [cursorTesting, setCursorTesting] = useState(false);
+  const [cursorTestResult, setCursorTestResult] = useState<string | null>(null);
+  const [cursorDebugInfo, setCursorDebugInfo] = useState<string | null>(null);
+  const [cursorDebugging, setCursorDebugging] = useState(false);
+
   useEffect(() => {
     Promise.all([
       fetchPricing(),
@@ -92,8 +110,9 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
       fetchQuotaConfig(),
       getNotifyConfig(),
       getShortcutConfig(),
+      getCursorConfig(),
     ])
-      .then(([p, m, q, n, s]) => {
+      .then(([p, m, q, n, s, cc]) => {
         setPricing(p);
         setModels(m);
         setQuotaCfg(q);
@@ -101,6 +120,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
         setNotifyCfg(n);
         setShortcutCfg(s);
         setShortcutDraft(s.accelerator);
+        setCursorCfg(cc);
       })
       .catch((e) => setError(String(e)));
   }, []);
@@ -138,6 +158,46 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
       setError(String(e));
     } finally {
       setSavingQuota(false);
+    }
+  };
+
+  // 保存 Cursor 配置
+  const handleSaveCursor = async () => {
+    setSavingCursor(true);
+    setError(null);
+    setCursorTestResult(null);
+    try {
+      await setCursorConfig(cursorCfg);
+      setCursorSavedFlash(true);
+      setTimeout(() => setCursorSavedFlash(false), 1500);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSavingCursor(false);
+    }
+  };
+
+  // 测试 Cursor 认证
+  const handleTestCursor = async () => {
+    setCursorTesting(true);
+    setCursorTestResult(null);
+    try {
+      // 先保存当前配置，再用最新配置测试
+      await setCursorConfig(cursorCfg);
+      const [email, name, membership] = await testCursorAuth();
+      if (email) {
+        setCursorTestResult(
+          `✓ 已连接：${email}${membership ? `（${membership}）` : ""}`
+        );
+      } else if (name) {
+        setCursorTestResult(`✓ 已连接：${name}`);
+      } else {
+        setCursorTestResult("✓ 认证成功");
+      }
+    } catch (e) {
+      setCursorTestResult(`✗ ${String(e)}`);
+    } finally {
+      setCursorTesting(false);
     }
   };
 
@@ -529,6 +589,142 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
           <p className="text-[9px] text-slate-700/45 mt-1.5 leading-relaxed">
             Token 从智谱开放平台获取。国内用户选「国内」端点。
           </p>
+        </div>
+
+        {/* ===== Cursor 用量配置 ===== */}
+        <div className="mt-2 rounded-lg bg-slate-900/5 border border-slate-900/10 p-2.5">
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-[11px] font-medium text-slate-900/85">
+              Cursor 统计
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={async () => {
+                  setCursorDebugging(true);
+                  setCursorDebugInfo(null);
+                  try {
+                    const info = await cursorDebug();
+                    setCursorDebugInfo(
+                      `来源: ${info.cookie_source}\nDB: ${info.db_found ? "已找到" : "未找到"}\nUserID: ${info.user_id}\nEvents HTTP: ${info.events_status}\n响应: ${info.events_body_excerpt}`
+                    );
+                  } catch (e) {
+                    setCursorDebugInfo(`诊断失败: ${e}`);
+                  } finally {
+                    setCursorDebugging(false);
+                  }
+                }}
+                disabled={cursorDebugging}
+                className="text-[10px] px-2 py-0.5 rounded-md bg-slate-600/80 text-white hover:bg-slate-700 disabled:opacity-40 transition-colors"
+              >
+                {cursorDebugging ? "诊断中…" : "诊断"}
+              </button>
+              <button
+                onClick={handleTestCursor}
+                disabled={cursorTesting}
+                className="text-[10px] px-2 py-0.5 rounded-md bg-violet-500/90 text-white hover:bg-violet-600 disabled:opacity-40 transition-colors"
+              >
+                {cursorTesting ? "测试中…" : "测试连接"}
+              </button>
+              <button
+                onClick={handleSaveCursor}
+                disabled={savingCursor}
+                className="text-[10px] px-2 py-0.5 rounded-md bg-sky-500 text-white hover:bg-sky-600 disabled:opacity-40 transition-colors"
+              >
+                {savingCursor
+                  ? "保存中…"
+                  : cursorSavedFlash
+                    ? "已保存 ✓"
+                    : "保存"}
+              </button>
+            </div>
+          </div>
+
+          {/* Cookie 来源切换 */}
+          <div className="flex items-center gap-2 mb-1.5">
+            <span className="text-[10px] text-slate-700/60 w-12 shrink-0">
+              认证
+            </span>
+            <div className="flex gap-1">
+              {(["auto", "manual"] as const).map((src) => (
+                <button
+                  key={src}
+                  onClick={() =>
+                    setCursorCfg({ ...cursorCfg, cookie_source: src })
+                  }
+                  className={`px-2 py-0.5 rounded text-[10px] transition-colors ${
+                    cursorCfg.cookie_source === src
+                      ? "bg-violet-500/20 text-violet-700"
+                      : "text-slate-700/45 hover:text-slate-900/70"
+                  }`}
+                >
+                  {src === "auto" ? "自动（读 Cursor 应用）" : "手动 Cookie"}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* 手动 Cookie 输入 */}
+          {cursorCfg.cookie_source === "manual" && (
+            <input
+              type="text"
+              value={cursorCfg.cookie_header}
+              onChange={(e) =>
+                setCursorCfg({
+                  ...cursorCfg,
+                  cookie_header: e.target.value,
+                })
+              }
+              placeholder="粘贴 cursor.com 请求的 Cookie 头"
+              className="w-full px-2 py-1 rounded-md bg-white/60 border border-slate-900/10 text-[10px] text-slate-900/80 focus:outline-none focus:border-violet-400/60 mb-1.5"
+            />
+          )}
+
+          {/* 汇率 */}
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-[10px] text-slate-700/60 w-12 shrink-0">
+              USD→CNY
+            </span>
+            <input
+              type="number"
+              step="0.1"
+              min="0.1"
+              value={cursorCfg.usd_cny_rate}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value);
+                setCursorCfg({
+                  ...cursorCfg,
+                  // 拒绝 0 / 负数 / NaN，兜底默认汇率
+                  usd_cny_rate: v > 0 ? v : 7.2,
+                });
+              }}
+              className="num w-20 px-2 py-0.5 rounded-md bg-white/60 border border-slate-900/10 text-[10px] text-slate-900/80 focus:outline-none focus:border-violet-400/60"
+            />
+            <span className="text-[9px] text-slate-700/45">
+              汇总页合并花费换算用
+            </span>
+          </div>
+
+          {cursorTestResult && (
+            <p
+              className={`text-[9px] mt-1 leading-relaxed ${
+                cursorTestResult.startsWith("✓")
+                  ? "text-emerald-600"
+                  : "text-rose-600"
+              }`}
+            >
+              {cursorTestResult}
+            </p>
+          )}
+          {cursorCfg.cookie_source === "auto" && (
+            <p className="text-[9px] text-slate-700/45 mt-1 leading-relaxed">
+              自动读取 Cursor 应用的本地登录凭据。请确保 Cursor 已安装并登录。
+            </p>
+          )}
+          {cursorDebugInfo && (
+            <pre className="text-[8px] text-slate-700/60 mt-1.5 p-1.5 rounded bg-slate-900/5 overflow-x-auto whitespace-pre-wrap break-all max-h-32 overflow-y-auto font-mono">
+              {cursorDebugInfo}
+            </pre>
+          )}
         </div>
 
         {/* ===== 额度阈值通知 ===== */}

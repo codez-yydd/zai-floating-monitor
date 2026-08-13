@@ -6,6 +6,8 @@ import type {
   ConsumedBucket,
   CostResult,
   Currency,
+  CursorConfig,
+  CursorSnapshot,
   DeviceInfo,
   ModelInfo,
   NotifyConfig,
@@ -314,3 +316,46 @@ export async function setPeakConfig(config: PeakConfig): Promise<void> {
 export async function setPlanType(plan: PlanType): Promise<PeakConfig> {
   return invoke<PeakConfig>("set_plan_type", { plan });
 }
+
+// ===== Cursor 用量统计 =====
+
+/** 拉取 Cursor 用量快照（套餐额度 + events 明细） */
+export async function fetchCursorUsage(
+  fromMs: number,
+  toMs: number
+): Promise<CursorSnapshot> {
+  return invoke<CursorSnapshot>("get_cursor_usage", {
+    req: { from_ms: fromMs, to_ms: toMs },
+  });
+}
+
+/** 读取 Cursor 配置 */
+export async function getCursorConfig(): Promise<CursorConfig> {
+  return invoke<CursorConfig>("get_cursor_config");
+}
+
+/** 保存 Cursor 配置 */
+export async function setCursorConfig(config: CursorConfig): Promise<void> {
+  await invoke("set_cursor_config", { config });
+}
+
+/** 测试 Cursor 认证，返回 [email, name, membership_type] */
+export async function testCursorAuth(): Promise<
+  [string | null, string | null, string | null]
+> {
+  return invoke<[string | null, string | null, string | null]>(
+    "test_cursor_auth"
+  );
+}
+
+/** 诊断 Cursor events API（排查"暂无明细"问题） */
+export async function cursorDebug(): Promise<{
+  cookie_source: string;
+  db_found: boolean;
+  user_id: string;
+  events_status: number;
+  events_body_excerpt: string;
+}> {
+  return invoke("cursor_debug");
+}
+

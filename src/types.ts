@@ -395,3 +395,90 @@ export interface ShortcutConfig {
   accelerator: string;
 }
 
+// ===== Cursor 用量统计（与 Rust cursor.rs 结构一一对应）=====
+
+/** Cursor 配置（~/.zbar/cursor.json） */
+export interface CursorConfig {
+  /** cookie 来源："auto"（读 Cursor 应用本地 DB）| "manual"（手动粘贴） */
+  cookie_source: "auto" | "manual";
+  /** 手动 cookie 头 */
+  cookie_header: string;
+  /** USD→CNY 汇率（汇总页合并花费用） */
+  usd_cny_rate: number;
+}
+
+/** Cursor 套餐额度信息（金额单位为美分） */
+export interface CursorPlanInfo {
+  enabled: boolean | null;
+  used_cents: number | null;
+  limit_cents: number | null;
+  remaining_cents: number | null;
+  total_pct: number | null;
+  auto_pct: number | null;
+  api_pct: number | null;
+}
+
+/** Cursor 按需用量（金额单位为美分） */
+export interface CursorOnDemandInfo {
+  enabled: boolean | null;
+  used_cents: number | null;
+  limit_cents: number | null;
+  remaining_cents: number | null;
+}
+
+/** Cursor events 聚合汇总 */
+export interface CursorEventsSummary {
+  /** API 标价总花费（美元） */
+  total_cost_usd: number;
+  /** 套餐实际扣费（美元），null 表示部分事件缺失 */
+  metered_cost_usd: number | null;
+  total_tokens: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  requests: number;
+}
+
+/** Cursor 每日明细（趋势图用） */
+export interface CursorDailyEntry {
+  /** 日期标签 "08-13"（MM-DD） */
+  date: string;
+  cost_usd: number;
+  total_tokens: number;
+  requests: number;
+}
+
+/** Cursor 按模型聚合 */
+export interface CursorModelStat {
+  model: string;
+  cost_usd: number;
+  total_tokens: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  requests: number;
+}
+
+/** Cursor 完整快照（get_cursor_usage 返回） */
+export interface CursorSnapshot {
+  /** 是否成功登录并获取到数据 */
+  logged_in: boolean;
+  error: string | null;
+  /** events 拉取失败时的错误信息（套餐数据可能仍可用） */
+  events_error: string | null;
+  account_email: string | null;
+  account_name: string | null;
+  membership_type: string | null;
+  billing_cycle_start: string | null;
+  billing_cycle_end: string | null;
+  plan: CursorPlanInfo | null;
+  on_demand: CursorOnDemandInfo | null;
+  events: CursorEventsSummary | null;
+  daily: CursorDailyEntry[];
+  by_model: CursorModelStat[];
+}
+
+/** 主面板三标签 */
+export type StatsTab = "summary" | "zai" | "cursor";
+
+
