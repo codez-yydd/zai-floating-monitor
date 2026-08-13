@@ -118,7 +118,12 @@ def sync():
         accepted = db.insert_usage_records(device_id, records, now)
     last_rowid = data.get("last_rowid")
     if last_rowid is None:
-        max_rowid = db.max_rowid_of(device_id)
+        # 兼容不传 last_rowid 的旧客户端。当前客户端恒传 last_rowid（sync.rs），
+        # 此分支实际不会命中。注意：不能用 max_rowid_of(device_id) 作为回退——
+        # 设备合并后该值会因合并记录的大偏移 rowid 而膨胀到 20 亿+，旧客户端会
+        # 把它当游标写回，导致后续上传被永久跳过（静默丢数据）。返回 0 让旧客户端
+        # 全量重传（INSERT OR IGNORE 幂等去重，不丢数据），最坏只是多一次冗余上传。
+        max_rowid = 0
     else:
         max_rowid = last_rowid
 
@@ -254,6 +259,43 @@ def revoke():
         return jsonify({"error": "device_id 缺失"}), 400
     devs, recs = db.revoke_device(device_id)
     return jsonify({"devices_deleted": devs, "records_deleted": recs})
+
+
+@app.post("/device/merge")
+def merge():
+    """合并设备：把来源设备数据并入目标设备，再删除来源。master token 鉴权。"""
+    data = request.get_json(force=True)
+    err = require_master_token(data)
+    if err:
+        return err
+    source = (data.get("source_device_id") or "").strip()
+    target = (data.get("target_device_id") or "").strip()
+    if not source or not target:
+        return jsonify({"error": "source_device_id / target_device_id 缺失"}), 400
+    try:
+        recs, snaps = db.merge_devices(source, target)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"records_moved": recs, "snapshots_moved": snaps})
+
+
+@app.post("/device/rename")
+def rename():
+    """修改设备显示名。master token 鉴权。"""
+    data = request.get_json(force=True)
+    err = require_master_token(data)
+    if err:
+        return err
+    device_id = (data.get("device_id") or "").strip()
+    name = (data.get("device_name") or "").strip()
+    if not device_id:
+        return jsonify({"error": "device_id 缺失"}), 400
+    if not name:
+        return jsonify({"error": "设备名称不能为空"}), 400
+    if len(name) > 32:
+        return jsonify({"error": "设备名称过长（最多 32 字符）"}), 400
+    updated = db.rename_device(device_id, name)
+    return jsonify({"updated": updated})
 
 
 # ===== 清理接口 =====

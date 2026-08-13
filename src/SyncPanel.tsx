@@ -12,8 +12,10 @@ import {
   disconnectDevice,
   getCleanupStatus,
   getSyncConfig,
+  mergeDevices,
   pendingUploadCount,
   registerDevice,
+  renameDevice,
   setAutoCleanup,
   setSyncConfig,
   syncNow,
@@ -65,6 +67,10 @@ export function SyncPanel({ onBack }: Props) {
   const [masterInput, setMasterInput] = useState("");
   const [confirmAction, setConfirmAction] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // 设备合并 / 改名
+  const [mergeSource, setMergeSource] = useState<DeviceInfo | null>(null);
+  const [renameTarget, setRenameTarget] = useState<DeviceInfo | null>(null);
 
   const refresh = async (cfg: SyncConfig) => {
     setConfig(cfg);
@@ -179,6 +185,62 @@ export function SyncPanel({ onBack }: Props) {
       setTimeout(() => setSyncFlash(null), 2500);
       setConfirmAction(null);
       // 刷新状态
+      const cfg = await getSyncConfig();
+      await refresh(cfg);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleMerge = async (sourceId: string, targetId: string) => {
+    if (!masterInput.trim()) {
+      setError("请先填写 Master Token（从服务器日志获取）");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await mergeDevices(masterInput.trim(), sourceId, targetId);
+      const tName =
+        cleanupStatus?.devices.find((d) => d.device_id === targetId)
+          ?.device_name ?? "目标设备";
+      setSyncFlash(`已合并 ${res.records_moved} 条记录到「${tName}」`);
+      setTimeout(() => setSyncFlash(null), 2500);
+      setMergeSource(null);
+      const cfg = await getSyncConfig();
+      await refresh(cfg);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRename = async (deviceId: string, newName: string) => {
+    if (!masterInput.trim()) {
+      setError("请先填写 Master Token（从服务器日志获取）");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await renameDevice(masterInput.trim(), deviceId, newName);
+      if (res.updated === 0) {
+        setError("设备不存在或已被删除");
+        setRenameTarget(null);
+        const cfg = await getSyncConfig();
+        await refresh(cfg);
+        return;
+      }
+      // 若改的是本机设备名，回写 sync.json 保持一致，避免下次同步注册成新名字
+      if (config && config.device_id === deviceId) {
+        await setSyncConfig({ ...config, device_name: newName });
+      }
+      setSyncFlash(`已改名为「${newName}」`);
+      setTimeout(() => setSyncFlash(null), 2500);
+      setRenameTarget(null);
       const cfg = await getSyncConfig();
       await refresh(cfg);
     } catch (e) {
@@ -496,27 +558,48 @@ export function SyncPanel({ onBack }: Props) {
                       key={d.device_id}
                       className="flex items-center justify-between text-[10px]"
                     >
-                      <span className="text-slate-700/70">
+                      <span className="text-slate-700/70 min-w-0 truncate">
                         {d.device_name}
                         <span className="text-slate-700/40 ml-1 font-mono">
                           {d.device_id.slice(0, 6)}
                         </span>
+                        {d.device_id === config!.device_id && (
+                          <span className="ml-1 text-sky-600/70">本机</span>
+                        )}
                       </span>
-                      <span className="flex items-center gap-2">
+                      <span className="flex items-center gap-1.5 shrink-0">
                         <span className="text-slate-700/45">
                           {d.record_count ?? 0} 条
                         </span>
+                        <button
+                          onClick={() => setRenameTarget(d)}
+                          disabled={busy}
+                          className="text-slate-700/40 hover:text-sky-600 transition-colors"
+                          title="改名"
+                        >
+                          ✎
+                        </button>
                         {d.device_id !== config!.device_id && (
-                          <button
-                            onClick={() =>
-                              setConfirmAction(`device:${d.device_id}`)
-                            }
-                            disabled={busy}
-                            className="text-slate-700/40 hover:text-red-600 transition-colors"
-                            title="删除此设备数据"
-                          >
-                            ✕
-                          </button>
+                          <>
+                            <button
+                              onClick={() => setMergeSource(d)}
+                              disabled={busy}
+                              className="text-slate-700/50 hover:text-sky-600 transition-colors"
+                              title="合并到其他设备"
+                            >
+                              合并
+                            </button>
+                            <button
+                              onClick={() =>
+                                setConfirmAction(`device:${d.device_id}`)
+                              }
+                              disabled={busy}
+                              className="text-slate-700/40 hover:text-red-600 transition-colors"
+                              title="删除此设备数据"
+                            >
+                              ✕
+                            </button>
+                          </>
                         )}
                       </span>
                     </div>
@@ -568,6 +651,165 @@ export function SyncPanel({ onBack }: Props) {
           }}
         />
       )}
+
+      {/* 设备合并弹层 */}
+      {mergeSource && cleanupStatus && (
+        <MergeDialog
+          source={mergeSource}
+          devices={cleanupStatus.devices}
+          localDeviceId={config?.device_id ?? ""}
+          onCancel={() => setMergeSource(null)}
+          onConfirm={(targetId) =>
+            handleMerge(mergeSource.device_id, targetId)
+          }
+        />
+      )}
+
+      {/* 设备改名弹层 */}
+      {renameTarget && (
+        <RenameDialog
+          device={renameTarget}
+          onCancel={() => setRenameTarget(null)}
+          onConfirm={(newName) =>
+            handleRename(renameTarget.device_id, newName)
+          }
+        />
+      )}
+    </div>
+  );
+}
+
+/** 设备合并对话框：选目标设备，把来源并入目标后删除来源 */
+function MergeDialog({
+  source,
+  devices,
+  localDeviceId,
+  onCancel,
+  onConfirm,
+}: {
+  source: DeviceInfo;
+  devices: DeviceInfo[];
+  localDeviceId: string;
+  onCancel: () => void;
+  onConfirm: (targetId: string) => void;
+}) {
+  // 候选目标 = 除来源外的全部设备。默认选最新注册的那个（通常是该设备当前正在用的
+  // 实例），而不是本机：合并到本机会让历史数据在本机"全部汇总"视图中不可见（本机
+  // 读本地库、远端查询又排除本机），故只在用户明确选择本机时才走这条路径。
+  const candidates = devices.filter((d) => d.device_id !== source.device_id);
+  const defaultTarget =
+    [...candidates].sort((a, b) => b.created_at - a.created_at)[0]?.device_id ??
+    candidates[0]?.device_id ??
+    "";
+  const [target, setTarget] = useState<string>(defaultTarget);
+  const targetIsLocal = target === localDeviceId;
+
+  return (
+    <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/30 rounded-2xl">
+      <div className="mx-4 w-full rounded-lg bg-white p-3 shadow-xl">
+        <div className="text-[12px] font-semibold text-slate-900 mb-1">
+          合并设备
+        </div>
+        <p className="text-[10px] text-slate-700/65 leading-relaxed mb-2">
+          将「{source.device_name}（{source.device_id.slice(0, 6)}）」的{" "}
+          {source.record_count ?? 0} 条记录合并到：
+        </p>
+        <select
+          value={target}
+          onChange={(e) => setTarget(e.target.value)}
+          className="w-full mb-2 px-1.5 py-1 rounded-md bg-slate-900/5 border border-slate-900/10 text-[11px] focus:outline-none focus:border-sky-400/60"
+        >
+          {candidates.map((d) => (
+            <option key={d.device_id} value={d.device_id}>
+              {d.device_name}（{d.device_id.slice(0, 6)}）
+              {d.device_id === localDeviceId ? " · 本机" : ""}
+            </option>
+          ))}
+        </select>
+        {targetIsLocal ? (
+          <p className="text-[10px] text-amber-700/80 leading-relaxed mb-2">
+            合并到本机后，被合并的历史数据在本机"全部汇总"视图中可能不可见。建议改
+            合并到该设备当前正在用的实例。
+          </p>
+        ) : (
+          <p className="text-[10px] text-amber-700/80 leading-relaxed mb-2">
+            来源设备的记录会转移到目标设备，来源设备将被删除，不可恢复。若来源设备仍
+            在某台机器上同步，请到那台机器"断开"并重新注册。
+          </p>
+        )}
+        <div className="flex gap-1.5">
+          <button
+            onClick={onCancel}
+            className="flex-1 text-[11px] py-1 rounded-md bg-slate-900/5 text-slate-700/70 hover:bg-slate-900/10 transition-colors"
+          >
+            取消
+          </button>
+          <button
+            disabled={!target}
+            onClick={() => onConfirm(target)}
+            className="flex-1 text-[11px] py-1 rounded-md bg-sky-500 text-white hover:bg-sky-600 transition-colors disabled:opacity-40"
+          >
+            确认合并
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** 设备改名对话框 */
+function RenameDialog({
+  device,
+  onCancel,
+  onConfirm,
+}: {
+  device: DeviceInfo;
+  onCancel: () => void;
+  onConfirm: (newName: string) => void;
+}) {
+  const [name, setName] = useState(device.device_name);
+  const trimmed = name.trim();
+  const valid = trimmed.length > 0 && trimmed.length <= 32;
+
+  return (
+    <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/30 rounded-2xl">
+      <div className="mx-4 w-full rounded-lg bg-white p-3 shadow-xl">
+        <div className="text-[12px] font-semibold text-slate-900 mb-1">
+          设备改名
+        </div>
+        <p className="text-[10px] text-slate-700/65 leading-relaxed mb-2">
+          修改「{device.device_name}（{device.device_id.slice(0, 6)}）」的名称。
+        </p>
+        <input
+          type="text"
+          value={name}
+          maxLength={32}
+          autoFocus
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && valid) onConfirm(trimmed);
+          }}
+          className="w-full mb-1 px-1.5 py-1 rounded-md bg-slate-900/5 border border-slate-900/10 text-[11px] focus:outline-none focus:border-sky-400/60"
+        />
+        <div className="text-[9px] text-slate-700/40 mb-2 text-right">
+          {trimmed.length}/32
+        </div>
+        <div className="flex gap-1.5">
+          <button
+            onClick={onCancel}
+            className="flex-1 text-[11px] py-1 rounded-md bg-slate-900/5 text-slate-700/70 hover:bg-slate-900/10 transition-colors"
+          >
+            取消
+          </button>
+          <button
+            disabled={!valid}
+            onClick={() => onConfirm(trimmed)}
+            className="flex-1 text-[11px] py-1 rounded-md bg-sky-500 text-white hover:bg-sky-600 transition-colors disabled:opacity-40"
+          >
+            确认
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

@@ -668,6 +668,79 @@ pub fn cleanup_server(req: CleanupServerRequest) -> Result<CleanupResult, String
     Ok(resp)
 }
 
+// ===== 设备合并 / 改名 =====
+
+#[derive(Debug, Deserialize)]
+pub struct MergeDevicesRequest {
+    pub master_token: String,
+    pub source_device_id: String,
+    pub target_device_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeResult {
+    pub records_moved: i64,
+    pub snapshots_moved: i64,
+}
+
+/// 合并设备：把来源设备数据并入目标设备后删除来源。master token 鉴权。
+pub fn merge_devices(req: MergeDevicesRequest) -> Result<MergeResult, String> {
+    let cfg = load_sync_config()?;
+    let base = &cfg.server_url;
+    #[derive(Serialize)]
+    struct Body<'a> {
+        master_token: &'a str,
+        source_device_id: &'a str,
+        target_device_id: &'a str,
+    }
+    let resp: MergeResult = ureq::post(&format!("{base}/device/merge"))
+        .timeout(Duration::from_secs(15))
+        .send_json(Body {
+            master_token: req.master_token.trim(),
+            source_device_id: req.source_device_id.trim(),
+            target_device_id: req.target_device_id.trim(),
+        })
+        .map_err(map_http_err("合并设备"))?
+        .into_json()
+        .map_err(|e| format!("解析合并响应失败: {e}"))?;
+    Ok(resp)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RenameDeviceRequest {
+    pub master_token: String,
+    pub device_id: String,
+    pub device_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenameResult {
+    pub updated: i64,
+}
+
+/// 修改设备显示名。master token 鉴权。
+pub fn rename_device(req: RenameDeviceRequest) -> Result<RenameResult, String> {
+    let cfg = load_sync_config()?;
+    let base = &cfg.server_url;
+    #[derive(Serialize)]
+    struct Body<'a> {
+        master_token: &'a str,
+        device_id: &'a str,
+        device_name: &'a str,
+    }
+    let resp: RenameResult = ureq::post(&format!("{base}/device/rename"))
+        .timeout(Duration::from_secs(10))
+        .send_json(Body {
+            master_token: req.master_token.trim(),
+            device_id: req.device_id.trim(),
+            device_name: req.device_name.trim(),
+        })
+        .map_err(map_http_err("改名设备"))?
+        .into_json()
+        .map_err(|e| format!("解析改名响应失败: {e}"))?;
+    Ok(resp)
+}
+
 /// 查询清理状态（数据量 + 自动清理配置）。device_token 鉴权。
 pub fn fetch_cleanup_status() -> Result<CleanupStatus, String> {
     let cfg = load_sync_config()?;

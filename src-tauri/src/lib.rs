@@ -455,8 +455,9 @@ fn set_pin(enabled: bool, app: AppHandle) -> Result<(), String> {
 
 use sync::{
     AutoCleanupServerRequest, CleanupServerRequest, CleanupStatus, DeviceInfo,
-    RemotePeriodDetail, RemotePeriodDetailRequest, RemoteSnapshot,
-    RemoteSnapshotRequest, RemoteUsage, RemoteUsageRequest, SyncConfig, SyncOutcome,
+    MergeDevicesRequest, RemotePeriodDetail, RemotePeriodDetailRequest, RemoteSnapshot,
+    RemoteSnapshotRequest, RemoteUsage, RemoteUsageRequest, RenameDeviceRequest, SyncConfig,
+    SyncOutcome,
 };
 
 /// 读取同步配置
@@ -525,6 +526,18 @@ fn get_cleanup_status() -> Result<CleanupStatus, String> {
 #[tauri::command]
 fn cleanup_server(req: CleanupServerRequest) -> Result<sync::CleanupResult, String> {
     sync::cleanup_server(req)
+}
+
+/// 合并设备：把来源设备数据并入目标设备后删除来源
+#[tauri::command]
+fn merge_devices(req: MergeDevicesRequest) -> Result<sync::MergeResult, String> {
+    sync::merge_devices(req)
+}
+
+/// 修改设备显示名
+#[tauri::command]
+fn rename_device(req: RenameDeviceRequest) -> Result<sync::RenameResult, String> {
+    sync::rename_device(req)
 }
 
 /// 配置服务端自动清理
@@ -971,6 +984,8 @@ pub fn run() {
             list_remote_devices,
             get_cleanup_status,
             cleanup_server,
+            merge_devices,
+            rename_device,
             set_auto_cleanup,
             pending_upload_count,
             get_pin,

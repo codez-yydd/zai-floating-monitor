@@ -642,3 +642,95 @@ def revoke_device(device_id):
             return d, u
         finally:
             conn.close()
+
+
+def merge_devices(source_id, target_id):
+    """把 source 设备的全部数据合并到 target，然后删除 source。
+
+    用量明细的主键是 (device_id, local_rowid)，而 local_rowid 来自各机本地的
+    ZCode 库 rowid（每台都从 1 开始逐条递增）。直接改 device_id 会撞主键；但若
+    简单地接在 target 现有最大值之后（base+1..base+N）也不行——target 客户端的
+    增量上传游标仍是 base，它接下来会用 rowid = base+1, base+2, ... 上传自己的
+    真实记录，而服务端用 INSERT OR IGNORE 去重，这些真实记录会被合并进来的历史
+    记录占用而**静默丢弃、且因游标推进而永久丢失**。
+
+    因此这里把合并记录放到一个 target 客户端在可预见未来都不可能触达的远端区段
+    （当前最大值 + MERGE_ROWID_OFFSET）。sqlite rowid 上限是 2^63，偏移量取 20 亿
+    （即便每秒一条用量也要 ~63 年才会长到），个人监控工具绝无可能撞上。额度快照
+    主键是 (device_id, ts)，先丢弃来源中与 target 同 ts 的条目再迁移。整个操作
+    在一个事务内完成。
+
+    返回 (records_moved, snapshots_moved)。source/target 不存在时抛 ValueError。
+    """
+    # 远超任何真实客户端 rowid 上限，避免与 target 后续真实上传撞主键
+    MERGE_ROWID_OFFSET = 2_000_000_000
+
+    if source_id == target_id:
+        raise ValueError("来源设备与目标设备不能相同")
+
+    with _db_lock:
+        conn = get_conn()
+        try:
+            exists = conn.execute(
+                "SELECT COUNT(*) AS c FROM devices WHERE device_id IN (?, ?)",
+                (source_id, target_id),
+            ).fetchone()["c"]
+            if exists < 2:
+                raise ValueError("来源或目标设备不存在")
+
+            # 1) 用量明细：重编号到 target 客户端不可达的远端区段，再迁移
+            max_row = conn.execute(
+                "SELECT COALESCE(MAX(local_rowid), 0) AS m "
+                "FROM usage_records WHERE device_id = ?",
+                (target_id,),
+            ).fetchone()["m"]
+            start = max_row + MERGE_ROWID_OFFSET
+            src_rows = conn.execute(
+                "SELECT local_rowid FROM usage_records WHERE device_id = ? "
+                "ORDER BY local_rowid",
+                (source_id,),
+            ).fetchall()
+            for i, r in enumerate(src_rows, start=1):
+                conn.execute(
+                    "UPDATE usage_records SET device_id = ?, local_rowid = ? "
+                    "WHERE device_id = ? AND local_rowid = ?",
+                    (target_id, start + i, source_id, r["local_rowid"]),
+                )
+            records_moved = len(src_rows)
+
+            # 2) 额度快照：丢弃与 target 同 ts 的来源条目，再迁移
+            conn.execute(
+                "DELETE FROM quota_snapshots WHERE device_id = ? "
+                "AND ts IN (SELECT ts FROM quota_snapshots WHERE device_id = ?)",
+                (source_id, target_id),
+            )
+            snap = conn.execute(
+                "UPDATE quota_snapshots SET device_id = ? WHERE device_id = ?",
+                (target_id, source_id),
+            )
+            snapshots_moved = snap.rowcount
+
+            # 3) 删除来源设备记录
+            conn.execute(
+                "DELETE FROM devices WHERE device_id = ?", (source_id,)
+            )
+
+            conn.commit()
+            return records_moved, snapshots_moved
+        finally:
+            conn.close()
+
+
+def rename_device(device_id, new_name):
+    """修改设备显示名。返回更新行数（0 表示设备不存在）。"""
+    with _db_lock:
+        conn = get_conn()
+        try:
+            n = conn.execute(
+                "UPDATE devices SET device_name = ? WHERE device_id = ?",
+                (new_name, device_id),
+            ).rowcount
+            conn.commit()
+            return n
+        finally:
+            conn.close()

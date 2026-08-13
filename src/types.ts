@@ -140,6 +140,7 @@ export interface SyncConfig {
   device_name: string;
   device_token: string;
   last_uploaded_rowid: number;
+  last_uploaded_snapshot_ts: number;
   last_sync_at: number;
 }
 
@@ -234,6 +235,17 @@ export interface CleanupResult {
   action: string;
   records_deleted: number;
   devices_deleted?: number;
+}
+
+/** 设备合并结果 */
+export interface MergeResult {
+  records_moved: number;
+  snapshots_moved: number;
+}
+
+/** 设备改名结果 */
+export interface RenameResult {
+  updated: number;
 }
 
 /** 设备筛选选项 */

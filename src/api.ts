@@ -7,6 +7,7 @@ import type {
   CostResult,
   Currency,
   DeviceInfo,
+  MergeResult,
   ModelInfo,
   NotifyConfig,
   PeakConfig,
@@ -19,6 +20,7 @@ import type {
   QuotaSnapshot,
   RegisterRequest,
   RemotePeriodDetail,
+  RenameResult,
   RemoteSnapshot,
   RemoteUsage,
   ShortcutConfig,
@@ -230,6 +232,34 @@ export async function cleanupServer(
       action,
       device_id: deviceId ?? "",
       days: days ?? 0,
+    },
+  });
+}
+
+export async function mergeDevices(
+  masterToken: string,
+  sourceDeviceId: string,
+  targetDeviceId: string
+): Promise<MergeResult> {
+  return invoke<MergeResult>("merge_devices", {
+    req: {
+      master_token: masterToken,
+      source_device_id: sourceDeviceId,
+      target_device_id: targetDeviceId,
+    },
+  });
+}
+
+export async function renameDevice(
+  masterToken: string,
+  deviceId: string,
+  deviceName: string
+): Promise<RenameResult> {
+  return invoke<RenameResult>("rename_device", {
+    req: {
+      master_token: masterToken,
+      device_id: deviceId,
+      device_name: deviceName,
     },
   });
 }
