@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { RangePreset } from "./types";
 import { dateStr, rangeToMs } from "./format";
+import { DatePicker } from "./DatePicker";
 
 interface Props {
   preset: RangePreset;
@@ -41,25 +42,17 @@ export function RangePicker({ preset, custom, onChange }: Props) {
       </div>
       {showCustom && (
         <div className="flex items-center gap-1.5 text-[11px]">
-          <input
-            type="date"
+          <DatePicker
             value={custom.from}
             max={custom.to}
-            onChange={(e) =>
-              onChange("custom", { ...custom, from: e.target.value })
-            }
-            className="px-1.5 py-0.5 rounded-md bg-slate-900/5 border border-slate-900/10 text-slate-900/80 [color-scheme:light]"
+            onChange={(v) => onChange("custom", { ...custom, from: v })}
           />
           <span className="text-slate-700/40">→</span>
-          <input
-            type="date"
+          <DatePicker
             value={custom.to}
             min={custom.from}
             max={dateStr(Date.now())}
-            onChange={(e) =>
-              onChange("custom", { ...custom, to: e.target.value })
-            }
-            className="px-1.5 py-0.5 rounded-md bg-slate-900/5 border border-slate-900/10 text-slate-900/80 [color-scheme:light]"
+            onChange={(v) => onChange("custom", { ...custom, to: v })}
           />
         </div>
       )}
