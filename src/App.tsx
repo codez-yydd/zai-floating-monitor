@@ -4,6 +4,7 @@ import { PricingPanel } from "./PricingPanel";
 import { SyncPanel } from "./SyncPanel";
 import { ComparePanel } from "./ComparePanel";
 import { ReportPanel } from "./ReportPanel";
+import { DataProvider } from "./DataCache";
 import { fetchPricing, fetchCurrency, saveCurrency } from "./api";
 import type { Currency, PricingConfig } from "./types";
 
@@ -52,32 +53,34 @@ export default function App() {
   };
 
   return (
-    <div className="panel-shell">
-      {view === "stats" ? (
-        <StatsPanel
-          currency={currency}
-          pricing={pricing}
-          onGoPricing={() => setView("pricing")}
-          onGoSync={() => setView("sync")}
-          onGoCompare={() => setView("compare")}
-          onGoReport={() => setView("report")}
-        />
-      ) : view === "pricing" ? (
-        <PricingPanel
-          currency={currency}
-          onCurrencyChange={handleCurrencyChange}
-          onBack={backToStats}
-        />
-      ) : view === "compare" ? (
-        <ComparePanel onBack={() => setView("stats")} />
-      ) : view === "report" ? (
-        <ReportPanel
-          onBack={() => setView("stats")}
-          pricing={pricing}
-        />
-      ) : (
-        <SyncPanel onBack={backToStats} />
-      )}
-    </div>
+    <DataProvider pricing={pricing} currency={currency}>
+      <div className="panel-shell">
+        {view === "stats" ? (
+          <StatsPanel
+            currency={currency}
+            pricing={pricing}
+            onGoPricing={() => setView("pricing")}
+            onGoSync={() => setView("sync")}
+            onGoCompare={() => setView("compare")}
+            onGoReport={() => setView("report")}
+          />
+        ) : view === "pricing" ? (
+          <PricingPanel
+            currency={currency}
+            onCurrencyChange={handleCurrencyChange}
+            onBack={backToStats}
+          />
+        ) : view === "compare" ? (
+          <ComparePanel onBack={() => setView("stats")} />
+        ) : view === "report" ? (
+          <ReportPanel
+            onBack={() => setView("stats")}
+            pricing={pricing}
+          />
+        ) : (
+          <SyncPanel onBack={backToStats} />
+        )}
+      </div>
+    </DataProvider>
   );
 }

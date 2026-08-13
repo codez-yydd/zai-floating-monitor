@@ -1,44 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type {
-  CostResult,
-  Currency,
-  CursorSnapshot,
-  DeviceInfo,
-  PricingConfig,
-  RangePreset,
-  RemoteUsage,
-  Stats,
-  StatsTab,
-  SyncConfig,
-  TrendBucket,
-  TrendPoint,
-} from "./types";
-import {
-  computeCost,
-  fetchCursorUsage,
-  fetchPin,
-  fetchStats,
-  fetchTrend,
-  getCursorConfig,
-  getSyncConfig,
-  listRemoteDevices,
-  remoteUsage,
-  setPin,
-} from "./api";
+import type { Currency, PricingConfig, StatsTab } from "./types";
+import { fetchPin, setPin } from "./api";
+import { useDataCache } from "./DataCache";
 import { QuotaPanel } from "./QuotaPanel";
-import { RangePicker, resolveRange } from "./RangePicker";
+import { RangePicker } from "./RangePicker";
 import { ZaiStatsContent } from "./ZaiStatsContent";
 import { CursorPanel } from "./CursorPanel";
 import { SummaryTab } from "./SummaryTab";
-import {
-  computeRemoteCost,
-  mergeCost,
-  mergeStats,
-  mergeTrend,
-  remoteToStats,
-  remoteTrendToLocal,
-} from "./merge";
 
 interface Props {
   currency: Currency;
@@ -49,48 +18,55 @@ interface Props {
   onGoReport: () => void;
 }
 
-export function StatsPanel({ currency, pricing, onGoPricing, onGoSync, onGoCompare, onGoReport }: Props) {
-  const [preset, setPreset] = useState<RangePreset>("today");
-  const [custom, setCustom] = useState(() => {
-    const today = new Date().toISOString().slice(0, 10);
-    const week = new Date(Date.now() - 6 * 86400000).toISOString().slice(0, 10);
-    return { from: week, to: today };
-  });
+/**
+ * 统计面板 —— 纯展示层。
+ *
+ * 所有数据（z.ai / Cursor / quota）由全局 DataProvider 统一预加载 + 定时刷新，
+ * 此组件仅负责从缓存读取并渲染，不再自己发请求或维护定时器。
+ * 数据常驻 Provider，切到其他页面再切回来瞬时恢复，无需重新加载。
+ */
+export function StatsPanel({
+  currency,
+  pricing,
+  onGoPricing,
+  onGoSync,
+  onGoCompare,
+  onGoReport,
+}: Props) {
+  const cache = useDataCache();
+  const {
+    preset,
+    custom,
+    trendBucket,
+    deviceFilter,
+    setPreset,
+    setCustom,
+    setDeviceFilter,
+    stats,
+    cost,
+    trend,
+    error,
+    cursor,
+    cursorError,
+    fxRate,
+    syncConfig,
+    remoteDevices,
+    syncEnabled,
+    lastUpdate,
+    refreshing,
+    refresh,
+  } = cache;
 
   // 三标签：汇总 | z.ai | Cursor
   const [tab, setTab] = useState<StatsTab>(
     () => (localStorage.getItem("zbar-tab") as StatsTab) || "summary"
   );
 
-  const [stats, setStats] = useState<Stats | null>(null);
-  const [cost, setCost] = useState<CostResult | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [lastUpdate, setLastUpdate] = useState<number>(0);
-  // 趋势图：分桶数据（小时/日，跟随所选时间范围）
-  const [trend, setTrend] = useState<TrendPoint[]>([]);
-
-  // ===== Cursor 用量相关状态 =====
-  const [cursor, setCursor] = useState<CursorSnapshot | null>(null);
-  const [cursorError, setCursorError] = useState<string | null>(null);
-  const [cursorLoading, setCursorLoading] = useState(false);
-  // USD→CNY 汇率（汇总页合并花费用）
-  const [fxRate, setFxRate] = useState(7.2);
-
-  // ===== 多设备同步相关状态 =====
-  const [syncConfig, setSyncConfig] = useState<SyncConfig | null>(null);
-  const [remoteDevices, setRemoteDevices] = useState<DeviceInfo[]>([]);
-  const [deviceFilter, setDeviceFilter] = useState<string>("all");
-
   // ===== 窗口置顶常驻（仅 Windows）=====
   const isWindows =
     typeof navigator !== "undefined" &&
     /windows/i.test(navigator.userAgent);
   const [pinned, setPinned] = useState(false);
-
-  // Cursor 请求竞态保护：快速切换时间范围时，丢弃过期的 fire-and-forget 响应，
-  // 防止旧请求后到覆盖新数据（events API 较慢，容易触发）。
-  const cursorReqId = useRef(0);
 
   useEffect(() => {
     if (!isWindows) return;
@@ -103,150 +79,6 @@ export function StatsPanel({ currency, pricing, onGoPricing, onGoSync, onGoCompa
   useEffect(() => {
     localStorage.setItem("zbar-tab", tab);
   }, [tab]);
-
-  // preset → 桶粒度：今日/24h 按小时，更长范围按日
-  const trendBucket: TrendBucket =
-    preset === "today" || preset === "1d" ? "hour" : "day";
-
-  const syncEnabled = !!syncConfig?.enabled && !!syncConfig.device_token;
-
-  // 初次加载时读取同步配置 + 设备列表 + Cursor 配置
-  useEffect(() => {
-    getSyncConfig()
-      .then((cfg) => {
-        setSyncConfig(cfg);
-        if (cfg.enabled && cfg.device_token) {
-          listRemoteDevices()
-            .then(setRemoteDevices)
-            .catch(() => {});
-        }
-      })
-      .catch(() => {});
-    getCursorConfig()
-      .then((cfg) => setFxRate(cfg.usd_cny_rate))
-      .catch(() => {});
-  }, []);
-
-  // z.ai 数据加载（本地 SQLite + 远端同步），每 30 秒刷新
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    const [from, to] = resolveRange(preset, custom);
-
-    try {
-      // 根据设备筛选决定数据来源：
-      let localStats: Stats | null = null;
-      let localCost: CostResult | null = null;
-      let localTrend: TrendPoint[] = [];
-      let remote: RemoteUsage | null = null;
-
-      const wantLocal = deviceFilter === "all" || deviceFilter === "local";
-      const wantRemote =
-        syncEnabled &&
-        (deviceFilter === "all" ||
-          (deviceFilter !== "local" && deviceFilter !== "all"));
-
-      const tasks: Promise<unknown>[] = [];
-      if (wantLocal) {
-        tasks.push(
-          fetchStats(from, to).then((s) => (localStats = s)),
-          computeCost(from, to).then((c) => (localCost = c)),
-          fetchTrend(from, to, trendBucket).then((t) => (localTrend = t))
-        );
-      }
-      if (wantRemote && syncConfig) {
-        const opts =
-          deviceFilter === "all"
-            ? { excludeDevice: syncConfig.device_id }
-            : { devices: deviceFilter };
-        const isSpecificRemote = deviceFilter !== "all";
-        tasks.push(
-          remoteUsage(from, to, trendBucket, opts)
-            .then((r) => (remote = r))
-            .catch((e) => {
-              if (isSpecificRemote) throw e;
-            })
-        );
-      }
-
-      await Promise.all(tasks);
-
-      // 合并
-      if (deviceFilter === "local") {
-        setStats(localStats);
-        setCost(localCost);
-        setTrend(localTrend);
-      } else if (remote && !localStats) {
-        setStats(remoteToStats(remote));
-        setCost(computeRemoteCost(remote, pricing, currency));
-        setTrend(remoteTrendToLocal(remote, pricing, trendBucket));
-      } else if (localStats && remote) {
-        setStats(mergeStats(localStats, remote));
-        setCost(mergeCost(localCost, remote, pricing, currency));
-        setTrend(mergeTrend(localTrend, remote, pricing, trendBucket));
-      } else {
-        setStats(localStats);
-        setCost(localCost);
-        setTrend(localTrend);
-      }
-      setLastUpdate(Date.now());
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [preset, custom, trendBucket, deviceFilter, syncConfig, syncEnabled, pricing, currency]);
-
-  // Cursor 数据独立加载（账号级别，不受设备筛选影响）。
-  // 用递增 reqId 做竞态保护：快速切换时间范围时丢弃过期的旧响应。
-  const loadCursor = useCallback(() => {
-    const [from, to] = resolveRange(preset, custom);
-    const reqId = ++cursorReqId.current;
-    setCursorLoading(true);
-    setCursorError(null);
-    fetchCursorUsage(from, to)
-      .then((data) => {
-        if (reqId !== cursorReqId.current) return;
-        setCursor(data);
-        setLastUpdate(Date.now());
-      })
-      .catch((e) => {
-        if (reqId !== cursorReqId.current) return;
-        setCursor(null);
-        setCursorError(String(e));
-      })
-      .finally(() => {
-        if (reqId !== cursorReqId.current) return;
-        setCursorLoading(false);
-      });
-  }, [preset, custom]);
-
-  // z.ai：挂载 + 时间范围/设备变化时加载 + 每 30 秒刷新
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  useEffect(() => {
-    const timer = setInterval(load, 30_000);
-    return () => clearInterval(timer);
-  }, [load]);
-
-  // Cursor：挂载 + 时间范围变化时加载 + 每 2 分钟刷新
-  // 数据常驻 React state，切换标签即时展示，无需重新加载
-  useEffect(() => {
-    loadCursor();
-  }, [loadCursor]);
-
-  useEffect(() => {
-    const timer = setInterval(loadCursor, 120_000);
-    return () => clearInterval(timer);
-  }, [loadCursor]);
-
-  // 手动刷新：同时触发 z.ai + Cursor
-  const refreshAll = useCallback(() => {
-    load();
-    loadCursor();
-  }, [load, loadCursor]);
 
   return (
     <div className="flex flex-col h-full">
@@ -314,8 +146,8 @@ export function StatsPanel({ currency, pricing, onGoPricing, onGoSync, onGoCompa
               </button>
             )}
             <button
-              onClick={refreshAll}
-              disabled={loading}
+              onClick={refresh}
+              disabled={refreshing}
               className="text-slate-700/50 hover:text-slate-900/80 text-xs transition-colors"
               title="刷新"
             >
@@ -376,13 +208,9 @@ export function StatsPanel({ currency, pricing, onGoPricing, onGoSync, onGoCompa
         </div>
       </div>
 
-      {/* Coding Plan 额度监控
-          始终挂载（非条件卸载），保证 QuotaPanel 内部的 30s 轮询持续运行、
-          额度快照持续写入 quota_history —— 即使停留在「汇总」或「Cursor」标签也不中断。
-          非 z.ai 标签时用 CSS 隐藏而非卸载。 */}
-      <div style={{ display: tab === "zai" ? "block" : "none" }}>
-        <QuotaPanel onGoSettings={onGoPricing} />
-      </div>
+      {/* Coding Plan 额度监控 —— 仅在 z.ai 标签显示。
+          额度采样由 DataProvider 全局定时器负责，与组件挂载无关，无需 display:none hack。 */}
+      {tab === "zai" && <QuotaPanel onGoSettings={onGoPricing} />}
 
       {/* 标签内容 */}
       {tab === "zai" ? (
@@ -404,7 +232,7 @@ export function StatsPanel({ currency, pricing, onGoPricing, onGoSync, onGoCompa
       ) : tab === "cursor" ? (
         <CursorPanel
           snapshot={cursor}
-          loading={cursorLoading}
+          loading={!cursor && !cursorError}
           error={cursorError}
           currency={currency}
           fxRate={fxRate}
