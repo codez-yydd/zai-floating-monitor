@@ -167,16 +167,16 @@ export function StatsPanel({
             setCustom(c);
           }}
         />
-        {/* 设备筛选器：仅在同步启用时显示 */}
-        {syncEnabled && (
-          <div className="mt-2 flex items-center gap-1.5">
-            <span className="text-[10px] text-slate-700/45 shrink-0">设备</span>
+        {/* 设备筛选 + 三标签同一行，少占一排高度 */}
+        <div className="mt-2 flex items-center gap-1.5">
+          {syncEnabled && (
             <select
               value={deviceFilter}
               onChange={(e) => setDeviceFilter(e.target.value)}
-              className="num flex-1 px-1.5 py-0.5 rounded-md bg-slate-900/5 border border-slate-900/10 text-[10px] text-slate-900/80 focus:outline-none focus:border-sky-400/60"
+              title="筛选设备"
+              className="num w-[4.75rem] shrink-0 px-1 py-1 rounded-md bg-slate-900/5 border border-slate-900/10 text-[10px] text-slate-900/80 focus:outline-none focus:border-sky-400/60"
             >
-              <option value="all">全部（汇总）</option>
+              <option value="all">全部</option>
               <option value="local">
                 本机{syncConfig?.device_name ? `（${syncConfig.device_name}）` : ""}
               </option>
@@ -188,27 +188,26 @@ export function StatsPanel({
                   </option>
                 ))}
             </select>
+          )}
+          <div className="flex-1 flex gap-0.5 p-0.5 rounded-lg bg-slate-900/5">
+            {(["summary", "zai", "cursor"] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setTab(t)}
+                className={`flex-1 py-1 rounded-md text-[10px] font-medium transition-colors ${
+                  tab === t
+                    ? t === "cursor"
+                      ? "bg-white text-violet-700 shadow-sm"
+                      : t === "zai"
+                        ? "bg-white text-sky-700 shadow-sm"
+                        : "bg-white text-slate-900 shadow-sm"
+                    : "text-slate-700/50 hover:text-slate-900/70"
+                }`}
+              >
+                {t === "summary" ? "汇总" : t === "zai" ? "Z.ai" : "Cursor"}
+              </button>
+            ))}
           </div>
-        )}
-        {/* 三标签栏：汇总 | Z.ai | Cursor */}
-        <div className="mt-2 flex gap-0.5 p-0.5 rounded-lg bg-slate-900/5">
-          {(["summary", "zai", "cursor"] as const).map((t) => (
-            <button
-              key={t}
-              onClick={() => setTab(t)}
-              className={`flex-1 py-1 rounded-md text-[10px] font-medium transition-colors ${
-                tab === t
-                  ? t === "cursor"
-                    ? "bg-white text-violet-700 shadow-sm"
-                    : t === "zai"
-                      ? "bg-white text-sky-700 shadow-sm"
-                      : "bg-white text-slate-900 shadow-sm"
-                  : "text-slate-700/50 hover:text-slate-900/70"
-              }`}
-            >
-              {t === "summary" ? "汇总" : t === "zai" ? "Z.ai" : "Cursor"}
-            </button>
-          ))}
         </div>
       </div>
 

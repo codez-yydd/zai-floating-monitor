@@ -25,6 +25,80 @@ interface Props {
   fxRate: number;
 }
 
+const LEVEL_LABEL: Record<string, string> = {
+  lite: "Lite",
+  pro: "Pro",
+  max: "Max",
+  ultra: "Ultra",
+};
+
+/** 单个 agent 在汇总页的展示单元。以后加新 agent 往数组里追加一项即可。 */
+interface AgentSummary {
+  id: string;
+  name: string;
+  /** 占比条 / 圆点颜色（hex，避免 Tailwind 动态类名失效） */
+  color: string;
+  nameClass: string;
+  badge?: string | null;
+  badgeClass: string;
+  cost: number;
+  tokens: number;
+  metrics: { label: string; usedPct: number }[];
+  empty?: string;
+}
+
+/** 花费占比条：用 gradient 硬切色段，避免 flex/width 舍入露出底色 */
+function CompositionBar({ agents }: { agents: AgentSummary[] }) {
+  const total = agents.reduce((s, a) => s + a.cost, 0);
+  if (total <= 0) {
+    return <div className="h-1.5 rounded-full bg-slate-900/8" />;
+  }
+
+  let acc = 0;
+  const stops: string[] = [];
+  for (const a of agents) {
+    if (a.cost <= 0) continue;
+    const start = (acc / total) * 100;
+    acc += a.cost;
+    const end = (acc / total) * 100;
+    stops.push(`${a.color} ${start}%`, `${a.color} ${end}%`);
+  }
+
+  return (
+    <div
+      className="h-1.5 rounded-full"
+      style={{ background: `linear-gradient(90deg, ${stops.join(", ")})` }}
+    />
+  );
+}
+
+/** 额度一行：标签 + 剩余进度条 + 剩余% */
+function QuotaMiniRow({
+  label,
+  usedPct,
+}: {
+  label: string;
+  usedPct: number;
+}) {
+  const remain = Math.max(0, 100 - usedPct);
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="text-[9px] text-slate-500 w-7 shrink-0">{label}</span>
+      <ProgressBar
+        pct={remain / 100}
+        height="h-1"
+        gradient={remainingGradient(remain)}
+      />
+      <span
+        className="num text-[9px] font-medium w-12 text-right shrink-0 whitespace-nowrap"
+        style={{ color: remainingTextColor(remain) }}
+      >
+        剩 {Math.round(remain)}%
+      </span>
+    </div>
+  );
+}
+
 export function SummaryTab({
   stats,
   cost,
@@ -40,10 +114,13 @@ export function SummaryTab({
   const { quota, quotaError } = useDataCache();
   const hour5Pct = quota?.hour5?.percentage ?? null;
   const weeklyPct = quota?.weekly?.percentage ?? null;
+  const levelLabel = quota?.level
+    ? LEVEL_LABEL[quota.level] || quota.level
+    : null;
 
   // z.ai 花费 & token
   const zaiCost =
-    currency === "cny" ? cost?.total_cny ?? 0 : cost?.total_usd ?? 0;
+    currency === "cny" ? (cost?.total_cny ?? 0) : (cost?.total_usd ?? 0);
   const zaiTokens = stats?.overall.total_tokens ?? 0;
 
   // Cursor 花费 & token（events 口径）
@@ -53,22 +130,62 @@ export function SummaryTab({
     currency === "cny" ? cursorCostRaw * fxRate : cursorCostRaw;
   const cursorTokens = cursorEvents?.total_tokens ?? 0;
 
-  // 合计
-  const totalCost = zaiCost + cursorCost;
-  const totalTokens = zaiTokens + cursorTokens;
-
-  // 占比（用于可视化条）
-  const zaiCostPct = totalCost > 0 ? zaiCost / totalCost : 0;
-  const zaiTokenPct = totalTokens > 0 ? zaiTokens / totalTokens : 0;
-
-  // Cursor 套餐进度
+  // Cursor 套餐进度：只用总量 / Auto / API 百分比。
+  // used_cents/limit_cents 是套餐标价口径，不能代表 Auto 额度（Auto 可用量远大于 API 的 $20 限额）。
   const plan = cursor?.plan;
-  const planPct =
-    plan?.total_pct ??
-    (plan?.used_cents != null && plan?.limit_cents != null &&
-    plan.limit_cents > 0
-      ? (plan.used_cents / plan.limit_cents) * 100
-      : null);
+
+  const zcodeEmpty = quotaError
+    ? /未配置|Token/i.test(quotaError)
+      ? "未配置 Token"
+      : "额度获取失败"
+    : "加载中…";
+
+  const zcodeMetrics = [
+    ...(weeklyPct != null ? [{ label: "本周", usedPct: weeklyPct }] : []),
+    ...(hour5Pct != null ? [{ label: "5h", usedPct: hour5Pct }] : []),
+  ];
+  const cursorMetrics = [
+    ...(plan?.total_pct != null
+      ? [{ label: "总量", usedPct: plan.total_pct }]
+      : []),
+    ...(plan?.auto_pct != null
+      ? [{ label: "Auto", usedPct: plan.auto_pct }]
+      : []),
+    ...(plan?.api_pct != null
+      ? [{ label: "API", usedPct: plan.api_pct }]
+      : []),
+  ];
+
+  // 按 agent 组装。新增来源时在此追加，总览占比条 / 花费表 / 额度列表会一起跟上。
+  const agents: AgentSummary[] = [
+    {
+      id: "zcode",
+      name: "ZCode",
+      color: "#0ea5e9",
+      nameClass: "text-sky-700",
+      badge: levelLabel,
+      badgeClass: "bg-sky-500/12 text-sky-700",
+      cost: zaiCost,
+      tokens: zaiTokens,
+      metrics: zcodeMetrics,
+      empty: zcodeEmpty,
+    },
+    {
+      id: "cursor",
+      name: "Cursor",
+      color: "#8b5cf6",
+      nameClass: "text-violet-700",
+      badge: cursor?.membership_type ?? null,
+      badgeClass: "bg-violet-500/12 text-violet-700 capitalize",
+      cost: cursorCost,
+      tokens: cursorTokens,
+      metrics: cursorMetrics,
+      empty: cursor?.logged_in ? "暂无额度数据" : "未登录",
+    },
+  ];
+
+  const totalCost = agents.reduce((s, a) => s + a.cost, 0);
+  const totalTokens = agents.reduce((s, a) => s + a.tokens, 0);
 
   // 合并趋势：按 label 对齐 z.ai 趋势 + Cursor daily（仅日桶有意义）
   // 双货币各自计算：usd 用原值，cny = usd × 汇率，分别写入对应字段，
@@ -96,138 +213,90 @@ export function SummaryTab({
   });
 
   return (
-    <div className="flex-1 overflow-y-auto px-3.5 py-3 space-y-3">
-      {/* 合计花费 */}
-      <div>
-        <div className="text-[10px] uppercase tracking-wide text-slate-700/55">
-          合计花费
-        </div>
-        <div className="num text-[26px] font-bold text-slate-900 leading-none mt-0.5">
-          {formatCost(totalCost, currency)}
-        </div>
-        {/* 花费占比条：z.ai vs Cursor */}
-        <div className="flex items-center gap-1.5 mt-2">
-          <span className="text-[9px] text-slate-700/45 w-10 shrink-0">ZCode</span>
-          <div className="flex-1 h-2 rounded-full overflow-hidden flex bg-slate-900/8">
-            <div
-              className="h-full bg-sky-500"
-              style={{ width: `${zaiCostPct * 100}%` }}
-            />
-            <div
-              className="h-full bg-violet-500"
-              style={{ width: `${(1 - zaiCostPct) * 100}%` }}
-            />
-          </div>
-        </div>
-        <div className="flex items-center justify-between text-[10px] num mt-1">
-          <span className="text-sky-600/80">
-            ZCode {formatCost(zaiCost, currency)}
-          </span>
-          <span className="text-violet-600/80">
-            Cursor {formatCost(cursorCost, currency)}
-          </span>
-        </div>
-      </div>
-
-      {/* 合计 Token */}
-      <div className="rounded-lg bg-white/25 border border-white/30 px-2.5 py-2">
-        <div className="flex items-center justify-between mb-1.5">
-          <span className="text-[10px] uppercase tracking-wide text-slate-700/55">
-            合计 Token
-          </span>
-          <span className="num text-[13px] font-semibold text-slate-900/80">
-            {formatTokens(totalTokens)}
-          </span>
-        </div>
-        <div className="h-2 rounded-full overflow-hidden flex bg-slate-900/8">
-          <div
-            className="h-full bg-sky-500"
-            style={{ width: `${zaiTokenPct * 100}%` }}
-          />
-          <div
-            className="h-full bg-violet-500"
-            style={{ width: `${(1 - zaiTokenPct) * 100}%` }}
-          />
-        </div>
-        <div className="flex items-center justify-between text-[10px] num mt-1">
-          <span className="text-sky-600/70">
-            ZCode {formatTokens(zaiTokens)}
-          </span>
-          <span className="text-violet-600/70">
-            Cursor {formatTokens(cursorTokens)}
-          </span>
-        </div>
-      </div>
-
-      {/* 双看板：额度进度 */}
-      <div className="grid grid-cols-2 gap-1.5">
-        {/* ZCode 周额度（剩余版） */}
-        <div className="rounded-lg bg-white/25 border border-white/30 px-2 py-1.5">
-          <div className="flex items-center justify-between">
-            <span className="text-[9px] text-slate-700/45">ZCode 周额度</span>
-            {weeklyPct != null && (
-              <span
-                className="num text-[10px] font-semibold"
-                style={{ color: remainingTextColor(100 - weeklyPct) }}
-              >
-                剩 {Math.max(0, Math.round(100 - weeklyPct))}%
-              </span>
-            )}
-          </div>
-          {weeklyPct != null ? (
-            <>
-              <ProgressBar
-                pct={(100 - weeklyPct) / 100}
-                height="h-1"
-                gradient={remainingGradient(100 - weeklyPct)}
-              />
-              {hour5Pct != null && (
-                <div className="flex items-center gap-1.5 mt-1">
-                  <span className="text-[8px] text-slate-700/40 shrink-0">5h</span>
-                  <ProgressBar
-                    pct={(100 - hour5Pct) / 100}
-                    height="h-1"
-                    gradient={remainingGradient(100 - hour5Pct)}
-                  />
-                  <span className="num text-[8px] text-slate-700/50 w-8 text-right">
-                    剩 {Math.max(0, Math.round(100 - hour5Pct))}%
-                  </span>
-                </div>
-              )}
-            </>
-          ) : (
-            <div className="text-[10px] text-slate-700/40 mt-1">
-              {quotaError
-                ? /未配置|Token/i.test(quotaError)
-                  ? "未配置 Token"
-                  : "额度获取失败"
-                : "加载中…"}
+    <div className="flex-1 min-h-0 overflow-y-auto px-3.5 pt-3 pb-2 flex flex-col gap-2.5">
+      {/* 总览：数字 → 一条占比 → 来源表 */}
+      <div className="rounded-xl bg-white/30 border border-white/35 px-3 py-2.5 shrink-0">
+        <div className="flex items-end justify-between gap-3">
+          <div>
+            <div className="text-[10px] text-slate-500">合计花费</div>
+            <div className="num text-[26px] font-bold text-slate-900 leading-none mt-1">
+              {formatCost(totalCost, currency)}
             </div>
-          )}
+          </div>
+          <div className="text-right">
+            <div className="text-[10px] text-slate-500">合计 Token</div>
+            <div className="num text-[16px] font-semibold text-slate-800 leading-none mt-1">
+              {formatTokens(totalTokens)}
+            </div>
+          </div>
         </div>
-        {/* Cursor 套餐（剩余版） */}
-        <div className="rounded-lg bg-white/25 border border-white/30 px-2 py-1.5">
-          <div className="flex items-center justify-between">
-            <span className="text-[9px] text-slate-700/45">Cursor 套餐</span>
-            {planPct != null && (
-              <span
-                className="num text-[10px] font-semibold"
-                style={{ color: remainingTextColor(100 - planPct) }}
-              >
-                剩 {Math.max(0, Math.round(100 - planPct))}%
+
+        <div className="mt-2.5">
+          <CompositionBar agents={agents} />
+        </div>
+
+        <div className="mt-2.5 grid grid-cols-[1fr_auto_auto] gap-x-3 gap-y-1 items-center">
+          {agents.map((a) => (
+            <div key={a.id} className="contents">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span
+                  className="w-1.5 h-1.5 rounded-full shrink-0"
+                  style={{ background: a.color }}
+                />
+                <span
+                  className={`text-[10px] font-medium truncate ${a.nameClass}`}
+                >
+                  {a.name}
+                </span>
+              </div>
+              <span className="num text-[11px] font-semibold text-slate-800 text-right">
+                {formatCost(a.cost, currency)}
               </span>
+              <span className="num text-[11px] text-slate-500 text-right">
+                {formatTokens(a.tokens)}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* 额度：每个 agent 一块，纵向排列，方便以后继续加 */}
+      <div className="rounded-xl bg-white/30 border border-white/35 shrink-0 divide-y divide-slate-900/8">
+        {agents.map((a) => (
+          <div key={a.id} className="px-3 py-2">
+            <div className="flex items-center justify-between gap-1 mb-1.5">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span
+                  className="w-1.5 h-1.5 rounded-full shrink-0"
+                  style={{ background: a.color }}
+                />
+                <span className="text-[10px] font-medium text-slate-700 truncate">
+                  {a.name}
+                </span>
+                {a.badge && (
+                  <span
+                    className={`shrink-0 px-1 py-px rounded text-[8px] font-medium ${a.badgeClass}`}
+                  >
+                    {a.badge}
+                  </span>
+                )}
+              </div>
+            </div>
+            {a.metrics.length > 0 ? (
+              <div className="space-y-1">
+                {a.metrics.map((m) => (
+                  <QuotaMiniRow
+                    key={m.label}
+                    label={m.label}
+                    usedPct={m.usedPct}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="text-[10px] text-slate-500">{a.empty}</div>
             )}
           </div>
-          {planPct != null ? (
-            <ProgressBar
-              pct={(100 - planPct) / 100}
-              height="h-1"
-              gradient={remainingGradient(100 - planPct)}
-            />
-          ) : (
-            <div className="text-[10px] text-slate-700/40 mt-1">未登录</div>
-          )}
-        </div>
+        ))}
       </div>
 
       {/* 合并趋势图 */}
@@ -238,6 +307,7 @@ export function SummaryTab({
           currency={currency}
           metric={trendMetric}
           onMetricChange={setTrendMetric}
+          fill
         />
       )}
     </div>

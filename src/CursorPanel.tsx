@@ -27,6 +27,42 @@ function centsToUsd(cents: number | null): number | null {
   return cents == null ? null : cents / 100;
 }
 
+/** 套餐额度行：标签 + 剩余% 在上，通栏进度条在下（总量 / Auto / API 同一套） */
+function PlanQuotaRow({
+  label,
+  hint,
+  usedPct,
+}: {
+  label: string;
+  hint?: string;
+  usedPct: number;
+}) {
+  const remain = Math.max(0, 100 - usedPct);
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-2 mb-0.5">
+        <span className="text-[10px] text-slate-600 truncate">
+          {label}
+          {hint && (
+            <span className="ml-1 text-[8px] text-slate-400">{hint}</span>
+          )}
+        </span>
+        <span
+          className="num text-[10px] font-semibold shrink-0 whitespace-nowrap"
+          style={{ color: remainingTextColor(remain) }}
+        >
+          剩 {Math.round(remain)}%
+        </span>
+      </div>
+      <ProgressBar
+        pct={remain / 100}
+        height="h-1.5"
+        gradient={remainingGradient(remain)}
+      />
+    </div>
+  );
+}
+
 export function CursorPanel({
   snapshot,
   loading,
@@ -130,66 +166,25 @@ export function CursorPanel({
       {/* 套餐额度（本计费周期，不随时间范围变化） */}
       {plan && (
         <div className="rounded-lg bg-white/25 border border-white/30 px-2.5 py-2 space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] uppercase tracking-wide text-slate-700/55">
-              套餐额度
-              <span className="ml-1 text-[8px] text-slate-700/35 normal-case">
-                本计费周期
-              </span>
-            </span>
-            {planPct != null && (
-              <span
-                className="num text-[11px] font-semibold"
-                style={{ color: remainingTextColor(100 - planPct) }}
-              >
-                剩 {Math.max(0, Math.round(100 - planPct))}%
-              </span>
-            )}
-          </div>
           {planPct != null ? (
             <>
-              <ProgressBar
-                pct={(100 - planPct) / 100}
-                gradient={remainingGradient(100 - planPct)}
+              <PlanQuotaRow
+                label="总量"
+                hint="本计费周期"
+                usedPct={planPct}
               />
-              {/* Auto / API 百分比（剩余版） */}
-              {(plan.auto_pct != null || plan.api_pct != null) && (
-                <div className="flex gap-3 pt-1 border-t border-slate-900/8">
-                  {plan.auto_pct != null && (
-                    <div className="flex-1">
-                      <div className="text-[9px] text-slate-700/45">Auto+Composer</div>
-                      <div className="flex items-center gap-1.5 mt-0.5">
-                        <ProgressBar
-                          pct={(100 - plan.auto_pct) / 100}
-                          height="h-1"
-                          gradient={remainingGradient(100 - plan.auto_pct)}
-                        />
-                        <span className="num text-[9px] text-slate-700/60 w-9 text-right">
-                          剩 {Math.max(0, Math.round(100 - plan.auto_pct))}%
-                        </span>
-                      </div>
-                    </div>
-                  )}
-                  {plan.api_pct != null && (
-                    <div className="flex-1">
-                      <div className="text-[9px] text-slate-700/45">API</div>
-                      <div className="flex items-center gap-1.5 mt-0.5">
-                        <ProgressBar
-                          pct={(100 - plan.api_pct) / 100}
-                          height="h-1"
-                          gradient={remainingGradient(100 - plan.api_pct)}
-                        />
-                        <span className="num text-[9px] text-slate-700/60 w-9 text-right">
-                          剩 {Math.max(0, Math.round(100 - plan.api_pct))}%
-                        </span>
-                      </div>
-                    </div>
-                  )}
-                </div>
+              {plan.auto_pct != null && (
+                <PlanQuotaRow label="Auto" usedPct={plan.auto_pct} />
+              )}
+              {plan.api_pct != null && (
+                <PlanQuotaRow label="API" usedPct={plan.api_pct} />
               )}
             </>
           ) : (
-            <div className="text-[10px] text-slate-700/40">暂无额度数据</div>
+            <>
+              <div className="text-[10px] text-slate-600">套餐额度</div>
+              <div className="text-[10px] text-slate-700/40">暂无额度数据</div>
+            </>
           )}
         </div>
       )}

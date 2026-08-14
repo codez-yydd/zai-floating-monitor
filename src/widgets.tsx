@@ -136,6 +136,7 @@ export function TrendChart({
   metric,
   onMetricChange,
   showMetricToggle = true,
+  fill = false,
 }: {
   points: TrendPoint[];
   bucket: "hour" | "day";
@@ -143,6 +144,8 @@ export function TrendChart({
   metric: "cost" | "token";
   onMetricChange?: (m: "cost" | "token") => void;
   showMetricToggle?: boolean;
+  /** 撑满父级剩余高度（汇总页用，避免柱图下方大块留白） */
+  fill?: boolean;
 }) {
   // 取每根柱子的数值
   const values = points.map((d) =>
@@ -194,11 +197,15 @@ export function TrendChart({
     n <= 8 ? 1 : Math.max(2, Math.ceil(n / 7));
 
   return (
-    <div className="rounded-lg bg-white/25 border border-white/30 px-2.5 py-2">
+    <div
+      className={`rounded-xl bg-white/30 border border-white/35 px-3 pt-2.5 pb-2 ${
+        fill ? "flex-1 min-h-0 flex flex-col" : ""
+      }`}
+    >
       {/* 标题行 */}
-      <div className="flex items-center justify-between mb-1.5">
+      <div className="flex items-center justify-between mb-2 shrink-0">
         <div className="flex items-center gap-1.5">
-          <span className="text-[10px] uppercase tracking-wide text-slate-700/55">
+          <span className="text-[10px] text-slate-600">
             趋势
           </span>
           {deltaText && (
@@ -223,10 +230,10 @@ export function TrendChart({
               <button
                 key={m}
                 onClick={() => onMetricChange(m)}
-                className={`px-1.5 rounded text-[9px] transition-colors ${
+                className={`px-1.5 py-px rounded text-[9px] transition-colors ${
                   metric === m
                     ? "bg-sky-500/80 text-white"
-                    : "text-slate-700/45 hover:text-slate-900/70"
+                    : "text-slate-500 hover:text-slate-700"
                 }`}
               >
                 {m === "cost" ? "花费" : "Token"}
@@ -237,7 +244,11 @@ export function TrendChart({
       </div>
 
       {/* 柱状图 */}
-      <div className={`flex items-end ${barGap} h-12 relative`}>
+      <div
+        className={`flex items-end ${barGap} relative ${
+          fill ? "flex-1 min-h-14" : "h-14"
+        }`}
+      >
         {points.map((d, i) => {
           const v = values[i];
           const h = maxValue > 0 ? (v / maxValue) * 100 : 0;
@@ -284,20 +295,24 @@ export function TrendChart({
         })}
       </div>
 
-      {/* 标签：柱子多时隔几个显示一个，避免文字重叠 */}
-      <div className={`flex ${barGap} mt-1`}>
+      {/* 标签：柱子多时隔几个显示一个；靠近末柱的步进标签去掉，避免与「始终显示的最后一根」挤在一起 */}
+      <div className={`flex ${barGap} mt-1 shrink-0`}>
         {points.map((d, i) => {
-          // 按 labelStep 隔行；最后一个总是显示
-          const showLabel = i === points.length - 1 || i % labelStep === 0;
-          const isLast = i === points.length - 1;
+          const isFirst = i === 0;
+          const isLast = i === n - 1;
+          const farFromLast = n - 1 - i >= Math.max(1, Math.ceil(labelStep / 2));
+          const showLabel =
+            isFirst || isLast || (i % labelStep === 0 && farFromLast);
           return (
             <span
               key={d.label}
-              className={`flex-1 text-center text-[8px] num min-w-0 ${
+              className={`flex-1 text-[8px] num min-w-0 whitespace-nowrap ${
+                isFirst ? "text-left" : isLast ? "text-right" : "text-center"
+              } ${
                 isLast
-                  ? "text-sky-600/80 font-medium"
-                  : "text-slate-700/40"
-              } ${showLabel ? "" : "opacity-0"}`}
+                  ? "text-sky-600 font-medium"
+                  : "text-slate-500/80"
+              } ${showLabel ? "" : "invisible"}`}
             >
               {d.label}
             </span>
