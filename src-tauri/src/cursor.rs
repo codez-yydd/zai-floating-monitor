@@ -866,6 +866,17 @@ pub fn test_cursor_auth() -> Result<(Option<String>, Option<String>, Option<Stri
     Ok((auth.email, auth.name, summary.membership_type))
 }
 
+/// 轻量拉取 Cursor 用量合计（菜单栏标题合并用）。
+/// 只走 events（带 120s 缓存），不拉 summary/auth，避免 30s 定时器狂发请求。
+/// 返回 (API 标价花费 USD, 总 token)。未配置/未登录/网络失败时返回 Err，调用方静默降级。
+pub fn fetch_cursor_usage_totals(from_ms: i64, to_ms: i64) -> Result<(f64, i64), String> {
+    let cfg = load_cursor_config()?;
+    let cookie = resolve_cookie(&cfg)?;
+    let events = fetch_events_cached(&cookie, from_ms, to_ms)?;
+    let (summary, _, _) = aggregate_events(&events);
+    Ok((summary.total_cost_usd, summary.total_tokens))
+}
+
 /// 诊断信息：排查 events API 为何返回空。
 /// 返回 cookie 来源、events 原始响应状态码 + body 摘要。
 #[derive(Debug, Serialize)]

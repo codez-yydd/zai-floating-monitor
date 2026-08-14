@@ -866,6 +866,23 @@ fn today_tray_title(app: &AppHandle) -> String {
         }
     }
 
+    // Cursor：合并今日用量（events 带 120s 缓存；未配置/未登录/失败静默降级，
+    // 不影响 ZCode 部分展示，口径与前端汇总页一致：ZCode + Cursor 合计）
+    if let Ok((cursor_cost_usd, cursor_tokens)) =
+        cursor::fetch_cursor_usage_totals(today_start, now_ms)
+    {
+        total += cursor_tokens;
+        // Cursor 花费为 USD，按货币偏好换算（CNY 乘汇率）
+        let rate = cursor::load_cursor_config()
+            .map(|c| c.usd_cny_rate)
+            .unwrap_or(7.2);
+        cost += if is_usd {
+            cursor_cost_usd
+        } else {
+            cursor_cost_usd * rate
+        };
+    }
+
     let _ = app; // 占位
     let sym = if is_usd { "$" } else { "¥" };
     if total > 0 {
