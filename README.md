@@ -8,17 +8,42 @@
 
 ---
 
+## 📸 界面截图
+
+| 汇总视图 | Z.ai 视图 |
+|:---:|:---:|
+| ![汇总视图](doc/img/summary.png) | ![Z.ai 视图](doc/img/zai-quota.png) |
+| 多服务合计花费 / Token 与订阅额度 | Coding Plan 5 小时 / 每周 / MCP 额度 |
+
+| 趋势与模型排行 | Cursor 视图 |
+|:---:|:---:|
+| ![趋势与模型排行](doc/img/summary-trend.png) | ![Cursor 视图](doc/img/cursor.png) |
+| 按时段用量趋势与模型排行 | Pro / Auto / API 额度与用量统计 |
+
+| 价格设置 | 设备同步 |
+|:---:|:---:|
+| ![价格设置](doc/img/settings.png) | ![设备同步](doc/img/sync.png) |
+| 双币种单价、额度监控、汇率与全局快捷键 | 多设备增量同步与数据管理 |
+
+---
+
 ## ✨ 功能特性
 
-- **实时菜单栏标题** — 每 30 秒刷新，显示今日自然日的总花费（`¥xx.xx`）与总 Token（如 `3.7M`）。
+- **实时菜单栏标题** — 常驻 macOS 顶部菜单栏，每 30 秒刷新，显示今日自然日的总花费（`¥xx.xx`，美元模式下为 `$xx.xx`）与总 Token（如 `3.7M`）。
 - **浮动统计面板** — 点击托盘图标唤出，支持 **今日 / 24h / 7天 / 30天 / 自定义** 时间范围切换。
 - **Token 明细** — 输入、输出、缓存读、缓存写、推理 Token 分类统计，并按占比可视化。
 - **按模型分组** — 列出每个模型的请求数、Token、花费；未配置价格的模型会标记 ⚠ 提示。
-- **价格配置** — 支持 **人民币 / 美元** 双货币，为每个模型设置「输入 / 输出 / 缓存读」三项单价（每百万 Token），配置持久化到 `~/.zbar/pricing.json`。
+- **价格配置** — 支持 **人民币 / 美元** 双货币，为每个模型设置「输入 / 输出 / 缓存读」三项单价（每百万 Token），配置持久化到 `~/.zbar/pricing.json`；支持一键「检查价格更新」，从社区维护的 [models.dev](https://models.dev) 拉取全厂商最新价格（按汇率换算人民币参考价）。
 - **缓存感知计费** — `input_tokens` 已包含缓存读部分，计费时缓存读按缓存价单独计算，非缓存输入按输入价计算，避免重复计费。
 - **原生体验** — macOS 使用 `popover` 毛玻璃材质 + 透明窗口；Windows/Linux 面板贴近任务栏展开。
 - **自动刷新** — 面板数据每 30 秒自动拉取一次。
-- **Coding Plan 额度监控** — 订阅用户可在面板顶部查看 **5 小时窗口**与**每周额度**的用量进度条，颜色随用量警示（绿→琥珀→红），并显示下次重置倒计时；支持**国内 / 国际**双端点切换。
+- **Coding Plan 额度监控** — 订阅用户可在面板顶部查看 **5 小时窗口**、**每周额度**与 **MCP 月度额度**的用量进度条，颜色随用量警示（绿→琥珀→红），并显示下次重置倒计时；支持**国内 / 国际**双端点切换。
+- **🖥 Cursor 用量统计** — 自动读取本机 Cursor 应用的登录凭据（也支持手动 Cookie），统计 Pro / Auto / API 套餐额度与 Token 花费明细，美元花费按汇率折算后并入汇总视图。
+- **💱 汇率自动更新** — USD→CNY 汇率默认每日自动联网更新（也可改为手动填写），用于 Cursor 花费折算与人民币参考价换算。
+- **🧭 多服务汇总视图** — 「汇总 / Z.ai / Cursor」标签切换：多服务合计花费与 Token、订阅额度卡片、分时趋势图与模型排行。
+- **⌨️ 全局快捷键** — 默认 `alt+shift+z` 唤起 / 隐藏面板，可在设置中自定义或停用。
+- **📈 周额度对比** — 基于本地额度快照（90 天滚动保留）对比每个重置周期的额度用量，支持跨设备合并。
+- **📝 日报 / 周报** — 一键生成 Markdown 日报（今日）/ 周报（近 7 天）并保存到本地。
 - **🔄 多设备同步** — 自托管同步服务（`server/`），让公司 / 家里等多台电脑汇总查看全量用量。明细增量上传 + `(device, rowid)` 去重，支持**设备筛选**（全部 / 本机 / 指定设备）和**数据清理**（按设备 / 按时间 / 全清 + 可配置自动定时清理）。详见 [server/README.md](./server/README.md)。
 
 ---
@@ -40,10 +65,14 @@
 ```
 zai-floating-monitor/
 ├── src/                      # 前端（React）
-│   ├── App.tsx               # 视图路由：统计 / 价格设置 / 设备同步
+│   ├── App.tsx               # 视图路由：统计 / 价格设置 / 设备同步 / 周额度对比 / 报表
 │   ├── StatsPanel.tsx        # 统计面板（含设备筛选器 + 本地/远端数据合并）
-│   ├── PricingPanel.tsx      # 价格配置面板
+│   ├── SummaryTab.tsx        # 汇总视图（多服务合计 / 趋势 / 模型排行）
+│   ├── CursorPanel.tsx       # Cursor 视图（额度 + 用量统计）
+│   ├── PricingPanel.tsx      # 价格配置面板（含 Coding Plan / Cursor 统计 / 快捷键）
 │   ├── QuotaPanel.tsx        # Coding Plan 额度监控
+│   ├── ComparePanel.tsx      # 周额度对比
+│   ├── ReportPanel.tsx       # 日报 / 周报（Markdown 导出）
 │   ├── SyncPanel.tsx         # 设备同步设置面板（注册 / 数据管理）
 │   ├── RangePicker.tsx       # 时间范围选择器
 │   ├── api.ts                # invoke 封装（调用 Rust 命令）
@@ -54,8 +83,11 @@ zai-floating-monitor/
 │   ├── src/
 │   │   ├── lib.rs            # 应用入口、托盘、面板逻辑、Tauri 命令
 │   │   ├── db.rs             # SQLite 只读查询（统计 / 模型列表 / 增量查询）
-│   │   ├── pricing.rs        # 价格配置读写
-│   │   ├── quota.rs          # Coding Plan 额度查询
+│   │   ├── pricing.rs        # 价格配置读写 + models.dev 价格更新
+│   │   ├── quota.rs          # Coding Plan 额度查询（5 小时 / 每周 / MCP）
+│   │   ├── quota_history.rs  # 额度快照历史（JSONL，90 天滚动保留）
+│   │   ├── cursor.rs         # Cursor 用量统计（自动凭据 / Cookie / API）
+│   │   ├── shortcut.rs       # 全局快捷键配置
 │   │   ├── sync.rs           # 多设备同步（配置 / 增量上传 / 远端查询 / 清理）
 │   │   └── main.rs
 │   ├── capabilities/         # Tauri 权限配置
@@ -163,11 +195,13 @@ ZBar 以 **只读** 方式访问 ZCode 的 SQLite 数据库，不会干扰 ZCode
 - 三个字段：`input`（非缓存输入）、`output`（输出）、`cache_read`（缓存读）
 - 只需填写需要计费的模型；未填的模型在面板中显示 `—` 并标记 ⚠
 
+面板内支持一键「检查价格更新」：从社区维护的 [models.dev](https://models.dev) 拉取全厂商最新模型价格（USD / 百万 Token），按当前汇率换算人民币参考价，确认后合并进本地价格表。
+
 在面板内点击「⚙ 价格设置 → 打开目录」可一键用 Finder 打开 `~/.zbar/`。
 
 ### Coding Plan 额度监控
 
-订阅 GLM Coding Plan 的用户可在统计面板顶部查看 5 小时窗口与每周额度的实时用量。
+订阅 GLM Coding Plan 的用户可在统计面板顶部查看 5 小时窗口、每周额度与 MCP 月度额度的实时用量。
 
 **配置方式**：打开「⚙ 价格设置」，在「Coding Plan 额度监控」区块填写：
 
@@ -184,6 +218,31 @@ ZBar 以 **只读** 方式访问 ZCode 的 SQLite 数据库，不会干扰 ZCode
 ```
 
 额度数据通过 `GET /api/monitor/usage/quota/limit` 接口实时获取，每 30 秒自动刷新。未配置 Token 时面板显示「去配置」引导，不影响其他功能。
+
+### 全局快捷键
+
+默认 `alt+shift+z` 唤起 / 隐藏面板，可在「⚙ 价格设置 → 全局快捷键」中修改或停用，配置持久化到 `~/.zbar/shortcut.json`：
+
+```json
+{
+  "enabled": true,
+  "accelerator": "alt+shift+z"
+}
+```
+
+### Cursor 统计
+
+打开「⚙ 价格设置 → Cursor 统计」进行配置：
+
+- **认证方式** — **自动**（默认，读取本机 Cursor 应用的本地登录凭据，需已安装并登录 Cursor）或 **手动 Cookie**。
+- **汇率** — USD→CNY，默认每日自动联网更新，也可取消勾选后手动填写；Cursor 的美元花费按此汇率折算成人民币。
+
+配置保存在 `~/.zbar/cursor.json`（手动 Cookie 模式下 Cookie 也保存在此文件，仅存于本机）。
+
+### 周额度对比与报表
+
+- **周额度对比** — 以额度快照历史为数据源（`~/.zbar/quota_history.jsonl`，append-only，90 天滚动保留），按重置周期对比额度用量，支持跨设备合并。
+- **日报 / 周报** — 面板内一键生成 Markdown 报表（日报 = 今日，周报 = 近 7 天）并保存为 `.md` 文件。
 
 ### 多设备同步
 

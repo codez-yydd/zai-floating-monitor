@@ -8,17 +8,43 @@ A lightweight menu-bar floating panel that tracks the Token usage and cost of th
 
 ---
 
+## 📸 Screenshots
+
+| Summary view | Z.ai view |
+|:---:|:---:|
+| ![Summary view](doc/img/summary.png) | ![Z.ai view](doc/img/zai-quota.png) |
+| Total cost / tokens across services & subscription quotas | Coding Plan 5-hour / weekly / MCP quotas |
+
+| Trend & model ranking | Cursor view |
+|:---:|:---:|
+| ![Trend & model ranking](doc/img/summary-trend.png) | ![Cursor view](doc/img/cursor.png) |
+| Hourly usage trend and model ranking | Pro / Auto / API quotas & usage stats |
+
+| Pricing settings | Device sync |
+|:---:|:---:|
+| ![Pricing settings](doc/img/settings.png) | ![Device sync](doc/img/sync.png) |
+| Dual-currency prices, quota monitor, FX rate & global hotkey | Incremental multi-device sync & data management |
+
+---
+
 ## ✨ Features
 
-- **Live menu-bar title** — refreshes every 30s, showing today's total cost (`¥xx.xx`) and total tokens (e.g. `3.7M`).
+- **Live menu-bar title** — lives in the macOS menu bar, refreshing every 30s, showing today's total cost (`¥xx.xx`, or `$xx.xx` in USD mode) and total tokens (e.g. `3.7M`).
 - **Floating stats panel** — summoned by clicking the tray icon; supports **today / 24h / 7d / 30d / custom** time ranges.
 - **Token breakdown** — input, output, cache-read, cache-write and reasoning tokens, visualized by proportion.
 - **Per-model grouping** — requests, tokens and cost per model; models without pricing are flagged with ⚠.
-- **Pricing config** — **CNY / USD** dual currency; set input / output / cache-read unit prices (per million tokens) for each model, persisted to `~/.zbar/pricing.json`.
+- **Pricing config** — **CNY / USD** dual currency; set input / output / cache-read unit prices (per million tokens) for each model, persisted to `~/.zbar/pricing.json`; one-click "check price updates" pulls the latest community-maintained prices from [models.dev](https://models.dev) (CNY reference prices converted at the current FX rate).
 - **Cache-aware billing** — `input_tokens` already includes cache-read tokens; cache-read is billed at the cache rate and non-cache input at the input rate, avoiding double counting.
 - **Native feel** — macOS uses the `popover` vibrancy material + transparent window; Windows/Linux panels unfold near the taskbar.
 - **Auto refresh** — panel data is re-fetched every 30 seconds.
-- **Coding Plan quota monitor** — subscribers can view the **5-hour window** and **weekly quota** usage progress bars at the top of the panel; the color escalates with usage (green → amber → red) and shows a reset countdown. Supports **China / Global** endpoint switching.
+- **Coding Plan quota monitor** — subscribers can view the **5-hour window**, **weekly quota** and **MCP monthly quota** progress bars at the top of the panel; the color escalates with usage (green → amber → red) and shows a reset countdown. Supports **China / Global** endpoint switching.
+- **🖥 Cursor usage stats** — reads the local Cursor app's login credentials automatically (manual cookie also supported); tracks Pro / Auto / API plan quotas and per-model token costs, with USD costs converted at the FX rate and merged into the summary view.
+- **💱 Auto FX rate** — the USD→CNY rate is refreshed online daily by default (manual input supported); used for Cursor cost conversion and CNY reference prices.
+- **🧭 Multi-service summary view** — summary / Z.ai / Cursor tabs: total cost & tokens across services, subscription quota cards, hourly trend chart and model ranking.
+- **⌨️ Global hotkey** — summon / hide the panel with `alt+shift+z` by default; customizable or disable-able in settings.
+- **📈 Weekly quota compare** — compare quota usage across reset cycles based on local quota snapshots (90-day rolling retention), with cross-device merge.
+- **📝 Daily / weekly reports** — one-click Markdown report (daily = today, weekly = last 7 days) saved locally.
+- **🔄 Multi-device sync** — self-hosted sync server (`server/`) to aggregate usage across machines (office / home). Incremental detail upload + `(device, rowid)` dedup, with **device filtering** (all / local / specific device) and **data cleanup** (by device / by time / all + configurable auto cleanup). See [server/README.md](./server/README.md).
 
 ---
 
@@ -39,9 +65,15 @@ A lightweight menu-bar floating panel that tracks the Token usage and cost of th
 ```
 zai-floating-monitor/
 ├── src/                      # Frontend (React)
-│   ├── App.tsx               # View router: stats / pricing
-│   ├── StatsPanel.tsx        # Stats panel
-│   ├── PricingPanel.tsx      # Pricing config panel
+│   ├── App.tsx               # View router: stats / pricing / sync / weekly compare / reports
+│   ├── StatsPanel.tsx        # Stats panel (device filter + local/remote merge)
+│   ├── SummaryTab.tsx        # Summary view (multi-service totals / trend / model ranking)
+│   ├── CursorPanel.tsx       # Cursor view (quotas + usage stats)
+│   ├── PricingPanel.tsx      # Pricing config panel (Coding Plan / Cursor stats / hotkey)
+│   ├── QuotaPanel.tsx        # Coding Plan quota monitor
+│   ├── ComparePanel.tsx      # Weekly quota compare
+│   ├── ReportPanel.tsx       # Daily / weekly reports (Markdown export)
+│   ├── SyncPanel.tsx         # Device sync settings (register / data management)
 │   ├── RangePicker.tsx       # Time-range picker
 │   ├── api.ts                # invoke wrappers (Rust commands)
 │   ├── types.ts              # TS types mirroring the Rust structs
@@ -51,7 +83,12 @@ zai-floating-monitor/
 │   ├── src/
 │   │   ├── lib.rs            # App entry, tray, panel logic, Tauri commands
 │   │   ├── db.rs             # Read-only SQLite queries (stats / model list)
-│   │   ├── pricing.rs        # Pricing config read/write
+│   │   ├── pricing.rs        # Pricing config read/write + models.dev updates
+│   │   ├── quota.rs          # Coding Plan quota queries (5h / weekly / MCP)
+│   │   ├── quota_history.rs  # Quota snapshot history (JSONL, 90-day retention)
+│   │   ├── cursor.rs         # Cursor usage stats (auto credentials / cookie / API)
+│   │   ├── shortcut.rs       # Global hotkey config
+│   │   ├── sync.rs           # Multi-device sync (config / incremental upload / cleanup)
 │   │   └── main.rs
 │   ├── capabilities/         # Tauri permissions
 │   └── tauri.conf.json       # Window / bundling config
@@ -152,11 +189,13 @@ Edit visually via the "⚙ Pricing" page inside the panel, or edit the file dire
 - Three fields: `input` (non-cache input), `output`, `cache_read`
 - Only fill in the models you want billed; unpriced models show `—` and are flagged ⚠
 
+The panel also supports one-click "check price updates": pull the latest community-maintained prices for all vendors from [models.dev](https://models.dev) (USD per million tokens), convert them to CNY reference prices at the current FX rate, and merge them into the local price table.
+
 In the panel, "⚙ Pricing → open directory" opens `~/.zbar/` directly in Finder.
 
 ### Coding Plan Quota Monitor
 
-GLM Coding Plan subscribers can view real-time usage of the 5-hour window and weekly quota at the top of the stats panel.
+GLM Coding Plan subscribers can view real-time usage of the 5-hour window, weekly quota and MCP monthly quota at the top of the stats panel.
 
 **Setup**: open "⚙ Pricing" and fill in the "Coding Plan quota monitor" section:
 
@@ -173,6 +212,70 @@ The config is stored at **`~/.zbar/quota.json`**:
 ```
 
 Quota data is fetched live via `GET /api/monitor/usage/quota/limit` and auto-refreshes every 30 seconds. Without a configured token the panel shows a "configure" prompt without affecting other features.
+
+### Global Hotkey
+
+Summon / hide the panel with `alt+shift+z` by default; change or disable it under "⚙ Pricing → Global hotkey". Persisted to `~/.zbar/shortcut.json`:
+
+```json
+{
+  "enabled": true,
+  "accelerator": "alt+shift+z"
+}
+```
+
+### Cursor Stats
+
+Configure under "⚙ Pricing → Cursor stats":
+
+- **Auth** — **auto** (default; reads the local Cursor app's login credentials — Cursor must be installed and signed in) or **manual cookie**.
+- **FX rate** — USD→CNY, refreshed online daily by default; can also be entered manually. Cursor's USD costs are converted to CNY at this rate.
+
+The config is stored at `~/.zbar/cursor.json` (in manual-cookie mode the cookie is stored here too, locally only).
+
+### Weekly Compare & Reports
+
+- **Weekly quota compare** — based on local quota snapshots (`~/.zbar/quota_history.jsonl`, append-only, 90-day rolling retention); compare quota usage across reset cycles, with cross-device merge.
+- **Daily / weekly reports** — generate a Markdown report in one click (daily = today, weekly = last 7 days) and save it as a `.md` file.
+
+### Multi-device Sync
+
+Aggregate usage across machines (office / home) via a self-hosted sync server — the data stays on your own server.
+
+**Deploy the server** (Python + Flask):
+
+```bash
+cd server
+pip3 install -r requirements.txt   # Flask only
+python3 app.py                      # the Master Token is printed on startup
+```
+
+See [server/README.md](./server/README.md).
+
+**Client setup**: click the **⇅** icon at the top of the panel to open "Device sync", fill in the server URL + Master Token + device name (e.g. `work` / `home`), then click "Connect & register".
+
+After registering:
+
+- **Device filter** — a device dropdown appears at the top of the stats panel: "All (summary)" / "This device" / a specific device.
+- **Sync mode** — manual ("Sync now") or automatic (upload on an interval).
+- **Data management** — cleanup by device / by time / all, plus configurable server-side auto cleanup.
+
+The config is stored at `~/.zbar/sync.json` (the Master Token is not persisted — discarded right after registration):
+
+```json
+{
+  "enabled": true,
+  "mode": "auto",
+  "interval_seconds": 60,
+  "server_url": "http://192.168.1.100:3838",
+  "device_id": "uuid-xxx",
+  "device_name": "work",
+  "device_token": "...",
+  "last_uploaded_rowid": 12345
+}
+```
+
+**How it works**: ZCode usage records are append-only. Clients upload incrementally by `rowid`; the server dedups by `(device_id, local_rowid)`. Local data is queried locally, other devices' data remotely, then merged for display — no double counting.
 
 ---
 
@@ -197,6 +300,7 @@ The panel and the menu-bar title share the same Rust calculation logic, so the n
 
 - The DB connection uses `SQLITE_OPEN_READ_ONLY` — **strictly read-only**, never touching ZCode data.
 - Pricing config is stored only in the user-local `~/.zbar/` directory; nothing is uploaded.
+- **Multi-device sync** is optional and off by default. When enabled, only model names, token counts and timestamps are synced — **never code or conversation content**. The server is self-hosted; the data stays on your own server.
 - The panel hides on blur; the window stays alive (not destroyed) and can be re-summoned by clicking the tray.
 
 ---
