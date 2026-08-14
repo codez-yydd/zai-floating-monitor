@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useDataCache } from "./DataCache";
+import { formatCountdown } from "./format";
 import { remainingGradient, remainingTextColor } from "./widgets";
 
 interface Props {
@@ -178,18 +179,6 @@ function QuotaBar({
       )}
     </div>
   );
-}
-
-/** 毫秒差 → "17m" / "3h 12m" / "2d 5h" */
-function formatCountdown(ms: number): string {
-  const totalMin = Math.floor(ms / 60_000);
-  if (totalMin < 1) return "<1m";
-  const days = Math.floor(totalMin / (60 * 24));
-  const hours = Math.floor((totalMin % (60 * 24)) / 60);
-  const mins = totalMin % 60;
-  if (days > 0) return `${days}d ${hours}h 后刷新`;
-  if (hours > 0) return `${hours}h ${mins}m 后刷新`;
-  return `${mins}m 后刷新`;
 }
 
 /** MCP 月度额度条：与 QuotaBar 同款（剩余版）。

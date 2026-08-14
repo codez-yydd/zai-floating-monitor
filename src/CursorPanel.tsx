@@ -27,7 +27,7 @@ function centsToUsd(cents: number | null): number | null {
   return cents == null ? null : cents / 100;
 }
 
-/** 套餐额度行：标签 + 剩余% 在上，通栏进度条在下（总量 / Auto / API 同一套） */
+/** 套餐额度行：标签 + 剩余% 在上，通栏进度条在下（Auto / API 同一套） */
 function PlanQuotaRow({
   label,
   hint,
@@ -110,15 +110,6 @@ export function CursorPanel({
   const onDemand = snapshot.on_demand;
   const events = snapshot.events;
 
-  // 套餐额度进度
-  const planUsedUsd = centsToUsd(plan?.used_cents ?? null);
-  const planLimitUsd = centsToUsd(plan?.limit_cents ?? null);
-  const planPct =
-    plan?.total_pct ??
-    (planUsedUsd != null && planLimitUsd != null && planLimitUsd > 0
-      ? (planUsedUsd / planLimitUsd) * 100
-      : null);
-
   // 按需用量
   const odUsedUsd = centsToUsd(onDemand?.used_cents ?? null);
   const odLimitUsd = centsToUsd(onDemand?.limit_cents ?? null);
@@ -163,16 +154,11 @@ export function CursorPanel({
         </div>
       )}
 
-      {/* 套餐额度（本计费周期，不随时间范围变化） */}
+      {/* 套餐额度：与 Cursor 客户端一致，只展示 Auto / API（本计费周期，不随时间范围变化） */}
       {plan && (
         <div className="rounded-lg bg-white/25 border border-white/30 px-2.5 py-2 space-y-2">
-          {planPct != null ? (
+          {plan.auto_pct != null || plan.api_pct != null ? (
             <>
-              <PlanQuotaRow
-                label="总量"
-                hint="本计费周期"
-                usedPct={planPct}
-              />
               {plan.auto_pct != null && (
                 <PlanQuotaRow label="Auto" usedPct={plan.auto_pct} />
               )}

@@ -22,6 +22,22 @@ export function formatPct(n: number): string {
   return (n * 100).toFixed(1) + "%";
 }
 
+/** 毫秒差 → 倒计时。compact 时不加「后刷新」，给窄行用。 */
+export function formatCountdown(ms: number, compact = false): string {
+  const totalMin = Math.floor(ms / 60_000);
+  if (totalMin < 1) return "<1m";
+  const days = Math.floor(totalMin / (60 * 24));
+  const hours = Math.floor((totalMin % (60 * 24)) / 60);
+  const mins = totalMin % 60;
+  const core =
+    days > 0
+      ? `${days}d ${hours}h`
+      : hours > 0
+        ? `${hours}h ${mins}m`
+        : `${mins}m`;
+  return compact ? core : `${core} 后刷新`;
+}
+
 /** 时间范围预设 → [from_ms, to_ms] 毫秒时间戳 */
 export function rangeToMs(
   preset: string,

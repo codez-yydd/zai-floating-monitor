@@ -6,7 +6,7 @@ import type {
   Stats,
   TrendPoint,
 } from "./types";
-import { formatCost, formatTokens } from "./format";
+import { formatCost, formatCountdown, formatTokens } from "./format";
 import {
   ProgressBar,
   TrendChart,
@@ -14,7 +14,7 @@ import {
   remainingTextColor,
 } from "./widgets";
 import { useDataCache } from "./DataCache";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 interface Props {
   stats: Stats | null;
@@ -45,8 +45,11 @@ interface AgentSummary {
   badgeClass: string;
   cost: number;
   tokens: number;
-  metrics: { label: string; usedPct: number }[];
+  metrics: { label: string; usedPct: number; resetAt?: number | null }[];
   empty?: string;
+  /** 套餐级重置时间（Cursor 计费周期结束），显示在标题行 */
+  cycleResetAt?: number | null;
+  cycleResetDate?: string | null;
 }
 
 /** 花费占比条：用 gradient 硬切色段，避免 flex/width 舍入露出底色 */
@@ -137,31 +140,47 @@ function buildModelRows(
   return rows;
 }
 
-/** 额度一行：标签 + 剩余进度条 + 剩余% */
+/** 额度一行：标签 + 重置倒计时 + 剩余% 在上，进度条在下 */
 function QuotaMiniRow({
   label,
   usedPct,
+  resetAt,
+  now,
 }: {
   label: string;
   usedPct: number;
+  resetAt?: number | null;
+  now: number;
 }) {
   const remain = Math.max(0, 100 - usedPct);
+  const showReset = resetAt != null && resetAt > now;
   return (
-    <div className="flex items-center gap-1.5">
-      <span className="text-[9px] text-slate-500 w-7 shrink-0">{label}</span>
+    <div>
+      <div className="flex items-center gap-1 mb-0.5">
+        <span className="text-[9px] text-slate-500 w-7 shrink-0">{label}</span>
+        <span className="num text-[8px] text-slate-400 flex-1 text-right truncate min-w-0">
+          {showReset ? `↻ ${formatCountdown(resetAt - now, true)}` : ""}
+        </span>
+        <span
+          className="num text-[9px] font-medium w-12 text-right shrink-0 whitespace-nowrap"
+          style={{ color: remainingTextColor(remain) }}
+        >
+          剩 {Math.round(remain)}%
+        </span>
+      </div>
       <ProgressBar
         pct={remain / 100}
         height="h-1"
         gradient={remainingGradient(remain)}
       />
-      <span
-        className="num text-[9px] font-medium w-12 text-right shrink-0 whitespace-nowrap"
-        style={{ color: remainingTextColor(remain) }}
-      >
-        剩 {Math.round(remain)}%
-      </span>
     </div>
   );
+}
+
+function cycleEndMs(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? t : null;
 }
 
 export function SummaryTab({
@@ -176,11 +195,18 @@ export function SummaryTab({
 }: Props) {
   const [trendMetric, setTrendMetric] = useState<"cost" | "token">("cost");
   const [sortBy, setSortBy] = useState<"cost" | "token" | "requests">("cost");
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(tick);
+  }, []);
 
   // ZCode 额度（与范围无关，读全局缓存，与 QuotaPanel 同源）
   const { quota, quotaError } = useDataCache();
-  const hour5Pct = quota?.hour5?.percentage ?? null;
-  const weeklyPct = quota?.weekly?.percentage ?? null;
+  const hour5 = quota?.hour5 ?? null;
+  const weekly = quota?.weekly ?? null;
+  const mcp = quota?.mcp ?? null;
   const levelLabel = quota?.level
     ? LEVEL_LABEL[quota.level] || quota.level
     : null;
@@ -197,8 +223,8 @@ export function SummaryTab({
     currency === "cny" ? cursorCostRaw * fxRate : cursorCostRaw;
   const cursorTokens = cursorEvents?.total_tokens ?? 0;
 
-  // Cursor 套餐进度：只用总量 / Auto / API 百分比。
-  // used_cents/limit_cents 是套餐标价口径，不能代表 Auto 额度（Auto 可用量远大于 API 的 $20 限额）。
+  // Cursor 套餐进度：与客户端一致，只展示 Auto / API。
+  // used_cents/limit_cents 是套餐标价口径，不能代表 Auto 额度。
   const plan = cursor?.plan;
 
   const zcodeEmpty = quotaError
@@ -208,13 +234,35 @@ export function SummaryTab({
     : "加载中…";
 
   const zcodeMetrics = [
-    ...(weeklyPct != null ? [{ label: "本周", usedPct: weeklyPct }] : []),
-    ...(hour5Pct != null ? [{ label: "5h", usedPct: hour5Pct }] : []),
+    ...(hour5 != null
+      ? [
+          {
+            label: "5h",
+            usedPct: hour5.percentage,
+            resetAt: hour5.nextResetTime,
+          },
+        ]
+      : []),
+    ...(weekly != null
+      ? [
+          {
+            label: "本周",
+            usedPct: weekly.percentage,
+            resetAt: weekly.nextResetTime,
+          },
+        ]
+      : []),
+    ...(mcp != null
+      ? [
+          {
+            label: "MCP",
+            usedPct: mcp.percentage,
+            resetAt: mcp.nextResetTime,
+          },
+        ]
+      : []),
   ];
   const cursorMetrics = [
-    ...(plan?.total_pct != null
-      ? [{ label: "总量", usedPct: plan.total_pct }]
-      : []),
     ...(plan?.auto_pct != null
       ? [{ label: "Auto", usedPct: plan.auto_pct }]
       : []),
@@ -248,6 +296,10 @@ export function SummaryTab({
       tokens: cursorTokens,
       metrics: cursorMetrics,
       empty: cursor?.logged_in ? "暂无额度数据" : "未登录",
+      cycleResetAt: cycleEndMs(cursor?.billing_cycle_end),
+      cycleResetDate: cursor?.billing_cycle_end
+        ? cursor.billing_cycle_end.slice(0, 10)
+        : null,
     },
   ];
 
@@ -371,14 +423,25 @@ export function SummaryTab({
                   </span>
                 )}
               </div>
+              {a.cycleResetAt != null && a.cycleResetAt > now ? (
+                <span className="num text-[8px] text-slate-400 shrink-0 whitespace-nowrap">
+                  ↻ {formatCountdown(a.cycleResetAt - now, true)}
+                </span>
+              ) : a.cycleResetDate ? (
+                <span className="num text-[8px] text-slate-400 shrink-0 whitespace-nowrap">
+                  重置 {a.cycleResetDate}
+                </span>
+              ) : null}
             </div>
             {a.metrics.length > 0 ? (
-              <div className="space-y-1">
+              <div className="space-y-1.5">
                 {a.metrics.map((m) => (
                   <QuotaMiniRow
                     key={m.label}
                     label={m.label}
                     usedPct={m.usedPct}
+                    resetAt={m.resetAt}
+                    now={now}
                   />
                 ))}
               </div>
