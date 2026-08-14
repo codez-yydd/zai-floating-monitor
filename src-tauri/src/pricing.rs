@@ -105,35 +105,6 @@ fn load_defaults() -> PricingDefaults {
 
 // ---------- models.dev 拉取 + 磁盘缓存 ----------
 
-/// models.dev api.json 的顶层（智谱字段命名固定为 zhipuai，其余 provider 被 serde 忽略）
-#[derive(Debug, Deserialize)]
-struct ModelsDevRoot {
-    #[serde(default)]
-    zhipuai: Option<ModelsDevProvider>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ModelsDevProvider {
-    #[serde(default)]
-    models: BTreeMap<String, ModelsDevModel>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ModelsDevModel {
-    #[serde(default)]
-    cost: Option<ModelsDevCost>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct ModelsDevCost {
-    #[serde(default)]
-    input: Option<f64>,
-    #[serde(default)]
-    output: Option<f64>,
-    #[serde(default)]
-    cache_read: Option<f64>,
-}
-
 /// models.dev 磁盘缓存结构
 #[derive(Debug, Serialize, Deserialize)]
 struct ModelsDevCache {
@@ -152,18 +123,79 @@ fn load_models_dev_cache() -> Option<ModelsDevCache> {
     serde_json::from_str::<ModelsDevCache>(&data).ok()
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// JSON 值 → f64（兼容数值与字符串两种序列化，社区 API 常见保精度用字符串）。
+/// 无法解析时返回 None（调用方跳过该字段）。
+fn value_as_f64(v: &serde_json::Value) -> Option<f64> {
+    match v {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+/// 从 models.dev api.json 的动态 JSON 中提取智谱模型价格（逐模型容错）。
+/// - provider key 优先 `zhipuai`，找不到时按名称含 zhipu/glm 模糊匹配（防上游改名）
+/// - 单个模型字段缺失/类型异常只跳过该模型，不影响其他模型（避免整包失败）
+fn extract_zhipu_prices(root: &serde_json::Value) -> BTreeMap<String, ModelPrice> {
+    // 定位智谱 provider 节点
+    let mut provider = root.get("zhipuai");
+    if provider.is_none() {
+        provider = root.as_object().and_then(|obj| {
+            obj.values().find(|v| {
+                let name = v
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or_default()
+                    .to_lowercase();
+                name.contains("zhipu") || name.contains("z.ai")
+            })
+        });
+    }
+    let Some(models) = provider.and_then(|p| p.get("models")).and_then(|m| m.as_object()) else {
+        return BTreeMap::new();
+    };
+
+    let mut usd = BTreeMap::new();
+    for (id, model) in models {
+        let Some(cost) = model.get("cost") else { continue };
+        // input/output 必须都有且可解析；cache_read 缺省/异常按 0
+        let (Some(input), Some(output)) = (
+            cost.get("input").and_then(value_as_f64),
+            cost.get("output").and_then(value_as_f64),
+        ) else {
+            continue;
+        };
+        if input <= 0.0 && output <= 0.0 {
+            continue;
+        }
+        usd.insert(
+            id.to_lowercase(),
+            ModelPrice {
+                input,
+                output,
+                cache_read: cost.get("cache_read").and_then(value_as_f64).unwrap_or(0.0),
+            },
+        );
+    }
+    usd
+}
+
 /// 拉取 models.dev 智谱模型 USD 价格（每百万 token）。
 /// 磁盘缓存 24h：`force=false` 且缓存未过期 → 直接用缓存；
-/// 否则联网拉取，成功后写缓存；失败时回退过期缓存，再失败返回 Err（调用方用内置表兜底）。
+/// 否则联网拉取，成功后写缓存；网络失败时回退过期缓存（宁用昨日数据也不用静态内置表），
+/// 再失败返回 Err（调用方用内置表兜底）。
 pub fn fetch_models_dev_prices(force: bool) -> Result<BTreeMap<String, ModelPrice>, String> {
     let cached = load_models_dev_cache();
     if !force {
         if let Some(c) = cached.as_ref() {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            if now.saturating_sub(c.fetched_at) < MODELS_DEV_TTL_MS {
+            if now_ms().saturating_sub(c.fetched_at) < MODELS_DEV_TTL_MS {
                 return Ok(c.usd.clone());
             }
         }
@@ -173,44 +205,31 @@ pub fn fetch_models_dev_prices(force: bool) -> Result<BTreeMap<String, ModelPric
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(10))
         .build();
-    let resp = agent
-        .get(MODELS_DEV_URL)
-        .call()
-        .map_err(|e| format!("models.dev 请求失败: {e}"))?;
-    let root: ModelsDevRoot = resp
+    let fetch_result = agent.get(MODELS_DEV_URL).call().map_err(|e| format!("models.dev 请求失败: {e}"));
+    let resp = match fetch_result {
+        Ok(r) => r,
+        Err(e) => {
+            // 网络失败：回退过期缓存（若有），保持「models.dev 数据源」语义
+            if let Some(c) = cached {
+                if !c.usd.is_empty() {
+                    return Ok(c.usd);
+                }
+            }
+            return Err(e);
+        }
+    };
+    let root: serde_json::Value = resp
         .into_json()
         .map_err(|e| format!("models.dev 响应解析失败: {e}"))?;
 
-    // 提取智谱模型价格：input/output 必须都有，cache_read 缺省按 0
-    let mut usd = BTreeMap::new();
-    if let Some(provider) = root.zhipuai.as_ref() {
-        for (id, m) in &provider.models {
-            if let Some(cost) = &m.cost {
-                if let (Some(input), Some(output)) = (cost.input, cost.output) {
-                    if input > 0.0 || output > 0.0 {
-                        usd.insert(
-                            id.to_lowercase(),
-                            ModelPrice {
-                                input,
-                                output,
-                                cache_read: cost.cache_read.unwrap_or(0.0),
-                            },
-                        );
-                    }
-                }
-            }
-        }
-    }
+    let usd = extract_zhipu_prices(&root);
     if usd.is_empty() {
         return Err("models.dev 未收录智谱模型价格".to_string());
     }
 
     // 写缓存（失败静默：缓存只是优化）
     let cache = ModelsDevCache {
-        fetched_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0),
+        fetched_at: now_ms(),
         usd: usd.clone(),
     };
     if let Ok(dir) = config_dir() {
@@ -259,14 +278,17 @@ pub struct PricingDiff {
 ///
 /// `relevant`: 实际调用过 ∪ 用户已配置的模型 id —— **遍历主体**，
 /// 保证实际在用但参考表没收录的模型也能以 missing 暴露出来。
-/// `fx_rate`: USD→CNY 汇率（models.dev 模式下 CNY 参考价 = USD × 汇率）。
+/// `fx_rate`: USD→CNY 汇率（models.dev 模式下 CNY 参考价 = USD × 汇率；≤0 时按 7.2 兜底）。
+/// `force`: 透传给 models.dev 拉取（true 绕过 24h 缓存，只发一次请求）。
 pub fn diff_pricing(
     user: &PricingConfig,
     relevant: &std::collections::HashSet<String>,
     fx_rate: f64,
+    force: bool,
 ) -> PricingDiff {
+    let fx_rate = if fx_rate > 0.0 { fx_rate } else { 7.2 };
     // 参考价：优先 models.dev（USD），失败回退内置表（USD+CNY）
-    match fetch_models_dev_prices(false) {
+    match fetch_models_dev_prices(force) {
         Ok(usd) => {
             // CNY 参考价 = USD × 汇率（models.dev 只有国际站 USD 价）
             let cny = usd
@@ -378,38 +400,50 @@ mod tests {
         }
     }
 
-    /// models.dev api.json 解析：提取智谱模型，忽略其他 provider；缺价字段跳过/兜底
+    /// models.dev api.json 提取：逐模型容错 + 字符串/数值兼容 + provider 模糊匹配
     #[test]
-    fn parse_models_dev_json() {
+    fn extract_models_dev_prices() {
         let json = r#"{
             "openai": {
+                "name": "OpenAI",
                 "models": { "gpt-4o": { "cost": { "input": 2.5, "output": 10 } } }
             },
             "zhipuai": {
+                "name": "Zhipu AI",
                 "models": {
                     "glm-4.6": { "cost": { "input": 0.35, "output": 1.4, "cache_read": 0.035, "cache_write": 0.05 } },
-                    "glm-4.7": { "cost": { "input": 0.2, "output": 0.8 } },
+                    "glm-4.7": { "cost": { "input": "0.2", "output": "0.8" } },
                     "broken": { "cost": { "input": 1 } },
-                    "nocost": { "limit": { "context": 128000 } }
+                    "nocost": { "limit": { "context": 128000 } },
+                    "zeroprice": { "cost": { "input": 0, "output": 0 } }
                 }
             }
         }"#;
-        let root: ModelsDevRoot = serde_json::from_str(json).unwrap();
-        let provider = root.zhipuai.expect("zhipuai 应存在");
-        let extract = |id: &str| -> Option<ModelPrice> {
-            provider.models.get(id).and_then(|m| {
-                let c = m.cost.as_ref()?;
-                Some(price(c.input?, c.output?, c.cache_read.unwrap_or(0.0)))
-            })
-        };
-        let g46 = extract("glm-4.6").expect("glm-4.6 有完整价格");
+        let root: serde_json::Value = serde_json::from_str(json).unwrap();
+        let usd = extract_zhipu_prices(&root);
+        assert_eq!(usd.len(), 2, "只应有 glm-4.6 与 glm-4.7 两个有效模型");
+        let g46 = &usd["glm-4.6"];
         assert_eq!(g46.input, 0.35);
         assert_eq!(g46.output, 1.4);
         assert_eq!(g46.cache_read, 0.035); // cache_write 不进 ModelPrice
-        let g47 = extract("glm-4.7").expect("glm-4.7 缺 cache_read 按 0");
-        assert_eq!(g47.cache_read, 0.0);
-        assert!(extract("broken").is_none(), "缺 output 视为无价");
-        assert!(extract("nocost").is_none(), "无 cost 视为无价");
+        let g47 = &usd["glm-4.7"];
+        assert_eq!(g47.input, 0.2, "字符串价格应可解析");
+        assert_eq!(g47.output, 0.8);
+        assert_eq!(g47.cache_read, 0.0, "缺 cache_read 按 0");
+    }
+
+    /// provider key 非_zhipuai 时按名称模糊匹配（防上游改名）
+    #[test]
+    fn extract_finds_zhipu_by_name_fallback() {
+        let json = r#"{
+            "some-other-key": {
+                "name": "Zhipu AI (GLM)",
+                "models": { "glm-4.6": { "cost": { "input": 0.35, "output": 1.4 } } }
+            }
+        }"#;
+        let root: serde_json::Value = serde_json::from_str(json).unwrap();
+        let usd = extract_zhipu_prices(&root);
+        assert!(usd.contains_key("glm-4.6"), "名称含 zhipu 的 provider 应被匹配");
     }
 
     /// diff 分类：以 relevant 为主体 —— new / changed / missing 三类 + 大小写归一

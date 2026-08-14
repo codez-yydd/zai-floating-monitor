@@ -135,17 +135,12 @@ fn check_pricing_updates(force: Option<bool>) -> Result<pricing::PricingDiff, St
     relevant.extend(user.cny.keys().cloned());
     relevant.extend(user.usd.keys().cloned());
 
-    // force 时先强制刷新 models.dev 缓存（失败静默，diff_pricing 内部会回退）
-    if force.unwrap_or(false) {
-        let _ = pricing::fetch_models_dev_prices(true);
-    }
-
     // USD→CNY 汇率：与 Cursor 配置共用同一来源（models.dev 模式下 CNY 参考价 = USD × 汇率）
     let fx_rate = cursor::load_cursor_config()
         .map(|c| c.usd_cny_rate)
         .unwrap_or(7.2);
 
-    Ok(pricing::diff_pricing(&user, &relevant, fx_rate))
+    Ok(pricing::diff_pricing(&user, &relevant, fx_rate, force.unwrap_or(false)))
 }
 
 /// apply_pricing_updates：把用户勾选的价格项合并进 pricing 并保存。
