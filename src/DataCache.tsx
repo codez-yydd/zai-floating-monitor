@@ -45,17 +45,73 @@ import {
 import { loadCache, saveCache } from "./cache";
 
 /**
- * 全局数据缓存层。
+ * 全局数据缓存层（v2：按范围缓存 + 后台定时刷新 + 展示只读）。
  *
- * 设计目标：把"数据获取"与"数据展示"彻底解耦。
- *  - Provider 挂在 view 切换之外，永不被卸载 → 切到设置再切回来数据瞬时恢复。
- *  - 应用启动即预加载，不等面板打开。
- *  - 刷新期间**不清空旧值**（只设 refreshing=true），新数据到达后平滑替换 → 无闪烁。
- *  - 面板/额度组件退化为纯展示层，直接读缓存瞬时渲染。
+ * 核心思路：
+ *  - 展示层「只读缓存」：切换时间范围 = 改当前 key → 直接读对应缓存条目，
+ *    零请求、秒显。stats/cost/trend/cursor 全部取自当前 key 的缓存。
+ *  - 后台独立定时任务：定期把各预设范围（today/1d/7d/30d）的数据刷新进缓存，
+ *    与范围切换完全解耦——切回来时数据已在缓存里。
+ *  - 按需补刷：切到无缓存/过期范围（如全新 custom、首次进入、数据老化）才
+ *    触发一次加载，之后也进缓存。
+ *  - 刷新期间不清空旧值（只设 refreshing），新数据到达后平滑替换 → 无闪烁。
+ *  - localStorage 持久化：进程重启后各范围仍秒显。
  */
 
+// 需要后台持续刷新的预设范围（custom 由按需补刷负责，无法预缓存）
+const PRESET_RANGES: RangePreset[] = ["today", "1d", "7d", "30d"];
+
+/** 由 preset 派生趋势分桶：今日/24h 按小时，更长范围按日 */
+function bucketOf(preset: RangePreset): TrendBucket {
+  return preset === "today" || preset === "1d" ? "hour" : "day";
+}
+
+/** 范围缓存 key：预设用 preset 名，custom 用日期区间 */
+function rangeKey(
+  preset: RangePreset,
+  custom: { from: string; to: string }
+): string {
+  return preset === "custom" ? `custom:${custom.from}~${custom.to}` : preset;
+}
+
+// 缓存过期阈值：超过则按需补刷（略大于后台刷新间隔，避免边界抖动）
+const ZAI_STALE_MS = 60_000;
+const CURSOR_STALE_MS = 240_000;
+
+interface ZaiEntry {
+  stats: Stats | null;
+  cost: CostResult | null;
+  trend: TrendPoint[];
+  error: string | null;
+  refreshing: boolean;
+  ts: number;
+}
+
+interface CursorEntry {
+  snapshot: CursorSnapshot | null;
+  error: string | null;
+  refreshing: boolean;
+  ts: number;
+}
+
+const EMPTY_ZAI: ZaiEntry = {
+  stats: null,
+  cost: null,
+  trend: [],
+  error: null,
+  refreshing: false,
+  ts: 0,
+};
+
+const EMPTY_CURSOR: CursorEntry = {
+  snapshot: null,
+  error: null,
+  refreshing: false,
+  ts: 0,
+};
+
 export interface DataCacheValue {
-  // ===== 查询参数（UI 可修改，变化时自动刷新对应数据）=====
+  // ===== 查询参数（UI 可修改，变化时只切当前 key，不触发请求）=====
   preset: RangePreset;
   custom: { from: string; to: string };
   /** 由 preset 派生：今日/24h 按小时，更长范围按日 */
@@ -65,18 +121,18 @@ export interface DataCacheValue {
   setCustom: (c: { from: string; to: string }) => void;
   setDeviceFilter: (d: string) => void;
 
-  // ===== z.ai 数据（旧值在刷新期间保留，不清空 → 无闪烁）=====
+  // ===== z.ai 数据（当前范围，读缓存）=====
   stats: Stats | null;
   cost: CostResult | null;
   trend: TrendPoint[];
 
-  // ===== Cursor 数据 =====
+  // ===== Cursor 数据（当前范围，读缓存）=====
   cursor: CursorSnapshot | null;
   cursorError: string | null;
   /** USD→CNY 汇率（汇总页合并花费用） */
   fxRate: number;
 
-  // ===== Quota 数据 =====
+  // ===== Quota 数据（与范围无关）=====
   quota: QuotaResult | null;
   todayDelta: [number, number] | null;
   quotaError: string | null;
@@ -88,11 +144,11 @@ export interface DataCacheValue {
 
   // ===== 元信息 =====
   lastUpdate: number;
-  /** 后台是否在拉取 z.ai 数据（仅用于刷新按钮转圈，不阻塞渲染） */
+  /** 当前范围是否在后台拉取（仅用于刷新按钮转圈，不阻塞渲染） */
   refreshing: boolean;
   /** z.ai 错误信息（不阻塞已有数据展示） */
   error: string | null;
-  /** 手动强制刷新 z.ai + Cursor */
+  /** 手动强制刷新当前范围（z.ai + Cursor） */
   refresh: () => void;
   /** 手动强制刷新 Coding Plan 额度 */
   refreshQuota: () => void;
@@ -101,58 +157,50 @@ export interface DataCacheValue {
 const Ctx = createContext<DataCacheValue | null>(null);
 
 interface ProviderProps {
-  /** 价格表（loadZai 合并远程花费时需要） */
+  /** 价格表（合并远程花费时需要） */
   pricing: PricingConfig;
-  /** 货币偏好（loadZai 合并远程花费时需要） */
+  /** 货币偏好（合并远程花费时需要） */
   currency: Currency;
   children: ReactNode;
 }
 
 export function DataProvider({ pricing, currency, children }: ProviderProps) {
-  // ===== 查询参数 =====
-  const [preset, setPreset] = useState<RangePreset>("today");
-  const [custom, setCustom] = useState(() => {
+  // ===== 查询参数（持久化，冷启动恢复上次视图，与上次缓存匹配）=====
+  const [preset, setPreset] = useState<RangePreset>(
+    () => loadCache<RangePreset>("zbar-preset") ?? "today"
+  );
+  const [custom, setCustom] = useState<{ from: string; to: string }>(() => {
+    const saved = loadCache<{ from: string; to: string }>("zbar-custom");
+    if (saved) return saved;
     const today = new Date().toISOString().slice(0, 10);
     const week = new Date(Date.now() - 6 * 86400000)
       .toISOString()
       .slice(0, 10);
     return { from: week, to: today };
   });
-  const trendBucket: TrendBucket =
-    preset === "today" || preset === "1d" ? "hour" : "day";
-  const [deviceFilter, setDeviceFilter] = useState<string>("all");
+  const [deviceFilter, setDeviceFilter] = useState<string>(
+    () => loadCache<string>("zbar-device") ?? "all"
+  );
 
-  // ===== z.ai 数据（冷启动先用 localStorage 缓存渲染，后台刷新覆盖）=====
-  const [stats, setStats] = useState<Stats | null>(() =>
-    loadCache<Stats>("zbar-stats")
-  );
-  const [cost, setCost] = useState<CostResult | null>(() =>
-    loadCache<CostResult>("zbar-cost")
-  );
-  const [trend, setTrend] = useState<TrendPoint[]>(
-    () => loadCache<TrendPoint[]>("zbar-trend") ?? []
-  );
-  const [error, setError] = useState<string | null>(null);
-  const [lastUpdate, setLastUpdate] = useState<number>(
-    () => loadCache<number>("zbar-lastupdate") ?? 0
-  );
-  const [refreshing, setRefreshing] = useState(false);
+  const trendBucket = bucketOf(preset);
 
-  // ===== Cursor 数据（冷启动先用缓存渲染，后台刷新覆盖）=====
-  const [cursor, setCursor] = useState<CursorSnapshot | null>(() =>
-    loadCache<CursorSnapshot>("zbar-cursor")
+  // ===== 按范围缓存（持久化，key: zai=`${df}|${rangeKey}`，cursor=rangeKey）=====
+  const [zaiCache, setZaiCache] = useState<Record<string, ZaiEntry>>(
+    () => loadCache<Record<string, ZaiEntry>>("zbar-zai-cache") ?? {}
   );
-  const [cursorError, setCursorError] = useState<string | null>(null);
+  const [cursorCache, setCursorCache] = useState<Record<string, CursorEntry>>(
+    () => loadCache<Record<string, CursorEntry>>("zbar-cursor-cache") ?? {}
+  );
+
+  // ===== 其他数据（持久化）=====
   const [fxRate, setFxRate] = useState<number>(
     () => loadCache<number>("zbar-fxrate") ?? 7.2
   );
-
-  // ===== Quota 数据（冷启动先用缓存渲染，后台刷新覆盖）=====
-  const [quota, setQuota] = useState<QuotaResult | null>(() =>
-    loadCache<QuotaResult>("zbar-quota")
+  const [quota, setQuota] = useState<QuotaResult | null>(
+    () => loadCache<QuotaResult>("zbar-quota")
   );
-  const [todayDelta, setTodayDelta] = useState<[number, number] | null>(() =>
-    loadCache<[number, number]>("zbar-today-delta")
+  const [todayDelta, setTodayDelta] = useState<[number, number] | null>(
+    () => loadCache<[number, number]>("zbar-today-delta")
   );
   const [quotaError, setQuotaError] = useState<string | null>(null);
 
@@ -161,43 +209,259 @@ export function DataProvider({ pricing, currency, children }: ProviderProps) {
   const [remoteDevices, setRemoteDevices] = useState<DeviceInfo[]>([]);
   const syncEnabled = !!syncConfig?.enabled && !!syncConfig.device_token;
 
-  // ===== 竞态保护：快速切换时间范围时丢弃过期的旧响应 =====
-  const zaiReqId = useRef(0);
-  const cursorReqId = useRef(0);
+  // ===== 并发保护：同范围正在刷新则跳过，避免重复请求 =====
+  const zaiInflight = useRef<Set<string>>(new Set());
+  const cursorInflight = useRef<Set<string>>(new Set());
   const quotaReqId = useRef(0);
 
-  // 初次加载：同步配置 + 设备列表 + Cursor 汇率（仅一次）
+  // ===== refs：按需补刷 effect 读取最新缓存，避免闭包过期 / 反复触发 =====
+  const zaiCacheRef = useRef(zaiCache);
   useEffect(() => {
-    getSyncConfig()
-      .then((cfg) => {
-        setSyncConfig(cfg);
-        if (cfg.enabled && cfg.device_token) {
-          listRemoteDevices()
-            .then(setRemoteDevices)
-            .catch(() => {});
+    zaiCacheRef.current = zaiCache;
+  }, [zaiCache]);
+  const cursorCacheRef = useRef(cursorCache);
+  useEffect(() => {
+    cursorCacheRef.current = cursorCache;
+  }, [cursorCache]);
+
+  /**
+   * 刷新单个 z.ai 范围（范围无关，参数化 df/from/to/bucket）。
+   * 保留原 local/remote/merge 合并逻辑；刷新期间不清空旧值，只设 refreshing。
+   */
+  const refreshZaiRange = useCallback(
+    async (
+      df: string,
+      key: string,
+      from: number,
+      to: number,
+      bucket: TrendBucket
+    ) => {
+      if (zaiInflight.current.has(key)) return; // 同范围已在刷新，跳过
+      zaiInflight.current.add(key);
+      setZaiCache((prev) => ({
+        ...prev,
+        [key]: { ...(prev[key] ?? EMPTY_ZAI), refreshing: true },
+      }));
+
+      try {
+        let localStats: Stats | null = null;
+        let localCost: CostResult | null = null;
+        let localTrend: TrendPoint[] = [];
+        let remote: RemoteUsage | null = null;
+
+        const wantLocal = df === "all" || df === "local";
+        // all 或指定远端设备时拉远程数据；选 local 时不拉
+        const wantRemote = syncEnabled && df !== "local";
+
+        const tasks: Promise<unknown>[] = [];
+        if (wantLocal) {
+          tasks.push(
+            fetchStats(from, to).then((s) => (localStats = s)),
+            computeCost(from, to).then((c) => (localCost = c)),
+            fetchTrend(from, to, bucket).then((t) => (localTrend = t))
+          );
         }
+        if (wantRemote && syncConfig) {
+          const opts =
+            df === "all"
+              ? { excludeDevice: syncConfig.device_id }
+              : { devices: df };
+          const isSpecificRemote = df !== "all";
+          tasks.push(
+            remoteUsage(from, to, bucket, opts)
+              .then((r) => (remote = r))
+              .catch((e) => {
+                if (isSpecificRemote) throw e;
+                // "全部"模式：远端失败静默，仅用本地数据
+              })
+          );
+        }
+
+        await Promise.all(tasks);
+
+        // 合并本地 + 远端
+        let stats: Stats | null;
+        let cost: CostResult | null;
+        let trend: TrendPoint[];
+        if (df === "local") {
+          stats = localStats;
+          cost = localCost;
+          trend = localTrend;
+        } else if (remote && !localStats) {
+          stats = remoteToStats(remote);
+          cost = computeRemoteCost(remote, pricing, currency);
+          trend = remoteTrendToLocal(remote, pricing, bucket);
+        } else if (localStats && remote) {
+          stats = mergeStats(localStats, remote);
+          cost = mergeCost(localCost, remote, pricing, currency);
+          trend = mergeTrend(localTrend, remote, pricing, bucket);
+        } else {
+          stats = localStats;
+          cost = localCost;
+          trend = localTrend;
+        }
+
+        setZaiCache((prev) => ({
+          ...prev,
+          [key]: { stats, cost, trend, error: null, refreshing: false, ts: Date.now() },
+        }));
+      } catch (e) {
+        setZaiCache((prev) => ({
+          ...prev,
+          [key]: {
+            ...(prev[key] ?? EMPTY_ZAI),
+            error: String(e),
+            refreshing: false,
+            ts: Date.now(),
+          },
+        }));
+      } finally {
+        zaiInflight.current.delete(key);
+      }
+    },
+    [syncConfig, syncEnabled, pricing, currency]
+  );
+
+  /** 刷新单个 Cursor 范围（账号级，不受设备筛选影响）。刷新期间不清空旧值。 */
+  const refreshCursorRange = useCallback((key: string, from: number, to: number) => {
+    if (cursorInflight.current.has(key)) return;
+    cursorInflight.current.add(key);
+    setCursorCache((prev) => ({
+      ...prev,
+      [key]: { ...(prev[key] ?? EMPTY_CURSOR), refreshing: true },
+    }));
+
+    fetchCursorUsage(from, to)
+      .then((data) => {
+        setCursorCache((prev) => ({
+          ...prev,
+          [key]: { snapshot: data, error: null, refreshing: false, ts: Date.now() },
+        }));
       })
-      .catch(() => {});
+      .catch((e) => {
+        setCursorCache((prev) => ({
+          ...prev,
+          [key]: {
+            ...(prev[key] ?? EMPTY_CURSOR),
+            error: String(e),
+            refreshing: false,
+            ts: Date.now(),
+          },
+        }));
+      })
+      .finally(() => {
+        cursorInflight.current.delete(key);
+      });
+
+    // 顺带刷新 USD→CNY 汇率：用户可能在设置页改过。本地配置读取，开销可忽略。
     getCursorConfig()
       .then((cfg) => setFxRate(cfg.usd_cny_rate))
       .catch(() => {});
   }, []);
 
-  // ===== 持久化：数据变化即落盘 localStorage，供下次冷启动首屏秒开。
-  //      与内存缓存互补——进程重启后内存清空，这里保证冷启动先用上次结果渲染，
-  //      后台请求刷新后无缝覆盖。写入失败静默（QuotaExceeded 等），不影响主流程。 =====
+  // Quota 数据加载（与范围无关，每次调用会采样写入 quota_history）。
+  const loadQuota = useCallback(() => {
+    const reqId = ++quotaReqId.current;
+    fetchQuota()
+      .then((r) => {
+        if (reqId !== quotaReqId.current) return;
+        setQuota(r);
+        setQuotaError(null);
+        // 额度刷新成功后顺带读今日增量（快照由 fetch_quota 采样写入）
+        getTodayDelta().then(setTodayDelta).catch(() => {});
+      })
+      .catch((e) => {
+        if (reqId !== quotaReqId.current) return;
+        setQuotaError(String(e));
+      });
+  }, []);
+
+  // 初次加载：同步配置 + 设备列表（仅一次）
   useEffect(() => {
-    if (stats) saveCache("zbar-stats", stats);
-  }, [stats]);
+    getSyncConfig()
+      .then((cfg) => {
+        setSyncConfig(cfg);
+        if (cfg.enabled && cfg.device_token) {
+          listRemoteDevices().then(setRemoteDevices).catch(() => {});
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  // ===== 后台定时刷新 z.ai：当前 deviceFilter 的所有预设范围（与 preset/custom 解耦）。
+  //      每 30s 刷一遍 today/1d/7d/30d → 切换预设范围时缓存命中、秒显。
+  //      依赖不含 preset/custom：预设范围的 resolveRange 忽略 custom，故无需进依赖。 =====
   useEffect(() => {
-    if (cost) saveCache("zbar-cost", cost);
-  }, [cost]);
+    const df = deviceFilter;
+    const tick = () => {
+      for (const p of PRESET_RANGES) {
+        const [f, t] = resolveRange(p, custom);
+        refreshZaiRange(df, `${df}|${p}`, f, t, bucketOf(p));
+      }
+    };
+    tick(); // 挂载/依赖变化立即刷一次，尽快填充缓存
+    const timer = setInterval(tick, 30_000);
+    return () => clearInterval(timer);
+    // 故意不把 custom 列入依赖：后台只刷预设范围，custom 由按需补刷负责
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deviceFilter, syncConfig, syncEnabled, pricing, currency, refreshZaiRange]);
+
+  // ===== 后台定时刷新 Cursor：所有预设范围，降频 180s（网络慢，4 范围并行）。
+  //      账号级，不受 deviceFilter 影响。 =====
   useEffect(() => {
-    saveCache("zbar-trend", trend);
-  }, [trend]);
+    const tick = () => {
+      for (const p of PRESET_RANGES) {
+        const [f, t] = resolveRange(p, custom);
+        refreshCursorRange(p, f, t);
+      }
+    };
+    tick();
+    const timer = setInterval(tick, 180_000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshCursorRange]);
+
+  // Quota 定时 30s（与范围无关）
   useEffect(() => {
-    if (cursor) saveCache("zbar-cursor", cursor);
-  }, [cursor]);
+    loadQuota();
+    const timer = setInterval(loadQuota, 30_000);
+    return () => clearInterval(timer);
+  }, [loadQuota]);
+
+  // ===== 按需补刷：切到无缓存/过期范围时补一次（覆盖 custom、首次、数据老化）。
+  //      预设范围通常已被后台任务刷新 → 命中新鲜缓存 → 不请求、秒显。 =====
+  useEffect(() => {
+    const [f, t] = resolveRange(preset, custom);
+    const zKey = `${deviceFilter}|${rangeKey(preset, custom)}`;
+    const zEntry = zaiCacheRef.current[zKey];
+    if (!zEntry || Date.now() - zEntry.ts > ZAI_STALE_MS) {
+      refreshZaiRange(deviceFilter, zKey, f, t, trendBucket);
+    }
+    const cKey = rangeKey(preset, custom);
+    const cEntry = cursorCacheRef.current[cKey];
+    if (!cEntry || Date.now() - cEntry.ts > CURSOR_STALE_MS) {
+      refreshCursorRange(cKey, f, t);
+    }
+    // 仅在范围/设备变化时触发；不依赖 cache 内容（靠 ref 读最新值），避免反复触发
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preset, custom, deviceFilter, trendBucket]);
+
+  // ===== 持久化：各 state 变化即落盘，供下次冷启动各范围秒显 =====
+  useEffect(() => {
+    saveCache("zbar-preset", preset);
+  }, [preset]);
+  useEffect(() => {
+    saveCache("zbar-custom", custom);
+  }, [custom]);
+  useEffect(() => {
+    saveCache("zbar-device", deviceFilter);
+  }, [deviceFilter]);
+  useEffect(() => {
+    saveCache("zbar-zai-cache", zaiCache);
+  }, [zaiCache]);
+  useEffect(() => {
+    saveCache("zbar-cursor-cache", cursorCache);
+  }, [cursorCache]);
   useEffect(() => {
     saveCache("zbar-fxrate", fxRate);
   }, [fxRate]);
@@ -207,172 +471,22 @@ export function DataProvider({ pricing, currency, children }: ProviderProps) {
   useEffect(() => {
     if (todayDelta) saveCache("zbar-today-delta", todayDelta);
   }, [todayDelta]);
-  useEffect(() => {
-    if (lastUpdate) saveCache("zbar-lastupdate", lastUpdate);
-  }, [lastUpdate]);
 
-  // z.ai 数据加载（本地 SQLite + 远端同步合并）。
-  // 刷新期间不清空旧值，只设 refreshing —— 面板始终展示上次成功的结果。
-  const loadZai = useCallback(async () => {
-    const reqId = ++zaiReqId.current;
-    setRefreshing(true);
-    const [from, to] = resolveRange(preset, custom);
-
-    try {
-      // 根据设备筛选决定数据来源
-      let localStats: Stats | null = null;
-      let localCost: CostResult | null = null;
-      let localTrend: TrendPoint[] = [];
-      let remote: RemoteUsage | null = null;
-
-      const wantLocal = deviceFilter === "all" || deviceFilter === "local";
-      // all 或指定远端设备时拉远程数据；选 local 时不拉
-      const wantRemote = syncEnabled && deviceFilter !== "local";
-
-      const tasks: Promise<unknown>[] = [];
-      if (wantLocal) {
-        tasks.push(
-          fetchStats(from, to).then((s) => (localStats = s)),
-          computeCost(from, to).then((c) => (localCost = c)),
-          fetchTrend(from, to, trendBucket).then((t) => (localTrend = t))
-        );
-      }
-      if (wantRemote && syncConfig) {
-        const opts =
-          deviceFilter === "all"
-            ? { excludeDevice: syncConfig.device_id }
-            : { devices: deviceFilter };
-        const isSpecificRemote = deviceFilter !== "all";
-        tasks.push(
-          remoteUsage(from, to, trendBucket, opts)
-            .then((r) => (remote = r))
-            .catch((e) => {
-              if (isSpecificRemote) throw e;
-            })
-        );
-      }
-
-      await Promise.all(tasks);
-      if (reqId !== zaiReqId.current) return; // 过期请求，丢弃
-
-      // 合并本地 + 远端
-      if (deviceFilter === "local") {
-        setStats(localStats);
-        setCost(localCost);
-        setTrend(localTrend);
-      } else if (remote && !localStats) {
-        setStats(remoteToStats(remote));
-        setCost(computeRemoteCost(remote, pricing, currency));
-        setTrend(remoteTrendToLocal(remote, pricing, trendBucket));
-      } else if (localStats && remote) {
-        setStats(mergeStats(localStats, remote));
-        setCost(mergeCost(localCost, remote, pricing, currency));
-        setTrend(mergeTrend(localTrend, remote, pricing, trendBucket));
-      } else {
-        setStats(localStats);
-        setCost(localCost);
-        setTrend(localTrend);
-      }
-      setError(null);
-      setLastUpdate(Date.now());
-    } catch (e) {
-      if (reqId !== zaiReqId.current) return;
-      setError(String(e));
-    } finally {
-      if (reqId !== zaiReqId.current) return;
-      setRefreshing(false);
-    }
-  }, [
-    preset,
-    custom,
-    trendBucket,
-    deviceFilter,
-    syncConfig,
-    syncEnabled,
-    pricing,
-    currency,
-  ]);
-
-  // Cursor 数据加载（账号级别，不受设备筛选影响）。刷新期间不清空旧值。
-  const loadCursor = useCallback(() => {
-    const [from, to] = resolveRange(preset, custom);
-    const reqId = ++cursorReqId.current;
-    fetchCursorUsage(from, to)
-      .then((data) => {
-        if (reqId !== cursorReqId.current) return;
-        setCursor(data);
-        setCursorError(null);
-        setLastUpdate(Date.now());
-      })
-      .catch((e) => {
-        if (reqId !== cursorReqId.current) return;
-        setCursorError(String(e));
-      });
-    // 顺带刷新 USD→CNY 汇率：用户可能在设置页改过，这里同步更新缓存。
-    // getCursorConfig 是本地配置读取（非 API），开销可忽略。
-    getCursorConfig()
-      .then((cfg) => setFxRate(cfg.usd_cny_rate))
-      .catch(() => {});
-  }, [preset, custom]);
-
-  // Quota 数据加载（每次调用会采样写入 quota_history）。
-  const loadQuota = useCallback(() => {
-    const reqId = ++quotaReqId.current;
-    fetchQuota()
-      .then((r) => {
-        if (reqId !== quotaReqId.current) return;
-        setQuota(r);
-        setQuotaError(null);
-        // 额度刷新成功后顺带读今日增量（快照由 fetch_quota 采样写入）
-        getTodayDelta()
-          .then(setTodayDelta)
-          .catch(() => {});
-      })
-      .catch((e) => {
-        if (reqId !== quotaReqId.current) return;
-        setQuotaError(String(e));
-      });
-  }, []);
-
-  // 预加载：Provider 挂载立即拉取，不等面板打开
-  useEffect(() => {
-    loadZai();
-  }, [loadZai]);
-
-  useEffect(() => {
-    loadCursor();
-  }, [loadCursor]);
-
-  useEffect(() => {
-    loadQuota();
-  }, [loadQuota]);
-
-  // 定时刷新：z.ai 30s、Cursor 2min、quota 30s
-  useEffect(() => {
-    const timer = setInterval(loadZai, 30_000);
-    return () => clearInterval(timer);
-  }, [loadZai]);
-
-  useEffect(() => {
-    const timer = setInterval(loadCursor, 120_000);
-    return () => clearInterval(timer);
-  }, [loadCursor]);
-
-  useEffect(() => {
-    const timer = setInterval(loadQuota, 30_000);
-    return () => clearInterval(timer);
-  }, [loadQuota]);
-
-  // 手动刷新：同时触发 z.ai + Cursor
+  // 手动刷新：刷新当前范围（z.ai + Cursor）一次
   const refresh = useCallback(() => {
-    loadZai();
-    loadCursor();
-  }, [loadZai, loadCursor]);
+    const [f, t] = resolveRange(preset, custom);
+    const zKey = `${deviceFilter}|${rangeKey(preset, custom)}`;
+    refreshZaiRange(deviceFilter, zKey, f, t, trendBucket);
+    refreshCursorRange(rangeKey(preset, custom), f, t);
+  }, [preset, custom, deviceFilter, trendBucket, refreshZaiRange, refreshCursorRange]);
 
-  // 手动刷新额度
-  const refreshQuota = useCallback(() => {
-    loadQuota();
-  }, [loadQuota]);
+  const refreshQuota = useCallback(() => loadQuota(), [loadQuota]);
+
+  // ===== 当前范围数据（展示层只读这些）=====
+  const curZaiKey = `${deviceFilter}|${rangeKey(preset, custom)}`;
+  const curCursorKey = rangeKey(preset, custom);
+  const curZai = zaiCache[curZaiKey] ?? EMPTY_ZAI;
+  const curCursor = cursorCache[curCursorKey] ?? EMPTY_CURSOR;
 
   const value: DataCacheValue = {
     preset,
@@ -382,11 +496,12 @@ export function DataProvider({ pricing, currency, children }: ProviderProps) {
     setPreset,
     setCustom,
     setDeviceFilter,
-    stats,
-    cost,
-    trend,
-    cursor,
-    cursorError,
+    stats: curZai.stats,
+    cost: curZai.cost,
+    trend: curZai.trend,
+    error: curZai.error,
+    cursor: curCursor.snapshot,
+    cursorError: curCursor.error,
     fxRate,
     quota,
     todayDelta,
@@ -394,9 +509,8 @@ export function DataProvider({ pricing, currency, children }: ProviderProps) {
     syncConfig,
     remoteDevices,
     syncEnabled,
-    lastUpdate,
-    refreshing,
-    error,
+    lastUpdate: Math.max(curZai.ts, curCursor.ts),
+    refreshing: curZai.refreshing || curCursor.refreshing,
     refresh,
     refreshQuota,
   };
