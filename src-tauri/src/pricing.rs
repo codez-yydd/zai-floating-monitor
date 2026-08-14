@@ -78,7 +78,7 @@ pub fn save_pricing(cfg: &PricingConfig) -> Result<(), String> {
 /// 作为 models.dev 不可达时的离线兜底；主数据源见 fetch_models_dev_prices。
 const DEFAULTS_JSON: &str = include_str!("../../public/pricing-defaults.json");
 
-/// models.dev 的智谱模型目录（USD / 百万 token，社区维护，随官方调价更新）
+/// models.dev 全厂商模型目录（USD / 百万 token，社区维护，随官方调价更新）
 const MODELS_DEV_URL: &str = "https://models.dev/api.json";
 /// models.dev 响应缓存有效期（磁盘缓存 ~/.zbar/models-dev-cache.json）
 const MODELS_DEV_TTL_MS: u64 = 24 * 3600 * 1000;
@@ -140,61 +140,60 @@ fn value_as_f64(v: &serde_json::Value) -> Option<f64> {
     }
 }
 
-/// 从 models.dev 数据中提取智谱模型价格（逐模型容错）。兼容两种 schema：
-/// - 官方 api.json：顶层是 provider map（找 key=zhipuai 或按名称模糊匹配）
-/// - jsDelivr 单文件（data/zhipuai.json）：顶层就是 provider 对象（自身含 name + models）
-/// - 单个模型字段缺失/类型异常只跳过该模型，不影响其他模型（避免整包失败）
-fn extract_zhipu_prices(root: &serde_json::Value) -> BTreeMap<String, ModelPrice> {
-    // 定位智谱 provider 节点
-    let mut provider = root.get("zhipuai");
-    if provider.is_none() {
-        provider = root.as_object().and_then(|obj| {
-            obj.values().find(|v| {
-                let name = v
-                    .get("name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or_default()
-                    .to_lowercase();
-                name.contains("zhipu") || name.contains("z.ai")
-            })
-        });
-    }
-    // 单 provider 文件：root 自身就是 provider（有 models 字段且自身 name 匹配）
-    if provider.is_none() && root.get("models").is_some() {
-        let name = root
-            .get("name")
-            .and_then(|n| n.as_str())
-            .unwrap_or_default()
-            .to_lowercase();
-        if name.contains("zhipu") || name.contains("z.ai") {
-            provider = Some(root);
-        }
-    }
-    let Some(models) = provider.and_then(|p| p.get("models")).and_then(|m| m.as_object()) else {
+/// 官方直连厂商白名单（models.dev provider key，小写比较）。
+/// 同一 model_id 会在多个厂商/聚合商下出现（如 glm-4.6 同时在 zhipuai 与 openrouter），
+/// 提取时官方价优先，聚合商价仅在官方未收录时兜底。
+const OFFICIAL_PROVIDERS: &[&str] = &[
+    "zhipuai", "openai", "anthropic", "google", "alibaba", "qwen", "deepseek", "moonshot",
+    "moonshotai", "minimax", "01-ai", "yi", "xai", "meta", "mistral", "cohere", "perplexity",
+    "amazon", "microsoft", "nvidia", "baidu", "tencent", "stepfun", "ai21", "writer",
+];
+
+/// 从 models.dev api.json 提取**全厂商**模型价格（USD/百万 token，key 为小写 model_id）。
+/// ZCode 可接入任意厂商模型（qwen / claude / deepseek …），因此不做厂商过滤。
+/// 逐模型容错：单个模型字段缺失/类型异常只跳过该模型；同名模型官方厂商价优先。
+fn extract_all_prices(root: &serde_json::Value) -> BTreeMap<String, ModelPrice> {
+    let Some(providers) = root.as_object() else {
         return BTreeMap::new();
     };
 
     let mut usd = BTreeMap::new();
-    for (id, model) in models {
-        let Some(cost) = model.get("cost") else { continue };
-        // input/output 必须都有且可解析；cache_read 缺省/异常按 0
-        let (Some(input), Some(output)) = (
-            cost.get("input").and_then(value_as_f64),
-            cost.get("output").and_then(value_as_f64),
-        ) else {
-            continue;
-        };
-        if input <= 0.0 && output <= 0.0 {
-            continue;
+    // 两轮遍历：官方厂商先入表（可占位），聚合商后入且不覆盖已有价
+    for pass in 0..2 {
+        for (provider_key, provider) in providers {
+            let is_official = OFFICIAL_PROVIDERS.contains(&provider_key.to_lowercase().as_str());
+            if (pass == 0) != is_official {
+                continue;
+            }
+            let Some(models) = provider.get("models").and_then(|m| m.as_object()) else {
+                continue;
+            };
+            for (id, model) in models {
+                let Some(cost) = model.get("cost") else { continue };
+                // input/output 必须都有且可解析；cache_read 缺省/异常按 0
+                let (Some(input), Some(output)) = (
+                    cost.get("input").and_then(value_as_f64),
+                    cost.get("output").and_then(value_as_f64),
+                ) else {
+                    continue;
+                };
+                if input <= 0.0 && output <= 0.0 {
+                    continue;
+                }
+                let key = id.to_lowercase();
+                if pass == 1 && usd.contains_key(&key) {
+                    continue; // 聚合商价不覆盖已有（官方）价
+                }
+                usd.insert(
+                    key,
+                    ModelPrice {
+                        input,
+                        output,
+                        cache_read: cost.get("cache_read").and_then(value_as_f64).unwrap_or(0.0),
+                    },
+                );
+            }
         }
-        usd.insert(
-            id.to_lowercase(),
-            ModelPrice {
-                input,
-                output,
-                cache_read: cost.get("cache_read").and_then(value_as_f64).unwrap_or(0.0),
-            },
-        );
     }
     usd
 }
@@ -209,7 +208,7 @@ pub enum FetchMode {
     Force,
 }
 
-/// 拉取 models.dev 智谱模型 USD 价格（每百万 token）。
+/// 拉取 models.dev 全厂商模型 USD 价格（每百万 token）。
 /// 磁盘缓存 24h；网络失败时回退过期缓存（宁用昨日数据也不用静态内置表），
 /// 再失败返回 Err（调用方用内置表兜底）。
 pub fn fetch_models_dev_prices(mode: FetchMode) -> Result<BTreeMap<String, ModelPrice>, String> {
@@ -280,7 +279,7 @@ fn models_dev_urls() -> Vec<String> {
     ]
 }
 
-/// 从单个 URL 拉取并提取智谱价格（超时 8s，按响应结构自动分派视图）
+/// 从单个 URL 拉取并提取全厂商价格（超时 8s，按响应结构自动分派视图）
 fn fetch_models_dev_from(url: &str) -> Result<BTreeMap<String, ModelPrice>, String> {
     let agent = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(8))
@@ -295,16 +294,17 @@ fn fetch_models_dev_from(url: &str) -> Result<BTreeMap<String, ModelPrice>, Stri
     let usd = if root.get("data").and_then(|d| d.as_array()).is_some() {
         extract_from_models_json(&root)
     } else {
-        extract_zhipu_prices(&root)
+        extract_all_prices(&root)
     };
     if usd.is_empty() {
-        return Err("未解析到智谱模型价格".to_string());
+        return Err("未解析到任何模型价格".to_string());
     }
     Ok(usd)
 }
 
 /// jsDelivr 镜像 models.json 视图：{data:[{id:"z-ai/glm-4.6", pricing:{prompt, completion,
 /// input_cache_read}}]}，价格为 USD/token 字符串 → 换算为 USD/百万 token。
+/// 全厂商提取（ZCode 可接入任意厂商模型），剥掉 "厂商/" 前缀；canonical 视图本身已去重。
 /// 跳过 ":free" 等变体 id，避免免费端点价覆盖正式价。
 fn extract_from_models_json(root: &serde_json::Value) -> BTreeMap<String, ModelPrice> {
     let mut usd = BTreeMap::new();
@@ -313,8 +313,9 @@ fn extract_from_models_json(root: &serde_json::Value) -> BTreeMap<String, ModelP
     };
     for item in items {
         let Some(id) = item.get("id").and_then(|i| i.as_str()) else { continue };
-        let Some(model_id) = id.strip_prefix("z-ai/") else { continue };
-        if model_id.contains(':') {
+        // 剥 "厂商/" 前缀（如 "z-ai/glm-4.6" → "glm-4.6"、"alibaba/qwen-max" → "qwen-max"）
+        let model_id = id.rsplit('/').next().unwrap_or(id);
+        if model_id.is_empty() || model_id.contains(':') {
             continue; // ":free" 等变体端点，非正式定价
         }
         let Some(pricing) = item.get("pricing") else { continue };
@@ -496,7 +497,7 @@ mod tests {
         }
     }
 
-    /// models.dev api.json 提取：逐模型容错 + 字符串/数值兼容 + provider 模糊匹配
+    /// models.dev api.json 全厂商提取：逐模型容错 + 字符串/数值兼容 + 官方厂商优先
     #[test]
     fn extract_models_dev_prices() {
         let json = r#"{
@@ -513,36 +514,37 @@ mod tests {
                     "nocost": { "limit": { "context": 128000 } },
                     "zeroprice": { "cost": { "input": 0, "output": 0 } }
                 }
+            },
+            "alibaba": {
+                "name": "Alibaba",
+                "models": { "qwen3.8-max": { "cost": { "input": 1.2, "output": 6 } } }
+            },
+            "someaggregator": {
+                "name": "Cheap Router",
+                "models": {
+                    "glm-4.6": { "cost": { "input": 0.99, "output": 2.5 } },
+                    "deepseek-v3": { "cost": { "input": 0.27, "output": 1.1 } }
+                }
             }
         }"#;
         let root: serde_json::Value = serde_json::from_str(json).unwrap();
-        let usd = extract_zhipu_prices(&root);
-        assert_eq!(usd.len(), 2, "只应有 glm-4.6 与 glm-4.7 两个有效模型");
+        let usd = extract_all_prices(&root);
+        // gpt-4o + glm-4.6 + glm-4.7 + qwen3.8-max + deepseek-v3（聚合商独有）
+        assert_eq!(usd.len(), 5, "全厂商提取，含聚合商独有的 deepseek-v3");
         let g46 = &usd["glm-4.6"];
-        assert_eq!(g46.input, 0.35);
+        assert_eq!(g46.input, 0.35, "同名模型官方厂商价优先于聚合商价");
         assert_eq!(g46.output, 1.4);
         assert_eq!(g46.cache_read, 0.035); // cache_write 不进 ModelPrice
         let g47 = &usd["glm-4.7"];
         assert_eq!(g47.input, 0.2, "字符串价格应可解析");
-        assert_eq!(g47.output, 0.8);
         assert_eq!(g47.cache_read, 0.0, "缺 cache_read 按 0");
+        let qwen = &usd["qwen3.8-max"];
+        assert_eq!(qwen.input, 1.2, "非智谱厂商（阿里）也应被提取");
+        let ds = &usd["deepseek-v3"];
+        assert_eq!(ds.input, 0.27, "聚合商独有的模型保留聚合商价");
     }
 
-    /// provider key 非_zhipuai 时按名称模糊匹配（防上游改名）
-    #[test]
-    fn extract_finds_zhipu_by_name_fallback() {
-        let json = r#"{
-            "some-other-key": {
-                "name": "Zhipu AI (GLM)",
-                "models": { "glm-4.6": { "cost": { "input": 0.35, "output": 1.4 } } }
-            }
-        }"#;
-        let root: serde_json::Value = serde_json::from_str(json).unwrap();
-        let usd = extract_zhipu_prices(&root);
-        assert!(usd.contains_key("glm-4.6"), "名称含 zhipu 的 provider 应被匹配");
-    }
-
-    /// jsDelivr 镜像 models.json 视图：z-ai/ 前缀 + USD/token 字符串 → USD/百万 token
+    /// jsDelivr 镜像 models.json 视图：全厂商前缀剥离 + USD/token 字符串 → USD/百万 token
     #[test]
     fn extract_from_models_json_view() {
         let json = r#"{
@@ -550,16 +552,19 @@ mod tests {
                 { "id": "z-ai/glm-4.6", "pricing": { "prompt": "0.00000043", "completion": "0.00000174", "input_cache_read": "0.00000008" } },
                 { "id": "z-ai/glm-4.5-air:free", "pricing": { "prompt": "0", "completion": "0" } },
                 { "id": "openai/gpt-4o", "pricing": { "prompt": "0.0000025", "completion": "0.00001" } },
+                { "id": "alibaba/qwen3.8-max", "pricing": { "prompt": "0.0000012", "completion": "0.000006" } },
                 { "id": "z-ai/glm-4.7", "pricing": {} }
             ]
         }"#;
         let root: serde_json::Value = serde_json::from_str(json).unwrap();
         let usd = extract_from_models_json(&root);
-        assert_eq!(usd.len(), 1, "只应有 glm-4.6（free 变体/他厂/无价格均跳过）");
+        assert_eq!(usd.len(), 3, "glm-4.6 / gpt-4o / qwen3.8-max（free 变体与无价格跳过）");
         let g = &usd["glm-4.6"];
         assert_eq!(g.input, 0.43, "USD/token × 1M");
         assert_eq!(g.output, 1.74);
         assert_eq!(g.cache_read, 0.08);
+        assert_eq!(usd["gpt-4o"].input, 2.5, "多厂商前缀均应剥离");
+        assert_eq!(usd["qwen3.8-max"].input, 1.2, "阿里模型（ZCode 可接入非智谱模型）");
     }
 
     /// diff 分类：以 relevant 为主体 —— new / changed / missing 三类 + 大小写归一
@@ -613,7 +618,7 @@ mod tests {
         let usd = fetch_models_dev_from(
             "https://cdn.jsdelivr.net/gh/anomalyco/models.dev@dev/models.json",
         )
-        .expect("jsDelivr 镜像应可达且解析出智谱价格");
+        .expect("jsDelivr 镜像应可达且解析出模型价格");
         assert!(
             usd.contains_key("glm-4.6"),
             "应包含 glm-4.6，实际: {:?}",

@@ -439,7 +439,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
             </div>
             <p className="text-[9px] text-slate-700/50 mb-2 leading-relaxed">
               {diff.source === "models.dev"
-                ? "来自 models.dev 的智谱国际站 USD 指导价，CNY 按汇率换算。勾选后点「应用选中」才会写入。"
+                ? "来自 models.dev 的全厂商模型 USD 参考价（你在 ZCode 里用到的任意厂商模型都会检测），CNY 按汇率换算。勾选后点「应用选中」才会写入。"
                 : "models.dev 不可达，已回退内置参考表。勾选后点「应用选中」才会写入。"}
               新增项默认勾选，变动项默认不勾（保护你的自定义）。
             </p>
