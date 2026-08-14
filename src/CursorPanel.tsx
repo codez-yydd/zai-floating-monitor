@@ -315,8 +315,11 @@ export function CursorPanel({
             <Metric
               label="缓存率"
               value={
-                events.input_tokens > 0
-                  ? formatPct(events.cache_read_tokens / events.input_tokens)
+                events.input_tokens + events.cache_read_tokens > 0
+                  ? formatPct(
+                      events.cache_read_tokens /
+                        (events.input_tokens + events.cache_read_tokens),
+                    )
                   : "0%"
               }
               accent="text-emerald-600"
