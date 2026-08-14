@@ -327,10 +327,14 @@ pub struct WeeklyPeriod {
 ///
 /// 核心语义（关键，勿混淆）：
 /// - 每条快照的 weekly_reset = "此刻的下次重置时间"（未来的）
-/// - 当 weekly_reset 发生跳变（新值 > 旧值）时，说明刚发生了一次重置，
-///   重置时刻 ≈ 跳变发生处的快照 ts。这个跳变点就是前后两周期的分界。
-/// - 周期[i] 的 reset_at(开始) = 跳变点的 ts（重置发生时刻）
-/// - 周期[i] 的 end_at(结束) = 周期内快照的 weekly_reset（下次重置时刻）
+/// - 当 weekly_reset 发生跳变（新值 > 旧值）时，说明刚发生了一次重置。
+///   这个跳变点就是前后两周期的分界。
+/// - 周期[i] 的 reset_at(开始) = min(跳变前最后一条快照预告的 weekly_reset,
+///   跳变后首条快照 ts)：常规错过跳变场景取服务端预告的准确重置时刻；
+///   服务端提前重置（旧预告时刻未到就跳变）时取快照 ts，两种场景都不漏用量
+/// - 周期[i] 的 end_at(结束) = 与下一周期 reset_at 共用的统一分界
+///   min(周期内最后一条快照预告的 weekly_reset, 下一周期首条快照 ts)，
+///   保证相邻周期区间无缝不重叠（SQL 逐周期独立聚合，重叠会双计）
 /// - 兼容补差价/重新订阅导致的提前重置：任何大幅跳变都视为新周期。
 pub fn split_periods(snaps: &[QuotaSnapshot]) -> Vec<WeeklyPeriod> {
     if snaps.is_empty() {
@@ -357,19 +361,28 @@ pub fn split_periods(snaps: &[QuotaSnapshot]) -> Vec<WeeklyPeriod> {
             _ => false,
         };
         if jumped {
+            // 统一分界 = min(跳变前快照预告的 weekly_reset, 跳变后首条快照 ts)。
+            // 上一周期的 end_at 与新周期的 reset_at 必须共用同一分界，区间才无缝
+            // 不重叠——本地 SQL 与前端远端归属均按 [reset_at, end_at) 逐周期独立
+            // 聚合，两个分界不一致会让重叠段的用量双计进两个周期：
+            // - 常规场景（应用在重置后才恢复采样，snaps[i].ts > 预告时刻）：分界 =
+            //   预告的准确重置时刻，闭合"重置~首条快照"的漏算缺口（否则对比页
+            //   "实际 Token"偏低）；
+            // - 服务端提前重置场景（跳变发生时旧预告时刻还没到，snaps[i].ts < 预告
+            //   时刻）：分界 = snaps[i].ts，避免把 [snaps[i].ts, 预告时刻) 的用量
+            //   漏出所有周期。
+            // i 从 1 起循环，i-1 恒存在；jumped 要求 prev_reset 为 Some，unwrap_or 仅为兜底。
+            let boundary = prev_reset.unwrap_or(snaps[i].ts).min(snaps[i].ts);
             // [start_idx, i) 这些快照属于上一周期（跳变前的）
-            // 上一周期的 end = 它们共同的 weekly_reset（= prev_reset）
-            let prev_end = snaps[i - 1].weekly_reset.unwrap_or(snaps[i - 1].ts);
             periods.push(build_period(
                 &snaps[start_idx..i],
                 cur_start,
-                prev_end,
+                boundary,
                 false,
                 now_ms,
             ));
-            // 新周期从这里开始，重置时刻 ≈ 当前快照 ts
             start_idx = i;
-            cur_start = snaps[i].ts;
+            cur_start = boundary;
         }
     }
     // 收尾最后一个周期（当前未结束）
@@ -462,6 +475,74 @@ mod tests {
             mcp_used: None,
             mcp_total: None,
         }
+    }
+
+    /// 生成指定 weekly_reset 的快照（周期切分用例需要精确控制预告重置时刻）
+    fn snap_at(ts: i64, weekly_reset: Option<i64>) -> QuotaSnapshot {
+        QuotaSnapshot {
+            weekly_reset,
+            ..snap(ts, "pro")
+        }
+    }
+
+    /// 周期切分：跳变前快照预告的 weekly_reset 落在跳变后快照 ts 之前数小时
+    /// （应用重置后很久才启动的场景），新周期 reset_at 应等于预告重置时刻，
+    /// 否则真实重置~首条快照之间的用量会漏出所有周期
+    #[test]
+    fn split_periods_uses_announced_reset_as_new_start() {
+        // 周五 22:00 采样，预告周六 02:00 重置；应用关机，周一 20:00 才恢复采样
+        let announced = 1_800_000_000_000_i64;
+        let before_ts = announced - 4 * 3600_000;
+        let before = snap_at(before_ts, Some(announced));
+        let after = snap_at(
+            announced + 66 * 3600_000,
+            Some(announced + 7 * 86_400_000),
+        );
+        let periods = split_periods(&[before, after]);
+        assert_eq!(periods.len(), 2, "weekly_reset 大幅跳变应切出两个周期");
+        // 上一周期：起点用首条快照 ts 兜底，终点 = 预告重置时刻
+        assert_eq!(periods[0].reset_at, before_ts);
+        assert_eq!(periods[0].end_at, announced, "上一周期终点应为预告重置时刻");
+        // 新周期：起点 = 预告重置时刻（而非首条快照 ts），闭合 66h 的漏算缺口
+        assert_eq!(periods[1].reset_at, announced);
+        assert!(periods[0].end_at <= periods[1].reset_at, "相邻周期必须无缝不重叠");
+        assert!(periods[1].is_current);
+    }
+
+    /// 周期切分：服务端提前重置（跳变发生时旧预告时刻还没到，snaps[i].ts <
+    /// 预告时刻）新周期起点应取 snaps[i].ts，避免 [snaps[i].ts, 预告时刻)
+    /// 的用量漏出所有周期
+    #[test]
+    fn split_periods_early_reset_uses_snapshot_ts() {
+        let base = 1_800_000_000_000_i64;
+        // 采样时预告 20 小时后重置；1 小时后再次采样，服务端已把重置大幅推远
+        let before = snap_at(base, Some(base + 20 * 3600_000));
+        let after_ts = base + 3600_000;
+        let after = snap_at(after_ts, Some(after_ts + 8 * 86_400_000));
+        let periods = split_periods(&[before, after]);
+        assert_eq!(periods.len(), 2);
+        // 新周期起点 = min(预告时刻, 首条快照 ts) = 快照 ts（无缝，不取未到的预告时刻）
+        assert_eq!(periods[1].reset_at, after_ts);
+        // 上一周期 end_at 与新周期 reset_at 共用同一分界：提前重置场景下
+        // 上一周期 end_at 也必须收窄到快照 ts，否则重叠段用量会被双计
+        assert_eq!(periods[0].end_at, after_ts);
+        assert!(periods[0].end_at <= periods[1].reset_at, "相邻周期必须无缝不重叠");
+        assert!(periods[1].is_current);
+    }
+
+    /// 周期切分：无跳变时只有单个当前周期，起点用首条快照 ts 兜底
+    #[test]
+    fn split_periods_single_when_no_jump() {
+        let base = 1_800_000_000_000_i64;
+        let snaps = vec![
+            snap_at(base, Some(base + 7 * 86_400_000)),
+            snap_at(base + 3600_000, Some(base + 7 * 86_400_000)),
+        ];
+        let periods = split_periods(&snaps);
+        assert_eq!(periods.len(), 1, "weekly_reset 未跳变不应切分周期");
+        assert_eq!(periods[0].reset_at, base);
+        assert_eq!(periods[0].sample_count, 2);
+        assert!(periods[0].is_current);
     }
 
     /// 尾部回读：常规多行文件能取到最后一条的 ts

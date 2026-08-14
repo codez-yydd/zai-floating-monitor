@@ -75,9 +75,13 @@ export function StatsPanel({
       .catch(() => {});
   }, [isWindows]);
 
-  // 记忆当前标签
+  // 记忆当前标签（localStorage 异常静默，对齐 cache.ts：记忆仅锦上添花，不影响主流程）
   useEffect(() => {
-    localStorage.setItem("zbar-tab", tab);
+    try {
+      localStorage.setItem("zbar-tab", tab);
+    } catch {
+      /* 忽略：QuotaExceededError、隐私模式等 */
+    }
   }, [tab]);
 
   return (

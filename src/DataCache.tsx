@@ -52,7 +52,8 @@ import { loadCache, saveCache } from "./cache";
  *  - 展示层「只读缓存」：切换时间范围 = 改当前 key → 直接读对应缓存条目，
  *    零请求、秒显。stats/cost/trend/cursor 全部取自当前 key 的缓存。
  *  - 后台独立定时任务：定期把各预设范围（today/1d/7d/30d）的数据刷新进缓存，
- *    与范围切换完全解耦——切回来时数据已在缓存里。
+ *    与范围切换完全解耦——切回来时数据已在缓存里；用户停留在自定义视图时，
+ *    当前 custom 范围（z.ai + Cursor）也顺带刷新，保证 lastUpdate 常新。
  *  - 按需补刷：切到无缓存/过期范围（如全新 custom、首次进入、数据老化、配置
  *    就绪）才触发一次加载，之后也进缓存。
  *  - 刷新期间不清空旧值（只设 refreshing），新数据到达后平滑替换 → 无闪烁。
@@ -60,7 +61,8 @@ import { loadCache, saveCache } from "./cache";
  *  - localStorage 持久化：进程重启后各范围仍秒显。
  */
 
-// 需要后台持续刷新的预设范围（custom 由按需补刷负责，无法预缓存）
+// 需要后台持续刷新的预设范围（custom 无法预缓存，仅当用户停留在自定义视图时
+// 由后台 tick / visibilitychange 顺带刷新当前 custom 范围）
 const PRESET_RANGES: RangePreset[] = ["today", "1d", "7d", "30d"];
 
 // custom 缓存条目上限：超过则按 ts 淘汰最老的，避免长期累积撑爆 localStorage
@@ -257,6 +259,18 @@ export function DataProvider({ pricing, children }: ProviderProps) {
     cursorCacheRef.current = cursorCache;
   }, [cursorCache]);
 
+  // ===== refs：后台 tick 读取最新 preset/custom（用户停留在自定义视图时把当前
+  //      custom 范围纳入刷新用）。经 ref 读取而不是列入定时器 effect 依赖，
+  //      避免每次切换范围都重建 30s 定时器 =====
+  const presetRef = useRef(preset);
+  useEffect(() => {
+    presetRef.current = preset;
+  }, [preset]);
+  const customRef = useRef(custom);
+  useEffect(() => {
+    customRef.current = custom;
+  }, [custom]);
+
   /**
    * 刷新单个 z.ai 范围（范围无关，参数化 df/from/to/bucket）。
    * 保留原 local/remote/merge 合并逻辑；刷新期间不清空旧值，只设 refreshing。
@@ -449,13 +463,22 @@ export function DataProvider({ pricing, children }: ProviderProps) {
 
   // ===== 后台定时刷新 z.ai：当前 deviceFilter 的所有预设范围（与 preset/custom 解耦）。
   //      每 30s 刷一遍 today/1d/7d/30d → 切换预设范围时缓存命中、秒显。
-  //      依赖不含 preset/custom：预设范围的 resolveRange 忽略 custom，故无需进依赖。 =====
+  //      用户停留在自定义视图时，当前 custom 范围也顺带刷一轮（复用既有
+  //      refreshZaiRange 路径与 inflight 去重；custom 缓存 key 独立，不混淆预设缓存）。
+  //      依赖不含 preset/custom：预设范围的 resolveRange 忽略 custom，custom 经 ref 读最新值。 =====
   useEffect(() => {
     const df = deviceFilter;
     const tick = () => {
       for (const p of PRESET_RANGES) {
         const [f, t] = resolveRange(p, custom);
         refreshZaiRange(df, `${df}|${p}`, f, t, bucketOf(p));
+      }
+      // 自定义视图当前展示的范围纳入本轮刷新：custom 无法预缓存（日期区间任意），
+      // 不顺带刷的话该视图只能靠按需补刷，lastUpdate 会长期显示旧时间
+      if (presetRef.current === "custom") {
+        const key = `${df}|${rangeKey("custom", customRef.current)}`;
+        const [f, t] = resolveRange("custom", customRef.current);
+        refreshZaiRange(df, key, f, t, bucketOf("custom"));
       }
     };
     // 延后首刷（500ms）：WebView 重载（首次打开 / 长期隐藏后被系统回收）后，
@@ -467,12 +490,15 @@ export function DataProvider({ pricing, children }: ProviderProps) {
       clearTimeout(first);
       clearInterval(timer);
     };
-    // 故意不把 custom 列入依赖：后台只刷预设范围，custom 由按需补刷负责
+    // 故意不把 preset/custom 列入依赖：后台刷预设范围与二者无关（custom 仅在
+    // 自定义视图时经 ref 顺带刷新），列入会导致每次切范围重建定时器
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deviceFilter, syncConfig, syncEnabled, pricing, refreshZaiRange]);
 
   // ===== 后台定时刷新 Cursor：所有预设范围，降频 180s（网络慢，4 范围并行）。
-  //      账号级，不受 deviceFilter 影响。汇率每 tick 只读一次（与范围循环解耦）。 =====
+  //      账号级，不受 deviceFilter 影响。汇率每 tick 只读一次（与范围循环解耦）。
+  //      用户停留在自定义视图时，当前 custom 范围也顺带刷一轮（与 z.ai 后台
+  //      tick 同款 ref 模式；cursorCache 的 inflight 去重复用）。 =====
   useEffect(() => {
     const tick = () => {
       // 每 tick 读一次汇率（用户可能在设置页改过），避免每个范围重复读
@@ -482,6 +508,12 @@ export function DataProvider({ pricing, children }: ProviderProps) {
       for (const p of PRESET_RANGES) {
         const [f, t] = resolveRange(p, custom);
         refreshCursorRange(p, f, t);
+      }
+      // 自定义视图当前范围纳入本轮：lastUpdate 取 zai/cursor 两者较旧值，
+      // 只刷 z.ai 不刷 cursor 的话仍会被旧 cursor 条目拉低
+      if (presetRef.current === "custom") {
+        const [f, t] = resolveRange("custom", customRef.current);
+        refreshCursorRange(rangeKey("custom", customRef.current), f, t);
       }
     };
     // 延后首刷（1.5s）错峰：避免与 z.ai 首刷、首屏渲染竞争主线程
@@ -525,7 +557,8 @@ export function DataProvider({ pricing, children }: ProviderProps) {
   }, [preset, custom, deviceFilter, trendBucket, refreshZaiRange, refreshCursorRange]);
 
   // ===== 窗口恢复可见时主动补刷：隐藏期间 setInterval 常被节流，恢复后立即补齐
-  //      当前 deviceFilter 的预设范围，保证"常驻新鲜"。 =====
+  //      当前 deviceFilter 的预设范围，保证"常驻新鲜"。
+  //      用户停留在自定义视图时，当前 custom 范围（z.ai + Cursor）同样补刷。 =====
   useEffect(() => {
     const onVisible = () => {
       if (document.visibilityState !== "visible") return;
@@ -534,6 +567,12 @@ export function DataProvider({ pricing, children }: ProviderProps) {
         const [f, t] = resolveRange(p, custom);
         refreshZaiRange(df, `${df}|${p}`, f, t, bucketOf(p));
         refreshCursorRange(p, f, t);
+      }
+      if (presetRef.current === "custom") {
+        const cKey = rangeKey("custom", customRef.current);
+        const [f, t] = resolveRange("custom", customRef.current);
+        refreshZaiRange(df, `${df}|${cKey}`, f, t, bucketOf("custom"));
+        refreshCursorRange(cKey, f, t);
       }
     };
     document.addEventListener("visibilitychange", onVisible);

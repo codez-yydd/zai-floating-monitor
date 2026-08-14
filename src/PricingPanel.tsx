@@ -1107,6 +1107,7 @@ const PeakConfigEditor = memo(function PeakConfigEditor() {
           {cfg.plan_type === "v2"
             ? "V2：消耗 = token × 时段倍率（高峰3×/非高峰1×），周末全天非高峰。"
             : "V3：消耗 = 积分 = (input×系数 + cache×系数 + output×系数)/10000 × 时段倍率（高峰1.0/非高峰0.5）。"}
+          {"时段支持跨午夜（如 22:00-02:00），午夜后按发生时刻的星期判断：仅勾周五则周六凌晨段不命中，需同时勾周五+周六。"}
           {cfg.zcode_discount ? " 已启用 ZCode ×0.67 优惠。" : ""}
         </p>
       )}

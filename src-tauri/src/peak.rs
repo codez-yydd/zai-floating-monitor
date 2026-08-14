@@ -238,6 +238,7 @@ fn ms_to_local(ms: i64) -> Option<(u32, u32)> {
 /// 判断毫秒时间戳落在哪个时段，返回对应倍率。
 /// - 未启用/无时段/未匹配 → 返回 1.0（基础倍率）
 /// - 取第一个匹配的 segment（用户应避免配置重叠时段）
+/// - 支持跨午夜时段（end < start，如 22:00-02:00 = [22:00,24:00) ∪ [00:00,02:00)）
 pub fn multiplier_at(ms: i64, cfg: &PeakConfig) -> f64 {
     if !cfg.enabled || cfg.segments.is_empty() {
         return 1.0;
@@ -255,7 +256,16 @@ pub fn multiplier_at(ms: i64, cfg: &PeakConfig) -> f64 {
         let Some(end) = parse_hhmm(&seg.end) else {
             continue;
         };
-        if end > start && now_min >= start && now_min < end {
+        // 跨午夜区间（end < start）匹配 [start,24:00) ∪ [00:00,end)；
+        // end == start 视为空区间不匹配（否则会被误放大成全天命中）
+        let hit = if end > start {
+            now_min >= start && now_min < end
+        } else if end < start {
+            now_min >= start || now_min < end
+        } else {
+            false
+        };
+        if hit {
             return seg.multiplier;
         }
     }
@@ -326,4 +336,70 @@ pub fn credits_for_call(
         + output_tokens as f64 * c.output)
         / 10_000.0;
     Some(base * multiplier)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 全周掩码：时段判断用例不关心星期几，避免对具体日期敏感
+    const ALL_WEEK: u32 = MASK_WEEKDAY | MASK_WEEKEND;
+
+    fn seg(start: &str, end: &str, multiplier: f64) -> PeakSegment {
+        PeakSegment {
+            start: start.into(),
+            end: end.into(),
+            multiplier,
+            weekday_mask: ALL_WEEK,
+        }
+    }
+
+    fn cfg_with(segments: Vec<PeakSegment>) -> PeakConfig {
+        PeakConfig {
+            plan_type: Some(PlanType::V2),
+            zcode_discount: false,
+            enabled: true,
+            segments,
+        }
+    }
+
+    /// 本地时间 → 毫秒时间戳（选 8 月中旬，避开各地夏令时切换的缺失时刻）
+    fn local_ms(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> i64 {
+        chrono::Local
+            .with_ymd_and_hms(y, mo, d, h, mi, 0)
+            .single()
+            .expect("测试时间应有效")
+            .timestamp_millis()
+    }
+
+    /// 跨午夜区间（22:00-02:00）：23 点、次日 1 点命中，正午不命中
+    #[test]
+    fn multiplier_at_cross_midnight_hits() {
+        let cfg = cfg_with(vec![seg("22:00", "02:00", 3.0)]);
+        // 2026-08-12 周三 / 13 日周四，跨到次日验证 [00:00,end) 半段
+        assert_eq!(multiplier_at(local_ms(2026, 8, 12, 23, 0), &cfg), 3.0);
+        assert_eq!(multiplier_at(local_ms(2026, 8, 13, 1, 0), &cfg), 3.0);
+        assert_eq!(multiplier_at(local_ms(2026, 8, 13, 12, 0), &cfg), 1.0);
+        // 边界：起点 22:00 命中（含），终点 02:00 不命中（排他）
+        assert_eq!(multiplier_at(local_ms(2026, 8, 12, 22, 0), &cfg), 3.0);
+        assert_eq!(multiplier_at(local_ms(2026, 8, 13, 2, 0), &cfg), 1.0);
+    }
+
+    /// 正常区间（14:00-18:00）行为不回归：区间内命中，起点前/终点整点不命中
+    #[test]
+    fn multiplier_at_normal_range() {
+        let cfg = cfg_with(vec![seg("14:00", "18:00", 3.0)]);
+        assert_eq!(multiplier_at(local_ms(2026, 8, 12, 15, 0), &cfg), 3.0);
+        assert_eq!(multiplier_at(local_ms(2026, 8, 12, 13, 59), &cfg), 1.0);
+        // end 排他：18:00 整点已不在区间内
+        assert_eq!(multiplier_at(local_ms(2026, 8, 12, 18, 0), &cfg), 1.0);
+    }
+
+    /// start == end 视为空区间，任何时刻都不命中（避免被跨夜逻辑放大成全天命中）
+    #[test]
+    fn multiplier_at_empty_range_never_hits() {
+        let cfg = cfg_with(vec![seg("14:00", "14:00", 3.0)]);
+        assert_eq!(multiplier_at(local_ms(2026, 8, 12, 14, 0), &cfg), 1.0);
+        assert_eq!(multiplier_at(local_ms(2026, 8, 12, 9, 0), &cfg), 1.0);
+    }
 }

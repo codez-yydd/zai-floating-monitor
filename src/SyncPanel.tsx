@@ -234,9 +234,13 @@ export function SyncPanel({ onBack }: Props) {
         await refresh(cfg);
         return;
       }
-      // 若改的是本机设备名，回写 sync.json 保持一致，避免下次同步注册成新名字
+      // 若改的是本机设备名，回写 sync.json 保持一致，避免下次同步注册成新名字。
+      // 保存前重新拉最新配置、只覆盖 device_name：组件内的 config 是打开面板时的
+      // 快照，直接全量写回会把后台同步线程刚推进的 last_uploaded_rowid 回退，
+      // 造成一批记录重复上传
       if (config && config.device_id === deviceId) {
-        await setSyncConfig({ ...config, device_name: newName });
+        const latest = await getSyncConfig();
+        await setSyncConfig({ ...latest, device_name: newName });
       }
       setSyncFlash(`已改名为「${newName}」`);
       setTimeout(() => setSyncFlash(null), 2500);

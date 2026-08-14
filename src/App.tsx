@@ -27,7 +27,11 @@ export default function App() {
     fetchCurrency()
       .then((c) => {
         setCurrency(c);
-        localStorage.setItem("zbar-currency", c);
+        try {
+          localStorage.setItem("zbar-currency", c);
+        } catch {
+          /* 忽略：QuotaExceededError、隐私模式等（对齐 cache.ts） */
+        }
       })
       .catch(() => {});
   }, []);
@@ -35,7 +39,11 @@ export default function App() {
   // 切换货币：同步写后端 + 本地缓存，确保菜单栏标题随之刷新
   const handleCurrencyChange = (c: Currency) => {
     setCurrency(c);
-    localStorage.setItem("zbar-currency", c);
+    try {
+      localStorage.setItem("zbar-currency", c);
+    } catch {
+      /* 忽略：QuotaExceededError、隐私模式等（对齐 cache.ts） */
+    }
     saveCurrency(c).catch(() => {});
   };
 

@@ -15,12 +15,20 @@ const CREDIT_COEF: Record<string, { input: number; cache: number; output: number
 /** ZCode 优惠系数（与 Rust ZCODE_DISCOUNT 一致） */
 const ZCODE_DISCOUNT = 0.67;
 
-/** "HH:MM" → 当天分钟数 (0-1439)，非法返回 null */
+/** "HH:MM" → 当天分钟数 (0-1439)，非法返回 null。
+ * 与 Rust parse_hhmm 严格对齐：仅接受 trim 后的纯数字段（Rust u32 parse
+ * 还接受 '+' 前缀，如 "+5:30" 按分钟 5*60+30 处理），拒绝空段
+ * （Number("")=0）、科学计数（Number("1e1")=10）、多段冒号（"1:2:3"）等
+ * JS 宽松解析值，避免两端折算结果分叉。 */
 function parseHhmm(s: string): number | null {
-  const [h, m] = s.split(":");
-  const hi = Number(h);
-  const mi = Number(m);
-  if (isNaN(hi) || isNaN(mi) || hi > 23 || mi > 59) return null;
+  const parts = s.split(":");
+  if (parts.length !== 2) return null; // Rust split_once 后余段会 parse 失败
+  const re = /^\+?\d+$/; // Rust u32 parse 语义：可选 '+' 前缀 + 纯数字（含任意位数）
+  const [h, m] = parts;
+  if (!re.test(h.trim()) || !re.test(m.trim())) return null;
+  const hi = Number(h.trim());
+  const mi = Number(m.trim());
+  if (hi > 23 || mi > 59) return null;
   return hi * 60 + mi;
 }
 
@@ -36,6 +44,7 @@ function msToLocal(ms: number): [number, number] | null {
 }
 
 /** 判断 ms 落在哪个时段，返回对应倍率（未启用/未匹配 → 1.0）。
+ * 支持跨午夜时段（end < start，如 22:00-02:00 = [22:00,24:00) ∪ [00:00,02:00)）。
  * 与 Rust multiplier_at 一致。 */
 export function multiplierAt(ms: number, cfg: PeakConfig): number {
   if (!cfg.enabled || cfg.segments.length === 0) return 1.0;
@@ -47,7 +56,15 @@ export function multiplierAt(ms: number, cfg: PeakConfig): number {
     const start = parseHhmm(seg.start);
     const end = parseHhmm(seg.end);
     if (start === null || end === null) continue;
-    if (end > start && nowMin >= start && nowMin < end) {
+    // 跨午夜区间（end < start）匹配 [start,24:00) ∪ [00:00,end)；
+    // end === start 视为空区间不匹配（否则会被误放大成全天命中）
+    const hit =
+      end > start
+        ? nowMin >= start && nowMin < end
+        : end < start
+          ? nowMin >= start || nowMin < end
+          : false;
+    if (hit) {
       return seg.multiplier;
     }
   }
