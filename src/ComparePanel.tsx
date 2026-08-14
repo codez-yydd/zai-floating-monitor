@@ -80,11 +80,13 @@ export function ComparePanel({ onBack }: Props) {
         (deviceFilter === "all" ||
           (deviceFilter !== "local" && deviceFilter !== "all"));
 
+      // source 固定 zcode：对比页口径是智谱 quota vs ZCode 实际消耗，
+      // 不含 Codex（服务端不传 source 会合并全部来源）
       const opts =
         syncConfig &&
         (deviceFilter === "all"
-          ? { excludeDevice: syncConfig.device_id }
-          : { devices: deviceFilter });
+          ? { excludeDevice: syncConfig.device_id, source: "zcode" }
+          : { devices: deviceFilter, source: "zcode" });
 
       // 2. 并发：本地 token + 远端（trend 折 token）
       const tasks: Promise<unknown>[] = [];

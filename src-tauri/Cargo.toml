@@ -29,10 +29,14 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 dirs = "5"
 chrono = { version = "0.4", features = ["serde"] }
 open = "5"
-ureq = { version = "2", features = ["json"] }
+ureq = { version = "2", features = ["json", "socks-proxy"] }
 base64 = "0.22"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-foundation = { version = "0.3", features = ["NSProcessInfo"] }
+
+[target.'cfg(windows)'.dependencies]
+# 读取 Windows 系统代理设置（HKCU Internet Settings），wham/usage 实时额度查询用
+winreg = "0.52"

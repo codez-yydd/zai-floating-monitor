@@ -6,6 +6,7 @@ import { useDataCache } from "./DataCache";
 import { QuotaPanel } from "./QuotaPanel";
 import { RangePicker } from "./RangePicker";
 import { ZaiStatsContent } from "./ZaiStatsContent";
+import { CodexPanel } from "./CodexPanel";
 import { CursorPanel } from "./CursorPanel";
 import { SummaryTab } from "./SummaryTab";
 
@@ -46,6 +47,8 @@ export function StatsPanel({
     cost,
     trend,
     error,
+    codex,
+    codexError,
     cursor,
     cursorError,
     fxRate,
@@ -57,7 +60,7 @@ export function StatsPanel({
     refresh,
   } = cache;
 
-  // 三标签：汇总 | z.ai | Cursor
+  // 四标签：汇总 | Z.ai | Codex | Cursor
   const [tab, setTab] = useState<StatsTab>(
     () => (localStorage.getItem("zbar-tab") as StatsTab) || "summary"
   );
@@ -190,7 +193,7 @@ export function StatsPanel({
             </select>
           )}
           <div className="flex-1 flex gap-0.5 p-0.5 rounded-lg bg-slate-900/5">
-            {(["summary", "zai", "cursor"] as const).map((t) => (
+            {(["summary", "zai", "codex", "cursor"] as const).map((t) => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
@@ -198,13 +201,21 @@ export function StatsPanel({
                   tab === t
                     ? t === "cursor"
                       ? "bg-white text-violet-700 shadow-sm"
-                      : t === "zai"
-                        ? "bg-white text-sky-700 shadow-sm"
-                        : "bg-white text-slate-900 shadow-sm"
+                      : t === "codex"
+                        ? "bg-white text-emerald-700 shadow-sm"
+                        : t === "zai"
+                          ? "bg-white text-sky-700 shadow-sm"
+                          : "bg-white text-slate-900 shadow-sm"
                     : "text-slate-700/50 hover:text-slate-900/70"
                 }`}
               >
-                {t === "summary" ? "汇总" : t === "zai" ? "Z.ai" : "Cursor"}
+                {t === "summary"
+                  ? "汇总"
+                  : t === "zai"
+                    ? "Z.ai"
+                    : t === "codex"
+                      ? "Codex"
+                      : "Cursor"}
               </button>
             ))}
           </div>
@@ -232,6 +243,15 @@ export function StatsPanel({
             trendBucket={trendBucket}
           />
         </>
+      ) : tab === "codex" ? (
+        <CodexPanel
+          snapshot={codex}
+          loading={!codex && !codexError}
+          error={codexError}
+          currency={currency}
+          trendBucket={trendBucket}
+          pricing={pricing}
+        />
       ) : tab === "cursor" ? (
         <CursorPanel
           snapshot={cursor}
@@ -245,6 +265,7 @@ export function StatsPanel({
           stats={stats}
           cost={cost}
           trend={trend}
+          codex={codex}
           cursor={cursor}
           currency={currency}
           bucket={trendBucket}

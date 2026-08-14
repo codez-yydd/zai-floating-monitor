@@ -1,4 +1,5 @@
 import type {
+  CodexSnapshot,
   CostResult,
   CursorSnapshot,
   Currency,
@@ -7,6 +8,7 @@ import type {
   TrendPoint,
 } from "./types";
 import { formatCost, formatCountdown, formatTokens } from "./format";
+import { modelCost } from "./merge";
 import {
   ProgressBar,
   TrendChart,
@@ -20,6 +22,7 @@ interface Props {
   stats: Stats | null;
   cost: CostResult | null;
   trend: TrendPoint[];
+  codex: CodexSnapshot | null;
   cursor: CursorSnapshot | null;
   currency: Currency;
   bucket: "hour" | "day";
@@ -93,6 +96,7 @@ interface ModelRankRow {
 function buildModelRows(
   stats: Stats | null,
   cost: CostResult | null,
+  codex: CodexSnapshot | null,
   cursor: CursorSnapshot | null,
   pricing: PricingConfig,
   currency: Currency,
@@ -119,6 +123,30 @@ function buildModelRows(
       requests: m.requests,
       tokens: m.total_tokens,
       cost: costById.get(m.model_id) ?? 0,
+      hasPrice,
+    });
+  }
+
+  // Codex：后端无按模型花费命令，前端按价格表自算（与 zcode 行同款口径）
+  for (const m of codex?.stats.by_model ?? []) {
+    const price = pricing[currency][m.model_id];
+    const hasPrice = Boolean(price && (price.input > 0 || price.output > 0));
+    rows.push({
+      key: `codex:${m.provider_id}:${m.model_id}`,
+      name: m.model_id,
+      source: "Codex",
+      color: "#10a37f",
+      barBg: "bg-emerald-500/10",
+      requests: m.requests,
+      tokens: m.total_tokens,
+      cost: modelCost(
+        m.model_id,
+        m.input_tokens,
+        m.output_tokens,
+        m.cache_read_tokens,
+        pricing,
+        currency
+      ),
       hasPrice,
     });
   }
@@ -187,6 +215,7 @@ export function SummaryTab({
   stats,
   cost,
   trend,
+  codex,
   cursor,
   currency,
   bucket,
@@ -203,7 +232,7 @@ export function SummaryTab({
   }, []);
 
   // ZCode 额度（与范围无关，读全局缓存，与 QuotaPanel 同源）
-  const { quota, quotaError } = useDataCache();
+  const { quota, quotaError, codexError } = useDataCache();
   const hour5 = quota?.hour5 ?? null;
   const weekly = quota?.weekly ?? null;
   const mcp = quota?.mcp ?? null;
@@ -215,6 +244,14 @@ export function SummaryTab({
   const zaiCost =
     currency === "cny" ? (cost?.total_cny ?? 0) : (cost?.total_usd ?? 0);
   const zaiTokens = stats?.overall.total_tokens ?? 0;
+
+  // Codex 花费 & token：花费对趋势桶求和（与后端口径一致）
+  const codexRate = codex?.rate_limits ?? null;
+  const codexCostRaw = (codex?.trend ?? []).reduce(
+    (s, p) => s + (currency === "cny" ? p.cost_cny : p.cost_usd),
+    0
+  );
+  const codexTokens = codex?.stats.overall.total_tokens ?? 0;
 
   // Cursor 花费 & token（events 口径）
   const cursorEvents = cursor?.events;
@@ -271,6 +308,37 @@ export function SummaryTab({
       : []),
   ];
 
+  // Codex 额度：本机会话解析（API 中转模式无 rate_limits → 空 metrics 走文案）
+  const codexMetrics =
+    codexRate &&
+    (codexRate.primary_pct != null || codexRate.secondary_pct != null)
+      ? [
+          ...(codexRate.primary_pct != null
+            ? [
+                {
+                  label: "5h",
+                  usedPct: codexRate.primary_pct,
+                  resetAt: codexRate.primary_reset_at,
+                },
+              ]
+            : []),
+          ...(codexRate.secondary_pct != null
+            ? [
+                {
+                  label: "本周",
+                  usedPct: codexRate.secondary_pct,
+                  resetAt: codexRate.secondary_reset_at,
+                },
+              ]
+            : []),
+        ]
+      : [];
+  const codexEmpty = codexError
+    ? /未找到|未安装|会话目录/i.test(codexError)
+      ? "未检测到 Codex"
+      : "数据获取失败"
+    : "暂无数据";
+
   // 按 agent 组装。新增来源时在此追加，总览占比条 / 花费表 / 额度列表会一起跟上。
   const agents: AgentSummary[] = [
     {
@@ -284,6 +352,18 @@ export function SummaryTab({
       tokens: zaiTokens,
       metrics: zcodeMetrics,
       empty: zcodeEmpty,
+    },
+    {
+      id: "codex",
+      name: "Codex",
+      color: "#10a37f",
+      nameClass: "text-emerald-700",
+      badge: codexRate?.plan_type ?? null,
+      badgeClass: "bg-emerald-500/12 text-emerald-700",
+      cost: codexCostRaw,
+      tokens: codexTokens,
+      metrics: codexMetrics,
+      empty: codexEmpty,
     },
     {
       id: "cursor",
@@ -306,7 +386,7 @@ export function SummaryTab({
   const totalCost = agents.reduce((s, a) => s + a.cost, 0);
   const totalTokens = agents.reduce((s, a) => s + a.tokens, 0);
 
-  // 合并趋势：按 label 对齐 z.ai 趋势 + Cursor daily（仅日桶有意义）
+  // 合并趋势：按 label 对齐 z.ai 趋势 + Codex 趋势 + Cursor daily（仅日桶有意义）
   // 双货币各自计算：usd 用原值，cny = usd × 汇率，分别写入对应字段，
   // 避免同一个换算值同时进 cost_cny/cost_usd 造成非当前货币字段错误
   const cursorDailyMap = new Map<
@@ -320,20 +400,25 @@ export function SummaryTab({
       tokens: d.total_tokens,
     });
   });
+  // Codex 趋势桶自带双货币花费，按 label 索引后直接相加（与 z.ai 桶格式一致）
+  const codexTrendMap = new Map<string, TrendPoint>();
+  (codex?.trend ?? []).forEach((p) => codexTrendMap.set(p.label, p));
   const mergedTrend: TrendPoint[] = trend.map((p) => {
     const c = cursorDailyMap.get(p.label);
+    const x = codexTrendMap.get(p.label);
     return {
       label: p.label,
-      total_tokens: p.total_tokens + (c?.tokens ?? 0),
-      requests: p.requests,
-      cost_cny: p.cost_cny + (c?.costCny ?? 0),
-      cost_usd: p.cost_usd + (c?.costUsd ?? 0),
+      total_tokens: p.total_tokens + (x?.total_tokens ?? 0) + (c?.tokens ?? 0),
+      requests: p.requests + (x?.requests ?? 0),
+      cost_cny: p.cost_cny + (x?.cost_cny ?? 0) + (c?.costCny ?? 0),
+      cost_usd: p.cost_usd + (x?.cost_usd ?? 0) + (c?.costUsd ?? 0),
     };
   });
 
   const modelRows = buildModelRows(
     stats,
     cost,
+    codex,
     cursor,
     pricing,
     currency,

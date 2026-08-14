@@ -140,6 +140,8 @@ export interface SyncConfig {
   device_name: string;
   device_token: string;
   last_uploaded_rowid: number;
+  /** Codex 会话已上传到的 rowid（与 last_uploaded_rowid 同款水位线机制） */
+  last_uploaded_codex_rowid: number;
   last_uploaded_snapshot_ts: number;
   last_sync_at: number;
 }
@@ -181,6 +183,8 @@ export interface RemoteOverall {
 export interface RemoteModelStat {
   model_id: string;
   provider_id: string;
+  /** 数据来源："zcode" | "codex"（旧数据无此字段时后端默认 "zcode"） */
+  source: string;
   requests: number;
   input_tokens: number;
   output_tokens: number;
@@ -440,7 +444,31 @@ export interface CursorSnapshot {
   by_model: CursorModelStat[];
 }
 
-/** 主面板三标签 */
-export type StatsTab = "summary" | "zai" | "cursor";
+/** 主面板四标签 */
+export type StatsTab = "summary" | "zai" | "codex" | "cursor";
 
+// ===== Codex 用量统计（与 Rust codex 模块结构一一对应）=====
+
+/** Codex（OpenAI Codex CLI）速率限制（解析本地 ~/.codex 会话得到） */
+export interface CodexRateLimits {
+  /** 套餐类型："plus" / "pro" 等 */
+  plan_type: string | null;
+  /** 5 小时窗口已用百分比（0-100） */
+  primary_pct: number | null;
+  /** 5 小时窗口重置时间（毫秒时间戳） */
+  primary_reset_at: number | null;
+  /** 周窗口已用百分比（0-100） */
+  secondary_pct: number | null;
+  /** 周窗口重置时间（毫秒时间戳） */
+  secondary_reset_at: number | null;
+}
+
+/** Codex 用量快照（get_codex_usage 返回）。
+ *  stats / trend 与 z.ai 的 get_stats / get_trend 同构，展示层可直接复用。 */
+export interface CodexSnapshot {
+  stats: Stats;
+  trend: TrendPoint[];
+  /** 速率限制（API 中转等无本地限流数据的模式为 null） */
+  rate_limits: CodexRateLimits | null;
+}
 

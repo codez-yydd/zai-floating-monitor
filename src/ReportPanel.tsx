@@ -98,11 +98,13 @@ export function ReportPanel({ onBack, pricing }: Props) {
       (deviceFilter === "all" ||
         (deviceFilter !== "local" && deviceFilter !== "all"));
 
+    // source 固定 zcode：报告页 stats/cost 口径为 ZCode（Codex 数据
+    // 由汇总页单独展示；服务端不传 source 会合并全部来源导致重复计数）
     const opts =
       syncConfig &&
       (deviceFilter === "all"
-        ? { excludeDevice: syncConfig.device_id }
-        : { devices: deviceFilter });
+        ? { excludeDevice: syncConfig.device_id, source: "zcode" }
+        : { devices: deviceFilter, source: "zcode" });
 
     const tasks: Promise<unknown>[] = [];
 

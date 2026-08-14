@@ -200,8 +200,14 @@ pub fn list_models() -> Result<Vec<ModelInfo>, String> {
 
 // ===== 增量查询（多设备同步用） =====
 
+/// source 字段缺省值：旧服务端/旧数据不区分来源，反序列化缺省按 zcode 处理。
+pub(crate) fn default_source() -> String {
+    "zcode".into()
+}
+
 /// 单条明细记录（供同步上传用）。
 /// 字段与 zcode 的 model_usage 表对齐，多带一个 local_rowid 作为去重键。
+/// source 标记数据来源："zcode"（本地 ZCode 库）| "codex"（Codex 导入库）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageRow {
     pub local_rowid: i64,
@@ -222,6 +228,8 @@ pub struct UsageRow {
     pub reasoning_tokens: i64,
     #[serde(default)]
     pub computed_total_tokens: i64,
+    #[serde(default = "default_source")]
+    pub source: String,
 }
 
 /// 查询 rowid > since 的明细记录（增量上传用）。
@@ -253,6 +261,8 @@ pub fn query_since(since: i64, limit: usize) -> Result<Vec<UsageRow>, String> {
                 cache_creation_input_tokens: row.get(7)?,
                 reasoning_tokens: row.get(8)?,
                 computed_total_tokens: row.get(9)?,
+                // 本库（zcode）的行固定标记为 zcode 来源
+                source: "zcode".into(),
             })
         })
         .map_err(|e| format!("读取增量记录失败: {e}"))?
@@ -302,7 +312,8 @@ pub struct TrendBucketRaw {
 /// 把毫秒时间戳对齐到桶起点。
 /// - hour：对齐到所在小时的整点（按 UTC 毫秒取整，配合本地时区偏移）
 /// - day ：对齐到本地 0 点
-fn align_bucket_start(ms: i64, bucket: &str) -> i64 {
+/// codex 模块的趋势查询复用这两个函数，保持与 zcode 一致的桶边界。
+pub(crate) fn align_bucket_start(ms: i64, bucket: &str) -> i64 {
     if bucket == "hour" {
         // 1 小时 = 3600000ms，直接按整除对齐到整点。
         // started_at 是 UTC 毫秒，整点对齐后用本地时区格式化标签，
@@ -327,7 +338,7 @@ fn align_bucket_start(ms: i64, bucket: &str) -> i64 {
 }
 
 /// 桶起始毫秒 → 标签字符串。
-fn bucket_label(start_ms: i64, bucket: &str) -> String {
+pub(crate) fn bucket_label(start_ms: i64, bucket: &str) -> String {
     chrono::Local
         .timestamp_millis_opt(start_ms)
         .single()

@@ -138,14 +138,30 @@ PORT=8080 python3 app.py
 | Endpoint | Auth | Purpose |
 |----------|------|---------|
 | `POST /register` | Master Token | Register a device, returns Device Token |
-| `POST /sync` | Device Token | Incremental upload of usage records |
-| `GET /usage` | Device Token | Aggregated query (overall + by_model + trend) |
+| `POST /sync` | Device Token | Incremental upload of usage records (each record may carry source, defaults to zcode) |
+| `GET /usage` | Device Token | Aggregated query (overall + by_model + trend, optional source filter) |
 | `GET /devices` | Device Token | Device list |
 | `POST /device/revoke` | Master Token | Revoke a device |
 | `POST /cleanup` | Master Token | Data cleanup (by device / by time / all / reset) |
 | `GET /cleanup/status` | Device Token | Data volume + auto-cleanup config |
 | `POST /cleanup/config` | Master Token | Configure scheduled auto-cleanup |
 | `GET /health` | None | Health check |
+
+---
+
+## Codex Data (source dimension)
+
+Newer clients also upload Codex CLI usage records in addition to ZCode usage. The two are distinguished by the `source` field (`zcode` / `codex`): the same device and the same `local_rowid` never conflict across sources (each source has its own independent rowid sequence), and their upload/query cursors are independent as well.
+
+**Upgrade**: pull the new code and restart the service. On first launch the `usage_records` table structure is migrated automatically (a `source` column is added, primary key becomes `(device_id, source, local_rowid)`); all existing data is kept intact and marked as `zcode`, and indexes are rebuilt. Upgrading the server before the clients is recommended.
+
+**Upgrade-order protection**: before uploading Codex data, new clients probe the server protocol version (the `/sync` response now includes a `proto: 2` field). Old servers do not return it, so the client neither uploads Codex data nor advances the cursor (the sync log shows "server version too old"); after the server is upgraded, uploading resumes automatically — no data is lost even if clients are upgraded first. Old clients are unaffected.
+
+**API changes** (all backward compatible):
+
+- `POST /sync`: each record gains a `source` field, defaulting to `zcode` (old clients that omit it are treated as zcode). Each batch contains a single source; `last_rowid` / `max_rowid` count within that source's own rowid sequence.
+- `GET /usage`: new optional query parameter `source` (`zcode` / `codex`); omitting it merges all sources. Every group in `by_model` and `trend.by_model` gains a `source` field for frontend display.
+- `POST /period_detail`: the body also accepts an optional `source` field.
 
 ---
 

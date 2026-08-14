@@ -1,3 +1,4 @@
+mod codex;
 mod cursor;
 mod db;
 mod pricing;
@@ -145,6 +146,13 @@ async fn check_pricing_updates(
         db::list_models()?.into_iter().for_each(|m| {
             relevant.insert(m.model_id);
         });
+        // Codex 导入库出现过的模型也纳入检查主体（未安装/导入失败时静默跳过，
+        // 不影响 zcode 部分的检查）
+        if let Ok(models) = codex::list_models() {
+            models.into_iter().for_each(|m| {
+                relevant.insert(m.model_id);
+            });
+        }
         relevant.extend(user.cny.keys().cloned());
         relevant.extend(user.usd.keys().cloned());
 
@@ -361,6 +369,84 @@ async fn cursor_debug() -> Result<cursor::CursorDebugInfo, String> {
     tauri::async_runtime::spawn_blocking(|| cursor::cursor_debug())
         .await
         .map_err(|e| format!("Cursor 诊断失败: {e}"))?
+}
+
+// ===== Codex 用量统计 =====
+
+/// get_codex_usage 的入参：时间范围 + 分桶粒度（"hour" | "day"）
+#[derive(Debug, Deserialize)]
+struct CodexUsageRequest {
+    from_ms: i64,
+    to_ms: i64,
+    bucket: String,
+}
+
+/// get_codex_usage 返回的 Codex 快照：
+/// 本地导入库统计 + 趋势（含花费，与 get_trend 同款计算）+ 最新订阅额度。
+#[derive(Debug, Serialize)]
+struct CodexSnapshot {
+    stats: db::Stats,
+    trend: Vec<TrendBucket>,
+    rate_limits: Option<codex::CodexRateLimits>,
+}
+
+/// 拉取 Codex 用量快照（本地 sessions jsonl 增量导入 + 聚合查询）。
+/// async + spawn_blocking：首次导入要解析大量会话文件（文件 IO + SQLite 写入），
+/// 与 get_stats 同款卸载到阻塞线程池，避免阻塞主线程。
+#[tauri::command]
+async fn get_codex_usage(req: CodexUsageRequest) -> Result<CodexSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let stats = codex::query_stats(req.from_ms, req.to_ms)?;
+        let buckets = codex::query_trend(req.from_ms, req.to_ms, &req.bucket)?;
+        let pricing = load_pricing().unwrap_or_default();
+
+        // 额度：优先实时接口（wham/usage，参照 CodexBar，60s 缓存），
+        // 失败（未登录/网络不通/接口变更）静默降级到本地快照（已滤过期窗口）
+        let rate_limits = match codex::fetch_live_rate_limits() {
+            Ok(live) => live.or_else(|| codex::latest_rate_limits().ok().flatten()),
+            Err(_) => codex::latest_rate_limits().ok().flatten(),
+        };
+
+        // 花费计算与 get_trend 完全同款：桶内按模型聚合后用 cost_for 求和
+        let trend = buckets
+            .into_iter()
+            .map(|b| {
+                let cost_cny = b
+                    .by_model
+                    .iter()
+                    .map(|m| cost_for(m, &pricing.cny))
+                    .sum::<f64>();
+                let cost_usd = b
+                    .by_model
+                    .iter()
+                    .map(|m| cost_for(m, &pricing.usd))
+                    .sum::<f64>();
+                TrendBucket {
+                    label: b.label,
+                    total_tokens: b.total_tokens,
+                    requests: b.requests,
+                    cost_cny,
+                    cost_usd,
+                }
+            })
+            .collect();
+
+        Ok(CodexSnapshot {
+            stats,
+            trend,
+            rate_limits,
+        })
+    })
+    .await
+    .map_err(|e| format!("Codex 查询任务失败: {e}"))?
+}
+
+/// 诊断 Codex 数据导入（排查"暂无数据"问题）
+#[tauri::command]
+async fn get_codex_debug() -> Result<codex::CodexDebugInfo, String> {
+    tauri::async_runtime::spawn_blocking(codex::debug_info)
+        .await
+        .map_err(|e| format!("Codex 诊断任务失败: {e}"))?
 }
 
 /// 对比页：单个周期的 token 聚合结果。
@@ -616,12 +702,21 @@ async fn set_auto_cleanup(req: AutoCleanupServerRequest) -> Result<sync::AutoCle
         .map_err(|e| format!("自动清理配置任务失败: {e}"))?
 }
 
-/// 查询本机待上传的记录数（本机 max_rowid - 已上传游标），供同步面板显示。
+/// 查询本机待上传的记录数（zcode 与 codex 两个「max_rowid - 游标」之和，各取 max(0)），
+/// 供同步面板显示。codex 查询失败按 0 计（未安装 Codex 时不应影响 zcode 部分显示）。
+/// async + spawn_blocking：codex 侧首次导入可能解析大量会话文件，不能卡主线程。
 #[tauri::command]
-fn pending_upload_count() -> Result<i64, String> {
-    let local_max = db::max_rowid()?;
-    let cfg = sync::load_sync_config().unwrap_or_default();
-    Ok((local_max - cfg.last_uploaded_rowid).max(0))
+async fn pending_upload_count() -> Result<i64, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let cfg = sync::load_sync_config().unwrap_or_default();
+        let zcode = (db::max_rowid()? - cfg.last_uploaded_rowid).max(0);
+        let codex = codex::max_rowid()
+            .map(|m| (m - cfg.last_uploaded_codex_rowid).max(0))
+            .unwrap_or(0);
+        Ok(zcode + codex)
+    })
+    .await
+    .map_err(|e| format!("待上传统计任务失败: {e}"))?
 }
 
 /// get_trend 的入参：时间范围 + 分桶粒度
@@ -863,6 +958,7 @@ fn today_tray_title(app: &AppHandle) -> String {
             bucket: "day".to_string(),
             exclude_device: cfg.device_id.clone(),
             devices: String::new(),
+            source: String::new(),
         };
         // 远端请求失败时静默降级（服务器不可达不影响菜单栏显示）
         if let Ok(remote) = sync::fetch_remote_usage(req) {
@@ -906,6 +1002,17 @@ fn today_tray_title(app: &AppHandle) -> String {
         } else {
             cursor_cost_usd * rate
         };
+    }
+
+    // Codex：合并今日用量（本地导入库；未安装/失败静默降级，
+    // 不影响 ZCode/Cursor 部分展示，口径与前端汇总页一致）
+    if let Ok(stats) = codex::query_stats(today_start, now_ms) {
+        total += stats.overall.total_tokens;
+        cost += stats
+            .by_model
+            .iter()
+            .map(|m| cost_for(m, price_map))
+            .sum::<f64>();
     }
 
     let _ = app; // 占位
@@ -1151,7 +1258,9 @@ pub fn run() {
             set_cursor_config,
             test_cursor_auth,
             cursor_debug,
-            fetch_fx_rate
+            fetch_fx_rate,
+            get_codex_usage,
+            get_codex_debug
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

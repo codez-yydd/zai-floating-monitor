@@ -97,8 +97,9 @@ def sync():
     """增量上传明细 + 额度快照。
 
     body 字段（snapshots 可选，向后兼容旧客户端）：
-    - records: 用量明细数组
-    - last_rowid: 本批记录游标
+    - records: 用量明细数组（每条可带 source='zcode'|'codex'，缺省 zcode；
+      客户端保证每批 records 属同一来源，zcode 与 codex 各自独立分批上传）
+    - last_rowid: 本批记录游标（按本批来源的 rowid 序列计数）
     - snapshots: 额度快照数组（可选）
     - last_snapshot_ts: 快照游标（可选）
     """
@@ -112,17 +113,18 @@ def sync():
 
     now = db.now_ms()
 
-    # 明细
+    # 明细（source 逐条读取，缺省 zcode；主键 (device_id, source, local_rowid) 去重）
     accepted = 0
     if records:
         accepted = db.insert_usage_records(device_id, records, now)
     last_rowid = data.get("last_rowid")
     if last_rowid is None:
         # 兼容不传 last_rowid 的旧客户端。当前客户端恒传 last_rowid（sync.rs），
-        # 此分支实际不会命中。注意：不能用 max_rowid_of(device_id) 作为回退——
-        # 设备合并后该值会因合并记录的大偏移 rowid 而膨胀到 20 亿+，旧客户端会
-        # 把它当游标写回，导致后续上传被永久跳过（静默丢数据）。返回 0 让旧客户端
-        # 全量重传（INSERT OR IGNORE 幂等去重，不丢数据），最坏只是多一次冗余上传。
+        # 此分支实际不会命中。注意：不能用 max_rowid_of(device_id, source) 作为
+        # 回退——设备合并后该值会因合并记录的大偏移 rowid 而膨胀到 20 亿+，旧
+        # 客户端会把它当游标写回，导致后续上传被永久跳过（静默丢数据）。返回 0
+        # 让旧客户端全量重传（INSERT OR IGNORE 幂等去重，不丢数据），最坏只是
+        # 多一次冗余上传。
         max_rowid = 0
     else:
         max_rowid = last_rowid
@@ -140,6 +142,11 @@ def sync():
         "max_rowid": max_rowid,
         "accepted_snapshots": accepted_snaps,
         "max_snapshot_ts": max_snapshot_ts,
+        # 服务端协议版本：2 = 支持多来源（usage_records.source 列 + 主键含 source）。
+        # 客户端据此探测——旧版服务端（无 source 列）会把 codex 记录按
+        # (device_id, local_rowid) 撞键静默丢弃，客户端发现 proto < 2 时
+        # 不会推进 codex 游标，升级服务端后自动恢复，数据不丢。
+        "proto": 2,
     })
 
 
@@ -162,7 +169,11 @@ def _resolve_device_filter(q_args, all_ids):
 
 @app.get("/usage")
 def usage():
-    """聚合查询：返回指定设备集合在时间范围内的 overall + by_model + trend。"""
+    """聚合查询：返回指定设备集合在时间范围内的 overall + by_model + trend。
+
+    可选 query 参数 source（'zcode' / 'codex'）：不传 = 全部来源合并；
+    by_model 每个分组带 source 字段，供前端区分展示。
+    """
     err, _ = require_device_token()
     if err:
         return err
@@ -172,6 +183,7 @@ def usage():
     bucket = request.args.get("bucket", "day")
     if bucket not in ("hour", "day"):
         return jsonify({"error": "bucket 必须是 hour 或 day"}), 400
+    source = (request.args.get("source") or "").strip()
 
     # 取所有 device_id 作为筛选池
     all_devices = db.list_devices()
@@ -182,7 +194,7 @@ def usage():
     if has_filter_param and not filter_ids:
         return jsonify(db.empty_usage_result(from_ms, to_ms))
 
-    result = db.query_usage(from_ms, to_ms, bucket, filter_ids)
+    result = db.query_usage(from_ms, to_ms, bucket, filter_ids, source=source or None)
     return jsonify(result)
 
 
@@ -216,7 +228,8 @@ def period_detail():
     """按一组周期 [start, end) 返回远端逐条用量明细。
 
     供客户端用本地 peak 配置折算消耗（服务端无 peak 配置）。
-    body: {periods: [[start,end],...], devices?, exclude_device?}
+    body: {periods: [[start,end],...], devices?, exclude_device?, source?}
+    source 可选（'zcode' / 'codex'），不传 = 全部来源。
     """
     err, _ = require_device_token()
     if err:
@@ -234,7 +247,8 @@ def period_detail():
         empty = [{"reset_at": s, "end_at": e, "rows": []} for s, e in periods]
         return jsonify({"buckets": empty})
 
-    buckets = db.query_period_detail(periods, filter_ids)
+    source = (data.get("source") or "").strip()
+    buckets = db.query_period_detail(periods, filter_ids, source=source or None)
     return jsonify({"buckets": buckets})
 
 

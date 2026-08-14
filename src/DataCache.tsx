@@ -10,6 +10,7 @@ import {
 import type { ReactNode } from "react";
 import type {
   CostResult,
+  CodexSnapshot,
   CursorSnapshot,
   DeviceInfo,
   PricingConfig,
@@ -23,6 +24,7 @@ import type {
 } from "./types";
 import {
   computeCost,
+  fetchCodexUsage,
   fetchCursorUsage,
   fetchQuota,
   fetchStats,
@@ -50,10 +52,10 @@ import { loadCache, saveCache } from "./cache";
  *
  * 核心思路：
  *  - 展示层「只读缓存」：切换时间范围 = 改当前 key → 直接读对应缓存条目，
- *    零请求、秒显。stats/cost/trend/cursor 全部取自当前 key 的缓存。
+ *    零请求、秒显。stats/cost/trend/codex/cursor 全部取自当前 key 的缓存。
  *  - 后台独立定时任务：定期把各预设范围（today/1d/7d/30d）的数据刷新进缓存，
  *    与范围切换完全解耦——切回来时数据已在缓存里；用户停留在自定义视图时，
- *    当前 custom 范围（z.ai + Cursor）也顺带刷新，保证 lastUpdate 常新。
+ *    当前 custom 范围（z.ai + Codex + Cursor）也顺带刷新，保证 lastUpdate 常新。
  *  - 按需补刷：切到无缓存/过期范围（如全新 custom、首次进入、数据老化、配置
  *    就绪）才触发一次加载，之后也进缓存。
  *  - 刷新期间不清空旧值（只设 refreshing），新数据到达后平滑替换 → 无闪烁。
@@ -106,6 +108,7 @@ function trimCustomEntries<T extends { ts: number }>(
 // 缓存过期阈值：超过则按需补刷（略大于后台刷新间隔，避免边界抖动）
 const ZAI_STALE_MS = 60_000;
 const CURSOR_STALE_MS = 240_000;
+const CODEX_STALE_MS = 60_000;
 
 interface ZaiEntry {
   stats: Stats | null;
@@ -123,6 +126,13 @@ interface CursorEntry {
   ts: number;
 }
 
+interface CodexEntry {
+  snapshot: CodexSnapshot | null;
+  error: string | null;
+  refreshing: boolean;
+  ts: number;
+}
+
 const EMPTY_ZAI: ZaiEntry = {
   stats: null,
   cost: null,
@@ -133,6 +143,13 @@ const EMPTY_ZAI: ZaiEntry = {
 };
 
 const EMPTY_CURSOR: CursorEntry = {
+  snapshot: null,
+  error: null,
+  refreshing: false,
+  ts: 0,
+};
+
+const EMPTY_CODEX: CodexEntry = {
   snapshot: null,
   error: null,
   refreshing: false,
@@ -163,6 +180,11 @@ export interface DataCacheValue {
   cost: CostResult | null;
   trend: TrendPoint[];
 
+  // ===== Codex 数据（当前范围，读缓存；stats/trend 与 z.ai 同构）=====
+  codex: CodexSnapshot | null;
+  /** Codex 错误信息（如未安装，不阻塞其他来源展示） */
+  codexError: string | null;
+
   // ===== Cursor 数据（当前范围，读缓存）=====
   cursor: CursorSnapshot | null;
   cursorError: string | null;
@@ -186,7 +208,7 @@ export interface DataCacheValue {
   refreshing: boolean;
   /** z.ai 错误信息（不阻塞已有数据展示） */
   error: string | null;
-  /** 手动强制刷新当前范围（z.ai + Cursor） */
+  /** 手动强制刷新当前范围（z.ai + Codex + Cursor） */
   refresh: () => void;
   /** 手动强制刷新 Coding Plan 额度 */
   refreshQuota: () => void;
@@ -219,12 +241,15 @@ export function DataProvider({ pricing, children }: ProviderProps) {
 
   const trendBucket = bucketOf(preset);
 
-  // ===== 按范围缓存（持久化，key: zai=`${df}|${rangeKey}`，cursor=rangeKey）=====
+  // ===== 按范围缓存（持久化，key: zai/codex=`${df}|${rangeKey}`，cursor=rangeKey）=====
   const [zaiCache, setZaiCache] = useState<Record<string, ZaiEntry>>(
     () => stripRefreshing(loadCache<Record<string, ZaiEntry>>("zbar-zai-cache") ?? {})
   );
   const [cursorCache, setCursorCache] = useState<Record<string, CursorEntry>>(
     () => stripRefreshing(loadCache<Record<string, CursorEntry>>("zbar-cursor-cache") ?? {})
+  );
+  const [codexCache, setCodexCache] = useState<Record<string, CodexEntry>>(
+    () => stripRefreshing(loadCache<Record<string, CodexEntry>>("zbar-codex-cache") ?? {})
   );
 
   // ===== 其他数据（持久化）=====
@@ -247,6 +272,7 @@ export function DataProvider({ pricing, children }: ProviderProps) {
   // ===== 并发保护：同范围正在刷新则跳过，避免重复请求 =====
   const zaiInflight = useRef<Set<string>>(new Set());
   const cursorInflight = useRef<Set<string>>(new Set());
+  const codexInflight = useRef<Set<string>>(new Set());
   const quotaReqId = useRef(0);
 
   // ===== refs：按需补刷 effect 读取最新缓存，避免闭包过期 / 反复触发 =====
@@ -258,6 +284,10 @@ export function DataProvider({ pricing, children }: ProviderProps) {
   useEffect(() => {
     cursorCacheRef.current = cursorCache;
   }, [cursorCache]);
+  const codexCacheRef = useRef(codexCache);
+  useEffect(() => {
+    codexCacheRef.current = codexCache;
+  }, [codexCache]);
 
   // ===== refs：后台 tick 读取最新 preset/custom（用户停留在自定义视图时把当前
   //      custom 范围纳入刷新用）。经 ref 读取而不是列入定时器 effect 依赖，
@@ -310,10 +340,12 @@ export function DataProvider({ pricing, children }: ProviderProps) {
           );
         }
         if (wantRemote && syncConfig) {
+          // source 固定 zcode：服务端不传 source 会合并全部来源，
+          // 其他设备上传的 Codex 数据会混入 Z.ai 口径并在汇总页重复计数
           const opts =
             df === "all"
-              ? { excludeDevice: syncConfig.device_id }
-              : { devices: df };
+              ? { excludeDevice: syncConfig.device_id, source: "zcode" }
+              : { devices: df, source: "zcode" };
           const isSpecificRemote = df !== "all";
           tasks.push(
             remoteUsage(from, to, bucket, opts)
@@ -432,6 +464,127 @@ export function DataProvider({ pricing, children }: ProviderProps) {
       });
   }, []);
 
+  /**
+   * 刷新单个 Codex 范围（本地 get_codex_usage + 远端合并，复用 z.ai 的
+   * Stats/RemoteUsage 合并函数——CodexSnapshot 的 stats/trend 与 z.ai 同构）。
+   * 远端合并开关与 z.ai 一致：syncEnabled 且设备筛选非 "local" 时拉
+   * remote_usage(source="codex")；本地 Codex 未安装时软失败，远端有数据
+   * 仍展示远端；完全无数据才记录 error。rate_limits 始终保持本地值。
+   */
+  const refreshCodexRange = useCallback(
+    async (
+      df: string,
+      key: string,
+      from: number,
+      to: number,
+      bucket: TrendBucket
+    ) => {
+      if (codexInflight.current.has(key)) return;
+      codexInflight.current.add(key);
+      setCodexCache((prev) => ({
+        ...prev,
+        [key]: { ...(prev[key] ?? EMPTY_CODEX), refreshing: true },
+      }));
+
+      // 本地命令错误单独记录（未安装等）：远端有数据时仍可展示，不整体失败
+      let localError: string | null = null;
+      // 用对象盒子承接 then 回调里的赋值：回调内赋值不参与控制流分析，
+      // 直接用 let 会被 TS 收窄成初始 null，后面无法安全解引用 stats/trend
+      const localBox: { snapshot: CodexSnapshot | null } = { snapshot: null };
+      try {
+        let remote: RemoteUsage | null = null;
+
+        const wantLocal = df === "all" || df === "local";
+        const wantRemote = syncEnabled && df !== "local";
+
+        const tasks: Promise<unknown>[] = [];
+        if (wantLocal) {
+          tasks.push(
+            fetchCodexUsage(from, to, bucket)
+              .then((s) => (localBox.snapshot = s))
+              .catch((e) => {
+                localError = String(e);
+              })
+          );
+        }
+        if (wantRemote && syncConfig) {
+          const opts =
+            df === "all"
+              ? { excludeDevice: syncConfig.device_id, source: "codex" }
+              : { devices: df, source: "codex" };
+          const isSpecificRemote = df !== "all";
+          tasks.push(
+            remoteUsage(from, to, bucket, opts)
+              .then((r) => (remote = r))
+              .catch((e) => {
+                if (isSpecificRemote) throw e;
+                // "全部"模式：远端失败静默，仅用本地数据
+              })
+          );
+        }
+
+        await Promise.all(tasks);
+        const local = localBox.snapshot;
+
+        // 合并本地 + 远端（与 z.ai 同款三分支）
+        let snapshot: CodexSnapshot | null;
+        if (df === "local") {
+          snapshot = local;
+        } else if (remote && !local) {
+          snapshot = {
+            stats: remoteToStats(remote),
+            trend: remoteTrendToLocal(remote, pricing, bucket),
+            rate_limits: null,
+          };
+        } else if (local && remote) {
+          snapshot = {
+            stats: mergeStats(local.stats, remote),
+            trend: mergeTrend(local.trend, remote, pricing, bucket),
+            rate_limits: local.rate_limits,
+          };
+        } else {
+          snapshot = local;
+        }
+
+        setCodexCache((prev) =>
+          trimCustomEntries(
+            {
+              ...prev,
+              [key]: {
+                snapshot,
+                // 有数据（含仅远端）即清错误；完全无数据时透出本地错误
+                error: snapshot
+                  ? null
+                  : localError ?? "未获取到 Codex 数据",
+                refreshing: false,
+                ts: Date.now(),
+              },
+            },
+            MAX_CUSTOM_ENTRIES
+          )
+        );
+      } catch (e) {
+        setCodexCache((prev) =>
+          trimCustomEntries(
+            {
+              ...prev,
+              [key]: {
+                ...(prev[key] ?? EMPTY_CODEX),
+                error: String(e),
+                refreshing: false,
+                ts: Date.now(),
+              },
+            },
+            MAX_CUSTOM_ENTRIES
+          )
+        );
+      } finally {
+        codexInflight.current.delete(key);
+      }
+    },
+    [syncConfig, syncEnabled, pricing]
+  );
+
   // Quota 数据加载（与范围无关，每次调用会采样写入 quota_history）。
   const loadQuota = useCallback(() => {
     const reqId = ++quotaReqId.current;
@@ -461,10 +614,11 @@ export function DataProvider({ pricing, children }: ProviderProps) {
       .catch(() => {});
   }, []);
 
-  // ===== 后台定时刷新 z.ai：当前 deviceFilter 的所有预设范围（与 preset/custom 解耦）。
+  // ===== 后台定时刷新 z.ai + Codex：当前 deviceFilter 的所有预设范围（与 preset/custom 解耦）。
   //      每 30s 刷一遍 today/1d/7d/30d → 切换预设范围时缓存命中、秒显。
   //      用户停留在自定义视图时，当前 custom 范围也顺带刷一轮（复用既有
-  //      refreshZaiRange 路径与 inflight 去重；custom 缓存 key 独立，不混淆预设缓存）。
+  //      refreshZaiRange/refreshCodexRange 路径与 inflight 去重；custom 缓存 key 独立，
+  //      不混淆预设缓存）。Codex 与 z.ai 同一轮刷新，无需单独定时器错峰。
   //      依赖不含 preset/custom：预设范围的 resolveRange 忽略 custom，custom 经 ref 读最新值。 =====
   useEffect(() => {
     const df = deviceFilter;
@@ -472,6 +626,7 @@ export function DataProvider({ pricing, children }: ProviderProps) {
       for (const p of PRESET_RANGES) {
         const [f, t] = resolveRange(p, custom);
         refreshZaiRange(df, `${df}|${p}`, f, t, bucketOf(p));
+        refreshCodexRange(df, `${df}|${p}`, f, t, bucketOf(p));
       }
       // 自定义视图当前展示的范围纳入本轮刷新：custom 无法预缓存（日期区间任意），
       // 不顺带刷的话该视图只能靠按需补刷，lastUpdate 会长期显示旧时间
@@ -479,6 +634,7 @@ export function DataProvider({ pricing, children }: ProviderProps) {
         const key = `${df}|${rangeKey("custom", customRef.current)}`;
         const [f, t] = resolveRange("custom", customRef.current);
         refreshZaiRange(df, key, f, t, bucketOf("custom"));
+        refreshCodexRange(df, key, f, t, bucketOf("custom"));
       }
     };
     // 延后首刷（500ms）：WebView 重载（首次打开 / 长期隐藏后被系统回收）后，
@@ -493,7 +649,7 @@ export function DataProvider({ pricing, children }: ProviderProps) {
     // 故意不把 preset/custom 列入依赖：后台刷预设范围与二者无关（custom 仅在
     // 自定义视图时经 ref 顺带刷新），列入会导致每次切范围重建定时器
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deviceFilter, syncConfig, syncEnabled, pricing, refreshZaiRange]);
+  }, [deviceFilter, syncConfig, syncEnabled, pricing, refreshZaiRange, refreshCodexRange]);
 
   // ===== 后台定时刷新 Cursor：所有预设范围，降频 180s（网络慢，4 范围并行）。
   //      账号级，不受 deviceFilter 影响。汇率每 tick 只读一次（与范围循环解耦）。
@@ -538,8 +694,8 @@ export function DataProvider({ pricing, children }: ProviderProps) {
 
   // ===== 按需补刷：切到无缓存/过期范围，或配置就绪后补一次。
   //      预设范围通常已被后台任务刷新 → 命中新鲜缓存 → 不请求、秒显。
-  //      依赖含 refreshZaiRange/refreshCursorRange：pricing/syncConfig 就绪后函数重建，
-  //      本 effect 重跑 → custom 范围用就绪配置重刷自愈（修复冷启动覆盖问题）。 =====
+  //      依赖含 refreshZaiRange/refreshCursorRange/refreshCodexRange：pricing/syncConfig
+  //      就绪后函数重建，本 effect 重跑 → custom 范围用就绪配置重刷自愈（修复冷启动覆盖问题）。 =====
   useEffect(() => {
     const [f, t] = resolveRange(preset, custom);
     const zKey = `${deviceFilter}|${rangeKey(preset, custom)}`;
@@ -552,13 +708,17 @@ export function DataProvider({ pricing, children }: ProviderProps) {
     if (!cEntry || Date.now() - cEntry.ts > CURSOR_STALE_MS) {
       refreshCursorRange(cKey, f, t);
     }
+    const xEntry = codexCacheRef.current[zKey];
+    if (!xEntry || Date.now() - xEntry.ts > CODEX_STALE_MS) {
+      refreshCodexRange(deviceFilter, zKey, f, t, trendBucket);
+    }
     // 仅在范围/设备/刷新函数变化时触发；不依赖 cache 内容（靠 ref 读最新值）
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [preset, custom, deviceFilter, trendBucket, refreshZaiRange, refreshCursorRange]);
+  }, [preset, custom, deviceFilter, trendBucket, refreshZaiRange, refreshCursorRange, refreshCodexRange]);
 
   // ===== 窗口恢复可见时主动补刷：隐藏期间 setInterval 常被节流，恢复后立即补齐
   //      当前 deviceFilter 的预设范围，保证"常驻新鲜"。
-  //      用户停留在自定义视图时，当前 custom 范围（z.ai + Cursor）同样补刷。 =====
+  //      用户停留在自定义视图时，当前 custom 范围（z.ai + Codex + Cursor）同样补刷。 =====
   useEffect(() => {
     const onVisible = () => {
       if (document.visibilityState !== "visible") return;
@@ -566,19 +726,21 @@ export function DataProvider({ pricing, children }: ProviderProps) {
       for (const p of PRESET_RANGES) {
         const [f, t] = resolveRange(p, custom);
         refreshZaiRange(df, `${df}|${p}`, f, t, bucketOf(p));
+        refreshCodexRange(df, `${df}|${p}`, f, t, bucketOf(p));
         refreshCursorRange(p, f, t);
       }
       if (presetRef.current === "custom") {
         const cKey = rangeKey("custom", customRef.current);
         const [f, t] = resolveRange("custom", customRef.current);
         refreshZaiRange(df, `${df}|${cKey}`, f, t, bucketOf("custom"));
+        refreshCodexRange(df, `${df}|${cKey}`, f, t, bucketOf("custom"));
         refreshCursorRange(cKey, f, t);
       }
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => document.removeEventListener("visibilitychange", onVisible);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deviceFilter, refreshZaiRange, refreshCursorRange]);
+  }, [deviceFilter, refreshZaiRange, refreshCursorRange, refreshCodexRange]);
 
   // ===== 持久化：各 state 变化即落盘，供下次冷启动各范围秒显 =====
   useEffect(() => {
@@ -597,6 +759,9 @@ export function DataProvider({ pricing, children }: ProviderProps) {
     saveCache("zbar-cursor-cache", cursorCache);
   }, [cursorCache]);
   useEffect(() => {
+    saveCache("zbar-codex-cache", codexCache);
+  }, [codexCache]);
+  useEffect(() => {
     saveCache("zbar-fxrate", fxRate);
   }, [fxRate]);
   useEffect(() => {
@@ -606,13 +771,14 @@ export function DataProvider({ pricing, children }: ProviderProps) {
     if (todayDelta) saveCache("zbar-today-delta", todayDelta);
   }, [todayDelta]);
 
-  // 手动刷新：刷新当前范围（z.ai + Cursor）一次
+  // 手动刷新：刷新当前范围（z.ai + Codex + Cursor）一次
   const refresh = useCallback(() => {
     const [f, t] = resolveRange(preset, custom);
     const zKey = `${deviceFilter}|${rangeKey(preset, custom)}`;
     refreshZaiRange(deviceFilter, zKey, f, t, trendBucket);
+    refreshCodexRange(deviceFilter, zKey, f, t, trendBucket);
     refreshCursorRange(rangeKey(preset, custom), f, t);
-  }, [preset, custom, deviceFilter, trendBucket, refreshZaiRange, refreshCursorRange]);
+  }, [preset, custom, deviceFilter, trendBucket, refreshZaiRange, refreshCodexRange, refreshCursorRange]);
 
   const refreshQuota = useCallback(() => loadQuota(), [loadQuota]);
 
@@ -621,11 +787,13 @@ export function DataProvider({ pricing, children }: ProviderProps) {
   const curCursorKey = rangeKey(preset, custom);
   const curZai = zaiCache[curZaiKey] ?? EMPTY_ZAI;
   const curCursor = cursorCache[curCursorKey] ?? EMPTY_CURSOR;
+  const curCodex = codexCache[curZaiKey] ?? EMPTY_CODEX;
 
   // lastUpdate 取当前范围各数据源里最旧的成功时间（保守的新鲜度下限）
-  const updateTs = [curZai.ts, curCursor.ts].filter((t) => t > 0);
+  const updateTs = [curZai.ts, curCursor.ts, curCodex.ts].filter((t) => t > 0);
   const lastUpdate = updateTs.length ? Math.min(...updateTs) : 0;
-  const refreshing = curZai.refreshing || curCursor.refreshing;
+  const refreshing =
+    curZai.refreshing || curCursor.refreshing || curCodex.refreshing;
 
   const value = useMemo<DataCacheValue>(
     () => ({
@@ -640,6 +808,8 @@ export function DataProvider({ pricing, children }: ProviderProps) {
       cost: curZai.cost,
       trend: curZai.trend,
       error: curZai.error,
+      codex: curCodex.snapshot,
+      codexError: curCodex.error,
       cursor: curCursor.snapshot,
       cursorError: curCursor.error,
       fxRate,
@@ -660,6 +830,7 @@ export function DataProvider({ pricing, children }: ProviderProps) {
       trendBucket,
       deviceFilter,
       curZai,
+      curCodex,
       curCursor,
       fxRate,
       quota,

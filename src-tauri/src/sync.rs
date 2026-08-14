@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::db::{self, UsageRow};
+use crate::db::{self, default_source, UsageRow};
 use crate::pricing::config_dir;
 
 // ===== 配置（~/.zbar/sync.json）=====
@@ -51,6 +51,9 @@ pub struct SyncConfig {
     /// 已上传到的本机 rowid 游标。
     #[serde(default)]
     pub last_uploaded_rowid: i64,
+    /// 已上传到的 Codex 导入库 rowid 游标（与 zcode 游标相互独立）。
+    #[serde(default)]
+    pub last_uploaded_codex_rowid: i64,
     /// 已上传到的快照 ts 游标（额度快照）。
     #[serde(default)]
     pub last_uploaded_snapshot_ts: i64,
@@ -74,6 +77,7 @@ impl Default for SyncConfig {
             device_name: String::new(),
             device_token: String::new(),
             last_uploaded_rowid: 0,
+            last_uploaded_codex_rowid: 0,
             last_uploaded_snapshot_ts: 0,
             last_sync_at: 0,
         }
@@ -126,6 +130,11 @@ struct SyncResponse {
     accepted_snapshots: usize,
     #[serde(default)]
     max_snapshot_ts: Option<i64>,
+    /// 服务端协议版本：2 = 支持多来源（usage_records 含 source 列）。
+    /// 旧服务端不返回 → 0。codex 上传前据此探测，防止旧服务端按
+    /// (device_id, local_rowid) 撞键静默丢弃记录后游标仍推进。
+    #[serde(default)]
+    proto: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -207,6 +216,9 @@ pub struct RemoteModelStat {
     pub reasoning_tokens: i64,
     #[serde(default)]
     pub total_tokens: i64,
+    /// 数据来源（新版服务端返回；旧服务端不返回时默认 zcode）
+    #[serde(default = "default_source")]
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -312,15 +324,18 @@ pub struct SyncOutcome {
     pub last_sync_at: i64,
 }
 
-/// 执行一次增量上传：循环分批上传直到无新数据。
-/// 额度快照随首批发送（量小，无需分批）。失败时返回 Err，游标不前进（下次重试）。
+/// 执行一次增量上传（两阶段）：先 zcode 明细（含额度快照），再 Codex 导入库明细。
+/// 两来源游标相互独立：
+/// - zcode 失败：整体返回 Err，游标不前进（下次重试），与原有行为一致；
+/// - codex 失败：不阻断 zcode 已成功的结果，错误仅记日志，游标停在最近
+///   成功批次并随配置落盘（下次从断点续传）。
 pub fn upload_incremental() -> Result<SyncOutcome, String> {
     let mut cfg = load_sync_config()?;
     if !cfg.enabled || cfg.device_token.is_empty() {
         return Err("同步未启用或未注册设备".into());
     }
-    let base = &cfg.server_url;
-    let token = &cfg.device_token;
+    let base = cfg.server_url.clone();
+    let token = cfg.device_token.clone();
 
     // 读取待上传的快照（ts > 游标）。读失败不阻断明细同步。
     let mut pending_snaps = crate::quota_history::load_all()
@@ -331,6 +346,7 @@ pub fn upload_incremental() -> Result<SyncOutcome, String> {
     let snap_max_ts = pending_snaps.iter().map(|s| s.ts).max();
     let mut snapshot_cursor_advanced = false;
 
+    // ===== 阶段一：zcode 明细（records 固定 source="zcode"）=====
     let mut since = cfg.last_uploaded_rowid;
     let mut total_uploaded = 0usize;
     const BATCH: usize = 500;
@@ -392,6 +408,16 @@ pub fn upload_incremental() -> Result<SyncOutcome, String> {
         }
     }
 
+    // ===== 阶段二：Codex 明细（records 固定 source="codex"，失败不阻断）=====
+    let mut codex_uploaded = 0usize;
+    match upload_codex_incremental(&mut cfg, &base, &token) {
+        Ok(n) => codex_uploaded = n,
+        Err(e) => {
+            // 游标已随每批成功推进（见函数内），稍后随配置落盘，下次从断点续传
+            eprintln!("[zbar-sync] Codex 增量上传失败（下次重试）: {e}");
+        }
+    }
+
     let _ = snapshot_cursor_advanced; // 标记已用，避免未读警告
     let now = chrono::Local::now().timestamp_millis();
     cfg.last_uploaded_rowid = since;
@@ -399,10 +425,81 @@ pub fn upload_incremental() -> Result<SyncOutcome, String> {
     save_sync_config(&cfg)?;
 
     Ok(SyncOutcome {
-        uploaded: total_uploaded,
+        uploaded: total_uploaded + codex_uploaded,
         new_max_rowid: since,
         last_sync_at: now,
     })
+}
+
+/// 上传 Codex 导入库的增量（id > codex 游标，循环分批）。
+/// 查询前由 codex 模块自行增量导入（sessions jsonl → codex.sqlite）。
+/// 未安装 Codex 时静默返回 0（不算错误，避免后台同步每轮刷错误日志）。
+/// 首批上传前先探测服务端协议版本（proto ≥ 2 才支持多来源）：
+/// 旧服务端无 source 列，codex 记录会按 (device_id, local_rowid) 撞键
+/// 静默丢弃且游标推进 → 数据永久丢失，故版本不足时不推进游标直接报错，
+/// 升级服务端后自动恢复上传。成功的每批都推进 cfg.last_uploaded_codex_rowid
+/// （部分失败也保留断点，由调用方负责落盘）。返回本次成功上传的条数。
+fn upload_codex_incremental(
+    cfg: &mut SyncConfig,
+    base: &str,
+    token: &str,
+) -> Result<usize, String> {
+    // 未安装 Codex：无会话目录，静默跳过（不算错误，避免后台同步每轮刷日志）
+    if crate::codex::sessions_dir().is_err() {
+        return Ok(0);
+    }
+    if crate::codex::query_since(cfg.last_uploaded_codex_rowid, 1)?.is_empty() {
+        return Ok(0); // 无待上传数据，跳过（也免去协议探测请求）
+    }
+
+    // 协议探测：空批次请求无任何写入副作用，仅读回服务端能力标记
+    let probe: SyncResponse = ureq::post(&format!("{base}/sync"))
+        .set("Authorization", &format!("Bearer {token}"))
+        .timeout(Duration::from_secs(15))
+        .send_json(&SyncPayload {
+            records: Vec::new(),
+            last_rowid: None,
+            snapshots: Vec::new(),
+            last_snapshot_ts: None,
+        })
+        .map_err(map_http_err("探测服务端协议"))?
+        .into_json()
+        .map_err(|e| format!("解析协议探测响应失败: {e}"))?;
+    if probe.proto < 2 {
+        return Err(
+            "服务端版本过旧（不支持多来源同步），Codex 数据暂不上传，请升级服务端 zbar-sync 后重试"
+                .into(),
+        );
+    }
+
+    let mut since = cfg.last_uploaded_codex_rowid;
+    let mut total = 0usize;
+    const BATCH: usize = 500;
+    loop {
+        let records = crate::codex::query_since(since, BATCH)?;
+        if records.is_empty() {
+            break;
+        }
+        // 本批最大 rowid（游标必须至少推进到这里，否则死循环）
+        let batch_max = records.last().map(|r| r.local_rowid).unwrap_or(since);
+        let payload = SyncPayload {
+            records,
+            last_rowid: Some(batch_max),
+            snapshots: Vec::new(),
+            last_snapshot_ts: None,
+        };
+        let resp: SyncResponse = ureq::post(&format!("{base}/sync"))
+            .set("Authorization", &format!("Bearer {token}"))
+            .timeout(Duration::from_secs(15))
+            .send_json(&payload)
+            .map_err(map_http_err("上传 Codex 数据"))?
+            .into_json()
+            .map_err(|e| format!("解析上传响应失败: {e}"))?;
+        total += resp.accepted;
+        since = resp.max_rowid.max(batch_max);
+        cfg.last_uploaded_codex_rowid = since;
+    }
+    Ok(total)
 }
 
 // ===== 远端查询 =====
@@ -421,6 +518,9 @@ pub struct RemoteUsageRequest {
     /// 用于设备筛选器选具体设备时只查它。
     #[serde(default)]
     pub devices: String,
+    /// 数据来源过滤："zcode" | "codex"，空 = 全部来源。
+    #[serde(default)]
+    pub source: String,
 }
 
 /// 拉取远端聚合数据。
@@ -439,6 +539,9 @@ pub fn fetch_remote_usage(req: RemoteUsageRequest) -> Result<RemoteUsage, String
         "{base}/usage?from_ms={}&to_ms={}&bucket={}",
         req.from_ms, req.to_ms, req.bucket
     );
+    if !req.source.is_empty() {
+        url.push_str(&format!("&source={}", req.source));
+    }
     if !req.devices.is_empty() {
         url.push_str(&format!("&devices={}", req.devices));
     } else if !req.exclude_device.is_empty() {
@@ -720,6 +823,7 @@ pub fn disconnect() -> Result<(), String> {
     cfg.device_name.clear();
     cfg.device_token.clear();
     cfg.last_uploaded_rowid = 0;
+    cfg.last_uploaded_codex_rowid = 0;
     cfg.last_sync_at = 0;
     // 保留 server_url + mode + interval，方便下次重连
     save_sync_config(&cfg)

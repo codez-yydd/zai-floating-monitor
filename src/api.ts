@@ -3,6 +3,7 @@ import type {
   AutoCleanupConfig,
   CleanupResult,
   CleanupStatus,
+  CodexSnapshot,
   CostResult,
   Currency,
   CursorConfig,
@@ -159,7 +160,12 @@ export async function remoteUsage(
   fromMs: number,
   toMs: number,
   bucket: TrendBucket,
-  options: { excludeDevice?: string; devices?: string } = {}
+  options: {
+    excludeDevice?: string;
+    devices?: string;
+    /** 数据来源筛选："zcode" | "codex"，空串 = 全部 */
+    source?: string;
+  } = {}
 ): Promise<RemoteUsage> {
   return invoke<RemoteUsage>("remote_usage", {
     req: {
@@ -168,6 +174,7 @@ export async function remoteUsage(
       bucket,
       exclude_device: options.excludeDevice ?? "",
       devices: options.devices ?? "",
+      source: options.source ?? "",
     },
   });
 }
@@ -344,5 +351,19 @@ export async function cursorDebug(): Promise<{
 /** 立即联网获取最新 USD→CNY 汇率（多源容错）并写入后端配置，返回 [汇率, 来源名] */
 export async function fetchFxRate(): Promise<[number, string]> {
   return invoke<[number, string]>("fetch_fx_rate");
+}
+
+// ===== Codex 用量统计 =====
+
+/** 拉取 Codex 用量快照（stats + trend + 速率限制）。
+ *  Codex 未安装 / 无会话目录时后端返回 Err（中文提示），调用方需容错。 */
+export async function fetchCodexUsage(
+  fromMs: number,
+  toMs: number,
+  bucket: TrendBucket
+): Promise<CodexSnapshot> {
+  return invoke<CodexSnapshot>("get_codex_usage", {
+    req: { from_ms: fromMs, to_ms: toMs, bucket },
+  });
 }
 

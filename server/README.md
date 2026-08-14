@@ -123,14 +123,30 @@ PORT=8080 python3 app.py
 | 接口 | 鉴权 | 用途 |
 |------|------|------|
 | `POST /register` | Master Token | 注册设备，返回 Device Token |
-| `POST /sync` | Device Token | 增量上传用量明细 |
-| `GET /usage` | Device Token | 聚合查询（overall + by_model + trend） |
+| `POST /sync` | Device Token | 增量上传用量明细（每条可带 source，缺省 zcode） |
+| `GET /usage` | Device Token | 聚合查询（overall + by_model + trend，可选 source 过滤） |
 | `GET /devices` | Device Token | 设备列表 |
 | `POST /device/revoke` | Master Token | 撤销设备 |
 | `POST /cleanup` | Master Token | 数据清理（按设备/按时间/全清/reset） |
 | `GET /cleanup/status` | Device Token | 数据量 + 自动清理配置 |
 | `POST /cleanup/config` | Master Token | 配置自动定时清理 |
 | `GET /health` | 无 | 健康检查 |
+
+---
+
+## Codex 数据（source 维度）
+
+新版客户端除了 ZCode 用量，还会上传 Codex CLI 的用量明细。两者通过 `source` 字段区分（`zcode` / `codex`），同一台设备、同一 `local_rowid` 在不同 source 下互不冲突（两套 rowid 序列各自独立），上传与查询游标也相互独立。
+
+**升级方式**：拉取新代码后重启服务即可。首次启动自动迁移 `usage_records` 表结构（新增 `source` 列，主键改为 `(device_id, source, local_rowid)`），老数据全部自动标记为 `zcode`，无损保留，索引自动重建。建议服务端先于客户端升级。
+
+**升级顺序保护**：新版客户端上传 Codex 数据前会先探测服务端协议版本（`/sync` 响应新增 `proto: 2` 字段）。旧服务端不返回该字段，客户端不会上传 Codex 数据也不推进游标（同步日志提示"服务端版本过旧"），升级服务端后自动恢复——即使客户端先升级也不会丢数据；旧客户端不受任何影响。
+
+**接口变化**（均向后兼容）：
+
+- `POST /sync`：records 每条新增 `source` 字段，缺省 `zcode`（旧客户端不传即 zcode）。客户端保证每批 records 属同一来源，`last_rowid` / `max_rowid` 按该来源自己的 rowid 序列计数。
+- `GET /usage`：新增可选 query 参数 `source`（`zcode` / `codex`），不传 = 全部来源合并；`by_model` 与 `trend.by_model` 每个分组新增 `source` 字段，便于前端区分展示。
+- `POST /period_detail`：body 同样新增可选 `source` 字段。
 
 ---
 
