@@ -111,6 +111,9 @@ struct ModelsDevCache {
     fetched_at: u64,
     /// USD 价格（key 为小写 model id）
     usd: BTreeMap<String, ModelPrice>,
+    /// 上次成功的数据源 URL（下次优先直连，避免每次都等失败源的超时）
+    #[serde(default)]
+    url: String,
 }
 
 fn models_dev_cache_path() -> Result<PathBuf, String> {
@@ -198,13 +201,20 @@ fn extract_all_prices(root: &serde_json::Value) -> BTreeMap<String, ModelPrice> 
     usd
 }
 
+/// 价格数值取整到 6 位小数（单位：每百万 token），消除浮点乘法尾巴
+/// （如 0.4 × 7.2 = 2.8800000000000003），保证展示与落盘干净。
+fn round_price(x: f64) -> f64 {
+    (x * 1e6).round() / 1e6
+}
+
 /// models.dev 拉取模式
 pub enum FetchMode {
-    /// 只读 24h 内缓存；过期/缺失直接回退内置表（不联网，进面板静默检查用）
-    CacheOnly,
-    /// 缓存未过期用缓存；过期则联网刷新（默认）
+    /// 优先本地缓存（不管过期与否），完全无缓存才联网兜底。
+    /// 「检查价格更新」按钮与进面板静默检查用——保证秒回；缓存保鲜交给每日定时任务/「更新」按钮。
+    LocalFirst,
+    /// 缓存未过期直接跳过；过期联网刷新（后台每日定时任务用，保证每天更新一次）
     Cached,
-    /// 绕过缓存强制联网（手动点「检查更新」按钮）
+    /// 绕过缓存强制联网（「更新」按钮：手动拉最新数据刷缓存）
     Force,
 }
 
@@ -214,24 +224,35 @@ pub enum FetchMode {
 pub fn fetch_models_dev_prices(mode: FetchMode) -> Result<BTreeMap<String, ModelPrice>, String> {
     let cached = load_models_dev_cache();
     if !matches!(mode, FetchMode::Force) {
-        if let Some(c) = cached.as_ref() {
+        if matches!(mode, FetchMode::LocalFirst) {
+            // 本地优先：有缓存就用（哪怕已过期——定时任务与「更新」按钮负责保鲜）
+            if let Some(c) = cached.as_ref() {
+                if !c.usd.is_empty() {
+                    return Ok(c.usd.clone());
+                }
+            }
+        } else if let Some(c) = cached.as_ref() {
+            // Cached（定时任务）：TTL 内不联网，过期才刷新
             if now_ms().saturating_sub(c.fetched_at) < MODELS_DEV_TTL_MS {
                 return Ok(c.usd.clone());
             }
         }
-        if matches!(mode, FetchMode::CacheOnly) {
-            // 静默检查：不联网，让调用方回退内置表
-            return Err("models.dev 缓存不可用（cache-only 模式不联网）".to_string());
-        }
     }
 
-    // 多源 failover：官方源国内可能直连不通，依次尝试镜像
+    // 多源 failover：官方源国内可能直连不通，依次尝试镜像。
+    // 源记忆：上次成功的源排最前，常规情况下无需再等失败源的超时。
+    let preferred = cached
+        .as_ref()
+        .map(|c| c.url.clone())
+        .unwrap_or_default();
     let mut last_err = String::new();
     let mut usd = BTreeMap::new();
-    for url in models_dev_urls() {
+    let mut ok_url = String::new();
+    for url in models_dev_urls(&preferred) {
         match fetch_models_dev_from(&url) {
             Ok(prices) => {
                 usd = prices;
+                ok_url = url;
                 break;
             }
             Err(e) => last_err = e,
@@ -247,10 +268,11 @@ pub fn fetch_models_dev_prices(mode: FetchMode) -> Result<BTreeMap<String, Model
         return Err(format!("models.dev 所有数据源均不可达: {last_err}"));
     }
 
-    // 写缓存（失败静默：缓存只是优化）
+    // 写缓存（失败静默：缓存只是优化），记录本次成功的数据源供下次直连
     let cache = ModelsDevCache {
         fetched_at: now_ms(),
         usd: usd.clone(),
+        url: ok_url,
     };
     if let Ok(dir) = config_dir() {
         if fs::create_dir_all(&dir).is_ok() {
@@ -269,20 +291,29 @@ pub fn fetch_models_dev_prices(mode: FetchMode) -> Result<BTreeMap<String, Model
 /// - jsDelivr CDN 镜像 GitHub anomalyco/models.dev 的 models.json（国内通常可达）
 /// - fastly 是 jsDelivr 的备用线路（连通性波动时兜底）
 ///
+/// `preferred` 非空时（上次成功的源）挪到最前，直连命中即可省去失败源的超时等待。
+///
 /// 注：镜像的 models.json 是 canonical 视图（{data:[{id:"z-ai/glm-4.6", pricing:{...}}]}，
 /// 价格为 USD/token 字符串），与 api.json 的 provider 视图结构不同，解析时自动分派。
-fn models_dev_urls() -> Vec<String> {
-    vec![
+fn models_dev_urls(preferred: &str) -> Vec<String> {
+    let mut urls = vec![
         MODELS_DEV_URL.to_string(),
         "https://cdn.jsdelivr.net/gh/anomalyco/models.dev@dev/models.json".to_string(),
         "https://fastly.jsdelivr.net/gh/anomalyco/models.dev@dev/models.json".to_string(),
-    ]
+    ];
+    if !preferred.is_empty() {
+        if let Some(idx) = urls.iter().position(|u| u == preferred) {
+            let hit = urls.remove(idx);
+            urls.insert(0, hit);
+        }
+    }
+    urls
 }
 
-/// 从单个 URL 拉取并提取全厂商价格（超时 8s，按响应结构自动分派视图）
+/// 从单个 URL 拉取并提取全厂商价格（超时 6s，按响应结构自动分派视图）
 fn fetch_models_dev_from(url: &str) -> Result<BTreeMap<String, ModelPrice>, String> {
     let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(8))
+        .timeout(std::time::Duration::from_secs(6))
         .build();
     let resp = agent
         .get(url)
@@ -319,9 +350,12 @@ fn extract_from_models_json(root: &serde_json::Value) -> BTreeMap<String, ModelP
             continue; // ":free" 等变体端点，非正式定价
         }
         let Some(pricing) = item.get("pricing") else { continue };
-        // USD/token → USD/百万 token
+        // USD/token → USD/百万 token（取整去浮点尾巴：4e-7×1e6 会得 0.39999999999999997）
         let to_m = |key: &str| -> Option<f64> {
-            pricing.get(key).and_then(value_as_f64).map(|v| v * 1_000_000.0)
+            pricing
+                .get(key)
+                .and_then(value_as_f64)
+                .map(|v| round_price(v * 1_000_000.0))
         };
         let (Some(input), Some(output)) = (to_m("prompt"), to_m("completion")) else {
             continue;
@@ -387,16 +421,17 @@ pub fn diff_pricing(
     // 参考价：优先 models.dev（USD），失败回退内置表（USD+CNY）
     match fetch_models_dev_prices(mode) {
         Ok(usd) => {
-            // CNY 参考价 = USD × 汇率（models.dev 只有国际站 USD 价）
+            // CNY 参考价 = USD × 汇率（models.dev 只有国际站 USD 价）。
+            // 取整到 6 位小数：避免 0.4×7.2=2.8800000000000003 这类浮点尾巴进配置
             let cny = usd
                 .iter()
                 .map(|(k, p)| {
                     (
                         k.clone(),
                         ModelPrice {
-                            input: p.input * fx_rate,
-                            output: p.output * fx_rate,
-                            cache_read: p.cache_read * fx_rate,
+                            input: round_price(p.input * fx_rate),
+                            output: round_price(p.output * fx_rate),
+                            cache_read: round_price(p.cache_read * fx_rate),
                         },
                     )
                 })
@@ -495,6 +530,29 @@ mod tests {
             output,
             cache_read,
         }
+    }
+
+    /// 源记忆：上次成功的源排最前；未知源/空值保持默认顺序
+    #[test]
+    fn models_dev_urls_prefers_last_success() {
+        let mirror = "https://cdn.jsdelivr.net/gh/anomalyco/models.dev@dev/models.json";
+        let urls = models_dev_urls(mirror);
+        assert_eq!(urls[0], mirror, "上次成功的镜像源应排第一");
+        assert_eq!(urls[1], MODELS_DEV_URL, "官方源退居第二");
+
+        // 未知源（缓存被手改等）：不 panic，维持默认顺序
+        assert_eq!(models_dev_urls("https://unknown.example/api.json")[0], MODELS_DEV_URL);
+        // 无记忆
+        assert_eq!(models_dev_urls("")[0], MODELS_DEV_URL);
+    }
+
+    /// round_price：消除浮点尾巴（换算 USD×汇率 / USD/token×1M 场景）
+    #[test]
+    fn round_price_trims_float_tail() {
+        assert_eq!(round_price(0.4 * 7.2), 2.88); // 2.8800000000000003 → 2.88
+        assert_eq!(round_price(4e-7 * 1e6), 0.4); // 0.39999999999999997 → 0.4
+        assert_eq!(round_price(0.11), 0.11); // 正常值不变
+        assert_eq!(round_price(10.0), 10.0);
     }
 
     /// models.dev api.json 全厂商提取：逐模型容错 + 字符串/数值兼容 + 官方厂商优先

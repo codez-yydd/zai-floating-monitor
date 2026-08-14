@@ -123,13 +123,13 @@ fn set_currency(currency: String, app: AppHandle) -> Result<(), String> {
 /// 返回差异。仅用于"检查更新"提示，绝不自动覆盖。
 /// 遍历主体 =「数据库实际调用过 ∪ 用户已手动配置」的模型：
 /// 实际在用但两边都没价格的模型会以 missing 暴露（花费按 0 计）。
-/// `force`：true 时绕过 models.dev 的 24h 磁盘缓存强制联网（手动点按钮用）。
-/// `cache_only`：true 时只读磁盘缓存、不联网（进面板静默检查用，保证秒回）。
+/// `force`：true 时绕过缓存强制联网刷新（「更新」按钮）；默认 LocalFirst——
+/// 有本地缓存直接用（秒回，不管新旧），完全无缓存才联网兜底。
+/// 缓存的每日保鲜由 spawn_pricing_refresher 后台定时任务负责。
 /// async + spawn_blocking：网络请求绝不能跑在主线程（同步 command 会卡死 UI）。
 #[tauri::command]
 async fn check_pricing_updates(
     force: Option<bool>,
-    cache_only: Option<bool>,
 ) -> Result<pricing::PricingDiff, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let user = load_pricing()?;
@@ -146,12 +146,10 @@ async fn check_pricing_updates(
             .map(|c| c.usd_cny_rate)
             .unwrap_or(7.2);
 
-        let mode = if cache_only.unwrap_or(false) {
-            pricing::FetchMode::CacheOnly
-        } else if force.unwrap_or(false) {
+        let mode = if force.unwrap_or(false) {
             pricing::FetchMode::Force
         } else {
-            pricing::FetchMode::Cached
+            pricing::FetchMode::LocalFirst
         };
         Ok(pricing::diff_pricing(&user, &relevant, fx_rate, mode))
     })
@@ -929,6 +927,20 @@ fn spawn_title_updater(app: AppHandle) {
     });
 }
 
+/// 后台线程：每天自动联网刷新一次 models.dev 价格缓存。
+/// Cached 模式：缓存未过期直接返回（不联网），过期才刷新；
+/// 源记忆让联网直连上次成功的源（通常 1~2s 完成）。
+/// 只刷缓存，不做 diff——「检查价格更新」按钮始终读本地缓存（秒回），
+/// 数据的每日保鲜由本任务在后台默默完成。
+fn spawn_pricing_refresher() {
+    std::thread::spawn(move || loop {
+        if let Err(e) = pricing::fetch_models_dev_prices(pricing::FetchMode::Cached) {
+            eprintln!("[zbar-pricing] 每日缓存刷新失败（明日重试）: {e}");
+        }
+        std::thread::sleep(std::time::Duration::from_secs(24 * 3600));
+    });
+}
+
 /// 初始化托盘图标
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let quit_item = MenuItem::with_id(app, "quit", "退出 ZBar", true, None::<&str>)?;
@@ -1007,6 +1019,7 @@ pub fn run() {
             }
             setup_tray(app.handle())?;
             spawn_title_updater(app.handle().clone());
+            spawn_pricing_refresher();
 
             // 应用全局快捷键配置（启动时若已启用则注册）
             let sc = shortcut::load_shortcut();

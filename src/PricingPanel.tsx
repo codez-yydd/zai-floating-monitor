@@ -46,12 +46,24 @@ const FIELDS: { key: keyof ModelPrice; label: string }[] = [
   { key: "cache_read", label: "缓存" },
 ];
 
+/// 价格数字显示格式化：6 位有效数字，去掉浮点乘法尾巴（0.39999999999999 → 0.4）
+function fmtPrice(n: number): string {
+  return String(Number(n.toPrecision(6)));
+}
+
+/// 价格三元组（输入/输出/缓存）显示
+function fmtTriplet(p: ModelPrice): string {
+  return `${fmtPrice(p.input)}/${fmtPrice(p.output)}/${fmtPrice(p.cache_read)}`;
+}
+
 export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
   const [pricing, setPricing] = useState<PricingConfig | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [saving, setSaving] = useState(false);
   const [savedFlash, setSavedFlash] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 手动检查联网中（Force 拉取需要几秒，按钮显示 loading 防重复点击）
+  const [checking, setChecking] = useState(false);
   // 草稿：把每个输入框的编辑值作为字符串暂存，避免小数点输入被 parseFloat 吞掉。
   // key = `${modelId}|${field}`
   const [draft, setDraft] = useState<Record<string, string>>({});
@@ -116,10 +128,10 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
   }, []);
 
   // 进入价格设置时静默检查一次更新，有差异则在按钮显示红点（不弹窗打扰）。
-  // cacheOnly=true：只读 24h 内磁盘缓存、不联网（首次无缓存时用内置表），保证进面板秒回不卡。
-  // 需要最新价时点「检查更新」按钮（force 联网刷新缓存）。
+  // 默认（LocalFirst）：读本地缓存对比（秒回，不管缓存新旧），完全无缓存才联网兜底。
+  // 缓存每天由后台定时任务自动联网刷新一次；手动拉最新数据点「更新」按钮。
   useEffect(() => {
-    checkPricingUpdates(false, true)
+    checkPricingUpdates()
       .then((d) => {
         const n = d.new_models.length + d.changed.length;
         setUpdateCount(n);
@@ -256,19 +268,28 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
     }
   };
 
-  // 手动点「检查更新」按钮：强制重新拉取
-  const handleCheckUpdates = async () => {
+  // 对比并展示差异。force=false 用本地缓存（秒回）；force=true 联网刷新缓存后对比。
+  const runDiff = async (force: boolean) => {
     setError(null);
+    if (force) setChecking(true);
     try {
-      const d = await checkPricingUpdates(true);
+      const d = await checkPricingUpdates(force);
       setDiff(d);
       setUpdateCount(d.new_models.length + d.changed.length);
       setSelected(new Set(d.new_models.map((i) => `${i.model_id}|${i.currency}`)));
       setDiffPanel(true);
     } catch (e) {
       setError(String(e));
+    } finally {
+      if (force) setChecking(false);
     }
   };
+
+  // 「检查价格更新」：用本地缓存对比差异（秒回，不联网）
+  const handleCheckUpdates = () => runDiff(false);
+
+  // 「更新」：手动联网拉取 models.dev 最新数据刷新缓存，完成后展示新对比
+  const handleRefreshPrices = () => runDiff(true);
 
   // 把草稿字符串解析回数字。非法/空 → 0。
   const parseDraft = (val: string): number => {
@@ -392,19 +413,30 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
           单位：{symbol}/百万 token。只填需要计费的模型即可。
         </p>
 
-        {/* ===== 价格同步（内置默认表 diff 提示，不自动覆盖）===== */}
+        {/* ===== 价格同步（models.dev 差异提示，不自动覆盖）===== */}
         <div className="mt-2 flex items-center justify-between">
-          <button
-            onClick={handleCheckUpdates}
-            className="relative text-[11px] px-2 py-0.5 rounded-md bg-slate-900/5 text-slate-700/70 hover:bg-slate-900/10 hover:text-slate-900/90 transition-colors"
-          >
-            🔄 检查价格更新
-            {updateCount > 0 && (
-              <span className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-1 flex items-center justify-center rounded-full bg-rose-500 text-white text-[9px] leading-none">
-                {updateCount}
-              </span>
-            )}
-          </button>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={handleCheckUpdates}
+              title="用本地缓存的价格数据对比差异（秒回，不联网）"
+              className="relative text-[11px] px-2 py-0.5 rounded-md bg-slate-900/5 text-slate-700/70 hover:bg-slate-900/10 hover:text-slate-900/90 transition-colors"
+            >
+              🔄 检查价格更新
+              {updateCount > 0 && (
+                <span className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-1 flex items-center justify-center rounded-full bg-rose-500 text-white text-[9px] leading-none">
+                  {updateCount}
+                </span>
+              )}
+            </button>
+            <button
+              onClick={handleRefreshPrices}
+              disabled={checking}
+              title="联网拉取 models.dev 最新价格并刷新本地缓存（后台每天也会自动更新一次）"
+              className="text-[11px] px-2 py-0.5 rounded-md bg-sky-500/10 text-sky-700/80 hover:bg-sky-500/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {checking ? "⏳ 更新中…" : "⬇️ 更新"}
+            </button>
+          </div>
           {diff && updateCount === 0 && !diffPanel && (
             <span
               className={`text-[10px] ${
@@ -439,8 +471,8 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
             </div>
             <p className="text-[9px] text-slate-700/50 mb-2 leading-relaxed">
               {diff.source === "models.dev"
-                ? "来自 models.dev 的全厂商模型 USD 参考价（你在 ZCode 里用到的任意厂商模型都会检测），CNY 按汇率换算。勾选后点「应用选中」才会写入。"
-                : "models.dev 不可达，已回退内置参考表。勾选后点「应用选中」才会写入。"}
+                ? "来自 models.dev 的全厂商模型 USD 参考价（你在 ZCode 里用到的任意厂商模型都会检测），CNY 按汇率换算；后台每天自动更新一次缓存，点「更新」可立即联网刷新。勾选后点「应用选中」才会写入。"
+                : "models.dev 不可达，已回退内置参考表；点「更新」可重试联网。勾选后点「应用选中」才会写入。"}
               新增项默认勾选，变动项默认不勾（保护你的自定义）。
             </p>
             {/* 无价格模型警示：实际在用但两边都没价格，花费按 0 计 */}
@@ -478,7 +510,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
                     </span>
                     <span className="text-slate-700/40">{i.currency.toUpperCase()}</span>
                     <span className="ml-auto text-slate-700/55 num">
-                      {i.default.input}/{i.default.output}/{i.default.cache_read}
+                      {fmtTriplet(i.default)}
                     </span>
                   </label>
                 );
@@ -504,13 +536,9 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
                     </span>
                     <span className="text-slate-700/40">{i.currency.toUpperCase()}</span>
                     <span className="ml-auto text-slate-700/55 num">
-                      {u
-                        ? `${u.input}/${u.output}/${u.cache_read}`
-                        : "—"}
+                      {u ? fmtTriplet(u) : "—"}
                       <span className="text-slate-700/35 mx-0.5">→</span>
-                      <span className="text-sky-600/90">
-                        {i.default.input}/{i.default.output}/{i.default.cache_read}
-                      </span>
+                      <span className="text-sky-600/90">{fmtTriplet(i.default)}</span>
                     </span>
                   </label>
                 );

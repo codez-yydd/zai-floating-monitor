@@ -66,13 +66,11 @@ export async function saveCurrency(currency: Currency): Promise<void> {
 }
 
 /** 对比参考价格（models.dev 优先，失败回退内置表）与用户当前配置，返回差异（不修改任何文件）。
- *  force=true 时绕过 24h 缓存强制联网刷新（手动点按钮）；
- *  cacheOnly=true 时只读缓存不联网（进面板静默检查，保证秒回）。 */
-export async function checkPricingUpdates(
-  force = false,
-  cacheOnly = false
-): Promise<PricingDiff> {
-  return invoke<PricingDiff>("check_pricing_updates", { force, cacheOnly });
+ *  默认（LocalFirst）：读本地缓存做对比（秒回，不管缓存新旧），完全无缓存才联网兜底；
+ *  force=true 时强制联网刷新缓存后对比（「更新」按钮）。
+ *  缓存的每日保鲜由后台定时任务负责，无需前端触发。 */
+export async function checkPricingUpdates(force = false): Promise<PricingDiff> {
+  return invoke<PricingDiff>("check_pricing_updates", { force });
 }
 
 /** 把用户勾选的价格项合并进 pricing 并保存 */
