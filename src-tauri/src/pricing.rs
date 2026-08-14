@@ -140,8 +140,9 @@ fn value_as_f64(v: &serde_json::Value) -> Option<f64> {
     }
 }
 
-/// 从 models.dev api.json 的动态 JSON 中提取智谱模型价格（逐模型容错）。
-/// - provider key 优先 `zhipuai`，找不到时按名称含 zhipu/glm 模糊匹配（防上游改名）
+/// 从 models.dev 数据中提取智谱模型价格（逐模型容错）。兼容两种 schema：
+/// - 官方 api.json：顶层是 provider map（找 key=zhipuai 或按名称模糊匹配）
+/// - jsDelivr 单文件（data/zhipuai.json）：顶层就是 provider 对象（自身含 name + models）
 /// - 单个模型字段缺失/类型异常只跳过该模型，不影响其他模型（避免整包失败）
 fn extract_zhipu_prices(root: &serde_json::Value) -> BTreeMap<String, ModelPrice> {
     // 定位智谱 provider 节点
@@ -157,6 +158,17 @@ fn extract_zhipu_prices(root: &serde_json::Value) -> BTreeMap<String, ModelPrice
                 name.contains("zhipu") || name.contains("z.ai")
             })
         });
+    }
+    // 单 provider 文件：root 自身就是 provider（有 models 字段且自身 name 匹配）
+    if provider.is_none() && root.get("models").is_some() {
+        let name = root
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or_default()
+            .to_lowercase();
+        if name.contains("zhipu") || name.contains("z.ai") {
+            provider = Some(root);
+        }
     }
     let Some(models) = provider.and_then(|p| p.get("models")).and_then(|m| m.as_object()) else {
         return BTreeMap::new();
@@ -187,44 +199,53 @@ fn extract_zhipu_prices(root: &serde_json::Value) -> BTreeMap<String, ModelPrice
     usd
 }
 
+/// models.dev 拉取模式
+pub enum FetchMode {
+    /// 只读 24h 内缓存；过期/缺失直接回退内置表（不联网，进面板静默检查用）
+    CacheOnly,
+    /// 缓存未过期用缓存；过期则联网刷新（默认）
+    Cached,
+    /// 绕过缓存强制联网（手动点「检查更新」按钮）
+    Force,
+}
+
 /// 拉取 models.dev 智谱模型 USD 价格（每百万 token）。
-/// 磁盘缓存 24h：`force=false` 且缓存未过期 → 直接用缓存；
-/// 否则联网拉取，成功后写缓存；网络失败时回退过期缓存（宁用昨日数据也不用静态内置表），
+/// 磁盘缓存 24h；网络失败时回退过期缓存（宁用昨日数据也不用静态内置表），
 /// 再失败返回 Err（调用方用内置表兜底）。
-pub fn fetch_models_dev_prices(force: bool) -> Result<BTreeMap<String, ModelPrice>, String> {
+pub fn fetch_models_dev_prices(mode: FetchMode) -> Result<BTreeMap<String, ModelPrice>, String> {
     let cached = load_models_dev_cache();
-    if !force {
+    if !matches!(mode, FetchMode::Force) {
         if let Some(c) = cached.as_ref() {
             if now_ms().saturating_sub(c.fetched_at) < MODELS_DEV_TTL_MS {
                 return Ok(c.usd.clone());
             }
         }
+        if matches!(mode, FetchMode::CacheOnly) {
+            // 静默检查：不联网，让调用方回退内置表
+            return Err("models.dev 缓存不可用（cache-only 模式不联网）".to_string());
+        }
     }
 
-    // 联网拉取（超时 10s，同步请求：检查更新为用户触发的低频操作）
-    let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(10))
-        .build();
-    let fetch_result = agent.get(MODELS_DEV_URL).call().map_err(|e| format!("models.dev 请求失败: {e}"));
-    let resp = match fetch_result {
-        Ok(r) => r,
-        Err(e) => {
-            // 网络失败：回退过期缓存（若有），保持「models.dev 数据源」语义
-            if let Some(c) = cached {
-                if !c.usd.is_empty() {
-                    return Ok(c.usd);
-                }
+    // 多源 failover：官方源国内可能直连不通，依次尝试镜像
+    let mut last_err = String::new();
+    let mut usd = BTreeMap::new();
+    for url in models_dev_urls() {
+        match fetch_models_dev_from(&url) {
+            Ok(prices) => {
+                usd = prices;
+                break;
             }
-            return Err(e);
+            Err(e) => last_err = e,
         }
-    };
-    let root: serde_json::Value = resp
-        .into_json()
-        .map_err(|e| format!("models.dev 响应解析失败: {e}"))?;
-
-    let usd = extract_zhipu_prices(&root);
+    }
     if usd.is_empty() {
-        return Err("models.dev 未收录智谱模型价格".to_string());
+        // 全部源失败：回退过期缓存（若有），保持「models.dev 数据源」语义
+        if let Some(c) = cached {
+            if !c.usd.is_empty() {
+                return Ok(c.usd);
+            }
+        }
+        return Err(format!("models.dev 所有数据源均不可达: {last_err}"));
     }
 
     // 写缓存（失败静默：缓存只是优化）
@@ -242,6 +263,81 @@ pub fn fetch_models_dev_prices(force: bool) -> Result<BTreeMap<String, ModelPric
         }
     }
     Ok(usd)
+}
+
+/// models.dev 数据源列表（按优先级）：
+/// - 官方 api.json（国内可能直连不通）
+/// - jsDelivr CDN 镜像 GitHub anomalyco/models.dev 的 models.json（国内通常可达）
+/// - fastly 是 jsDelivr 的备用线路（连通性波动时兜底）
+///
+/// 注：镜像的 models.json 是 canonical 视图（{data:[{id:"z-ai/glm-4.6", pricing:{...}}]}，
+/// 价格为 USD/token 字符串），与 api.json 的 provider 视图结构不同，解析时自动分派。
+fn models_dev_urls() -> Vec<String> {
+    vec![
+        MODELS_DEV_URL.to_string(),
+        "https://cdn.jsdelivr.net/gh/anomalyco/models.dev@dev/models.json".to_string(),
+        "https://fastly.jsdelivr.net/gh/anomalyco/models.dev@dev/models.json".to_string(),
+    ]
+}
+
+/// 从单个 URL 拉取并提取智谱价格（超时 8s，按响应结构自动分派视图）
+fn fetch_models_dev_from(url: &str) -> Result<BTreeMap<String, ModelPrice>, String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(8))
+        .build();
+    let resp = agent
+        .get(url)
+        .call()
+        .map_err(|e| format!("请求失败: {e}"))?;
+    let root: serde_json::Value = resp
+        .into_json()
+        .map_err(|e| format!("响应解析失败: {e}"))?;
+    let usd = if root.get("data").and_then(|d| d.as_array()).is_some() {
+        extract_from_models_json(&root)
+    } else {
+        extract_zhipu_prices(&root)
+    };
+    if usd.is_empty() {
+        return Err("未解析到智谱模型价格".to_string());
+    }
+    Ok(usd)
+}
+
+/// jsDelivr 镜像 models.json 视图：{data:[{id:"z-ai/glm-4.6", pricing:{prompt, completion,
+/// input_cache_read}}]}，价格为 USD/token 字符串 → 换算为 USD/百万 token。
+/// 跳过 ":free" 等变体 id，避免免费端点价覆盖正式价。
+fn extract_from_models_json(root: &serde_json::Value) -> BTreeMap<String, ModelPrice> {
+    let mut usd = BTreeMap::new();
+    let Some(items) = root.get("data").and_then(|d| d.as_array()) else {
+        return usd;
+    };
+    for item in items {
+        let Some(id) = item.get("id").and_then(|i| i.as_str()) else { continue };
+        let Some(model_id) = id.strip_prefix("z-ai/") else { continue };
+        if model_id.contains(':') {
+            continue; // ":free" 等变体端点，非正式定价
+        }
+        let Some(pricing) = item.get("pricing") else { continue };
+        // USD/token → USD/百万 token
+        let to_m = |key: &str| -> Option<f64> {
+            pricing.get(key).and_then(value_as_f64).map(|v| v * 1_000_000.0)
+        };
+        let (Some(input), Some(output)) = (to_m("prompt"), to_m("completion")) else {
+            continue;
+        };
+        if input <= 0.0 && output <= 0.0 {
+            continue;
+        }
+        usd.insert(
+            model_id.to_lowercase(),
+            ModelPrice {
+                input,
+                output,
+                cache_read: to_m("input_cache_read").unwrap_or(0.0),
+            },
+        );
+    }
+    usd
 }
 
 /// 单条差异：用户本地与参考价格不一致的某个货币维度。
@@ -279,16 +375,16 @@ pub struct PricingDiff {
 /// `relevant`: 实际调用过 ∪ 用户已配置的模型 id —— **遍历主体**，
 /// 保证实际在用但参考表没收录的模型也能以 missing 暴露出来。
 /// `fx_rate`: USD→CNY 汇率（models.dev 模式下 CNY 参考价 = USD × 汇率；≤0 时按 7.2 兜底）。
-/// `force`: 透传给 models.dev 拉取（true 绕过 24h 缓存，只发一次请求）。
+/// `mode`: models.dev 拉取模式（CacheOnly 不联网 / Cached 默认 / Force 强制刷新）。
 pub fn diff_pricing(
     user: &PricingConfig,
     relevant: &std::collections::HashSet<String>,
     fx_rate: f64,
-    force: bool,
+    mode: FetchMode,
 ) -> PricingDiff {
     let fx_rate = if fx_rate > 0.0 { fx_rate } else { 7.2 };
     // 参考价：优先 models.dev（USD），失败回退内置表（USD+CNY）
-    match fetch_models_dev_prices(force) {
+    match fetch_models_dev_prices(mode) {
         Ok(usd) => {
             // CNY 参考价 = USD × 汇率（models.dev 只有国际站 USD 价）
             let cny = usd
@@ -446,6 +542,26 @@ mod tests {
         assert!(usd.contains_key("glm-4.6"), "名称含 zhipu 的 provider 应被匹配");
     }
 
+    /// jsDelivr 镜像 models.json 视图：z-ai/ 前缀 + USD/token 字符串 → USD/百万 token
+    #[test]
+    fn extract_from_models_json_view() {
+        let json = r#"{
+            "data": [
+                { "id": "z-ai/glm-4.6", "pricing": { "prompt": "0.00000043", "completion": "0.00000174", "input_cache_read": "0.00000008" } },
+                { "id": "z-ai/glm-4.5-air:free", "pricing": { "prompt": "0", "completion": "0" } },
+                { "id": "openai/gpt-4o", "pricing": { "prompt": "0.0000025", "completion": "0.00001" } },
+                { "id": "z-ai/glm-4.7", "pricing": {} }
+            ]
+        }"#;
+        let root: serde_json::Value = serde_json::from_str(json).unwrap();
+        let usd = extract_from_models_json(&root);
+        assert_eq!(usd.len(), 1, "只应有 glm-4.6（free 变体/他厂/无价格均跳过）");
+        let g = &usd["glm-4.6"];
+        assert_eq!(g.input, 0.43, "USD/token × 1M");
+        assert_eq!(g.output, 1.74);
+        assert_eq!(g.cache_read, 0.08);
+    }
+
     /// diff 分类：以 relevant 为主体 —— new / changed / missing 三类 + 大小写归一
     #[test]
     fn diff_classifies_new_changed_missing() {
@@ -488,6 +604,22 @@ mod tests {
         // glm-x-new：missing；glm-4-plus：自定义不算 missing
         assert_eq!(diff.missing, vec!["glm-x-new".to_string()]);
         assert_eq!(diff.source, "models.dev");
+    }
+
+    /// 真实镜像数据管道验证（需网络，手动 `cargo test -- --ignored` 执行）
+    #[test]
+    #[ignore = "需要网络"]
+    fn fetch_real_jsdelivr_mirror() {
+        let usd = fetch_models_dev_from(
+            "https://cdn.jsdelivr.net/gh/anomalyco/models.dev@dev/models.json",
+        )
+        .expect("jsDelivr 镜像应可达且解析出智谱价格");
+        assert!(
+            usd.contains_key("glm-4.6"),
+            "应包含 glm-4.6，实际: {:?}",
+            usd.keys().collect::<Vec<_>>()
+        );
+        println!("glm-4.6 = {:?}", usd["glm-4.6"]);
     }
 }
 

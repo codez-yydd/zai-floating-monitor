@@ -115,9 +115,11 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
       .catch((e) => setError(String(e)));
   }, []);
 
-  // 进入价格设置时静默检查一次更新，有差异则在按钮显示红点（不弹窗打扰）
+  // 进入价格设置时静默检查一次更新，有差异则在按钮显示红点（不弹窗打扰）。
+  // cacheOnly=true：只读 24h 内磁盘缓存、不联网（首次无缓存时用内置表），保证进面板秒回不卡。
+  // 需要最新价时点「检查更新」按钮（force 联网刷新缓存）。
   useEffect(() => {
-    checkPricingUpdates()
+    checkPricingUpdates(false, true)
       .then((d) => {
         const n = d.new_models.length + d.changed.length;
         setUpdateCount(n);

@@ -124,23 +124,39 @@ fn set_currency(currency: String, app: AppHandle) -> Result<(), String> {
 /// 遍历主体 =「数据库实际调用过 ∪ 用户已手动配置」的模型：
 /// 实际在用但两边都没价格的模型会以 missing 暴露（花费按 0 计）。
 /// `force`：true 时绕过 models.dev 的 24h 磁盘缓存强制联网（手动点按钮用）。
+/// `cache_only`：true 时只读磁盘缓存、不联网（进面板静默检查用，保证秒回）。
+/// async + spawn_blocking：网络请求绝不能跑在主线程（同步 command 会卡死 UI）。
 #[tauri::command]
-fn check_pricing_updates(force: Option<bool>) -> Result<pricing::PricingDiff, String> {
-    let user = load_pricing()?;
-    // 相关模型 = 数据库里出现过的 + 用户已配置（任一货币）的
-    let mut relevant: std::collections::HashSet<String> = std::collections::HashSet::new();
-    db::list_models()?.into_iter().for_each(|m| {
-        relevant.insert(m.model_id);
-    });
-    relevant.extend(user.cny.keys().cloned());
-    relevant.extend(user.usd.keys().cloned());
+async fn check_pricing_updates(
+    force: Option<bool>,
+    cache_only: Option<bool>,
+) -> Result<pricing::PricingDiff, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let user = load_pricing()?;
+        // 相关模型 = 数据库里出现过的 + 用户已配置（任一货币）的
+        let mut relevant: std::collections::HashSet<String> = std::collections::HashSet::new();
+        db::list_models()?.into_iter().for_each(|m| {
+            relevant.insert(m.model_id);
+        });
+        relevant.extend(user.cny.keys().cloned());
+        relevant.extend(user.usd.keys().cloned());
 
-    // USD→CNY 汇率：与 Cursor 配置共用同一来源（models.dev 模式下 CNY 参考价 = USD × 汇率）
-    let fx_rate = cursor::load_cursor_config()
-        .map(|c| c.usd_cny_rate)
-        .unwrap_or(7.2);
+        // USD→CNY 汇率：与 Cursor 配置共用同一来源（models.dev 模式下 CNY 参考价 = USD × 汇率）
+        let fx_rate = cursor::load_cursor_config()
+            .map(|c| c.usd_cny_rate)
+            .unwrap_or(7.2);
 
-    Ok(pricing::diff_pricing(&user, &relevant, fx_rate, force.unwrap_or(false)))
+        let mode = if cache_only.unwrap_or(false) {
+            pricing::FetchMode::CacheOnly
+        } else if force.unwrap_or(false) {
+            pricing::FetchMode::Force
+        } else {
+            pricing::FetchMode::Cached
+        };
+        Ok(pricing::diff_pricing(&user, &relevant, fx_rate, mode))
+    })
+    .await
+    .map_err(|e| format!("检查任务执行失败: {e}"))?
 }
 
 /// apply_pricing_updates：把用户勾选的价格项合并进 pricing 并保存。
