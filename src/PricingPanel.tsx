@@ -471,47 +471,57 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
             </div>
             <p className="text-[9px] text-slate-700/50 mb-2 leading-relaxed">
               {diff.source === "models.dev"
-                ? "来自 models.dev 的全厂商模型 USD 参考价（你在 ZCode 里用到的任意厂商模型都会检测），CNY 按汇率换算；后台每天自动更新一次缓存，点「更新」可立即联网刷新。勾选后点「应用选中」才会写入。"
-                : "models.dev 不可达，已回退内置参考表；点「更新」可重试联网。勾选后点「应用选中」才会写入。"}
-              新增项默认勾选，变动项默认不勾（保护你的自定义）。
+                ? "来自 models.dev 的全厂商模型 USD 参考价（你在 ZCode 里用到的任意厂商模型都会检测），CNY 按汇率换算；后台每天自动更新一次缓存，点「更新」可立即联网刷新。"
+                : "models.dev 不可达，已回退内置参考表；点「更新」可重试联网。"}
+              勾选后点「应用选中」才会写入；新增项默认勾选，变动项默认不勾（保护你的自定义）。价格三项依次为 输入/输出/缓存（每百万 token）。
             </p>
             {/* 无价格模型警示：实际在用但两边都没价格，花费按 0 计 */}
             {diff.missing.length > 0 && (
               <div className="mb-2 rounded-md bg-amber-500/10 border border-amber-500/20 px-2 py-1.5">
                 <div className="text-[9px] text-amber-700/90 font-medium">
-                  以下模型实际在用但未配置价格（花费按 0 计）：
+                  以下 {diff.missing.length} 个模型实际在用但未配置价格（花费按 0 计）：
                 </div>
-                <div className="text-[9px] text-slate-700/60 mt-0.5 num leading-relaxed break-all">
-                  {diff.missing.join("、")}
-                </div>
+                <ul className="mt-0.5 max-h-16 overflow-y-auto space-y-0.5">
+                  {diff.missing.map((m) => (
+                    <li key={m} className="text-[9px] text-slate-700/60 num break-words">
+                      {m}
+                    </li>
+                  ))}
+                </ul>
                 <div className="text-[8px] text-slate-700/40 mt-0.5">
                   请在下方模型列表中手动补价
                 </div>
               </div>
             )}
-            <div className="space-y-1 max-h-44 overflow-y-auto">
+            <div className="space-y-1 max-h-52 overflow-y-auto">
               {/* 新增模型 */}
               {diff.new_models.map((i) => {
                 const key = `${i.model_id}|${i.currency}`;
+                const sym = i.currency === "cny" ? "¥" : "$";
                 return (
                   <label
                     key={`new-${key}`}
-                    className="flex items-center gap-2 text-[10px] py-0.5 cursor-pointer"
+                    className="flex items-start gap-2 py-1 px-1 rounded cursor-pointer hover:bg-white/50 transition-colors"
                   >
                     <input
                       type="checkbox"
                       checked={selected.has(key)}
                       onChange={() => toggleSelect(key)}
-                      className="accent-sky-500 w-3 h-3"
+                      className="accent-sky-500 w-3 h-3 mt-[3px] shrink-0"
                     />
-                    <span className="text-emerald-600/90">新增</span>
-                    <span className="font-medium text-slate-900/85 truncate">
-                      {i.model_id}
-                    </span>
-                    <span className="text-slate-700/40">{i.currency.toUpperCase()}</span>
-                    <span className="ml-auto text-slate-700/55 num">
-                      {fmtTriplet(i.default)}
-                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-baseline gap-1.5">
+                        <span className="shrink-0 px-1 rounded bg-emerald-500/15 text-emerald-700 text-[8px] font-medium">
+                          新增
+                        </span>
+                        <span className="font-medium text-slate-900/85 text-[10px] break-words">
+                          {i.model_id}
+                        </span>
+                      </div>
+                      <div className="mt-0.5 text-[10px] text-slate-700/60 num whitespace-nowrap">
+                        {sym} {fmtTriplet(i.default)}
+                      </div>
+                    </div>
                   </label>
                 );
               })}
@@ -519,27 +529,38 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
               {diff.changed.map((i) => {
                 const key = `${i.model_id}|${i.currency}`;
                 const u = i.user;
+                const sym = i.currency === "cny" ? "¥" : "$";
                 return (
                   <label
                     key={`chg-${key}`}
-                    className="flex items-center gap-2 text-[10px] py-0.5 cursor-pointer"
+                    className="flex items-start gap-2 py-1 px-1 rounded cursor-pointer hover:bg-white/50 transition-colors"
                   >
                     <input
                       type="checkbox"
                       checked={selected.has(key)}
                       onChange={() => toggleSelect(key)}
-                      className="accent-sky-500 w-3 h-3"
+                      className="accent-sky-500 w-3 h-3 mt-[3px] shrink-0"
                     />
-                    <span className="text-amber-600/90">变动</span>
-                    <span className="font-medium text-slate-900/85 truncate">
-                      {i.model_id}
-                    </span>
-                    <span className="text-slate-700/40">{i.currency.toUpperCase()}</span>
-                    <span className="ml-auto text-slate-700/55 num">
-                      {u ? fmtTriplet(u) : "—"}
-                      <span className="text-slate-700/35 mx-0.5">→</span>
-                      <span className="text-sky-600/90">{fmtTriplet(i.default)}</span>
-                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-baseline gap-1.5">
+                        <span className="shrink-0 px-1 rounded bg-amber-500/15 text-amber-700 text-[8px] font-medium">
+                          变动
+                        </span>
+                        <span className="font-medium text-slate-900/85 text-[10px] break-words">
+                          {i.model_id}
+                        </span>
+                      </div>
+                      <div className="mt-0.5 text-[10px] num leading-relaxed">
+                        <span className="text-slate-700/40 text-[9px]">旧 </span>
+                        <span className="text-slate-700/55 whitespace-nowrap">
+                          {u ? `${sym} ${fmtTriplet(u)}` : "未配价"}
+                        </span>
+                        <span className="text-slate-700/35 mx-1">→</span>
+                        <span className="text-sky-600/90 font-medium whitespace-nowrap">
+                          {sym} {fmtTriplet(i.default)}
+                        </span>
+                      </div>
+                    </div>
                   </label>
                 );
               })}
