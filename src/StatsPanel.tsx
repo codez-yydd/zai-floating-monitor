@@ -249,6 +249,7 @@ export function StatsPanel({
           currency={currency}
           bucket={trendBucket}
           fxRate={fxRate}
+          pricing={pricing}
         />
       )}
 

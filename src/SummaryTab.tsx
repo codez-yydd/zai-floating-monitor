@@ -2,6 +2,7 @@ import type {
   CostResult,
   CursorSnapshot,
   Currency,
+  PricingConfig,
   Stats,
   TrendPoint,
 } from "./types";
@@ -23,6 +24,7 @@ interface Props {
   currency: Currency;
   bucket: "hour" | "day";
   fxRate: number;
+  pricing: PricingConfig;
 }
 
 const LEVEL_LABEL: Record<string, string> = {
@@ -72,6 +74,69 @@ function CompositionBar({ agents }: { agents: AgentSummary[] }) {
   );
 }
 
+/** 汇总页模型排行的一行（ZCode / Cursor 混排） */
+interface ModelRankRow {
+  key: string;
+  name: string;
+  source: string;
+  color: string;
+  barBg: string;
+  requests: number;
+  tokens: number;
+  cost: number;
+  hasPrice: boolean;
+}
+
+function buildModelRows(
+  stats: Stats | null,
+  cost: CostResult | null,
+  cursor: CursorSnapshot | null,
+  pricing: PricingConfig,
+  currency: Currency,
+  fxRate: number
+): ModelRankRow[] {
+  const rows: ModelRankRow[] = [];
+
+  const costById = new Map<string, number>();
+  const perModel =
+    currency === "cny" ? cost?.per_model_cny : cost?.per_model_usd;
+  perModel?.forEach((x) => {
+    costById.set(x.model_id, (costById.get(x.model_id) ?? 0) + x.cost);
+  });
+
+  for (const m of stats?.by_model ?? []) {
+    const price = pricing[currency][m.model_id];
+    const hasPrice = Boolean(price && (price.input > 0 || price.output > 0));
+    rows.push({
+      key: `zcode:${m.provider_id}:${m.model_id}`,
+      name: m.model_id,
+      source: "ZCode",
+      color: "#0ea5e9",
+      barBg: "bg-sky-500/10",
+      requests: m.requests,
+      tokens: m.total_tokens,
+      cost: costById.get(m.model_id) ?? 0,
+      hasPrice,
+    });
+  }
+
+  for (const m of cursor?.by_model ?? []) {
+    rows.push({
+      key: `cursor:${m.model}`,
+      name: m.model,
+      source: "Cursor",
+      color: "#8b5cf6",
+      barBg: "bg-violet-500/10",
+      requests: m.requests,
+      tokens: m.total_tokens,
+      cost: currency === "cny" ? m.cost_usd * fxRate : m.cost_usd,
+      hasPrice: true,
+    });
+  }
+
+  return rows;
+}
+
 /** 额度一行：标签 + 剩余进度条 + 剩余% */
 function QuotaMiniRow({
   label,
@@ -107,8 +172,10 @@ export function SummaryTab({
   currency,
   bucket,
   fxRate,
+  pricing,
 }: Props) {
   const [trendMetric, setTrendMetric] = useState<"cost" | "token">("cost");
+  const [sortBy, setSortBy] = useState<"cost" | "token" | "requests">("cost");
 
   // ZCode 额度（与范围无关，读全局缓存，与 QuotaPanel 同源）
   const { quota, quotaError } = useDataCache();
@@ -212,6 +279,29 @@ export function SummaryTab({
     };
   });
 
+  const modelRows = buildModelRows(
+    stats,
+    cost,
+    cursor,
+    pricing,
+    currency,
+    fxRate
+  );
+  const sortedModels = [...modelRows].sort((a, b) => {
+    const av =
+      sortBy === "cost" ? a.cost : sortBy === "token" ? a.tokens : a.requests;
+    const bv =
+      sortBy === "cost" ? b.cost : sortBy === "token" ? b.tokens : b.requests;
+    return bv - av;
+  });
+  const maxModelVal = sortedModels[0]
+    ? sortBy === "cost"
+      ? sortedModels[0].cost
+      : sortBy === "token"
+        ? sortedModels[0].tokens
+        : sortedModels[0].requests
+    : 0;
+
   return (
     <div className="flex-1 min-h-0 overflow-y-auto px-3.5 pt-3 pb-2 flex flex-col gap-2.5">
       {/* 总览：数字 → 一条占比 → 来源表 */}
@@ -299,7 +389,7 @@ export function SummaryTab({
         ))}
       </div>
 
-      {/* 合并趋势图 */}
+      {/* 合并趋势图：下方有模型排行时不再撑满，把空间让给列表 */}
       {mergedTrend.length > 0 && (
         <TrendChart
           points={mergedTrend}
@@ -307,8 +397,94 @@ export function SummaryTab({
           currency={currency}
           metric={trendMetric}
           onMetricChange={setTrendMetric}
-          fill
+          fill={sortedModels.length === 0}
         />
+      )}
+
+      {/* 按模型：高度封顶，超出在列表内滚动，避免把面板撑高 */}
+      {sortedModels.length > 0 && (
+        <div className="shrink-0">
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-[10px] uppercase tracking-wide text-slate-700/55">
+              按模型
+            </span>
+            <div className="flex gap-0.5 text-[10px]">
+              {(["cost", "token", "requests"] as const).map((s) => (
+                <button
+                  key={s}
+                  onClick={() => setSortBy(s)}
+                  className={`px-1.5 py-0.5 rounded transition-colors ${
+                    sortBy === s
+                      ? "bg-slate-900/10 text-slate-800"
+                      : "text-slate-700/45 hover:text-slate-900/70"
+                  }`}
+                >
+                  {s === "cost" ? "花费" : s === "token" ? "Token" : "请求"}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="max-h-40 overflow-y-auto overflow-x-hidden overscroll-contain">
+            {sortedModels.map((m) => {
+              const sortVal =
+                sortBy === "cost"
+                  ? m.cost
+                  : sortBy === "token"
+                    ? m.tokens
+                    : m.requests;
+              const pct =
+                maxModelVal > 0 ? Math.max(sortVal / maxModelVal, 0.02) : 0;
+              return (
+                <div
+                  key={m.key}
+                  className="relative rounded-lg hover:bg-slate-900/5 transition-colors py-1.5 overflow-hidden min-w-0"
+                >
+                  <div
+                    className={`absolute inset-y-0 left-0 ${m.barBg} rounded-lg pointer-events-none`}
+                    style={{ width: `${pct * 100}%` }}
+                  />
+                  <div className="relative flex items-center gap-1.5 text-xs min-w-0">
+                    <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                      <span
+                        className="w-1.5 h-1.5 rounded-full shrink-0"
+                        style={{ background: m.color }}
+                        title={m.source}
+                      />
+                      <span
+                        className="font-medium text-slate-900/90 truncate"
+                        title={`${m.source} · ${m.name}`}
+                      >
+                        {m.name}
+                      </span>
+                      {!m.hasPrice && (
+                        <span
+                          className="text-[10px] text-amber-600/90 shrink-0"
+                          title="未配置价格"
+                        >
+                          ⚠
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5 text-slate-700/60 num shrink-0 whitespace-nowrap">
+                      <span>{m.requests}</span>
+                      <span className="text-slate-700/25">·</span>
+                      <span>{formatTokens(m.tokens)}</span>
+                      <span
+                        className={`min-w-[2.75rem] text-right ${
+                          m.hasPrice
+                            ? "text-slate-900/90"
+                            : "text-slate-700/35"
+                        }`}
+                      >
+                        {m.hasPrice ? formatCost(m.cost, currency) : "—"}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
       )}
     </div>
   );
