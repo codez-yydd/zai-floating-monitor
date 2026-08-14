@@ -231,10 +231,14 @@ def list_devices():
 # ===== 同步写入 =====
 
 def insert_usage_records(device_id, records, uploaded_at):
-    """批量插入明细记录（INSERT OR IGNORE 去重，主键含 source 维度）。
+    """批量插入明细记录（主键 (device_id, source, local_rowid) 去重 + 修订覆盖）。
 
     每条记录的 source 缺省为 'zcode'（旧客户端不传即 zcode，向后兼容）。
-    返回实际写入条数。
+    同主键重传且 computed_total_tokens 更大时覆盖旧值：Claude Code 会话流式
+    落盘，客户端可能先上传某条消息的中间值、稍后本地修正为终值并补传
+    （见客户端 claude 模块的 updated_at 修订机制）；其他来源记录不可变，
+    重传必然同值，覆盖守卫对其为无操作。
+    返回实际写入（插入或覆盖）条数。
     """
     if not records:
         return 0
@@ -246,12 +250,23 @@ def insert_usage_records(device_id, records, uploaded_at):
             for r in records:
                 cur.execute(
                     """
-                    INSERT OR IGNORE INTO usage_records
+                    INSERT INTO usage_records
                         (device_id, source, local_rowid, started_at, model_id, provider_id,
                          input_tokens, output_tokens, cache_read_input_tokens,
                          cache_creation_input_tokens, reasoning_tokens,
                          computed_total_tokens, uploaded_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(device_id, source, local_rowid) DO UPDATE SET
+                        started_at = excluded.started_at,
+                        model_id = excluded.model_id,
+                        provider_id = excluded.provider_id,
+                        input_tokens = excluded.input_tokens,
+                        output_tokens = excluded.output_tokens,
+                        cache_read_input_tokens = excluded.cache_read_input_tokens,
+                        cache_creation_input_tokens = excluded.cache_creation_input_tokens,
+                        reasoning_tokens = excluded.reasoning_tokens,
+                        computed_total_tokens = excluded.computed_total_tokens
+                    WHERE excluded.computed_total_tokens > usage_records.computed_total_tokens
                     """,
                     (
                         device_id,

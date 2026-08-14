@@ -142,6 +142,10 @@ export interface SyncConfig {
   last_uploaded_rowid: number;
   /** Codex 会话已上传到的 rowid（与 last_uploaded_rowid 同款水位线机制） */
   last_uploaded_codex_rowid: number;
+  /** Claude 会话已上传到的 rowid（与上面两个游标相互独立） */
+  last_uploaded_claude_rowid: number;
+  /** Claude 修订行已补传到的 updated_at 毫秒时间戳（流式终值修正） */
+  last_uploaded_claude_rev_ts: number;
   last_uploaded_snapshot_ts: number;
   last_sync_at: number;
 }
@@ -183,7 +187,7 @@ export interface RemoteOverall {
 export interface RemoteModelStat {
   model_id: string;
   provider_id: string;
-  /** 数据来源："zcode" | "codex"（旧数据无此字段时后端默认 "zcode"） */
+  /** 数据来源："zcode" | "codex" | "claude"（旧数据无此字段时后端默认 "zcode"） */
   source: string;
   requests: number;
   input_tokens: number;
@@ -444,8 +448,8 @@ export interface CursorSnapshot {
   by_model: CursorModelStat[];
 }
 
-/** 主面板四标签 */
-export type StatsTab = "summary" | "zai" | "codex" | "cursor";
+/** 主面板五标签 */
+export type StatsTab = "summary" | "zai" | "codex" | "claude" | "cursor";
 
 // ===== Codex 用量统计（与 Rust codex 模块结构一一对应）=====
 
@@ -470,5 +474,30 @@ export interface CodexSnapshot {
   trend: TrendPoint[];
   /** 速率限制（API 中转等无本地限流数据的模式为 null） */
   rate_limits: CodexRateLimits | null;
+}
+
+// ===== Claude 用量统计（与 Rust claude 模块结构一一对应）=====
+
+/** Claude（Anthropic Claude Code）订阅额度（OAuth 实时接口获取） */
+export interface ClaudeRateLimits {
+  /** 订阅类型："pro" / "max" 等（第三方中转模式为 null） */
+  plan_type: string | null;
+  /** 5 小时会话窗口已用百分比（0-100） */
+  primary_pct: number | null;
+  /** 5 小时会话窗口重置时间（毫秒时间戳） */
+  primary_reset_at: number | null;
+  /** 周窗口已用百分比（0-100） */
+  secondary_pct: number | null;
+  /** 周窗口重置时间（毫秒时间戳） */
+  secondary_reset_at: number | null;
+}
+
+/** Claude 用量快照（get_claude_usage 返回）。
+ *  stats / trend 与 z.ai 同构；rate_limits 仅订阅登录的机器上有值。 */
+export interface ClaudeSnapshot {
+  stats: Stats;
+  trend: TrendPoint[];
+  /** 订阅额度（未登录 claude.ai 订阅 / 第三方中转模式为 null） */
+  rate_limits: ClaudeRateLimits | null;
 }
 

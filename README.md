@@ -39,8 +39,10 @@
 - **自动刷新** — 面板数据每 30 秒自动拉取一次。
 - **Coding Plan 额度监控** — 订阅用户可在面板顶部查看 **5 小时窗口**、**每周额度**与 **MCP 月度额度**的用量进度条，颜色随用量警示（绿→琥珀→红），并显示下次重置倒计时；支持**国内 / 国际**双端点切换。
 - **🖥 Cursor 用量统计** — 自动读取本机 Cursor 应用的登录凭据（也支持手动 Cookie），统计 Pro / Auto / API 套餐额度与 Token 花费明细，美元花费按汇率折算后并入汇总视图。
+- **🟢 Codex 用量统计** — 解析本机 `~/.codex/sessions` 会话记录统计 Token 用量与花费；ChatGPT 订阅登录的机器上还可实时拉取 **5 小时 / 每周**额度进度条（API 中转模式自动隐藏额度块）。
+- **🟠 Claude 用量统计** — 解析本机 `~/.claude/projects` 会话记录统计 Token 用量与花费（含子代理会话，按 message 去重防重复计数）；claude.ai 订阅登录的机器上实时拉取 **5 小时会话 / 每周**额度（第三方中转模式自动隐藏额度块）。
 - **💱 汇率自动更新** — USD→CNY 汇率默认每日自动联网更新（也可改为手动填写），用于 Cursor 花费折算与人民币参考价换算。
-- **🧭 多服务汇总视图** — 「汇总 / Z.ai / Cursor」标签切换：多服务合计花费与 Token、订阅额度卡片、分时趋势图与模型排行。
+- **🧭 多服务汇总视图** — 「汇总 / Z.ai / Codex / Claude / Cursor」标签切换：多服务合计花费与 Token、订阅额度卡片、分时趋势图与模型排行。
 - **⌨️ 全局快捷键** — 默认 `alt+shift+z` 唤起 / 隐藏面板，可在设置中自定义或停用。
 - **📈 周额度对比** — 基于本地额度快照（90 天滚动保留）对比每个重置周期的额度用量，支持跨设备合并。
 - **📝 日报 / 周报** — 一键生成 Markdown 日报（今日）/ 周报（近 7 天）并保存到本地。
@@ -69,6 +71,9 @@ zai-floating-monitor/
 │   ├── StatsPanel.tsx        # 统计面板（含设备筛选器 + 本地/远端数据合并）
 │   ├── SummaryTab.tsx        # 汇总视图（多服务合计 / 趋势 / 模型排行）
 │   ├── CursorPanel.tsx       # Cursor 视图（额度 + 用量统计）
+│   ├── AgentUsagePanel.tsx   # 单 CLI Agent 通用用量面板（Codex / Claude 共用）
+│   ├── CodexPanel.tsx        # Codex 视图（AgentUsagePanel 品牌皮肤）
+│   ├── ClaudePanel.tsx       # Claude 视图（AgentUsagePanel 品牌皮肤）
 │   ├── PricingPanel.tsx      # 价格配置面板（含 Coding Plan / Cursor 统计 / 快捷键）
 │   ├── QuotaPanel.tsx        # Coding Plan 额度监控
 │   ├── ComparePanel.tsx      # 周额度对比
@@ -87,6 +92,8 @@ zai-floating-monitor/
 │   │   ├── quota.rs          # Coding Plan 额度查询（5 小时 / 每周 / MCP）
 │   │   ├── quota_history.rs  # 额度快照历史（JSONL，90 天滚动保留）
 │   │   ├── cursor.rs         # Cursor 用量统计（自动凭据 / Cookie / API）
+│   │   ├── codex.rs          # Codex 用量统计（sessions 解析 + 实时订阅额度）
+│   │   ├── claude.rs         # Claude 用量统计（projects 解析 + OAuth 实时额度）
 │   │   ├── shortcut.rs       # 全局快捷键配置
 │   │   ├── sync.rs           # 多设备同步（配置 / 增量上传 / 远端查询 / 清理）
 │   │   └── main.rs

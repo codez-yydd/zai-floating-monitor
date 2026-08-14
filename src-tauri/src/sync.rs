@@ -54,6 +54,12 @@ pub struct SyncConfig {
     /// 已上传到的 Codex 导入库 rowid 游标（与 zcode 游标相互独立）。
     #[serde(default)]
     pub last_uploaded_codex_rowid: i64,
+    /// 已上传到的 Claude 导入库 rowid 游标（与上面两个游标相互独立）。
+    #[serde(default)]
+    pub last_uploaded_claude_rowid: i64,
+    /// Claude 修订行补传游标（updated_at 毫秒时间戳，见 claude 模块修订机制）。
+    #[serde(default)]
+    pub last_uploaded_claude_rev_ts: i64,
     /// 已上传到的快照 ts 游标（额度快照）。
     #[serde(default)]
     pub last_uploaded_snapshot_ts: i64,
@@ -78,6 +84,8 @@ impl Default for SyncConfig {
             device_token: String::new(),
             last_uploaded_rowid: 0,
             last_uploaded_codex_rowid: 0,
+            last_uploaded_claude_rowid: 0,
+            last_uploaded_claude_rev_ts: 0,
             last_uploaded_snapshot_ts: 0,
             last_sync_at: 0,
         }
@@ -324,10 +332,10 @@ pub struct SyncOutcome {
     pub last_sync_at: i64,
 }
 
-/// 执行一次增量上传（两阶段）：先 zcode 明细（含额度快照），再 Codex 导入库明细。
-/// 两来源游标相互独立：
+/// 执行一次增量上传（三阶段）：先 zcode 明细（含额度快照），再 Codex、Claude
+/// 两个派生库的明细。各来源游标相互独立：
 /// - zcode 失败：整体返回 Err，游标不前进（下次重试），与原有行为一致；
-/// - codex 失败：不阻断 zcode 已成功的结果，错误仅记日志，游标停在最近
+/// - codex/claude 失败：不阻断已成功来源的结果，错误仅记日志，游标停在最近
 ///   成功批次并随配置落盘（下次从断点续传）。
 pub fn upload_incremental() -> Result<SyncOutcome, String> {
     let mut cfg = load_sync_config()?;
@@ -410,11 +418,20 @@ pub fn upload_incremental() -> Result<SyncOutcome, String> {
 
     // ===== 阶段二：Codex 明细（records 固定 source="codex"，失败不阻断）=====
     let mut codex_uploaded = 0usize;
-    match upload_codex_incremental(&mut cfg, &base, &token) {
+    match upload_derived_source_incremental(&mut cfg, &base, &token, "codex") {
         Ok(n) => codex_uploaded = n,
         Err(e) => {
             // 游标已随每批成功推进（见函数内），稍后随配置落盘，下次从断点续传
             eprintln!("[zbar-sync] Codex 增量上传失败（下次重试）: {e}");
+        }
+    }
+
+    // ===== 阶段三：Claude 明细（records 固定 source="claude"，失败不阻断）=====
+    let mut claude_uploaded = 0usize;
+    match upload_derived_source_incremental(&mut cfg, &base, &token, "claude") {
+        Ok(n) => claude_uploaded = n,
+        Err(e) => {
+            eprintln!("[zbar-sync] Claude 增量上传失败（下次重试）: {e}");
         }
     }
 
@@ -425,30 +442,49 @@ pub fn upload_incremental() -> Result<SyncOutcome, String> {
     save_sync_config(&cfg)?;
 
     Ok(SyncOutcome {
-        uploaded: total_uploaded + codex_uploaded,
+        uploaded: total_uploaded + codex_uploaded + claude_uploaded,
         new_max_rowid: since,
         last_sync_at: now,
     })
 }
 
-/// 上传 Codex 导入库的增量（id > codex 游标，循环分批）。
-/// 查询前由 codex 模块自行增量导入（sessions jsonl → codex.sqlite）。
-/// 未安装 Codex 时静默返回 0（不算错误，避免后台同步每轮刷错误日志）。
+/// 上传派生来源（codex/claude 导入库）的增量（id > 对应游标，循环分批）。
+/// 查询前由各模块自行增量导入（原始 jsonl → 派生 sqlite）。两条路径完全同构，
+/// 仅数据源与游标字段不同，故按 source 参数泛化：
+/// - "codex" → crate::codex + last_uploaded_codex_rowid
+/// - "claude" → crate::claude + last_uploaded_claude_rowid
+/// 未安装对应 CLI 时静默返回 0（不算错误，避免后台同步每轮刷错误日志）。
 /// 首批上传前先探测服务端协议版本（proto ≥ 2 才支持多来源）：
-/// 旧服务端无 source 列，codex 记录会按 (device_id, local_rowid) 撞键
-/// 静默丢弃且游标推进 → 数据永久丢失，故版本不足时不推进游标直接报错，
-/// 升级服务端后自动恢复上传。成功的每批都推进 cfg.last_uploaded_codex_rowid
-/// （部分失败也保留断点，由调用方负责落盘）。返回本次成功上传的条数。
-fn upload_codex_incremental(
+/// 旧服务端无 source 列，记录会按 (device_id, local_rowid) 撞键静默丢弃
+/// 且游标推进 → 数据永久丢失，故版本不足时不推进游标直接报错，
+/// 升级服务端后自动恢复上传。成功的每批都推进游标（部分失败也保留断点，
+/// 由调用方负责落盘）。返回本次成功上传的条数。
+fn upload_derived_source_incremental(
     cfg: &mut SyncConfig,
     base: &str,
     token: &str,
+    source: &str,
 ) -> Result<usize, String> {
-    // 未安装 Codex：无会话目录，静默跳过（不算错误，避免后台同步每轮刷日志）
-    if crate::codex::sessions_dir().is_err() {
+    let (dir_exists, has_pending, cursor): (bool, bool, i64) = match source {
+        "codex" => {
+            let dir = crate::codex::sessions_dir().is_ok();
+            let pending = dir
+                && !crate::codex::query_since(cfg.last_uploaded_codex_rowid, 1)?.is_empty();
+            (dir, pending, cfg.last_uploaded_codex_rowid)
+        }
+        "claude" => {
+            let dir = crate::claude::projects_dir().is_ok();
+            let pending = dir
+                && !crate::claude::query_since(cfg.last_uploaded_claude_rowid, 1)?.is_empty();
+            (dir, pending, cfg.last_uploaded_claude_rowid)
+        }
+        _ => return Err(format!("未知数据来源: {source}")),
+    };
+    // 未安装对应 CLI：无会话目录，静默跳过（不算错误，避免后台同步每轮刷日志）
+    if !dir_exists {
         return Ok(0);
     }
-    if crate::codex::query_since(cfg.last_uploaded_codex_rowid, 1)?.is_empty() {
+    if !has_pending {
         return Ok(0); // 无待上传数据，跳过（也免去协议探测请求）
     }
 
@@ -466,17 +502,20 @@ fn upload_codex_incremental(
         .into_json()
         .map_err(|e| format!("解析协议探测响应失败: {e}"))?;
     if probe.proto < 2 {
-        return Err(
-            "服务端版本过旧（不支持多来源同步），Codex 数据暂不上传，请升级服务端 zbar-sync 后重试"
-                .into(),
-        );
+        return Err(format!(
+            "服务端版本过旧（不支持多来源同步），{source} 数据暂不上传，请升级服务端 zbar-sync 后重试"
+        ));
     }
 
-    let mut since = cfg.last_uploaded_codex_rowid;
+    let mut since = cursor;
     let mut total = 0usize;
     const BATCH: usize = 500;
     loop {
-        let records = crate::codex::query_since(since, BATCH)?;
+        let records = match source {
+            "codex" => crate::codex::query_since(since, BATCH)?,
+            "claude" => crate::claude::query_since(since, BATCH)?,
+            _ => unreachable!("来源已在上文校验"),
+        };
         if records.is_empty() {
             break;
         }
@@ -492,12 +531,52 @@ fn upload_codex_incremental(
             .set("Authorization", &format!("Bearer {token}"))
             .timeout(Duration::from_secs(15))
             .send_json(&payload)
-            .map_err(map_http_err("上传 Codex 数据"))?
+            .map_err(map_http_err("上传数据"))?
             .into_json()
             .map_err(|e| format!("解析上传响应失败: {e}"))?;
         total += resp.accepted;
         since = resp.max_rowid.max(batch_max);
-        cfg.last_uploaded_codex_rowid = since;
+        match source {
+            "codex" => cfg.last_uploaded_codex_rowid = since,
+            "claude" => cfg.last_uploaded_claude_rowid = since,
+            _ => unreachable!("来源已在上文校验"),
+        }
+    }
+
+    // Claude 修订补传：会话流式落盘时，某条消息的中间值可能已随早前批次上传，
+    // 终值稍后覆盖本地行（id 不变）→ 上面的 id 游标永远选不出它。这里按
+    // updated_at 选出修订行重传，新版服务端以"总量更大者胜" upsert 覆盖修正；
+    // 旧服务端（INSERT OR IGNORE）会忽略重传——退化为旧行为（远端保留中间值），
+    // 无数据损坏，无需协议协商。after_id 逐批推进防止同批重复选出。
+    if source == "claude" {
+        let sweep_watermark = chrono::Local::now().timestamp_millis();
+        let mut after_id = 0i64;
+        loop {
+            let records =
+                crate::claude::query_revised_since(cfg.last_uploaded_claude_rev_ts, after_id, BATCH)?;
+            if records.is_empty() {
+                break;
+            }
+            after_id = records.last().map(|r| r.local_rowid).unwrap_or(after_id);
+            let resp: SyncResponse = ureq::post(&format!("{base}/sync"))
+                .set("Authorization", &format!("Bearer {token}"))
+                .timeout(Duration::from_secs(15))
+                .send_json(&SyncPayload {
+                    records,
+                    // 修订行都是已上传过的 rowid，不携带 last_rowid 以免扰动
+                    // 服务端对该来源游标状态的判断
+                    last_rowid: None,
+                    snapshots: Vec::new(),
+                    last_snapshot_ts: None,
+                })
+                .map_err(map_http_err("上传 Claude 修订数据"))?
+                .into_json()
+                .map_err(|e| format!("解析上传响应失败: {e}"))?;
+            total += resp.accepted;
+        }
+        // 推进到补传开始前的水位：补传期间新发生的修订（updated_at 更大）
+        // 下一轮自然选出
+        cfg.last_uploaded_claude_rev_ts = sweep_watermark;
     }
     Ok(total)
 }
@@ -518,7 +597,7 @@ pub struct RemoteUsageRequest {
     /// 用于设备筛选器选具体设备时只查它。
     #[serde(default)]
     pub devices: String,
-    /// 数据来源过滤："zcode" | "codex"，空 = 全部来源。
+    /// 数据来源过滤："zcode" | "codex" | "claude"，空 = 全部来源。
     #[serde(default)]
     pub source: String,
 }
@@ -824,6 +903,8 @@ pub fn disconnect() -> Result<(), String> {
     cfg.device_token.clear();
     cfg.last_uploaded_rowid = 0;
     cfg.last_uploaded_codex_rowid = 0;
+    cfg.last_uploaded_claude_rowid = 0;
+    cfg.last_uploaded_claude_rev_ts = 0;
     cfg.last_sync_at = 0;
     // 保留 server_url + mode + interval，方便下次重连
     save_sync_config(&cfg)

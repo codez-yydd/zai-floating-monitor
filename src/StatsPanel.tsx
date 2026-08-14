@@ -7,6 +7,7 @@ import { QuotaPanel } from "./QuotaPanel";
 import { RangePicker } from "./RangePicker";
 import { ZaiStatsContent } from "./ZaiStatsContent";
 import { CodexPanel } from "./CodexPanel";
+import { ClaudePanel } from "./ClaudePanel";
 import { CursorPanel } from "./CursorPanel";
 import { SummaryTab } from "./SummaryTab";
 
@@ -49,6 +50,8 @@ export function StatsPanel({
     error,
     codex,
     codexError,
+    claude,
+    claudeError,
     cursor,
     cursorError,
     fxRate,
@@ -60,7 +63,7 @@ export function StatsPanel({
     refresh,
   } = cache;
 
-  // 四标签：汇总 | Z.ai | Codex | Cursor
+  // 五标签：汇总 | Z.ai | Codex | Claude | Cursor
   const [tab, setTab] = useState<StatsTab>(
     () => (localStorage.getItem("zbar-tab") as StatsTab) || "summary"
   );
@@ -193,7 +196,7 @@ export function StatsPanel({
             </select>
           )}
           <div className="flex-1 flex gap-0.5 p-0.5 rounded-lg bg-slate-900/5">
-            {(["summary", "zai", "codex", "cursor"] as const).map((t) => (
+            {(["summary", "zai", "codex", "claude", "cursor"] as const).map((t) => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
@@ -201,11 +204,13 @@ export function StatsPanel({
                   tab === t
                     ? t === "cursor"
                       ? "bg-white text-violet-700 shadow-sm"
-                      : t === "codex"
-                        ? "bg-white text-emerald-700 shadow-sm"
-                        : t === "zai"
-                          ? "bg-white text-sky-700 shadow-sm"
-                          : "bg-white text-slate-900 shadow-sm"
+                      : t === "claude"
+                        ? "bg-white text-orange-700 shadow-sm"
+                        : t === "codex"
+                          ? "bg-white text-emerald-700 shadow-sm"
+                          : t === "zai"
+                            ? "bg-white text-sky-700 shadow-sm"
+                            : "bg-white text-slate-900 shadow-sm"
                     : "text-slate-700/50 hover:text-slate-900/70"
                 }`}
               >
@@ -215,7 +220,9 @@ export function StatsPanel({
                     ? "Z.ai"
                     : t === "codex"
                       ? "Codex"
-                      : "Cursor"}
+                      : t === "claude"
+                        ? "Claude"
+                        : "Cursor"}
               </button>
             ))}
           </div>
@@ -252,6 +259,15 @@ export function StatsPanel({
           trendBucket={trendBucket}
           pricing={pricing}
         />
+      ) : tab === "claude" ? (
+        <ClaudePanel
+          snapshot={claude}
+          loading={!claude && !claudeError}
+          error={claudeError}
+          currency={currency}
+          trendBucket={trendBucket}
+          pricing={pricing}
+        />
       ) : tab === "cursor" ? (
         <CursorPanel
           snapshot={cursor}
@@ -266,6 +282,7 @@ export function StatsPanel({
           cost={cost}
           trend={trend}
           codex={codex}
+          claude={claude}
           cursor={cursor}
           currency={currency}
           bucket={trendBucket}

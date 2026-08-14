@@ -1,3 +1,4 @@
+mod claude;
 mod codex;
 mod cursor;
 mod db;
@@ -149,6 +150,12 @@ async fn check_pricing_updates(
         // Codex 导入库出现过的模型也纳入检查主体（未安装/导入失败时静默跳过，
         // 不影响 zcode 部分的检查）
         if let Ok(models) = codex::list_models() {
+            models.into_iter().for_each(|m| {
+                relevant.insert(m.model_id);
+            });
+        }
+        // Claude 导入库同上
+        if let Ok(models) = claude::list_models() {
             models.into_iter().for_each(|m| {
                 relevant.insert(m.model_id);
             });
@@ -449,6 +456,80 @@ async fn get_codex_debug() -> Result<codex::CodexDebugInfo, String> {
         .map_err(|e| format!("Codex 诊断任务失败: {e}"))?
 }
 
+// ===== Claude 用量统计 =====
+
+/// get_claude_usage 的入参：时间范围 + 分桶粒度（"hour" | "day"）
+#[derive(Debug, Deserialize)]
+struct ClaudeUsageRequest {
+    from_ms: i64,
+    to_ms: i64,
+    bucket: String,
+}
+
+/// get_claude_usage 返回的 Claude 快照：
+/// 本地导入库统计 + 趋势（含花费，与 get_trend 同款计算）+ 实时订阅额度。
+#[derive(Debug, Serialize)]
+struct ClaudeSnapshot {
+    stats: db::Stats,
+    trend: Vec<TrendBucket>,
+    rate_limits: Option<claude::ClaudeRateLimits>,
+}
+
+/// 拉取 Claude 用量快照（本地 projects jsonl 增量导入 + 聚合查询）。
+/// async + spawn_blocking：与 get_codex_usage 同款卸载到阻塞线程池。
+/// 额度只有实时来源（会话文件无 rate_limits，与 Codex 不同）：OAuth 端点
+/// 失败（未登录订阅/网络不通/第三方中转）静默降级为 null，额度块不展示。
+#[tauri::command]
+async fn get_claude_usage(req: ClaudeUsageRequest) -> Result<ClaudeSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let stats = claude::query_stats(req.from_ms, req.to_ms)?;
+        let buckets = claude::query_trend(req.from_ms, req.to_ms, &req.bucket)?;
+        let pricing = load_pricing().unwrap_or_default();
+
+        let rate_limits = claude::fetch_live_rate_limits().ok().flatten();
+
+        // 花费计算与 get_trend 完全同款：桶内按模型聚合后用 cost_for 求和
+        let trend = buckets
+            .into_iter()
+            .map(|b| {
+                let cost_cny = b
+                    .by_model
+                    .iter()
+                    .map(|m| cost_for(m, &pricing.cny))
+                    .sum::<f64>();
+                let cost_usd = b
+                    .by_model
+                    .iter()
+                    .map(|m| cost_for(m, &pricing.usd))
+                    .sum::<f64>();
+                TrendBucket {
+                    label: b.label,
+                    total_tokens: b.total_tokens,
+                    requests: b.requests,
+                    cost_cny,
+                    cost_usd,
+                }
+            })
+            .collect();
+
+        Ok(ClaudeSnapshot {
+            stats,
+            trend,
+            rate_limits,
+        })
+    })
+    .await
+    .map_err(|e| format!("Claude 查询任务失败: {e}"))?
+}
+
+/// 诊断 Claude 数据导入（排查"暂无数据"问题）
+#[tauri::command]
+async fn get_claude_debug() -> Result<claude::ClaudeDebugInfo, String> {
+    tauri::async_runtime::spawn_blocking(claude::debug_info)
+        .await
+        .map_err(|e| format!("Claude 诊断任务失败: {e}"))?
+}
+
 /// 对比页：单个周期的 token 聚合结果。
 #[derive(Debug, Serialize)]
 struct WeeklyTokenBucket {
@@ -702,9 +783,10 @@ async fn set_auto_cleanup(req: AutoCleanupServerRequest) -> Result<sync::AutoCle
         .map_err(|e| format!("自动清理配置任务失败: {e}"))?
 }
 
-/// 查询本机待上传的记录数（zcode 与 codex 两个「max_rowid - 游标」之和，各取 max(0)），
-/// 供同步面板显示。codex 查询失败按 0 计（未安装 Codex 时不应影响 zcode 部分显示）。
-/// async + spawn_blocking：codex 侧首次导入可能解析大量会话文件，不能卡主线程。
+/// 查询本机待上传的记录数（zcode 与 codex/claude 两个派生库的
+/// 「max_rowid - 游标」之和，各取 max(0)），供同步面板显示。
+/// codex/claude 查询失败按 0 计（未安装时不应影响其他来源显示）。
+/// async + spawn_blocking：派生库首次导入可能解析大量会话文件，不能卡主线程。
 #[tauri::command]
 async fn pending_upload_count() -> Result<i64, String> {
     tauri::async_runtime::spawn_blocking(|| {
@@ -713,7 +795,10 @@ async fn pending_upload_count() -> Result<i64, String> {
         let codex = codex::max_rowid()
             .map(|m| (m - cfg.last_uploaded_codex_rowid).max(0))
             .unwrap_or(0);
-        Ok(zcode + codex)
+        let claude = claude::max_rowid()
+            .map(|m| (m - cfg.last_uploaded_claude_rowid).max(0))
+            .unwrap_or(0);
+        Ok(zcode + codex + claude)
     })
     .await
     .map_err(|e| format!("待上传统计任务失败: {e}"))?
@@ -1015,6 +1100,16 @@ fn today_tray_title(app: &AppHandle) -> String {
             .sum::<f64>();
     }
 
+    // Claude：合并今日用量（本地导入库；未安装/失败静默降级，同上）
+    if let Ok(stats) = claude::query_stats(today_start, now_ms) {
+        total += stats.overall.total_tokens;
+        cost += stats
+            .by_model
+            .iter()
+            .map(|m| cost_for(m, price_map))
+            .sum::<f64>();
+    }
+
     let _ = app; // 占位
     let sym = if is_usd { "$" } else { "¥" };
     if total > 0 {
@@ -1260,7 +1355,9 @@ pub fn run() {
             cursor_debug,
             fetch_fx_rate,
             get_codex_usage,
-            get_codex_debug
+            get_codex_debug,
+            get_claude_usage,
+            get_claude_debug
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

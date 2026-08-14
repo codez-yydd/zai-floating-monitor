@@ -3,6 +3,7 @@ import type {
   AutoCleanupConfig,
   CleanupResult,
   CleanupStatus,
+  ClaudeSnapshot,
   CodexSnapshot,
   CostResult,
   Currency,
@@ -363,6 +364,20 @@ export async function fetchCodexUsage(
   bucket: TrendBucket
 ): Promise<CodexSnapshot> {
   return invoke<CodexSnapshot>("get_codex_usage", {
+    req: { from_ms: fromMs, to_ms: toMs, bucket },
+  });
+}
+
+// ===== Claude 用量统计 =====
+
+/** 拉取 Claude 用量快照（stats + trend + 订阅额度）。
+ *  Claude Code 未安装 / 无会话目录时后端返回 Err（中文提示），调用方需容错。 */
+export async function fetchClaudeUsage(
+  fromMs: number,
+  toMs: number,
+  bucket: TrendBucket
+): Promise<ClaudeSnapshot> {
+  return invoke<ClaudeSnapshot>("get_claude_usage", {
     req: { from_ms: fromMs, to_ms: toMs, bucket },
   });
 }

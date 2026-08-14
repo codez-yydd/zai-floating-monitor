@@ -888,7 +888,8 @@ struct WhamWindow {
 /// 解析代理地址，优先级：HTTPS_PROXY 环境变量 > 系统代理（Windows 注册表 /
 /// macOS scutil）> 直连。chatgpt.com 在部分网络需代理才可达，而桌面应用
 /// 常见情况是用户开了系统代理但没有设置环境变量。
-fn resolve_proxy() -> Option<String> {
+/// claude 模块的实时额度请求（api.anthropic.com）复用同一探测。
+pub(crate) fn resolve_proxy() -> Option<String> {
     for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
         if let Ok(v) = std::env::var(key) {
             let v = v.trim().to_string();
@@ -983,6 +984,9 @@ fn normalize_proxy_url(addr: &str) -> String {
 ///   SOCKSEnable : 0
 /// }
 /// ```
+/// 仅 macOS 构建与测试编译纳入（Windows/Linux 普通构建下无人调用，
+/// 不加条件会触发 dead_code 警告）
+#[cfg(any(target_os = "macos", test))]
 fn parse_scutil_proxy(text: &str) -> Option<String> {
     // 逐行查找 "key : value"
     let find = |key: &str| -> Option<String> {

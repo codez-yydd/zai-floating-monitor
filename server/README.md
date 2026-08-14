@@ -134,18 +134,18 @@ PORT=8080 python3 app.py
 
 ---
 
-## Codex 数据（source 维度）
+## Codex / Claude 数据（source 维度）
 
-新版客户端除了 ZCode 用量，还会上传 Codex CLI 的用量明细。两者通过 `source` 字段区分（`zcode` / `codex`），同一台设备、同一 `local_rowid` 在不同 source 下互不冲突（两套 rowid 序列各自独立），上传与查询游标也相互独立。
+新版客户端除了 ZCode 用量，还会上传 Codex CLI 与 Claude Code 的用量明细。各来源通过 `source` 字段区分（`zcode` / `codex` / `claude`），同一台设备、同一 `local_rowid` 在不同 source 下互不冲突（各来源 rowid 序列相互独立），上传与查询游标也相互独立。服务端表结构对 source 取值无限制，后续新增来源无需再改服务端。
 
 **升级方式**：拉取新代码后重启服务即可。首次启动自动迁移 `usage_records` 表结构（新增 `source` 列，主键改为 `(device_id, source, local_rowid)`），老数据全部自动标记为 `zcode`，无损保留，索引自动重建。建议服务端先于客户端升级。
 
-**升级顺序保护**：新版客户端上传 Codex 数据前会先探测服务端协议版本（`/sync` 响应新增 `proto: 2` 字段）。旧服务端不返回该字段，客户端不会上传 Codex 数据也不推进游标（同步日志提示"服务端版本过旧"），升级服务端后自动恢复——即使客户端先升级也不会丢数据；旧客户端不受任何影响。
+**升级顺序保护**：新版客户端上传 Codex / Claude 数据前会先探测服务端协议版本（`/sync` 响应新增 `proto: 2` 字段）。旧服务端不返回该字段，客户端不会上传这些数据也不推进游标（同步日志提示"服务端版本过旧"），升级服务端后自动恢复——即使客户端先升级也不会丢数据；旧客户端不受任何影响。
 
 **接口变化**（均向后兼容）：
 
-- `POST /sync`：records 每条新增 `source` 字段，缺省 `zcode`（旧客户端不传即 zcode）。客户端保证每批 records 属同一来源，`last_rowid` / `max_rowid` 按该来源自己的 rowid 序列计数。
-- `GET /usage`：新增可选 query 参数 `source`（`zcode` / `codex`），不传 = 全部来源合并；`by_model` 与 `trend.by_model` 每个分组新增 `source` 字段，便于前端区分展示。
+- `POST /sync`：records 每条新增 `source` 字段，缺省 `zcode`（旧客户端不传即 zcode）。客户端保证每批 records 属同一来源，`last_rowid` / `max_rowid` 按该来源自己的 rowid 序列计数。同一主键重传且 `computed_total_tokens` 更大时覆盖旧值（Claude Code 会话流式落盘，客户端会把消息终值补传修正先前上传的中间值；zcode/codex 记录不可变，重传同值对覆盖守卫为无操作）。
+- `GET /usage`：新增可选 query 参数 `source`（`zcode` / `codex` / `claude`），不传 = 全部来源合并；`by_model` 与 `trend.by_model` 每个分组新增 `source` 字段，便于前端区分展示。
 - `POST /period_detail`：body 同样新增可选 `source` 字段。
 
 ---

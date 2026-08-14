@@ -1,4 +1,5 @@
 import type {
+  ClaudeSnapshot,
   CodexSnapshot,
   CostResult,
   CursorSnapshot,
@@ -23,6 +24,7 @@ interface Props {
   cost: CostResult | null;
   trend: TrendPoint[];
   codex: CodexSnapshot | null;
+  claude: ClaudeSnapshot | null;
   cursor: CursorSnapshot | null;
   currency: Currency;
   bucket: "hour" | "day";
@@ -97,6 +99,7 @@ function buildModelRows(
   stats: Stats | null,
   cost: CostResult | null,
   codex: CodexSnapshot | null,
+  claude: ClaudeSnapshot | null,
   cursor: CursorSnapshot | null,
   pricing: PricingConfig,
   currency: Currency,
@@ -137,6 +140,30 @@ function buildModelRows(
       source: "Codex",
       color: "#10a37f",
       barBg: "bg-emerald-500/10",
+      requests: m.requests,
+      tokens: m.total_tokens,
+      cost: modelCost(
+        m.model_id,
+        m.input_tokens,
+        m.output_tokens,
+        m.cache_read_tokens,
+        pricing,
+        currency
+      ),
+      hasPrice,
+    });
+  }
+
+  // Claude：与 Codex 行同款（Anthropic 品牌橙）
+  for (const m of claude?.stats.by_model ?? []) {
+    const price = pricing[currency][m.model_id];
+    const hasPrice = Boolean(price && (price.input > 0 || price.output > 0));
+    rows.push({
+      key: `claude:${m.provider_id}:${m.model_id}`,
+      name: m.model_id,
+      source: "Claude",
+      color: "#d97757",
+      barBg: "bg-orange-500/10",
       requests: m.requests,
       tokens: m.total_tokens,
       cost: modelCost(
@@ -216,6 +243,7 @@ export function SummaryTab({
   cost,
   trend,
   codex,
+  claude,
   cursor,
   currency,
   bucket,
@@ -232,7 +260,7 @@ export function SummaryTab({
   }, []);
 
   // ZCode 额度（与范围无关，读全局缓存，与 QuotaPanel 同源）
-  const { quota, quotaError, codexError } = useDataCache();
+  const { quota, quotaError, codexError, claudeError } = useDataCache();
   const hour5 = quota?.hour5 ?? null;
   const weekly = quota?.weekly ?? null;
   const mcp = quota?.mcp ?? null;
@@ -252,6 +280,14 @@ export function SummaryTab({
     0
   );
   const codexTokens = codex?.stats.overall.total_tokens ?? 0;
+
+  // Claude 花费 & token（与 Codex 同款口径）
+  const claudeRate = claude?.rate_limits ?? null;
+  const claudeCostRaw = (claude?.trend ?? []).reduce(
+    (s, p) => s + (currency === "cny" ? p.cost_cny : p.cost_usd),
+    0
+  );
+  const claudeTokens = claude?.stats.overall.total_tokens ?? 0;
 
   // Cursor 花费 & token（events 口径）
   const cursorEvents = cursor?.events;
@@ -339,6 +375,37 @@ export function SummaryTab({
       : "数据获取失败"
     : "暂无数据";
 
+  // Claude 额度：仅订阅登录机器上有实时值（中转模式 rate_limits 为 null → 空 metrics 走文案）
+  const claudeMetrics =
+    claudeRate &&
+    (claudeRate.primary_pct != null || claudeRate.secondary_pct != null)
+      ? [
+          ...(claudeRate.primary_pct != null
+            ? [
+                {
+                  label: "5h",
+                  usedPct: claudeRate.primary_pct,
+                  resetAt: claudeRate.primary_reset_at,
+                },
+              ]
+            : []),
+          ...(claudeRate.secondary_pct != null
+            ? [
+                {
+                  label: "本周",
+                  usedPct: claudeRate.secondary_pct,
+                  resetAt: claudeRate.secondary_reset_at,
+                },
+              ]
+            : []),
+        ]
+      : [];
+  const claudeEmpty = claudeError
+    ? /未找到|未安装|会话目录/i.test(claudeError)
+      ? "未检测到 Claude Code"
+      : "数据获取失败"
+    : "暂无数据";
+
   // 按 agent 组装。新增来源时在此追加，总览占比条 / 花费表 / 额度列表会一起跟上。
   const agents: AgentSummary[] = [
     {
@@ -364,6 +431,18 @@ export function SummaryTab({
       tokens: codexTokens,
       metrics: codexMetrics,
       empty: codexEmpty,
+    },
+    {
+      id: "claude",
+      name: "Claude",
+      color: "#d97757",
+      nameClass: "text-orange-700",
+      badge: claudeRate?.plan_type ?? null,
+      badgeClass: "bg-orange-500/12 text-orange-700 capitalize",
+      cost: claudeCostRaw,
+      tokens: claudeTokens,
+      metrics: claudeMetrics,
+      empty: claudeEmpty,
     },
     {
       id: "cursor",
@@ -400,18 +479,33 @@ export function SummaryTab({
       tokens: d.total_tokens,
     });
   });
-  // Codex 趋势桶自带双货币花费，按 label 索引后直接相加（与 z.ai 桶格式一致）
+  // Codex / Claude 趋势桶自带双货币花费，按 label 索引后直接相加（与 z.ai 桶格式一致）
   const codexTrendMap = new Map<string, TrendPoint>();
   (codex?.trend ?? []).forEach((p) => codexTrendMap.set(p.label, p));
+  const claudeTrendMap = new Map<string, TrendPoint>();
+  (claude?.trend ?? []).forEach((p) => claudeTrendMap.set(p.label, p));
   const mergedTrend: TrendPoint[] = trend.map((p) => {
     const c = cursorDailyMap.get(p.label);
     const x = codexTrendMap.get(p.label);
+    const a = claudeTrendMap.get(p.label);
     return {
       label: p.label,
-      total_tokens: p.total_tokens + (x?.total_tokens ?? 0) + (c?.tokens ?? 0),
-      requests: p.requests + (x?.requests ?? 0),
-      cost_cny: p.cost_cny + (x?.cost_cny ?? 0) + (c?.costCny ?? 0),
-      cost_usd: p.cost_usd + (x?.cost_usd ?? 0) + (c?.costUsd ?? 0),
+      total_tokens:
+        p.total_tokens +
+        (x?.total_tokens ?? 0) +
+        (a?.total_tokens ?? 0) +
+        (c?.tokens ?? 0),
+      requests: p.requests + (x?.requests ?? 0) + (a?.requests ?? 0),
+      cost_cny:
+        p.cost_cny +
+        (x?.cost_cny ?? 0) +
+        (a?.cost_cny ?? 0) +
+        (c?.costCny ?? 0),
+      cost_usd:
+        p.cost_usd +
+        (x?.cost_usd ?? 0) +
+        (a?.cost_usd ?? 0) +
+        (c?.costUsd ?? 0),
     };
   });
 
@@ -419,6 +513,7 @@ export function SummaryTab({
     stats,
     cost,
     codex,
+    claude,
     cursor,
     pricing,
     currency,
