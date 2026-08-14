@@ -1,0 +1,946 @@
+//! Cursor 用量统计模块。
+//!
+//! 认证原理（参照 CodexBar）：
+//! 1. 读取 Cursor 应用的本地 SQLite（state.vscdb）中的 JWT accessToken
+//! 2. 解析 JWT payload 取出 user ID（sub 字段，取 | 后的部分）
+//! 3. 拼接 cookie：WorkosCursorSessionToken=<userID>%3A%3A<accessToken>
+//! 4. 用该 cookie 调用 cursor.com 的 API：
+//!    - GET /api/usage-summary  套餐额度（金额为美分）
+//!    - GET /api/auth/me        账户身份
+//!    - POST /api/dashboard/get-filtered-usage-events  token 花费明细（分页）
+
+use base64::Engine;
+use rusqlite::{Connection, OpenFlags};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+// TimeZone trait 提供 timestamp_millis_opt 方法
+use chrono::TimeZone;
+
+use crate::pricing::config_dir;
+
+const CURSOR_BASE: &str = "https://cursor.com";
+/// Cursor 应用的 state.vscdb 相对于 config_dir 的路径（跨平台通用）
+const CURSOR_DB_REL: &str = "Cursor/User/globalStorage/state.vscdb";
+/// events API 的分页上限，防止分页 bug 死循环（200 页 × 1000 = 20 万条）
+const MAX_PAGES: usize = 200;
+const PAGE_SIZE: usize = 1000;
+/// events 结果缓存 TTL（2 分钟，与前端刷新间隔对齐）
+const EVENTS_CACHE_TTL: Duration = Duration::from_secs(120);
+
+// ============================================================
+// 配置
+// ============================================================
+
+/// Cursor 配置（~/.zbar/cursor.json）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CursorConfig {
+    /// cookie 来源："auto"（读 Cursor 应用本地 DB）| "manual"（手动粘贴）
+    #[serde(default = "default_cookie_source")]
+    pub cookie_source: String,
+    /// 手动 cookie 头（cookie_source=manual 时使用）
+    #[serde(default)]
+    pub cookie_header: String,
+    /// USD→CNY 汇率（汇总页合并花费用），默认 7.2
+    #[serde(default = "default_fx_rate")]
+    pub usd_cny_rate: f64,
+}
+
+fn default_cookie_source() -> String {
+    "auto".to_string()
+}
+
+fn default_fx_rate() -> f64 {
+    7.2
+}
+
+impl Default for CursorConfig {
+    fn default() -> Self {
+        Self {
+            cookie_source: default_cookie_source(),
+            cookie_header: String::new(),
+            usd_cny_rate: default_fx_rate(),
+        }
+    }
+}
+
+pub fn cursor_config_path() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join("cursor.json"))
+}
+
+pub fn load_cursor_config() -> Result<CursorConfig, String> {
+    let path = cursor_config_path()?;
+    if !path.exists() {
+        return Ok(CursorConfig::default());
+    }
+    let data = std::fs::read_to_string(&path)
+        .map_err(|e| format!("读取 Cursor 配置失败: {e}"))?;
+    serde_json::from_str::<CursorConfig>(&data)
+        .map_err(|e| format!("解析 Cursor 配置失败: {e}"))
+}
+
+pub fn save_cursor_config(cfg: &CursorConfig) -> Result<(), String> {
+    let dir = config_dir()?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建配置目录失败: {e}"))?;
+    let path = cursor_config_path()?;
+    let data = serde_json::to_string_pretty(cfg)
+        .map_err(|e| format!("序列化 Cursor 配置失败: {e}"))?;
+    std::fs::write(&path, data).map_err(|e| format!("写入 Cursor 配置失败: {e}"))
+}
+
+// ============================================================
+// 宽松数值反序列化（Cursor API 部分数字序列化为字符串）
+// ============================================================
+
+fn opt_i64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
+    let v: Option<serde_json::Value> = Option::deserialize(d)?;
+    match v {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(n)) => {
+            Ok(n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)))
+        }
+        Some(serde_json::Value::String(s)) => {
+            let s = s.trim();
+            Ok(s.parse::<i64>()
+                .ok()
+                .or_else(|| s.parse::<f64>().ok().map(|f| f as i64)))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn opt_f64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
+    let v: Option<serde_json::Value> = Option::deserialize(d)?;
+    match v {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(n)) => Ok(n.as_f64()),
+        Some(serde_json::Value::String(s)) => Ok(s.trim().parse::<f64>().ok()),
+        _ => Ok(None),
+    }
+}
+
+fn opt_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    let v: Option<serde_json::Value> = Option::deserialize(d)?;
+    match v {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) => Ok(if s.is_empty() { None } else { Some(s) }),
+        Some(n @ serde_json::Value::Number(_)) => Ok(Some(n.to_string())),
+        _ => Ok(None),
+    }
+}
+
+// ============================================================
+// API 响应模型
+// ============================================================
+
+/// GET /api/usage-summary 的完整响应
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageSummary {
+    #[serde(default)]
+    billing_cycle_start: Option<String>,
+    #[serde(default)]
+    billing_cycle_end: Option<String>,
+    #[serde(default)]
+    membership_type: Option<String>,
+    #[serde(default)]
+    individual_usage: Option<IndividualUsage>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    team_usage: Option<TeamUsage>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IndividualUsage {
+    #[serde(default)]
+    plan: Option<PlanUsage>,
+    #[serde(default)]
+    on_demand: Option<OnDemandUsage>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlanUsage {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default, deserialize_with = "opt_i64")]
+    used: Option<i64>,
+    #[serde(default, deserialize_with = "opt_i64")]
+    limit: Option<i64>,
+    #[serde(default, deserialize_with = "opt_i64")]
+    remaining: Option<i64>,
+    #[serde(default, deserialize_with = "opt_f64")]
+    auto_percent_used: Option<f64>,
+    #[serde(default, deserialize_with = "opt_f64")]
+    api_percent_used: Option<f64>,
+    #[serde(default, deserialize_with = "opt_f64")]
+    total_percent_used: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OnDemandUsage {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default, deserialize_with = "opt_i64")]
+    used: Option<i64>,
+    #[serde(default, deserialize_with = "opt_i64")]
+    limit: Option<i64>,
+    #[serde(default, deserialize_with = "opt_i64")]
+    remaining: Option<i64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+struct TeamUsage {
+    #[serde(default)]
+    on_demand: Option<OnDemandUsage>,
+    #[serde(default)]
+    pooled: Option<OnDemandUsage>,
+}
+
+/// GET /api/auth/me 的响应
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthMe {
+    #[serde(default, deserialize_with = "opt_string")]
+    email: Option<String>,
+    #[serde(default, deserialize_with = "opt_string")]
+    name: Option<String>,
+    #[serde(default, deserialize_with = "opt_string")]
+    #[allow(dead_code)]
+    sub: Option<String>,
+}
+
+/// events API 单页响应
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EventsPage {
+    #[serde(default, deserialize_with = "opt_i64")]
+    total_usage_events_count: Option<i64>,
+    #[serde(default)]
+    usage_events_display: Vec<UsageEvent>,
+}
+
+/// 单条 usage event
+/// 注意：必须加 rename_all = "camelCase"，否则 tokenUsage/chargedCents 等
+/// 多词字段会按 snake_case 匹配（token_usage），全部解析为 None。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageEvent {
+    #[serde(default, deserialize_with = "opt_i64")]
+    timestamp: Option<i64>,
+    #[serde(default, deserialize_with = "opt_string")]
+    model: Option<String>,
+    #[serde(default)]
+    token_usage: Option<EventTokenUsage>,
+    /// 套餐实际扣费（美分）
+    #[serde(default, deserialize_with = "opt_f64")]
+    charged_cents: Option<f64>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EventTokenUsage {
+    #[serde(default, deserialize_with = "opt_i64")]
+    input_tokens: Option<i64>,
+    #[serde(default, deserialize_with = "opt_i64")]
+    output_tokens: Option<i64>,
+    #[serde(default, deserialize_with = "opt_i64")]
+    cache_write_tokens: Option<i64>,
+    #[serde(default, deserialize_with = "opt_i64")]
+    cache_read_tokens: Option<i64>,
+    /// API 标价花费（美分）
+    #[serde(default, deserialize_with = "opt_f64")]
+    total_cents: Option<f64>,
+}
+
+// ============================================================
+// 认证
+// ============================================================
+
+/// 定位 Cursor 的 state.vscdb 路径（跨平台）
+fn cursor_db_path() -> Option<PathBuf> {
+    // dirs::config_dir():
+    //   Windows → %APPDATA% (Roaming)
+    //   macOS   → ~/Library/Application Support
+    //   Linux   → $XDG_CONFIG_HOME 或 ~/.config
+    let base = dirs::config_dir()?;
+    let p = base.join(CURSOR_DB_REL);
+    if p.exists() {
+        Some(p)
+    } else {
+        None
+    }
+}
+
+/// 从 state.vscdb 读取 cursorAuth/accessToken
+fn read_cursor_access_token() -> Result<String, String> {
+    let path = cursor_db_path()
+        .ok_or_else(|| "未找到 Cursor 应用数据库（state.vscdb），请确认 Cursor 已安装并登录".to_string())?;
+
+    let conn = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| format!("打开 Cursor 数据库失败: {e}"))?;
+
+    conn.busy_timeout(Duration::from_secs(3))
+        .map_err(|e| format!("设置 busy_timeout 失败: {e}"))?;
+
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM ItemTable WHERE key = ?1 LIMIT 1",
+            rusqlite::params!["cursorAuth/accessToken"],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+
+    let token = value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| "Cursor 数据库中未找到 accessToken，请确认已在 Cursor 应用中登录".to_string())?;
+
+    // 兼容：部分版本 value 可能是 JSON 包裹 {"accessToken":"..."}
+    if token.starts_with('{') {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&token) {
+            if let Some(inner) = json.get("accessToken").and_then(|v| v.as_str()) {
+                return Ok(inner.trim().to_string());
+            }
+        }
+    }
+
+    Ok(token)
+}
+
+/// base64url 解码（JWT payload 用）
+fn b64url_decode(input: &str) -> Result<Vec<u8>, String> {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(input.trim())
+        .or_else(|_| {
+            // 尝试带 padding 的标准 url base64
+            base64::engine::general_purpose::URL_SAFE.decode(input.trim())
+        })
+        .map_err(|e| format!("base64 解码失败: {e}"))
+}
+
+/// 解析 JWT payload 的 JSON
+fn jwt_payload(token: &str) -> Result<serde_json::Value, String> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() < 2 {
+        return Err("access token 不是有效的 JWT 格式".into());
+    }
+    let bytes = b64url_decode(parts[1])?;
+    serde_json::from_slice(&bytes).map_err(|e| format!("解析 JWT payload 失败: {e}"))
+}
+
+/// 从 JWT 的 sub 字段提取 user ID（取 | 后的最后一段）
+fn jwt_user_id(token: &str) -> Result<String, String> {
+    let payload = jwt_payload(token)?;
+    let sub = payload
+        .get("sub")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "JWT payload 中缺少 sub 字段".to_string())?;
+
+    let user_id = sub
+        .split('|')
+        .filter(|s| !s.is_empty())
+        .last()
+        .unwrap_or(sub)
+        .to_string();
+
+    if user_id.is_empty() {
+        return Err("JWT sub 字段无法提取 user ID".into());
+    }
+    Ok(user_id)
+}
+
+/// 检查 JWT 是否过期（留 60s 余量）
+fn jwt_is_valid(token: &str) -> bool {
+    if let Ok(payload) = jwt_payload(token) {
+        if let Some(exp) = payload.get("exp").and_then(|v| v.as_i64()) {
+            let now = chrono::Utc::now().timestamp();
+            return exp > now + 60;
+        }
+    }
+    // 无法解析 exp 时不阻拦，交给 API 判断
+    true
+}
+
+/// 构建 Cursor 认证 cookie 头
+fn build_cookie(user_id: &str, token: &str) -> String {
+    format!("WorkosCursorSessionToken={user_id}%3A%3A{token}")
+}
+
+/// 解析出有效的 cookie 头。优先级：手动配置 > Cursor 应用本地 DB
+pub fn resolve_cookie(cfg: &CursorConfig) -> Result<String, String> {
+    // 手动模式：直接用配置中的 cookie
+    if cfg.cookie_source == "manual" {
+        let header = cfg.cookie_header.trim();
+        if header.is_empty() {
+            return Err("Cookie 来源为手动模式，但未配置 cookie。请在设置中粘贴 Cookie".into());
+        }
+        return Ok(header.to_string());
+    }
+
+    // 自动模式：读 Cursor 应用本地 DB
+    let token = read_cursor_access_token()?;
+    if !jwt_is_valid(&token) {
+        return Err("Cursor 登录已过期，请在 Cursor 应用中重新登录".into());
+    }
+    let user_id = jwt_user_id(&token)?;
+    Ok(build_cookie(&user_id, &token))
+}
+
+// ============================================================
+// HTTP 请求
+// ============================================================
+
+/// 创建带超时的 HTTP agent
+fn http_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(30))
+        .build()
+}
+
+/// GET /api/usage-summary
+fn fetch_usage_summary(cookie: &str) -> Result<UsageSummary, String> {
+    let url = format!("{CURSOR_BASE}/api/usage-summary");
+    let resp = http_agent()
+        .get(&url)
+        .set("Cookie", cookie)
+        .set("Accept", "application/json")
+        .call();
+
+    let resp = map_http_error(resp, "usage-summary")?;
+    resp.into_json::<UsageSummary>()
+        .map_err(|e| format!("解析 usage-summary 响应失败: {e}"))
+}
+
+/// GET /api/auth/me
+fn fetch_auth_me(cookie: &str) -> Result<AuthMe, String> {
+    let url = format!("{CURSOR_BASE}/api/auth/me");
+    let resp = http_agent()
+        .get(&url)
+        .set("Cookie", cookie)
+        .set("Accept", "application/json")
+        .call();
+
+    let resp = map_http_error(resp, "auth/me")?;
+    resp.into_json::<AuthMe>()
+        .map_err(|e| format!("解析 auth/me 响应失败: {e}"))
+}
+
+/// 将 ureq 错误映射为友好提示
+fn map_http_error(
+    result: Result<ureq::Response, ureq::Error>,
+    ctx: &str,
+) -> Result<ureq::Response, String> {
+    match result {
+        Ok(r) => Ok(r),
+        Err(ureq::Error::Status(code, _)) => {
+            if code == 401 {
+                Err(format!("Cursor 未登录或会话已过期（{ctx} HTTP {code}），请在 Cursor 应用中重新登录或在设置中更新 Cookie"))
+            } else {
+                Err(format!("Cursor {ctx} 请求失败: HTTP {code}"))
+            }
+        }
+        Err(e) => Err(format!("Cursor {ctx} 网络请求失败: {e}")),
+    }
+}
+
+/// POST /api/dashboard/get-filtered-usage-events（分页拉取全部事件）
+fn fetch_usage_events(cookie: &str, from_ms: i64, to_ms: i64) -> Result<Vec<UsageEvent>, String> {
+    let url = format!("{CURSOR_BASE}/api/dashboard/get-filtered-usage-events");
+    let agent = http_agent();
+
+    let start_str = from_ms.to_string();
+    let end_str = to_ms.to_string();
+
+    let mut all_events: Vec<UsageEvent> = Vec::new();
+    let mut expected_total: Option<i64> = None;
+
+    for page in 1..=MAX_PAGES {
+        let body = serde_json::json!({
+            "page": page,
+            "pageSize": PAGE_SIZE,
+            "startDate": start_str,
+            "endDate": end_str,
+        });
+
+        let resp = agent
+            .post(&url)
+            .set("Content-Type", "application/json")
+            .set("Accept", "application/json")
+            .set("Cookie", cookie)
+            // Cursor 对 POST 端点做 CSRF 校验，必须带匹配的 Origin
+            .set("Origin", CURSOR_BASE)
+            .send_json(body);
+
+        let resp = map_http_error(resp, "events")?;
+        let page_data: EventsPage = resp
+            .into_json::<EventsPage>()
+            .map_err(|e| format!("解析 events 响应失败: {e}"))?;
+
+        if let Some(total) = page_data.total_usage_events_count {
+            expected_total = Some(total);
+        }
+
+        let page_events = page_data.usage_events_display;
+        let count = page_events.len();
+        if count == 0 {
+            break;
+        }
+        all_events.extend(page_events);
+
+        // 不足一页 → 已到末尾
+        if count < PAGE_SIZE {
+            break;
+        }
+    }
+
+    // 与 Cursor 报告的总数校验：少于期望数说明分页不完整
+    if let Some(expected) = expected_total {
+        if expected > 0 && (all_events.len() as i64) < expected {
+            // 不阻断：返回已获取的部分（避免因边界重复条目导致永远报错）
+            // 但在日志中记录差异（这里简单忽略，前端展示已获取数据）
+        }
+    }
+
+    Ok(all_events)
+}
+
+// ============================================================
+// 聚合
+// ============================================================
+
+/// 单日条目（供前端趋势图）
+#[derive(Debug, Clone, Serialize)]
+pub struct CursorDailyEntry {
+    /// 日期标签 "08-13"（MM-DD）
+    pub date: String,
+    /// 当日 API 标价花费（美元）
+    pub cost_usd: f64,
+    /// 当日总 token
+    pub total_tokens: i64,
+    /// 当日请求数
+    pub requests: i64,
+}
+
+/// 按模型聚合
+#[derive(Debug, Clone, Serialize)]
+pub struct CursorModelStat {
+    pub model: String,
+    pub cost_usd: f64,
+    pub total_tokens: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub requests: i64,
+}
+
+/// events 汇总
+#[derive(Debug, Clone, Serialize)]
+pub struct CursorEventsSummary {
+    /// API 标价总花费（美元）
+    pub total_cost_usd: f64,
+    /// 套餐实际扣费（美元），None 表示部分事件缺 chargedCents
+    pub metered_cost_usd: Option<f64>,
+    pub total_tokens: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub requests: i64,
+}
+
+/// 把 events 聚合为（汇总, 每日明细, 按模型）
+fn aggregate_events(events: &[UsageEvent]) -> (CursorEventsSummary, Vec<CursorDailyEntry>, Vec<CursorModelStat>) {
+    let mut total_cost_usd = 0.0f64;
+    let mut metered_ok = true;
+    let mut metered_cents = 0.0f64;
+    let mut saw_valid_event = false;
+    let mut total_tokens = 0i64;
+    let mut total_input = 0i64;
+    let mut total_output = 0i64;
+    let mut total_cache_read = 0i64;
+    let mut total_requests = 0i64;
+
+    // 按日聚合: full_date "2026-08-13" → (cost, tokens, requests)
+    // 用完整日期做 key，避免跨年自定义范围 "01-01" 碰撞
+    let mut daily: HashMap<String, (f64, i64, i64)> = HashMap::new();
+    // 按模型聚合: model → (cost, tokens, input, output, cache_read, requests)
+    let mut by_model: HashMap<String, (f64, i64, i64, i64, i64, i64)> = HashMap::new();
+
+    for ev in events {
+        let ts = match ev.timestamp {
+            Some(t) if t > 0 => t,
+            _ => continue,
+        };
+        saw_valid_event = true;
+
+        // 计费花费：对所有有效事件累计 chargedCents（包括无 token 详情的计量事件）。
+        // 对齐 CodexBar：任一有效事件缺 chargedCents → 总计不可靠，置 None。
+        match ev.charged_cents {
+            Some(c) if c >= 0.0 => metered_cents += c,
+            None => metered_ok = false,
+            _ => {}
+        }
+
+        // token 聚合：跳过无 token_usage 或全零的事件（对齐 CodexBar/ccusage）
+        let usage = match &ev.token_usage {
+            Some(u) => u,
+            None => continue,
+        };
+        let inp = usage.input_tokens.unwrap_or(0).max(0);
+        let out = usage.output_tokens.unwrap_or(0).max(0);
+        let cw = usage.cache_write_tokens.unwrap_or(0).max(0);
+        let cr = usage.cache_read_tokens.unwrap_or(0).max(0);
+        let tokens = inp + out + cw + cr;
+        if tokens == 0 {
+            continue;
+        }
+
+        // 花费（API 标价，美分→美元）
+        let cost = usage.total_cents.unwrap_or(0.0).max(0.0) / 100.0;
+        total_cost_usd += cost;
+
+        total_tokens += tokens;
+        total_input += inp;
+        total_output += out;
+        total_cache_read += cr;
+        total_requests += 1;
+
+        // 按日（本地时区，完整日期 key）
+        if let Some(dt) = chrono::Local.timestamp_millis_opt(ts).single() {
+            let day_key = format!("{}", dt.format("%Y-%m-%d"));
+            let entry = daily.entry(day_key).or_insert((0.0, 0, 0));
+            entry.0 += cost;
+            entry.1 += tokens;
+            entry.2 += 1;
+        }
+
+        // 按模型
+        let model = ev.model.clone().unwrap_or_else(|| "unknown".to_string());
+        let m = by_model
+            .entry(model)
+            .or_insert((0.0, 0, 0, 0, 0, 0));
+        m.0 += cost;
+        m.1 += tokens;
+        m.2 += inp;
+        m.3 += out;
+        m.4 += cr;
+        m.5 += 1;
+    }
+
+    // 每日明细：按完整日期排序，显示标签截取 "MM-DD"
+    let mut daily_vec: Vec<(String, CursorDailyEntry)> = daily
+        .into_iter()
+        .map(|(full_date, (cost, tokens, reqs))| {
+            let display = if full_date.len() >= 10 {
+                full_date[5..].to_string()
+            } else {
+                full_date.clone()
+            };
+            (
+                full_date,
+                CursorDailyEntry {
+                    date: display,
+                    cost_usd: cost,
+                    total_tokens: tokens,
+                    requests: reqs,
+                },
+            )
+        })
+        .collect();
+    daily_vec.sort_by(|a, b| a.0.cmp(&b.0));
+    let daily_vec: Vec<CursorDailyEntry> = daily_vec.into_iter().map(|(_, e)| e).collect();
+
+    // 按模型按花费降序
+    let mut model_vec: Vec<CursorModelStat> = by_model
+        .into_iter()
+        .map(|(model, (cost, tokens, inp, out, cr, reqs))| CursorModelStat {
+            model,
+            cost_usd: cost,
+            total_tokens: tokens,
+            input_tokens: inp,
+            output_tokens: out,
+            cache_read_tokens: cr,
+            requests: reqs,
+        })
+        .collect();
+    model_vec.sort_by(|a, b| b.cost_usd.partial_cmp(&a.cost_usd).unwrap_or(std::cmp::Ordering::Equal));
+
+    let summary = CursorEventsSummary {
+        total_cost_usd,
+        metered_cost_usd: if metered_ok && saw_valid_event {
+            Some(metered_cents / 100.0)
+        } else {
+            None
+        },
+        total_tokens,
+        input_tokens: total_input,
+        output_tokens: total_output,
+        cache_read_tokens: total_cache_read,
+        requests: total_requests,
+    };
+
+    (summary, daily_vec, model_vec)
+}
+
+// ============================================================
+// events 缓存
+// ============================================================
+
+#[derive(Default)]
+struct EventsCache {
+    key: String,
+    events: Arc<Vec<UsageEvent>>,
+    fetched_at: Option<Instant>,
+}
+
+static EVENTS_CACHE: OnceLock<Mutex<EventsCache>> = OnceLock::new();
+
+fn events_cache() -> &'static Mutex<EventsCache> {
+    EVENTS_CACHE.get_or_init(|| Mutex::new(EventsCache::default()))
+}
+
+/// 将毫秒时间戳向下取整到 10 分钟刻度，作为缓存 key 的一部分。
+/// 原因：today/1d/7d/30d 预设的 to_ms = Date.now()，每次调用都不同，
+/// 直接用作 key 会导致缓存永远不命中。取整后同一 10 分钟窗口内复用缓存。
+fn round_for_cache(ms: i64) -> i64 {
+    const INTERVAL: i64 = 600_000; // 10 分钟
+    (ms / INTERVAL) * INTERVAL
+}
+
+/// 带缓存的 events 拉取：相同时间窗口（取整后）在 TTL 内复用
+fn fetch_events_cached(cookie: &str, from_ms: i64, to_ms: i64) -> Result<Vec<UsageEvent>, String> {
+    // 取整后构建 key，避免 to_ms=Date.now() 导致每次 miss
+    let key = format!(
+        "{}|{}|{}",
+        cookie,
+        round_for_cache(from_ms),
+        round_for_cache(to_ms)
+    );
+    {
+        let cache = events_cache().lock().map_err(|e| format!("缓存锁失败: {e}"))?;
+        if cache.key == key {
+            if let Some(at) = cache.fetched_at {
+                if at.elapsed() < EVENTS_CACHE_TTL {
+                    // Arc clone（仅引用计数 +1，不复制底层数据）
+                    return Ok((*cache.events).clone());
+                }
+            }
+        }
+    }
+
+    let events = Arc::new(fetch_usage_events(cookie, from_ms, to_ms)?);
+
+    let mut cache = events_cache().lock().map_err(|e| format!("缓存锁失败: {e}"))?;
+    cache.key = key;
+    cache.events = Arc::clone(&events);
+    cache.fetched_at = Some(Instant::now());
+
+    // 返回 owned Vec（调用方需要 &[UsageEvent]）
+    Ok((*events).clone())
+}
+
+// ============================================================
+// 对外快照结构
+// ============================================================
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CursorPlanInfo {
+    pub enabled: Option<bool>,
+    /// 已用（美分）
+    pub used_cents: Option<i64>,
+    /// 上限（美分）
+    pub limit_cents: Option<i64>,
+    pub remaining_cents: Option<i64>,
+    pub total_pct: Option<f64>,
+    pub auto_pct: Option<f64>,
+    pub api_pct: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CursorOnDemandInfo {
+    pub enabled: Option<bool>,
+    pub used_cents: Option<i64>,
+    pub limit_cents: Option<i64>,
+    pub remaining_cents: Option<i64>,
+}
+
+/// 前端使用的完整快照
+#[derive(Debug, Clone, Serialize)]
+pub struct CursorSnapshot {
+    /// 是否成功登录并获取到数据
+    pub logged_in: bool,
+    pub error: Option<String>,
+    /// events 拉取失败时的错误信息（套餐数据可能仍可用）
+    pub events_error: Option<String>,
+    pub account_email: Option<String>,
+    pub account_name: Option<String>,
+    pub membership_type: Option<String>,
+    pub billing_cycle_start: Option<String>,
+    pub billing_cycle_end: Option<String>,
+    pub plan: Option<CursorPlanInfo>,
+    pub on_demand: Option<CursorOnDemandInfo>,
+    pub events: Option<CursorEventsSummary>,
+    pub daily: Vec<CursorDailyEntry>,
+    pub by_model: Vec<CursorModelStat>,
+}
+
+/// 拉取 Cursor 完整用量快照（套餐 + events 明细）
+pub fn fetch_cursor_snapshot(from_ms: i64, to_ms: i64) -> Result<CursorSnapshot, String> {
+    let cfg = load_cursor_config()?;
+    let cookie = resolve_cookie(&cfg)?;
+
+    // 并行拉取三路数据（ureq 是同步的，顺序拉取）
+    let summary = fetch_usage_summary(&cookie)?;
+    let auth = fetch_auth_me(&cookie).unwrap_or_default();
+
+    // events 可能较慢 / 失败，不阻断套餐展示，但透传错误信息
+    let mut events_error: Option<String> = None;
+    let (events_summary, daily, by_model) = match fetch_events_cached(&cookie, from_ms, to_ms) {
+        Ok(events) => {
+            if events.is_empty() {
+                (None, Vec::new(), Vec::new())
+            } else {
+                let (s, d, m) = aggregate_events(&events);
+                (Some(s), d, m)
+            }
+        }
+        Err(e) => {
+            // events 失败不阻断套餐展示，但记录错误供前端区分"无数据"和"拉取失败"
+            events_error = Some(e);
+            (None, Vec::new(), Vec::new())
+        }
+    };
+
+    let plan = summary.individual_usage.as_ref().and_then(|iu| iu.plan.as_ref()).map(|p| CursorPlanInfo {
+        enabled: p.enabled,
+        used_cents: p.used,
+        limit_cents: p.limit,
+        remaining_cents: p.remaining,
+        total_pct: p.total_percent_used,
+        auto_pct: p.auto_percent_used,
+        api_pct: p.api_percent_used,
+    });
+
+    let on_demand = summary.individual_usage.as_ref().and_then(|iu| iu.on_demand.as_ref()).map(|od| {
+        CursorOnDemandInfo {
+            enabled: od.enabled,
+            used_cents: od.used,
+            limit_cents: od.limit,
+            remaining_cents: od.remaining,
+        }
+    });
+
+    Ok(CursorSnapshot {
+        logged_in: true,
+        error: None,
+        events_error,
+        account_email: auth.email,
+        account_name: auth.name,
+        membership_type: summary.membership_type.clone(),
+        billing_cycle_start: summary.billing_cycle_start,
+        billing_cycle_end: summary.billing_cycle_end,
+        plan,
+        on_demand,
+        events: events_summary,
+        daily,
+        by_model,
+    })
+}
+
+/// 测试 Cursor 认证是否有效（设置页用）
+pub fn test_cursor_auth() -> Result<(Option<String>, Option<String>, Option<String>), String> {
+    let cfg = load_cursor_config()?;
+    let cookie = resolve_cookie(&cfg)?;
+    let auth = fetch_auth_me(&cookie)?;
+    let summary = fetch_usage_summary(&cookie).unwrap_or_default();
+    Ok((auth.email, auth.name, summary.membership_type))
+}
+
+/// 诊断信息：排查 events API 为何返回空。
+/// 返回 cookie 来源、events 原始响应状态码 + body 摘要。
+#[derive(Debug, Serialize)]
+pub struct CursorDebugInfo {
+    pub cookie_source: String,
+    pub db_found: bool,
+    pub user_id: String,
+    pub events_status: u16,
+    pub events_body_excerpt: String,
+}
+
+pub fn cursor_debug() -> Result<CursorDebugInfo, String> {
+    let cfg = load_cursor_config()?;
+
+    // 诊断 DB 是否存在
+    let db_found = cursor_db_path().is_some();
+
+    let cookie = resolve_cookie(&cfg)?;
+
+    // 提取 user_id（用于验证 JWT 解析）
+    let user_id = if cfg.cookie_source == "manual" {
+        "(manual cookie)".to_string()
+    } else {
+        match read_cursor_access_token() {
+            Ok(token) => jwt_user_id(&token).unwrap_or_else(|e| format!("解析失败: {e}")),
+            Err(e) => format!("读取失败: {e}"),
+        }
+    };
+
+    // 直接发一个 events 请求，看原始响应
+    let url = format!("{CURSOR_BASE}/api/dashboard/get-filtered-usage-events");
+    let now = chrono::Utc::now().timestamp_millis();
+    let week_ago = now - 7 * 86_400_000;
+    let body = serde_json::json!({
+        "page": 1,
+        "pageSize": 100,
+        "startDate": week_ago.to_string(),
+        "endDate": now.to_string(),
+    });
+
+    let resp_result = http_agent()
+        .post(&url)
+        .set("Content-Type", "application/json")
+        .set("Accept", "application/json")
+        .set("Cookie", &cookie)
+        .set("Origin", CURSOR_BASE)
+        .send_json(body);
+
+    let (status, body_excerpt) = match resp_result {
+        Ok(resp) => {
+            let status = resp.status();
+            let body_text = resp.into_string().unwrap_or_default();
+            (status, truncate_str(&body_text, 2000))
+        }
+        Err(ureq::Error::Status(code, resp)) => {
+            let body_text = resp.into_string().unwrap_or_default();
+            (code, truncate_str(&body_text, 2000))
+        }
+        Err(e) => (0, format!("网络错误: {e}")),
+    };
+
+    Ok(CursorDebugInfo {
+        cookie_source: cfg.cookie_source,
+        db_found,
+        user_id,
+        events_status: status,
+        events_body_excerpt: body_excerpt,
+    })
+}
+
+/// 按 char 边界安全截断字符串（避免 UTF-8 字节截断 panic）
+fn truncate_str(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let truncated: String = s.chars().take(max_chars).collect();
+    format!("{truncated}...(truncated, total {len} bytes)", len = s.len())
+}

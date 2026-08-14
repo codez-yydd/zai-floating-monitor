@@ -1,3 +1,4 @@
+mod cursor;
 mod db;
 mod notify;
 mod peak;
@@ -305,6 +306,56 @@ fn set_plan_type(plan: peak::PlanType) -> Result<peak::PeakConfig, String> {
     cfg.reset_for_plan(plan);
     peak::save_peak(&cfg)?;
     Ok(cfg)
+}
+
+// ===== Cursor 用量统计 =====
+
+/// get_cursor_usage 的入参
+#[derive(Debug, Deserialize)]
+struct CursorUsageRequest {
+    from_ms: i64,
+    to_ms: i64,
+}
+
+/// 拉取 Cursor 用量快照（套餐额度 + events 明细）。
+/// async + spawn_blocking：内部为同步 HTTP（ureq），必须卸载到阻塞线程池，
+/// 避免网络 I/O 冻结 Tauri 主线程（托盘、窗口事件循环）。
+#[tauri::command]
+async fn get_cursor_usage(req: CursorUsageRequest) -> Result<cursor::CursorSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        cursor::fetch_cursor_snapshot(req.from_ms, req.to_ms)
+    })
+    .await
+    .map_err(|e| format!("Cursor 后台任务失败: {e}"))?
+}
+
+/// 读取 Cursor 配置
+#[tauri::command]
+fn get_cursor_config() -> Result<cursor::CursorConfig, String> {
+    cursor::load_cursor_config()
+}
+
+/// 保存 Cursor 配置
+#[tauri::command]
+fn set_cursor_config(config: cursor::CursorConfig) -> Result<(), String> {
+    cursor::save_cursor_config(&config)
+}
+
+/// 测试 Cursor 认证（设置页用）。返回 (email, name, membership_type)
+/// 同样用 spawn_blocking 卸载网络 I/O。
+#[tauri::command]
+async fn test_cursor_auth() -> Result<(Option<String>, Option<String>, Option<String>), String> {
+    tauri::async_runtime::spawn_blocking(|| cursor::test_cursor_auth())
+        .await
+        .map_err(|e| format!("Cursor 认证测试失败: {e}"))?
+}
+
+/// 诊断 Cursor events API（排查"暂无明细"问题）
+#[tauri::command]
+async fn cursor_debug() -> Result<cursor::CursorDebugInfo, String> {
+    tauri::async_runtime::spawn_blocking(|| cursor::cursor_debug())
+        .await
+        .map_err(|e| format!("Cursor 诊断失败: {e}"))?
 }
 
 /// 对比页：单个周期的 token 聚合结果。
@@ -998,7 +1049,12 @@ pub fn run() {
             get_compare_consumed,
             get_peak_config,
             set_peak_config,
-            set_plan_type
+            set_plan_type,
+            get_cursor_usage,
+            get_cursor_config,
+            set_cursor_config,
+            test_cursor_auth,
+            cursor_debug
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

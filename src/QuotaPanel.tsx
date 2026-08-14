@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
-import type { NotifyConfig, QuotaResult } from "./types";
-import { fetchQuota, getNotifyConfig, getTodayDelta } from "./api";
-import { loadCache, saveCache } from "./cache";
+import { useEffect, useState } from "react";
+import type { NotifyConfig } from "./types";
+import { getNotifyConfig } from "./api";
+import { useDataCache } from "./DataCache";
 
 interface Props {
   /** 点击「去设置」回调 */
@@ -19,55 +19,27 @@ const LEVEL_LABEL: Record<string, string> = {
 const DEFAULT_THRESHOLDS = { hour5: 75, weekly: 80, mcp: 75 };
 
 export function QuotaPanel({ onGoSettings }: Props) {
-  const [quota, setQuota] = useState<QuotaResult | null>(() =>
-    loadCache<QuotaResult>("zbar-quota")
-  );
+  // 额度数据由全局 DataProvider 统一预加载 + 30s 定时刷新，
+  // 此组件仅负责展示（纯展示层），不再自己请求。
+  const { quota, quotaError, todayDelta, refreshQuota } = useDataCache();
   const [notifyCfg, setNotifyCfg] = useState<NotifyConfig | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
   const [now, setNow] = useState(Date.now());
-  // 今日周额度增量：[增量百分比, 今日采样数]
-  const [todayDelta, setTodayDelta] = useState<[number, number] | null>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const r = await fetchQuota();
-      setQuota(r);
-      // 缓存额度结果，供下次冷启动首屏秒开（额度是网络请求，最慢）
-      saveCache("zbar-quota", r);
-      // 额度刷新成功后顺带读今日增量（快照由 fetch_quota 采样写入）
-      getTodayDelta()
-        .then(setTodayDelta)
-        .catch(() => {});
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
+  // 阈值配置只加载一次（设置页保存后会重新拉，这里初值即可）
   useEffect(() => {
-    load();
-    // 阈值配置只加载一次（设置页保存后会重新拉，这里初值即可）
     getNotifyConfig()
       .then(setNotifyCfg)
       .catch(() => {});
-  }, [load]);
+  }, []);
 
-  // 每 30 秒刷新额度 + 每秒更新倒计时
+  // 每秒更新倒计时显示
   useEffect(() => {
-    const quotaTimer = setInterval(load, 30_000);
     const tickTimer = setInterval(() => setNow(Date.now()), 1000);
-    return () => {
-      clearInterval(quotaTimer);
-      clearInterval(tickTimer);
-    };
-  }, [load]);
+    return () => clearInterval(tickTimer);
+  }, []);
 
   // 未配置 token 的错误 → 显示引导
-  if (error && /未配置|Token/i.test(error)) {
+  if (quotaError && /未配置|Token/i.test(quotaError)) {
     return (
       <div className="mx-3.5 mb-1 rounded-lg bg-sky-500/10 border border-sky-500/20 px-2.5 py-1.5">
         <div className="flex items-center justify-between">
@@ -89,11 +61,11 @@ export function QuotaPanel({ onGoSettings }: Props) {
   }
 
   // 其他错误 → 简短提示
-  if (error || !quota) {
+  if (quotaError || !quota) {
     return (
       <div className="mx-3.5 mb-1 rounded-lg bg-amber-500/10 border border-amber-500/20 px-2.5 py-1.5">
         <span className="text-[10px] text-amber-700/80">
-          {error ? `额度查询失败：${error}` : "加载中…"}
+          {quotaError ? `额度查询失败：${quotaError}` : "加载中…"}
         </span>
       </div>
     );
@@ -119,8 +91,7 @@ export function QuotaPanel({ onGoSettings }: Props) {
           </span>
         </div>
         <button
-          onClick={load}
-          disabled={loading}
+          onClick={refreshQuota}
           className="text-slate-700/40 hover:text-slate-900/70 text-[11px] transition-colors"
           title="刷新额度"
         >
