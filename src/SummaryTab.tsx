@@ -110,11 +110,11 @@ export function SummaryTab({
           <span className="text-[9px] text-slate-700/45 w-10 shrink-0">ZCode</span>
           <div className="flex-1 h-2 rounded-full overflow-hidden flex bg-slate-900/8">
             <div
-              className="h-full bg-sky-400"
+              className="h-full bg-sky-500"
               style={{ width: `${zaiCostPct * 100}%` }}
             />
             <div
-              className="h-full bg-violet-400"
+              className="h-full bg-violet-500"
               style={{ width: `${(1 - zaiCostPct) * 100}%` }}
             />
           </div>
@@ -141,11 +141,11 @@ export function SummaryTab({
         </div>
         <div className="h-2 rounded-full overflow-hidden flex bg-slate-900/8">
           <div
-            className="h-full bg-sky-400"
+            className="h-full bg-sky-500"
             style={{ width: `${zaiTokenPct * 100}%` }}
           />
           <div
-            className="h-full bg-violet-400"
+            className="h-full bg-violet-500"
             style={{ width: `${(1 - zaiTokenPct) * 100}%` }}
           />
         </div>

@@ -98,13 +98,13 @@ export function ZaiStatsContent({
               ? stats.overall.input_tokens / stats.overall.total_tokens
               : 0
           }
-          color="bg-sky-400"
+          color="bg-sky-500"
         />
         <DetailRow
           label="缓存"
           value={formatTokens(stats.overall.cache_read_tokens)}
           pct={cacheRate}
-          color="bg-emerald-400"
+          color="bg-emerald-500"
         />
         <DetailRow
           label="输出"
@@ -114,7 +114,7 @@ export function ZaiStatsContent({
               ? stats.overall.output_tokens / stats.overall.total_tokens
               : 0
           }
-          color="bg-violet-400"
+          color="bg-violet-500"
         />
         {stats.overall.reasoning_tokens > 0 && (
           <DetailRow
@@ -125,7 +125,7 @@ export function ZaiStatsContent({
                 ? stats.overall.reasoning_tokens / stats.overall.total_tokens
                 : 0
             }
-            color="bg-amber-400"
+            color="bg-amber-500"
           />
         )}
       </div>

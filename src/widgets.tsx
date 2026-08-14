@@ -8,12 +8,13 @@ import { formatCost, formatTokens } from "./format";
 // （剩余越低颜色越深，如 <10% 时明显更红）。边界色连续无跳变。
 // ============================================================
 
-/** 插值锚点：[剩余%, 色相, 饱和度, 亮度]。色相用 -10 等价 350，避免跨 360 插值走反方向 */
+/** 插值锚点：[剩余%, 色相, 饱和度, 亮度]。色相用 -10 等价 350，避免跨 360 插值走反方向。
+ *  饱和度控制在 55~70：与界面低饱和毛玻璃风格协调，避免高饱和纯色扎眼 */
 const REMAINING_STOPS: [number, number, number, number][] = [
-  [0, -10, 88, 40], // 深红（额度耗尽）
-  [30, 22, 92, 50], // 橙红（红/黄边界）
-  [80, 58, 82, 47], // 黄（黄/绿边界）
-  [100, 152, 72, 40], // 绿（额度充裕）
+  [0, -2, 66, 41], // 砖红（额度耗尽）
+  [30, 24, 70, 50], // 柔橙（红/黄边界）
+  [80, 48, 68, 46], // 暖黄（黄/绿边界，色相偏暖降低荧光感）
+  [100, 152, 56, 40], // 灰绿（额度充裕）
 ];
 
 /** 剩余百分比 → 基色 HSL（分段线性插值） */
@@ -35,19 +36,21 @@ function remainingHsl(remaining: number): [number, number, number] {
 /** 剩余百分比 → 进度条填充渐变（左深右浅，基色随剩余分段渐变） */
 export function remainingGradient(remaining: number): string {
   const [h, s, l] = remainingHsl(remaining);
-  return `linear-gradient(90deg, hsl(${h}, ${s}%, ${l}%), hsl(${h}, ${s}%, ${Math.min(l + 12, 62)}%))`;
+  // 右端仅提亮 6 个点、封顶 52：保留立体感但不发荧光
+  return `linear-gradient(90deg, hsl(${h}, ${s}%, ${l}%), hsl(${h}, ${s}%, ${Math.min(l + 6, 52)}%))`;
 }
 
-/** 剩余百分比 → 文字颜色（与进度条同基色） */
+/** 剩余百分比 → 文字颜色（同基色但压暗 10 个亮度点：
+ *  小号数字（9~11px）需要更高对比度，条可以浅、文字要深） */
 export function remainingTextColor(remaining: number): string {
   const [h, s, l] = remainingHsl(remaining);
-  return `hsl(${h}, ${s}%, ${l}%)`;
+  return `hsl(${h}, ${s}%, ${Math.max(l - 10, 28)}%)`;
 }
 
 /** 通用进度条 */
 export function ProgressBar({
   pct,
-  color = "bg-sky-400",
+  color = "bg-sky-500",
   gradient,
   track = "bg-slate-900/10",
   height = "h-1.5",
