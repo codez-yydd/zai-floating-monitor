@@ -88,12 +88,6 @@ export function CursorPanel({
         ? events.total_cost_usd * fxRate
         : events.total_cost_usd
       : 0;
-  const meteredCost =
-    events?.metered_cost_usd != null
-      ? currency === "cny"
-        ? events.metered_cost_usd * fxRate
-        : events.metered_cost_usd
-      : null;
 
   // Cursor daily → TrendPoint（复用 TrendChart）
   const trendPoints: TrendPoint[] = (snapshot.daily ?? []).map((d) => ({
@@ -161,26 +155,6 @@ export function CursorPanel({
                   : "bg-emerald-400"
             }
           />
-          <div className="flex items-center justify-between text-[10px] num text-slate-700/60">
-            <span>
-              已用{" "}
-              {planUsedUsd != null
-                ? formatCost(
-                    currency === "cny" ? planUsedUsd * fxRate : planUsedUsd,
-                    currency
-                  )
-                : "—"}
-            </span>
-            <span>
-              上限{" "}
-              {planLimitUsd != null
-                ? formatCost(
-                    currency === "cny" ? planLimitUsd * fxRate : planLimitUsd,
-                    currency
-                  )
-                : "无限"}
-            </span>
-          </div>
           {/* Auto / API 百分比 */}
           {(plan.auto_pct != null || plan.api_pct != null) && (
             <div className="flex gap-3 pt-1 border-t border-slate-900/8">
@@ -282,11 +256,6 @@ export function CursorPanel({
               <div className="num text-[26px] font-bold text-slate-900 leading-none mt-0.5">
                 {formatCost(eventsCost, currency)}
               </div>
-              {meteredCost != null && (
-                <div className="text-[9px] text-slate-700/45 mt-1">
-                  套餐计费 {formatCost(meteredCost, currency)}
-                </div>
-              )}
             </div>
             <div className="text-right">
               <div className="text-[10px] uppercase tracking-wide text-slate-700/55">
