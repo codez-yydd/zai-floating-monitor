@@ -392,6 +392,17 @@ async fn test_cursor_auth() -> Result<(Option<String>, Option<String>, Option<St
         .map_err(|e| format!("Cursor 认证测试失败: {e}"))?
 }
 
+/// fetch_fx_rate：立即联网获取最新 USD→CNY 汇率（多源容错）并写入 cursor 配置，
+/// 返回 (汇率, 来源名)。设置页「立即更新」按钮用。
+/// async + spawn_blocking：内部为同步 HTTP（ureq），必须卸载到阻塞线程池，
+/// 避免网络 I/O 冻结 Tauri 主线程（与 check_pricing_updates 同款模式）。
+#[tauri::command]
+async fn fetch_fx_rate() -> Result<(f64, String), String> {
+    tauri::async_runtime::spawn_blocking(cursor::fetch_fx_rate)
+        .await
+        .map_err(|e| format!("汇率获取任务失败: {e}"))?
+}
+
 /// 诊断 Cursor events API（排查"暂无明细"问题）
 #[tauri::command]
 async fn cursor_debug() -> Result<cursor::CursorDebugInfo, String> {
@@ -1032,6 +1043,27 @@ fn spawn_pricing_refresher() {
     });
 }
 
+/// 后台线程：每天自动联网刷新一次 USD→CNY 汇率（写回 cursor 配置）。
+/// 启动先 sleep 180s 错开启动网络高峰（项目已有 500ms/1500ms/2500ms 错峰惯例，
+/// 汇率刷新更低频，无需抢启动窗口）。每轮重新读配置判断 fx_rate_auto——
+/// 用户可能中途开关「每日自动更新汇率」，不能启动时读一次就用。
+/// 获取失败不动现有汇率值，明日重试。
+fn spawn_fx_rate_refresher() {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(180));
+        loop {
+            if let Ok(cfg) = cursor::load_cursor_config() {
+                if cfg.fx_rate_auto {
+                    if let Err(e) = cursor::fetch_fx_rate() {
+                        eprintln!("[zbar-fx-rate] 每日汇率刷新失败（明日重试）: {e}");
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_secs(24 * 3600));
+        }
+    });
+}
+
 /// 初始化托盘图标
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let quit_item = MenuItem::with_id(app, "quit", "退出 ZBar", true, None::<&str>)?;
@@ -1118,6 +1150,7 @@ pub fn run() {
             setup_tray(app.handle())?;
             spawn_title_updater(app.handle().clone());
             spawn_pricing_refresher();
+            spawn_fx_rate_refresher();
 
             // 应用全局快捷键配置（启动时若已启用则注册）
             let sc = shortcut::load_shortcut();
@@ -1191,7 +1224,8 @@ pub fn run() {
             get_cursor_config,
             set_cursor_config,
             test_cursor_auth,
-            cursor_debug
+            cursor_debug,
+            fetch_fx_rate
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

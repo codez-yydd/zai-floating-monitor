@@ -381,3 +381,8 @@ export async function cursorDebug(): Promise<{
   return invoke("cursor_debug");
 }
 
+/** 立即联网获取最新 USD→CNY 汇率（多源容错）并写入后端配置，返回 [汇率, 来源名] */
+export async function fetchFxRate(): Promise<[number, string]> {
+  return invoke<[number, string]>("fetch_fx_rate");
+}
+

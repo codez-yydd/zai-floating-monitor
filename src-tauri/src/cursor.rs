@@ -46,6 +46,15 @@ pub struct CursorConfig {
     /// USD→CNY 汇率（汇总页合并花费用），默认 7.2
     #[serde(default = "default_fx_rate")]
     pub usd_cny_rate: f64,
+    /// 是否每日自动联网更新汇率（默认 true，开箱即自动）
+    #[serde(default = "default_true")]
+    pub fx_rate_auto: bool,
+    /// 汇率最近一次联网获取的时间（ms 时间戳，None=从未自动获取过）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fx_rate_fetched_at: Option<i64>,
+    /// 汇率最近一次获取成功的来源名（如 "er-api"，用于设置页展示）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fx_rate_source: Option<String>,
 }
 
 fn default_cookie_source() -> String {
@@ -56,12 +65,19 @@ fn default_fx_rate() -> f64 {
     7.2
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl Default for CursorConfig {
     fn default() -> Self {
         Self {
             cookie_source: default_cookie_source(),
             cookie_header: String::new(),
             usd_cny_rate: default_fx_rate(),
+            fx_rate_auto: default_true(),
+            fx_rate_fetched_at: None,
+            fx_rate_source: None,
         }
     }
 }
@@ -81,13 +97,95 @@ pub fn load_cursor_config() -> Result<CursorConfig, String> {
         .map_err(|e| format!("解析 Cursor 配置失败: {e}"))
 }
 
+/// cursor.json 写互斥：后台每日汇率刷新的"读-改-写"段与设置页保存的
+/// 全量写并发时（毫秒级窗口交错），无锁可能互相覆盖（如丢刚保存的
+/// cookie）或交错写坏文件。所有写路径统一经此锁串行化。
+static CURSOR_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn cursor_write_lock() -> &'static Mutex<()> {
+    CURSOR_WRITE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
 pub fn save_cursor_config(cfg: &CursorConfig) -> Result<(), String> {
+    let _guard = cursor_write_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    write_cursor_config_unlocked(cfg)
+}
+
+/// 写入 cursor.json。调用方必须已持有 CURSOR_WRITE_LOCK（std::Mutex
+/// 不可重入，持锁内不得再调 save_cursor_config）。
+fn write_cursor_config_unlocked(cfg: &CursorConfig) -> Result<(), String> {
     let dir = config_dir()?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建配置目录失败: {e}"))?;
     let path = cursor_config_path()?;
     let data = serde_json::to_string_pretty(cfg)
         .map_err(|e| format!("序列化 Cursor 配置失败: {e}"))?;
     std::fs::write(&path, data).map_err(|e| format!("写入 Cursor 配置失败: {e}"))
+}
+
+// ============================================================
+// 汇率自动获取（多源容错）
+// ============================================================
+
+/// 免费无 key 汇率数据源（按优先级）。三源响应结构一致：
+/// { rates: { CNY: 7.16, ... } }，任一成功即采用。
+const FX_RATE_SOURCES: &[(&str, &str)] = &[
+    ("er-api", "https://open.er-api.com/v6/latest/USD"),
+    ("frankfurter", "https://api.frankfurter.app/latest?from=USD&to=CNY"),
+    ("exchangerate-api", "https://api.exchangerate-api.com/v4/latest/USD"),
+];
+
+/// 从单个源拉取 USD→CNY 汇率（超时 15s）
+fn fetch_fx_rate_from(source: &str, url: &str) -> Result<f64, String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(15))
+        .build();
+    let resp = agent
+        .get(url)
+        .set("Accept", "application/json")
+        .call()
+        .map_err(|e| format!("{source} 请求失败: {e}"))?;
+    let root: serde_json::Value = resp
+        .into_json()
+        .map_err(|e| format!("{source} 响应解析失败: {e}"))?;
+    let rate = root
+        .get("rates")
+        .and_then(|r| r.get("CNY"))
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| format!("{source} 响应中缺少有效的 CNY 汇率"))?;
+    // 常识范围校验（5~15）：防止解析异常/脏数据写坏配置。
+    // USD→CNY 多年正常运行于此区间，超界视为数据源异常，换下一个源。
+    if !(5.0..=15.0).contains(&rate) {
+        return Err(format!("{source} 汇率 {rate} 超出常识范围 (5~15)，疑似脏数据"));
+    }
+    Ok(rate)
+}
+
+/// 联网获取最新 USD→CNY 汇率并写回 cursor 配置。
+/// 依次尝试三个免费源（HTTP 失败/解析失败/数值异常都换下一个），
+/// 成功返回 (汇率, 来源名)；全部失败返回 Err 且不改动现有汇率值。
+pub fn fetch_fx_rate() -> Result<(f64, String), String> {
+    let mut last_err = String::new();
+    for (source, url) in FX_RATE_SOURCES {
+        match fetch_fx_rate_from(source, url) {
+            Ok(rate) => {
+                // 成功才落盘：更新汇率 + 获取时间 + 来源。读-改-写全程持锁，
+                // 与 set_cursor_config 的全量写在锁上串行化，防毫秒窗口互相覆盖。
+                let _guard = cursor_write_lock()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut cfg = load_cursor_config()?;
+                cfg.usd_cny_rate = rate;
+                cfg.fx_rate_fetched_at = Some(chrono::Utc::now().timestamp_millis());
+                cfg.fx_rate_source = Some(source.to_string());
+                write_cursor_config_unlocked(&cfg)?;
+                return Ok((rate, source.to_string()));
+            }
+            Err(e) => last_err = e,
+        }
+    }
+    Err(format!("所有汇率数据源均不可达: {last_err}"))
 }
 
 // ============================================================

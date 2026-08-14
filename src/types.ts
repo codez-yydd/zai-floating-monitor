@@ -413,6 +413,12 @@ export interface CursorConfig {
   cookie_header: string;
   /** USD→CNY 汇率（汇总页合并花费用） */
   usd_cny_rate: number;
+  /** 是否每日自动联网更新汇率 */
+  fx_rate_auto: boolean;
+  /** 汇率最近一次联网获取的时间（ms 时间戳，null=从未获取过） */
+  fx_rate_fetched_at: number | null;
+  /** 汇率最近一次获取成功的来源名（如 "er-api"） */
+  fx_rate_source: string | null;
 }
 
 /** Cursor 套餐额度信息（金额单位为美分） */

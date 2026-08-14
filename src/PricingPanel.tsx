@@ -18,6 +18,7 @@ import { MASK_WEEKDAY } from "./types";
 import {
   applyPricingUpdates,
   checkPricingUpdates,
+  fetchFxRate,
   fetchModels,
   fetchPricing,
   fetchQuotaConfig,
@@ -49,6 +50,13 @@ const FIELDS: { key: keyof ModelPrice; label: string }[] = [
 /// 价格数字显示格式化：6 位有效数字，去掉浮点乘法尾巴（0.39999999999999 → 0.4）
 function fmtPrice(n: number): string {
   return String(Number(n.toPrecision(6)));
+}
+
+/// 汇率最近获取时间的显示格式：MM-DD HH:mm（本地时区）
+function fmtFxTime(ms: number): string {
+  const d = new Date(ms);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
 /// 价格三元组（输入/输出/缓存）显示
@@ -116,6 +124,9 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
     cookie_source: "auto",
     cookie_header: "",
     usd_cny_rate: 7.2,
+    fx_rate_auto: true,
+    fx_rate_fetched_at: null,
+    fx_rate_source: null,
   });
   const [savingCursor, setSavingCursor] = useState(false);
   const [cursorSavedFlash, setCursorSavedFlash] = useState(false);
@@ -123,6 +134,10 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
   const [cursorTestResult, setCursorTestResult] = useState<string | null>(null);
   const [cursorDebugInfo, setCursorDebugInfo] = useState<string | null>(null);
   const [cursorDebugging, setCursorDebugging] = useState(false);
+  // 汇率「立即更新」进行中（防重复点击）
+  const [fxUpdating, setFxUpdating] = useState(false);
+  // 最近一次「立即更新」的结果反馈（✓ 成功 / ✗ 失败）
+  const [fxUpdateResult, setFxUpdateResult] = useState<string | null>(null);
 
   useEffect(() => {
     Promise.all([
@@ -219,6 +234,30 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
       setCursorTestResult(`✗ ${String(e)}`);
     } finally {
       setCursorTesting(false);
+    }
+  };
+
+  // 立即联网更新汇率。nextCfg 用于勾选自动时（state 尚未生效）传入最新配置，
+  // 保证后端 load→改→save 基于最新值，不覆盖未落盘的改动。
+  const handleFetchFxRate = async (nextCfg?: CursorConfig) => {
+    setFxUpdating(true);
+    setFxUpdateResult(null);
+    try {
+      // 先保存当前配置再联网（后端在磁盘配置上合并汇率，与测试连接同款顺序）
+      await setCursorConfig(nextCfg ?? cursorCfg);
+      const [rate, source] = await fetchFxRate();
+      setCursorCfg((c) => ({
+        ...c,
+        usd_cny_rate: rate,
+        fx_rate_fetched_at: Date.now(),
+        fx_rate_source: source,
+      }));
+      setFxUpdateResult(`✓ ${rate.toFixed(2)}（${source}）`);
+    } catch (e) {
+      // 失败保留旧汇率值，只提示错误
+      setFxUpdateResult(`✗ ${String(e)}`);
+    } finally {
+      setFxUpdating(false);
     }
   };
 
@@ -768,29 +807,91 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
             />
           )}
 
-          {/* 汇率 */}
-          <div className="flex items-center gap-2 mb-1">
-            <span className="text-[10px] text-slate-700/60 w-12 shrink-0">
-              USD→CNY
-            </span>
-            <input
-              type="number"
-              step="0.1"
-              min="0.1"
-              value={cursorCfg.usd_cny_rate}
-              onChange={(e) => {
-                const v = parseFloat(e.target.value);
-                setCursorCfg({
-                  ...cursorCfg,
-                  // 拒绝 0 / 负数 / NaN，兜底默认汇率
-                  usd_cny_rate: v > 0 ? v : 7.2,
-                });
-              }}
-              className="num w-20 px-2 py-0.5 rounded-md bg-white/60 border border-slate-900/10 text-[10px] text-slate-900/80 focus:outline-none focus:border-violet-400/60"
-            />
-            <span className="text-[9px] text-slate-700/45">
-              汇总页合并花费换算用
-            </span>
+          {/* 汇率：自动获取（每日后台刷一次）+ 手动立即更新 + 保留手动输入 */}
+          <div className="mb-1">
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-slate-700/60 w-12 shrink-0">
+                USD→CNY
+              </span>
+              <input
+                type="number"
+                step="0.1"
+                min="0.1"
+                value={cursorCfg.usd_cny_rate}
+                readOnly={cursorCfg.fx_rate_auto}
+                title={
+                  cursorCfg.fx_rate_auto
+                    ? "自动更新中，取消勾选可手动输入"
+                    : undefined
+                }
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  setCursorCfg({
+                    ...cursorCfg,
+                    // 拒绝 0 / 负数 / NaN，兜底默认汇率
+                    usd_cny_rate: v > 0 ? v : 7.2,
+                  });
+                }}
+                className={`num w-20 px-2 py-0.5 rounded-md bg-white/60 border border-slate-900/10 text-[10px] text-slate-900/80 focus:outline-none focus:border-violet-400/60 ${
+                  cursorCfg.fx_rate_auto
+                    ? "opacity-60 cursor-not-allowed"
+                    : ""
+                }`}
+              />
+              <span className="text-[9px] text-slate-700/45 truncate">
+                {cursorCfg.fx_rate_fetched_at
+                  ? `${cursorCfg.fx_rate_source ?? "未知来源"} · ${fmtFxTime(cursorCfg.fx_rate_fetched_at)}`
+                  : "尚未联网获取"}
+              </span>
+            </div>
+            <div className="flex items-center gap-2 mt-1">
+              <label
+                className="flex items-center gap-1 text-[9px] text-slate-700/55 cursor-pointer"
+                title="后台每天自动联网刷新一次汇率"
+              >
+                <input
+                  type="checkbox"
+                  checked={cursorCfg.fx_rate_auto}
+                  onChange={(e) => {
+                    const next = {
+                      ...cursorCfg,
+                      fx_rate_auto: e.target.checked,
+                    };
+                    setCursorCfg(next);
+                    // 勾选自动且从未获取过：顺带立即拉一次，避免长期显示"尚未联网获取"
+                    if (e.target.checked && !cursorCfg.fx_rate_fetched_at) {
+                      handleFetchFxRate(next);
+                    }
+                  }}
+                  className="accent-violet-500 w-3 h-3"
+                />
+                每日自动更新汇率
+              </label>
+              <button
+                onClick={() => handleFetchFxRate()}
+                disabled={fxUpdating}
+                title="立即联网获取最新汇率（多个免费数据源自动容错）"
+                className="text-[9px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-700/80 hover:bg-sky-500/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {fxUpdating ? "更新中…" : "立即更新"}
+              </button>
+              {fxUpdateResult && (
+                <span
+                  className={`text-[9px] truncate ${
+                    fxUpdateResult.startsWith("✓")
+                      ? "text-emerald-600"
+                      : "text-rose-600"
+                  }`}
+                >
+                  {fxUpdateResult}
+                </span>
+              )}
+            </div>
+            {cursorCfg.fx_rate_auto && (
+              <p className="text-[8px] text-slate-700/40 mt-0.5">
+                自动更新中，取消勾选可手动输入
+              </p>
+            )}
           </div>
 
           {cursorTestResult && (
