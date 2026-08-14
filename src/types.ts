@@ -327,6 +327,9 @@ export interface PriceDiffItem {
   default: ModelPrice;
   /** 参考 CNY 价格（折算展示值，应用时与 USD 一并写入） */
   default_cny: ModelPrice;
+  /** 变体名回退匹配时实际命中的参考表模型 id（如 "gpt-5.6-sol" 命中 "gpt-5"），
+   *  精确/点号归一命中时为 null */
+  reference_id: string | null;
 }
 
 /** 完整差异结果 */

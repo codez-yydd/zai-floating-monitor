@@ -392,6 +392,9 @@ pub struct PriceDiffItem {
     pub default: ModelPrice,
     /// 参考 CNY 价格（应用时与 USD 一并写入）
     pub default_cny: ModelPrice,
+    /// 变体名回退匹配时实际命中的参考表模型 id（如 "gpt-5.6-sol" 命中 "gpt-5"
+    /// 的参考价），供前端标注"参考自 xxx"；精确/点号归一命中时为 None
+    pub reference_id: Option<String>,
 }
 
 /// 完整差异结果
@@ -452,6 +455,67 @@ pub fn diff_pricing(
     }
 }
 
+/// 参考价三级查找（解决 CLI 模型名与 models.dev 收录名不一致的问题）：
+/// - L1 精确 / 点号归一："claude-sonnet-4-5"（CLI 落盘名）与 models.dev 的
+///   "claude-sonnet-4.5" 是同一模型的两种写法，'.' 与 '-' 统一后比较，
+///   视为精确命中、不标注来源；
+/// - L2 渐进去尾回退："gpt-5.6-sol" → "gpt-5.6" → "gpt-5"，命中即停，
+///   视为变体名（-sol/-terra/-air/-max/日期后缀等）匹配基础模型参考价，
+///   返回命中 id 供条目标注"参考自 xxx"，由用户知情勾选；
+/// - 均未命中 → missing（未配价警示）。
+/// 点号/连字符归一（"claude-sonnet-4.5" ↔ "claude-sonnet-4-5" 视为同一写法）。
+/// pub(crate)：lib.rs 的 cost_for 计费查找同样需要归一兜底。
+pub(crate) fn normalize_dots(s: &str) -> String {
+    s.replace('.', "-")
+}
+
+
+/// 点号归一索引：归一 key → 参考表原始 key（参考表 key 全小写）
+fn build_norm_index(map: &BTreeMap<String, ModelPrice>) -> BTreeMap<String, String> {
+    map.iter()
+        .filter(|(k, _)| k.contains('.'))
+        .map(|(k, _)| (normalize_dots(k), k.clone()))
+        .collect()
+}
+
+/// L1 查找：精确 → 点号归一。命中视为"参考表收录了该模型"。
+fn lookup_exact<'a>(
+    map: &'a BTreeMap<String, ModelPrice>,
+    norm: &BTreeMap<String, String>,
+    lc: &str,
+) -> Option<&'a ModelPrice> {
+    if let Some(p) = map.get(lc) {
+        return Some(p);
+    }
+    norm.get(&normalize_dots(lc)).and_then(|orig| map.get(orig))
+}
+
+/// L2 查找：渐进去尾回退（'-' 与 '.' 都算分段边界，如 "gpt-5.6-sol" → "gpt-5.6"
+/// → "gpt-5"），每级同时尝试原始与点号归一形态，命中即停。
+/// 返回 (参考价, 命中的参考表模型 id)。
+fn lookup_variant<'a>(
+    map: &'a BTreeMap<String, ModelPrice>,
+    norm: &BTreeMap<String, String>,
+    lc: &str,
+) -> Option<(&'a ModelPrice, String)> {
+    let mut cur = lc.to_string();
+    loop {
+        // 取最靠右的 '-' 或 '.' 作为切点，保证每段（含点号段）都能被剥掉
+        let cut = cur.rfind('-').max(cur.rfind('.'));
+        let Some(pos) = cut else { break };
+        cur.truncate(pos);
+        if let Some(p) = map.get(&cur) {
+            return Some((p, cur));
+        }
+        if let Some(orig) = norm.get(&normalize_dots(&cur)) {
+            if let Some(p) = map.get(orig) {
+                return Some((p, orig.clone()));
+            }
+        }
+    }
+    None
+}
+
 /// 纯对比逻辑（与网络解耦，便于测试）：参考价 map 的 key 需为小写模型 id。
 /// 判定基准 = 参考表 USD 原始价，CNY 参考（折算值）不参与相等性判定。
 fn diff_with_reference(
@@ -463,69 +527,99 @@ fn diff_with_reference(
     version: &str,
 ) -> PricingDiff {
     // 小写归一：db 里的 model_id 大小写可能与参考表不一致（models.dev 全小写）
-    let ref_lookup = |map: &BTreeMap<String, ModelPrice>, id: &str| -> Option<ModelPrice> {
-        map.get(&id.to_lowercase()).cloned()
-    };
-    // 用户配置也按小写建索引，让 db 原始大小写 id 能命中用户以另一种形态保存的价格
-    let user_usd: BTreeMap<String, &ModelPrice> =
-        user.usd.iter().map(|(k, v)| (k.to_lowercase(), v)).collect();
-    let user_cny: BTreeMap<String, &ModelPrice> =
-        user.cny.iter().map(|(k, v)| (k.to_lowercase(), v)).collect();
+    // 用户配置按「小写 + 点号归一」建索引：db 原始 id 能命中用户以另一种大小写
+    // 或点号/连字符形态保存的价格（手输 claude-sonnet-4.5 ↔ db 的 claude-sonnet-4-5）
+    let user_usd: BTreeMap<String, &ModelPrice> = user
+        .usd
+        .iter()
+        .map(|(k, v)| (normalize_dots(&k.to_lowercase()), v))
+        .collect();
+    let user_cny: BTreeMap<String, &ModelPrice> = user
+        .cny
+        .iter()
+        .map(|(k, v)| (normalize_dots(&k.to_lowercase()), v))
+        .collect();
+    let norm_usd = build_norm_index(ref_usd);
+    let norm_cny = build_norm_index(ref_cny);
 
     let mut new_models = Vec::new();
     let mut changed = Vec::new();
     let mut missing = Vec::new();
     let mut relevant_sorted: Vec<&String> = relevant.iter().collect();
     relevant_sorted.sort();
-    // relevant 可能同时含同一模型的大小写两种形态（db 原始 id + 用户配置 key），
-    // 归一去重，避免同一模型输出两条条目
+    // relevant 可能同时含同一模型的多种形态（db 原始 id + 用户配置 key，
+    // 大小写或点号/连字符写法不同），归一去重避免同一模型输出多条条目
     let mut seen = std::collections::HashSet::new();
 
     for model_id in relevant_sorted {
         let lc = model_id.to_lowercase();
-        if !seen.insert(lc.clone()) {
+        let key = normalize_dots(&lc);
+        if !seen.insert(key.clone()) {
             continue;
         }
-        let user_u: Option<ModelPrice> = user_usd.get(&lc).map(|p| (*p).clone());
-        let user_c = user_cny.get(&lc);
+        let user_u: Option<ModelPrice> = user_usd.get(&key).map(|p| (*p).clone());
+        let user_c = user_cny.get(&key);
 
-        // USD 参考缺失：CNY 参考也没有且本地未配 → missing（花费按 0，最该提醒）。
-        // 仅 CNY 参考有（内置表国内人民币价模型）→ USD 无基准可比，不打扰；
-        // 本地已配 → 用户自定义价格，同样不打扰
-        let Some(default_usd) = ref_lookup(ref_usd, model_id) else {
-            let ref_c_only = ref_lookup(ref_cny, model_id).is_some();
-            if !ref_c_only && user_u.is_none() && user_c.is_none() {
-                missing.push(model_id.clone());
+        // L1（精确/点号归一）命中：参考表收录了该模型，正常走 new/changed 判定
+        if let Some(default_usd) = lookup_exact(ref_usd, &norm_usd, &lc) {
+            // CNY 参考价缺失时以 0 兜底（正常两条参考链路同源，均有值）
+            let default_cny = lookup_exact(ref_cny, &norm_cny, &lc)
+                .cloned()
+                .unwrap_or_default();
+            let item = |user: Option<ModelPrice>| PriceDiffItem {
+                model_id: model_id.clone(),
+                user,
+                default: default_usd.clone(),
+                default_cny: default_cny.clone(),
+                reference_id: None,
+            };
+
+            match user_u {
+                // 已配 USD：三项不等才提示变动（默认不勾，保护用户自定义）
+                Some(u) => {
+                    let same = u.input == default_usd.input
+                        && u.output == default_usd.output
+                        && u.cache_read == default_usd.cache_read;
+                    if !same {
+                        changed.push(item(Some(u)));
+                    }
+                }
+                // 未配 USD：CNY 也未配 → 新增模型（默认勾选，应用时 USD+CNY 一并写入）；
+                // 仅配了 CNY → 视为用户已按自己的口径定价（如国内站人民币价），不打扰
+                None => {
+                    if user_c.is_none() {
+                        new_models.push(item(None));
+                    }
+                }
             }
             continue;
-        };
-        // CNY 参考价缺失时以 0 兜底（正常两条参考链路同源，均有值）
-        let default_cny = ref_lookup(ref_cny, model_id).unwrap_or_default();
-        let item = |user: Option<ModelPrice>| PriceDiffItem {
-            model_id: model_id.clone(),
-            user,
-            default: default_usd.clone(),
-            default_cny: default_cny.clone(),
-        };
-
-        match user_u {
-            // 已配 USD：三项不等才提示变动（默认不勾，保护用户自定义）
-            Some(u) => {
-                let same = u.input == default_usd.input
-                    && u.output == default_usd.output
-                    && u.cache_read == default_usd.cache_read;
-                if !same {
-                    changed.push(item(Some(u)));
-                }
-            }
-            // 未配 USD：CNY 也未配 → 新增模型（默认勾选，应用时 USD+CNY 一并写入）；
-            // 仅配了 CNY → 视为用户已按自己的口径定价（如国内站人民币价），不打扰
-            None => {
-                if user_c.is_none() {
-                    new_models.push(item(None));
-                }
-            }
         }
+
+        // L1 未命中但本地已配（任一货币）→ 用户自定义价格，不用近似参考去打扰
+        if user_u.is_some() || user_c.is_some() {
+            continue;
+        }
+        // 仅 CNY 参考命中（内置表国内人民币价模型）→ USD 无基准可比，不打扰
+        if lookup_exact(ref_cny, &norm_cny, &lc).is_some() {
+            continue;
+        }
+        // L2 变体回退：未配置模型拿基础模型参考价兜底（如 gpt-5.6-sol → gpt-5），
+        // 条目标注实际参考来源，默认勾选、由用户知情决定是否应用
+        if let Some((usd_ref, hit_id)) = lookup_variant(ref_usd, &norm_usd, &lc) {
+            let default_cny = lookup_variant(ref_cny, &norm_cny, &lc)
+                .map(|(p, _)| p.clone())
+                .unwrap_or_default();
+            new_models.push(PriceDiffItem {
+                model_id: model_id.clone(),
+                user: None,
+                default: usd_ref.clone(),
+                default_cny,
+                reference_id: Some(hit_id),
+            });
+            continue;
+        }
+        // 三级均未命中 → missing（花费按 0，最该提醒手动补价）
+        missing.push(model_id.clone());
     }
 
     PricingDiff {
@@ -707,6 +801,118 @@ mod tests {
         assert_eq!(diff.source, "models.dev");
     }
 
+    /// 变体名三级匹配：点号归一视为精确、去尾回退标注参考来源、已配置不近似打扰
+    #[test]
+    fn diff_matches_variant_model_names() {
+        let user = PricingConfig::default();
+        // 场景数据：参考表只有基础模型（模拟 gpt-5.6 系列尚未被 models.dev 收录）
+        let ref_usd = BTreeMap::from([
+            ("gpt-5".to_string(), price(1.25, 10.0, 0.125)),
+            ("gpt-5.5".to_string(), price(1.5, 12.0, 0.15)),
+            ("claude-sonnet-4.5".to_string(), price(3.0, 15.0, 0.3)),
+            ("glm-4.5".to_string(), price(0.5, 2.0, 0.05)),
+        ]);
+        let ref_cny = ref_usd
+            .iter()
+            .map(|(k, p)| (k.clone(), price(p.input * 7.2, p.output * 7.2, p.cache_read * 7.2)))
+            .collect();
+
+        let relevant: std::collections::HashSet<String> = [
+            "gpt-5.6-sol".to_string(),          // 两级去尾 → gpt-5，标注参考来源
+            "gpt-5.6-terra".to_string(),        // 同上
+            "gpt-5.5-codex-low".to_string(),    // 一级去尾 → gpt-5.5（含点号，直接命中）
+            "claude-sonnet-4-5".to_string(),    // 点号归一 → claude-sonnet-4.5，视为精确
+            "glm-4.5-air".to_string(),          // 一级去尾 → glm-4.5
+            "glm-x-unknown".to_string(),        // 三级均 miss → missing
+        ]
+        .into_iter()
+        .collect();
+
+        let diff = diff_with_reference(&user, &relevant, &ref_usd, &ref_cny, "models.dev", "");
+
+        assert_eq!(diff.new_models.len(), 5, "五个未配置模型都应有参考价");
+        let by_id: std::collections::HashMap<&str, &PriceDiffItem> = diff
+            .new_models
+            .iter()
+            .map(|i| (i.model_id.as_str(), i))
+            .collect();
+        // 点号归一命中视为精确，不标注来源
+        assert_eq!(by_id["claude-sonnet-4-5"].reference_id, None);
+        assert_eq!(by_id["claude-sonnet-4-5"].default, price(3.0, 15.0, 0.3));
+        assert_eq!(
+            by_id["claude-sonnet-4-5"].default_cny,
+            price(3.0 * 7.2, 15.0 * 7.2, 0.3 * 7.2),
+            "CNY 参考与 ref_cny 构造同源（同乘法路径，浮点一致）"
+        );
+        // 去尾回退命中标注实际参考来源
+        assert_eq!(by_id["gpt-5.6-sol"].reference_id, Some("gpt-5".to_string()));
+        assert_eq!(by_id["gpt-5.6-terra"].reference_id, Some("gpt-5".to_string()));
+        assert_eq!(
+            by_id["gpt-5.5-codex-low"].reference_id,
+            Some("gpt-5.5".to_string())
+        );
+        assert_eq!(by_id["glm-4.5-air"].reference_id, Some("glm-4.5".to_string()));
+        // 变体条目同样带 CNY 折算参考
+        assert_eq!(by_id["gpt-5.6-sol"].default, price(1.25, 10.0, 0.125));
+        assert_eq!(
+            by_id["gpt-5.6-sol"].default_cny,
+            price(1.25 * 7.2, 10.0 * 7.2, 0.125 * 7.2)
+        );
+        // 三级均 miss → missing
+        assert_eq!(diff.missing, vec!["glm-x-unknown".to_string()]);
+    }
+
+    /// 已配置的变体模型不被近似参考打扰：用户给 gpt-5.6-sol 手动配过价时，
+    /// 不拿 gpt-5 的参考价去提示变动（近似参考只服务未配置模型的首次配价）
+    #[test]
+    fn diff_skips_configured_variant_models() {
+        let mut user = PricingConfig::default();
+        user.usd.insert(
+            "gpt-5.6-sol".to_string(),
+            price(1.25, 10.0, 0.125),
+        );
+        let ref_usd = BTreeMap::from([("gpt-5".to_string(), price(2.0, 20.0, 0.2))]);
+        let ref_cny = BTreeMap::from([("gpt-5".to_string(), price(14.4, 144.0, 1.44))]);
+
+        let relevant: std::collections::HashSet<String> =
+            ["gpt-5.6-sol".to_string()].into_iter().collect();
+        let diff = diff_with_reference(&user, &relevant, &ref_usd, &ref_cny, "models.dev", "");
+
+        assert!(diff.new_models.is_empty());
+        assert!(diff.changed.is_empty(), "不拿基础模型参考价判变动");
+        assert!(diff.missing.is_empty(), "已配置不算 missing");
+    }
+
+    /// 用户手输点号形态（claude-sonnet-4.5）与 db 连字符形态（claude-sonnet-4-5）
+    /// 视为同一模型：已配置不误报新增，应用后收敛为单一 key
+    #[test]
+    fn diff_normalizes_user_dot_notation() {
+        let mut user = PricingConfig::default();
+        // 用户照抄 models.dev 形态手动配置的价格
+        user.usd.insert("claude-sonnet-4.5".to_string(), price(3.0, 15.0, 0.3));
+
+        let relevant: std::collections::HashSet<String> = [
+            "claude-sonnet-4-5".to_string(), // db 落盘形态
+            "claude-sonnet-4.5".to_string(),  // 用户配置 key（归一后与上一条同模型）
+        ]
+        .into_iter()
+        .collect();
+        let ref_usd = BTreeMap::from([("claude-sonnet-4.5".to_string(), price(3.0, 15.0, 0.3))]);
+        let ref_cny = BTreeMap::new();
+
+        let diff = diff_with_reference(&user, &relevant, &ref_usd, &ref_cny, "models.dev", "");
+        // 已配置（点号形态命中）且与参考一致 → 不产出任何条目，只输出一个模型
+        assert!(diff.new_models.is_empty(), "用户点号配置应被识别，不误报新增");
+        assert!(diff.changed.is_empty());
+        assert!(diff.missing.is_empty());
+
+        // 应用写入连字符形态时收敛掉点号旧 key
+        let mut map = BTreeMap::from([("claude-sonnet-4.5".to_string(), price(1.0, 5.0, 0.1))]);
+        collapse_insert(&mut map, "claude-sonnet-4-5", price(3.0, 15.0, 0.3));
+        assert_eq!(map.len(), 1, "点号/连字符形态应收敛为单一 key");
+        assert!(map.contains_key("claude-sonnet-4-5"));
+    }
+
     /// apply_updates 写入前收敛同模型大小写重复 key：
     /// 否则归一索引取旧值、应用写入新形态，changed 条目应用后仍不清零
     #[test]
@@ -755,12 +961,15 @@ pub fn apply_updates(items: &[(String, String, ModelPrice)]) -> Result<PricingCo
     Ok(cfg)
 }
 
-/// 删除同模型其他大小写形态的旧 key 后写入（收敛为单一 key）。
-/// 如手输的 "glm-4.6" 与应用写入的 "GLM-4.6" 并存时，diff 的归一索引会取到
-/// 旧值，导致应用后 changed 条目仍不清零、红点反复出现。
+/// 删除同模型其他写法（大小写、点号/连字符）的旧 key 后写入（收敛为单一 key）。
+/// 如手输的 "glm-4.6" / "claude-sonnet-4.5" 与应用写入的 "GLM-4.6" /
+/// "claude-sonnet-4-5" 并存时，diff 的归一索引会取到旧值，
+/// 导致应用后条目仍不清零、红点反复出现。
 fn collapse_insert(map: &mut BTreeMap<String, ModelPrice>, model_id: &str, price: ModelPrice) {
-    let lc = model_id.to_lowercase();
-    map.retain(|k, _| k.to_lowercase() != lc);
+    let same_model = |k: &str, target: &str| {
+        normalize_dots(&k.to_lowercase()) == normalize_dots(&target.to_lowercase())
+    };
+    map.retain(|k, _| !same_model(k, model_id));
     map.insert(model_id.to_string(), price);
 }
 

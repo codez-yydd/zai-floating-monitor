@@ -125,6 +125,7 @@ PORT=8080 python3 app.py
 | `POST /register` | Master Token | 注册设备，返回 Device Token |
 | `POST /sync` | Device Token | 增量上传用量明细（每条可带 source，缺省 zcode） |
 | `GET /usage` | Device Token | 聚合查询（overall + by_model + trend，可选 source 过滤） |
+| `GET /models` | Device Token | 全部设备 × 全部来源的模型清单（distinct，价格配置用） |
 | `GET /devices` | Device Token | 设备列表 |
 | `POST /device/revoke` | Master Token | 撤销设备 |
 | `POST /cleanup` | Master Token | 数据清理（按设备/按时间/全清/reset） |
@@ -147,6 +148,7 @@ PORT=8080 python3 app.py
 - `POST /sync`：records 每条新增 `source` 字段，缺省 `zcode`（旧客户端不传即 zcode）。客户端保证每批 records 属同一来源，`last_rowid` / `max_rowid` 按该来源自己的 rowid 序列计数。同一主键重传且 `computed_total_tokens` 更大时覆盖旧值（Claude Code 会话流式落盘，客户端会把消息终值补传修正先前上传的中间值；zcode/codex 记录不可变，重传同值对覆盖守卫为无操作）。
 - `GET /usage`：新增可选 query 参数 `source`（`zcode` / `codex` / `claude`），不传 = 全部来源合并；`by_model` 与 `trend.by_model` 每个分组新增 `source` 字段，便于前端区分展示。
 - `POST /period_detail`：body 同样新增可选 `source` 字段。
+- `GET /models`：返回全部设备 × 全部来源出现过的模型清单（`[{source, provider_id, model_id}]`，distinct）。客户端价格设置页据此展示"其他设备同步上来、本机没有"的模型并纳入价格更新检查。旧服务端无此接口时客户端静默降级（只用本地清单），升级服务端即可启用。
 
 ---
 

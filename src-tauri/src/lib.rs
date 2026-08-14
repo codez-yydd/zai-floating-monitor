@@ -60,8 +60,9 @@ impl Billable for db::BucketModelStat {
 /// 按 price map 计算单个模型的花费（每百万 token 计价）。
 /// input_tokens 已包含 cache_read_tokens，缓存读部分按缓存价计费，
 /// 剩余非缓存输入部分才按输入价计费。
-/// 查找先精确匹配 db 原始形态；miss 时再按小写归一兜底（价格条目与 db 的
-/// model_id 大小写可能不一致，让任何形态都能算出花费）。线性扫描仅在 miss 时发生。
+/// 查找先精确匹配 db 原始形态；miss 时再按「小写 + 点号归一」兜底（价格条目
+/// 与 db 的 model_id 大小写或点号/连字符写法可能不一致，让任何形态都能算出花费）。
+/// 线性扫描仅在 miss 时发生。
 fn cost_for<B: Billable>(s: &B, map: &BTreeMap<String, ModelPrice>) -> f64 {
     let lookup = |p: &ModelPrice| {
         let non_cache_input =
@@ -74,9 +75,9 @@ fn cost_for<B: Billable>(s: &B, map: &BTreeMap<String, ModelPrice>) -> f64 {
     if let Some(p) = map.get(s.model_id()) {
         return lookup(p);
     }
-    let lc = s.model_id().to_lowercase();
+    let target = pricing::normalize_dots(&s.model_id().to_lowercase());
     map.iter()
-        .find(|(k, _)| k.to_lowercase() == lc)
+        .find(|(k, _)| pricing::normalize_dots(&k.to_lowercase()) == target)
         .map(|(_, p)| lookup(p))
         .unwrap_or(0.0)
 }
@@ -98,10 +99,49 @@ async fn get_stats(req: StatsRequest) -> Result<db::Stats, String> {
         .map_err(|e| format!("统计查询任务失败: {e}"))?
 }
 
-/// list_models：列出数据库中所有出现过的模型
+/// list_models：列出所有出现过的模型，价格设置页的配价表单数据源。
+/// 来源 = 本地 ZCode 库 ∪ Codex 导入库 ∪ Claude 导入库 ∪ 远端同步的全部设备模型
+/// （让"其他设备在用、本机没有"的模型也能直接配价并参与价格更新检查）。
+/// 按 (provider_id, model_id) 去重、按 model_id 排序。
+/// 远端清单带 5 分钟缓存、失败静默降级为空；远端 HTTP 不能跑在主线程，
+/// 与其他含网络/磁盘 I/O 的命令一样 async + spawn_blocking。
 #[tauri::command]
-fn list_models() -> Result<Vec<db::ModelInfo>, String> {
-    db::list_models()
+async fn list_models() -> Result<Vec<db::ModelInfo>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        // zcode 本地库是主数据源，失败照常报错；codex/claude/远端为增量来源，静默降级
+        let zcode = db::list_models()?;
+        let codex_models = codex::list_models().unwrap_or_default();
+        let claude_models = claude::list_models().unwrap_or_default();
+        let remote = sync::remote_models_cached()
+            .into_iter()
+            .map(|m| db::ModelInfo {
+                // 远端记录 provider_id 可能为空，用来源标识兜底，保证去重键稳定
+                provider_id: if m.provider_id.is_empty() {
+                    m.source
+                } else {
+                    m.provider_id
+                },
+                model_id: m.model_id,
+            })
+            .collect();
+        Ok(merge_model_lists(vec![zcode, codex_models, claude_models, remote]))
+    })
+    .await
+    .map_err(|e| format!("模型列表查询任务失败: {e}"))?
+}
+
+/// 合并多个来源的模型清单：(provider_id, model_id) 去重、按 model_id 排序。
+/// 纯函数（list_models 命令用），抽出来便于测试多来源去重与排序。
+fn merge_model_lists(lists: Vec<Vec<db::ModelInfo>>) -> Vec<db::ModelInfo> {
+    let mut seen = std::collections::HashSet::new();
+    let mut all: Vec<db::ModelInfo> = Vec::new();
+    for m in lists.into_iter().flatten() {
+        if seen.insert((m.provider_id.clone(), m.model_id.clone())) {
+            all.push(m);
+        }
+    }
+    all.sort_by(|a, b| a.model_id.cmp(&b.model_id).then(a.provider_id.cmp(&b.provider_id)));
+    all
 }
 
 /// get_pricing：读取价格配置
@@ -140,7 +180,7 @@ fn set_currency(currency: String, app: AppHandle) -> Result<(), String> {
 /// 返回差异。仅用于"检查更新"提示，绝不自动覆盖。
 /// 差异判定只看 USD 原始价；CNY 参考价（USD × 汇率）仅作折算展示随条目带出，
 /// 不参与"是否变动"判定——汇率每日自动更新，参与判定会导致持续误报。
-/// 遍历主体 =「数据库实际调用过 ∪ 用户已手动配置」的模型：
+/// 遍历主体 =「数据库实际调用过 ∪ 用户已手动配置 ∪ 远端同步（其他设备）」的模型：
 /// 实际在用但两边都没价格的模型会以 missing 暴露（花费按 0 计）。
 /// `force`：true 时绕过缓存强制联网刷新（「更新」按钮）；默认 LocalFirst——
 /// 有本地缓存直接用（秒回，不管新旧），完全无缓存才联网兜底。
@@ -170,6 +210,12 @@ async fn check_pricing_updates(
                 relevant.insert(m.model_id);
             });
         }
+        // 远端同步（其他设备上传）的模型同样纳入：本机没有但其他设备在用的
+        // 模型（如 gpt-5.6-sol）也需要配价——models.dev 收录则提示新增可一键应用，
+        // 未收录则以 missing 暴露提醒手动补价；服务器不可用时静默降级为空
+        sync::remote_models_cached().into_iter().for_each(|m| {
+            relevant.insert(m.model_id);
+        });
         relevant.extend(user.cny.keys().cloned());
         relevant.extend(user.usd.keys().cloned());
 
@@ -1372,4 +1418,36 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(provider: &str, model: &str) -> db::ModelInfo {
+        db::ModelInfo {
+            provider_id: provider.to_string(),
+            model_id: model.to_string(),
+        }
+    }
+
+    /// 多来源模型清单合并：跨来源同名去重、不同来源同名保留、按 model_id 排序
+    #[test]
+    fn merge_model_lists_dedupes_and_sorts() {
+        let zcode = vec![info("zai", "glm-4.6"), info("zai", "glm-4.5-air")];
+        let codex = vec![info("codex", "gpt-5.6-sol")];
+        // 远端含本地已有的（同 provider+model → 去重）与本地没有的（保留）
+        let remote = vec![info("zai", "glm-4.6"), info("claude", "claude-sonnet-4-5")];
+
+        let merged = merge_model_lists(vec![zcode, codex, remote]);
+
+        let ids: Vec<&str> = merged.iter().map(|m| m.model_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["claude-sonnet-4-5", "glm-4.5-air", "glm-4.6", "gpt-5.6-sol"],
+            "按 model_id 排序且无重复"
+        );
+        // 同名不同来源不去重（cost_for 按模型 id 计价，表单按 model_id 再去重展示）
+        assert_eq!(merged.len(), 4);
+    }
 }

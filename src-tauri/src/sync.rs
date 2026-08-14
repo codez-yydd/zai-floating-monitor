@@ -7,7 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::db::{self, default_source, UsageRow};
 use crate::pricing::config_dir;
@@ -635,6 +636,99 @@ pub fn fetch_remote_usage(req: RemoteUsageRequest) -> Result<RemoteUsage, String
         .into_json()
         .map_err(|e| format!("解析远端数据失败: {e}"))?;
     Ok(resp)
+}
+
+// ===== 远端模型清单（价格设置页 / 价格检查用）=====
+
+/// 远端一条模型记录（全部设备 × 全部来源的去重并集）
+#[derive(Debug, Clone, Deserialize)]
+pub struct RemoteModelInfo {
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub provider_id: String,
+    #[serde(default)]
+    pub model_id: String,
+}
+
+/// 远端模型清单缓存，条目 = (最近一次尝试时间, 清单)。
+/// - 成功后 TTL_REMOTE_MODELS（5 分钟）内直接复用；
+/// - 拉取失败写入短负缓存 TTL_REMOTE_MODELS_RETRY（30 秒），期间用旧值/空值顶住，
+///   避免服务器不可达时设置页每次打开都等一轮 3s 超时（list_models 与
+///   check_pricing_updates 首开即并发调用，无负缓存最坏叠加约 6s）。
+static REMOTE_MODELS_CACHE: OnceLock<Mutex<Option<(Instant, Vec<RemoteModelInfo>)>>> =
+    OnceLock::new();
+const TTL_REMOTE_MODELS: Duration = Duration::from_secs(300);
+const TTL_REMOTE_MODELS_RETRY: Duration = Duration::from_secs(30);
+
+/// 实际请求服务端 GET /models（轻量 distinct 清单）。
+fn fetch_remote_models_once() -> Result<Vec<RemoteModelInfo>, String> {
+    let cfg = load_sync_config()?;
+    if !cfg.enabled || cfg.device_token.is_empty() {
+        return Ok(Vec::new());
+    }
+    #[derive(Deserialize)]
+    struct ModelsResponse {
+        #[serde(default)]
+        models: Vec<RemoteModelInfo>,
+    }
+    let resp: ModelsResponse = ureq::get(&format!("{}/models", cfg.server_url))
+        .set("Authorization", &format!("Bearer {}", cfg.device_token))
+        // 清单接口很轻，超时收紧到 3s：避免服务器不可达时拖慢设置页首次加载
+        .timeout(Duration::from_secs(3))
+        .call()
+        .map_err(map_http_err("查询远端模型清单"))?
+        .into_json()
+        .map_err(|e| format!("解析远端模型清单失败: {e}"))?;
+    Ok(resp
+        .models
+        .into_iter()
+        .filter(|m| !m.model_id.is_empty())
+        .collect())
+}
+
+/// 远端模型清单（带缓存、负缓存与静默降级），绝不向调用方报错：
+/// - 未启用同步 → 恒为空且不写缓存（刚注册设备后立即可见远端模型）；
+/// - 拉取失败 → 30s 内不重试，期间沿用上次清单（含过期值）；
+/// - 完全无缓存且失败 → 空列表。
+pub fn remote_models_cached() -> Vec<RemoteModelInfo> {
+    // 未启用同步直接短路，不触碰缓存
+    let enabled = load_sync_config()
+        .map(|c| c.enabled && !c.device_token.is_empty())
+        .unwrap_or(false);
+    if !enabled {
+        return Vec::new();
+    }
+
+    let cache = REMOTE_MODELS_CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = cache.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some((last_attempt, models)) = guard.as_ref() {
+        // 有数据：5 分钟内复用；空数据（上次失败）：30s 负缓存内不重试
+        let ttl = if models.is_empty() {
+            TTL_REMOTE_MODELS_RETRY
+        } else {
+            TTL_REMOTE_MODELS
+        };
+        if last_attempt.elapsed() < ttl {
+            return models.clone();
+        }
+    }
+    match fetch_remote_models_once() {
+        Ok(models) => {
+            *guard = Some((Instant::now(), models.clone()));
+            models
+        }
+        Err(_) => {
+            // 失败：只推进尝试时间戳，保留旧清单继续顶住（无旧值则为空）
+            if let Some((last_attempt, models)) = guard.as_mut() {
+                *last_attempt = Instant::now();
+                models.clone()
+            } else {
+                *guard = Some((Instant::now(), Vec::new()));
+                Vec::new()
+            }
+        }
+    }
 }
 
 // ===== 远端额度快照查询（对比页/报告页用）=====

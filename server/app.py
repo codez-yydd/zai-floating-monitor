@@ -198,6 +198,20 @@ def usage():
     return jsonify(result)
 
 
+@app.get("/models")
+def models():
+    """全部设备、全部来源出现过的模型清单（轻量，价格配置用）。
+
+    客户端价格设置页把清单并入本地模型列表，让"其他设备同步上来、
+    本机没有"的模型也能直接配价并参与价格更新检查。
+    旧客户端不调用本接口，无兼容性问题。
+    """
+    err, _ = require_device_token()
+    if err:
+        return err
+    return jsonify({"models": db.list_all_models()})
+
+
 @app.get("/snapshots")
 def snapshots():
     """额度快照查询：返回指定设备集合在时间范围内的快照（带 device_id）。

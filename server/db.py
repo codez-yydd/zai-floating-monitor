@@ -305,6 +305,32 @@ def max_rowid_of(device_id, source="zcode"):
         conn.close()
 
 
+def list_all_models():
+    """全部设备、全部来源出现过的模型清单（distinct，价格配置用）。
+
+    客户端价格设置页据此展示"其他设备同步上来、本机没有"的模型，
+    并让价格检查能覆盖这些模型（如另一台设备在用的新模型）。
+    返回 [{source, provider_id, model_id}, ...]，按 model_id 排序。
+    """
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT source, provider_id, model_id FROM usage_records "
+            "ORDER BY model_id, source"
+        ).fetchall()
+        return [
+            {
+                "source": r[0] or "zcode",
+                "provider_id": r[1] or "",
+                "model_id": r[2] or "",
+            }
+            for r in rows
+            if r[2]
+        ]
+    finally:
+        conn.close()
+
+
 # ===== 聚合查询（/usage 用）=====
 
 def _build_device_filter(device_ids):

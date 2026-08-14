@@ -140,6 +140,7 @@ PORT=8080 python3 app.py
 | `POST /register` | Master Token | Register a device, returns Device Token |
 | `POST /sync` | Device Token | Incremental upload of usage records (each record may carry source, defaults to zcode) |
 | `GET /usage` | Device Token | Aggregated query (overall + by_model + trend, optional source filter) |
+| `GET /models` | Device Token | Distinct model list across all devices × sources (for pricing setup) |
 | `GET /devices` | Device Token | Device list |
 | `POST /device/revoke` | Master Token | Revoke a device |
 | `POST /cleanup` | Master Token | Data cleanup (by device / by time / all / reset) |
@@ -162,6 +163,7 @@ Newer clients also upload Codex CLI and Claude Code usage records in addition to
 - `POST /sync`: each record gains a `source` field, defaulting to `zcode` (old clients that omit it are treated as zcode). Each batch contains a single source; `last_rowid` / `max_rowid` count within that source's own rowid sequence. Re-sending the same primary key with a larger `computed_total_tokens` overwrites the old row (Claude Code sessions stream to disk, so the client re-uploads final values to correct previously uploaded intermediate ones; zcode/codex records are immutable and re-sends are no-ops due to the overwrite guard).
 - `GET /usage`: new optional query parameter `source` (`zcode` / `codex` / `claude`); omitting it merges all sources. Every group in `by_model` and `trend.by_model` gains a `source` field for frontend display.
 - `POST /period_detail`: the body also accepts an optional `source` field.
+- `GET /models`: returns the distinct model list across all devices and sources (`[{source, provider_id, model_id}]`). The client's pricing page uses it to show models that exist only on other devices and to include them in pricing-update checks. Against an older server without this endpoint the client silently falls back to local lists only; upgrade the server to enable it.
 
 ---
 

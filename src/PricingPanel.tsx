@@ -528,7 +528,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
             </div>
             <p className="text-[9px] text-slate-700/50 mb-2 leading-relaxed">
               {diff.source === "models.dev"
-                ? "来自 models.dev 的全厂商模型参考价（你在 ZCode 里用到的任意厂商模型都会检测）。差异判定只看 USD 原始价；CNY 为按当前汇率的折算参考，汇率每日更新不会再触发误报。后台每天自动更新一次缓存，点「更新」可立即联网刷新。"
+                ? "来自 models.dev 的全厂商模型参考价（你在 ZCode / Codex / Claude 里用到的任意模型都会检测，含其他设备同步的模型）。差异判定只看 USD 原始价；CNY 为按当前汇率的折算参考，汇率每日更新不会再触发误报。带 ≈ 标记的是变体名匹配的基础模型参考价（如 gpt-5.6-sol ≈ gpt-5），应用前请确认。后台每天自动更新一次缓存，点「更新」可立即联网刷新。"
                 : "models.dev 不可达，已回退内置参考表；点「更新」可重试联网。"}
               勾选后点「应用选中」才会写入（USD 与 CNY 折算价一并写入）；新增项默认勾选，变动项默认不勾（保护你的自定义）。价格三项依次为 输入/输出/缓存（每百万 token）。
             </p>
@@ -573,6 +573,14 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
                         <span className="font-medium text-slate-900/85 text-[10px] break-words">
                           {i.model_id}
                         </span>
+                        {i.reference_id && (
+                          <span
+                            title={`参考价格表未收录该模型名，参考价取自基础模型 ${i.reference_id}（同系变体），应用前请确认价格`}
+                            className="shrink-0 px-1 rounded bg-amber-500/15 text-amber-700 text-[8px] font-medium"
+                          >
+                            ≈ {i.reference_id}
+                          </span>
+                        )}
                       </div>
                       <div className="mt-0.5 text-[10px] text-slate-700/60 num whitespace-nowrap">
                         $ {fmtTriplet(i.default)}
