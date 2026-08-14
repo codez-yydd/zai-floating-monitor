@@ -1,6 +1,5 @@
 mod cursor;
 mod db;
-mod peak;
 mod pricing;
 mod quota;
 mod quota_history;
@@ -243,7 +242,7 @@ async fn fetch_quota() -> Result<QuotaResult, String> {
     .map_err(|e| format!("额度查询任务失败: {e}"))?
 }
 
-// ===== 周额度追踪 / 对比页 / 高峰期 =====
+// ===== 周额度追踪 / 对比页 =====
 // 以下命令内部为全文件读取/逐行解析（quota_history，90 天约 38MB）或 SQLite 查询
 // （busy_timeout 3s），对比页每 60s 触发一轮，统一 async + spawn_blocking
 // 卸载到阻塞线程池，避免阻塞主线程（与 get_stats 同款模式）。
@@ -301,53 +300,6 @@ async fn get_compare_tokens(
     })
     .await
     .map_err(|e| format!("对比 token 任务失败: {e}"))?
-}
-
-/// 对比页"折算额度消耗"列（本地部分）：按订阅类型折算。
-/// - V2：Σ token × 时段倍率（等效 token）
-/// - V3：Σ 积分公式 × 时段倍率（积分）
-/// - 都可再 × ZCode 优惠系数
-/// 返回的 consumed 字段即折算后的消耗值。
-#[tauri::command]
-async fn get_compare_consumed(
-    periods: Vec<(i64, i64)>,
-) -> Result<Vec<ConsumedBucket>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let cfg = peak::load_peak().unwrap_or_default();
-        let buckets = db::query_period_consumed(&periods, &cfg)?;
-        Ok(buckets
-            .into_iter()
-            .map(|b| ConsumedBucket {
-                reset_at: b.reset_at,
-                end_at: b.end_at,
-                consumed: b.consumed,
-                requests: b.requests,
-            })
-            .collect())
-    })
-    .await
-    .map_err(|e| format!("对比消耗任务失败: {e}"))?
-}
-
-/// 读取高峰期配置。
-#[tauri::command]
-fn get_peak_config() -> Result<peak::PeakConfig, String> {
-    peak::load_peak()
-}
-
-/// 保存高峰期配置。
-#[tauri::command]
-fn set_peak_config(config: peak::PeakConfig) -> Result<(), String> {
-    peak::save_peak(&config)
-}
-
-/// 切换订阅类型并重置为该类型的官方默认时段（保留 zcode_discount 设置）。
-#[tauri::command]
-fn set_plan_type(plan: peak::PlanType) -> Result<peak::PeakConfig, String> {
-    let mut cfg = peak::load_peak().unwrap_or_default();
-    cfg.reset_for_plan(plan);
-    peak::save_peak(&cfg)?;
-    Ok(cfg)
 }
 
 // ===== Cursor 用量统计 =====
@@ -421,16 +373,6 @@ struct WeeklyTokenBucket {
     /// 桶内总 token
     total_tokens: i64,
     /// 桶内总请求数
-    requests: i64,
-}
-
-/// 对比页：单个周期的折算消耗结果。
-#[derive(Debug, Serialize)]
-struct ConsumedBucket {
-    reset_at: i64,
-    end_at: i64,
-    /// 折算后的消耗（V2=等效token, V3=积分）
-    consumed: f64,
     requests: i64,
 }
 
@@ -565,9 +507,8 @@ fn set_pin(enabled: bool, app: AppHandle) -> Result<(), String> {
 
 use sync::{
     AutoCleanupServerRequest, CleanupServerRequest, CleanupStatus, DeviceInfo,
-    MergeDevicesRequest, RemotePeriodDetail, RemotePeriodDetailRequest, RemoteSnapshot,
-    RemoteSnapshotRequest, RemoteUsage, RemoteUsageRequest, RenameDeviceRequest, SyncConfig,
-    SyncOutcome,
+    MergeDevicesRequest, RemoteSnapshot, RemoteSnapshotRequest, RemoteUsage,
+    RemoteUsageRequest, RenameDeviceRequest, SyncConfig, SyncOutcome,
 };
 
 /// 读取同步配置
@@ -625,16 +566,6 @@ async fn remote_snapshots(req: RemoteSnapshotRequest) -> Result<Vec<RemoteSnapsh
     tauri::async_runtime::spawn_blocking(move || sync::fetch_remote_snapshots(req))
         .await
         .map_err(|e| format!("远端快照任务失败: {e}"))?
-}
-
-/// 拉取远端各周期逐条用量明细（前端用本地 peak 配置折算消耗）
-#[tauri::command]
-async fn remote_period_detail(
-    req: RemotePeriodDetailRequest,
-) -> Result<Vec<RemotePeriodDetail>, String> {
-    tauri::async_runtime::spawn_blocking(move || sync::fetch_remote_period_detail(req))
-        .await
-        .map_err(|e| format!("远端明细任务失败: {e}"))?
 }
 
 /// 拉取设备列表
@@ -1201,7 +1132,6 @@ pub fn run() {
             disconnect_device,
             remote_usage,
             remote_snapshots,
-            remote_period_detail,
             list_remote_devices,
             get_cleanup_status,
             cleanup_server,
@@ -1216,10 +1146,6 @@ pub fn run() {
             get_today_delta,
             clear_quota_history,
             get_compare_tokens,
-            get_compare_consumed,
-            get_peak_config,
-            set_peak_config,
-            set_plan_type,
             get_cursor_usage,
             get_cursor_config,
             set_cursor_config,

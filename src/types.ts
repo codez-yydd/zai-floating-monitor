@@ -251,7 +251,7 @@ export interface RenameResult {
 /** 设备筛选选项 */
 export type DeviceFilter = "all" | "local" | string; // string 为具体 device_id
 
-// ===== 周额度追踪 / 对比页 / 高峰期（与 Rust quota_history.rs / peak.rs 一一对应）=====
+// ===== 周额度追踪 / 对比页（与 Rust quota_history.rs 一一对应）=====
 
 /** 单条额度快照（jsonl 一行） */
 export interface QuotaSnapshot {
@@ -291,7 +291,7 @@ export interface WeeklyPeriod {
   sample_count: number;
 }
 
-// ===== 远端额度快照 / 周期明细（多设备跨设备支持）=====
+// ===== 远端额度快照（多设备跨设备支持）=====
 
 /** 远端额度快照（带 device_id，字段与 QuotaSnapshot 对齐 + device_id） */
 export interface RemoteSnapshot extends QuotaSnapshot {
@@ -299,63 +299,11 @@ export interface RemoteSnapshot extends QuotaSnapshot {
   device_id: string;
 }
 
-/** 远端周期内单条用量明细（折算消耗用，字段与本地 db 口径一致） */
-export interface RemoteDetailRow {
-  started_at: number;
-  model_id: string;
-  input_tokens: number;
-  output_tokens: number;
-  cache_read_tokens: number;
-  total_tokens: number;
-}
-
-/** 一个周期的远端明细聚合（供前端用本地 peak 配置折算） */
-export interface RemotePeriodDetail {
-  reset_at: number;
-  end_at: number;
-  rows: RemoteDetailRow[];
-}
-
 /** 对比页：单个周期的 token 聚合结果 */
 export interface WeeklyTokenBucket {
   reset_at: number;
   end_at: number;
   total_tokens: number;
-  requests: number;
-}
-
-/** 订阅类型：决定折算口径 */
-export type PlanType = "v2" | "v3";
-
-/** 高峰时段单段配置 */
-export interface PeakSegment {
-  start: string; // "HH:MM"
-  end: string; // "HH:MM"
-  /** 倍率：V2 高峰3.0/非高峰1.0；V3 高峰1.0/非高峰0.5 */
-  multiplier: number;
-  /** 周几位掩码：bit0=周日...bit6=周六；用 WEEKDAY_MASK=62/WEEKEND_MASK=65 */
-  weekday_mask: number;
-}
-
-/** 高峰期整体配置 */
-export interface PeakConfig {
-  /** 订阅类型：null=未选择（不折算） */
-  plan_type: PlanType | null;
-  /** ZCode 150% 提额优惠开关（对 V2/V3 都生效） */
-  zcode_discount: boolean;
-  enabled: boolean;
-  segments: PeakSegment[];
-}
-
-/** 周几位掩码常量（与后端 peak.rs 一致，避免手算二进制） */
-export const MASK_WEEKDAY = 62; // 周一~周五
-export const MASK_WEEKEND = 65; // 周六+周日
-
-/** 对比页：折算消耗结果（V2=等效token, V3=积分） */
-export interface ConsumedBucket {
-  reset_at: number;
-  end_at: number;
-  consumed: number;
   requests: number;
 }
 

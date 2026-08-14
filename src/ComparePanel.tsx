@@ -1,24 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
-  ConsumedBucket,
   DeviceInfo,
-  PeakConfig,
   SyncConfig,
   WeeklyPeriod,
   WeeklyTokenBucket,
 } from "./types";
 import {
-  getCompareConsumed,
   getCompareTokens,
-  getPeakConfig,
   getSyncConfig,
   getWeeklyCompare,
   listRemoteDevices,
-  remotePeriodDetail,
   remoteUsage,
 } from "./api";
 import { formatTokens } from "./format";
-import { detailToConsumed } from "./peak";
 import { remainingGradient, remainingTextColor } from "./widgets";
 
 interface Props {
@@ -28,8 +22,6 @@ interface Props {
 export function ComparePanel({ onBack }: Props) {
   const [periods, setPeriods] = useState<WeeklyPeriod[]>([]);
   const [tokens, setTokens] = useState<WeeklyTokenBucket[]>([]);
-  const [consumed, setConsumed] = useState<ConsumedBucket[]>([]);
-  const [peakCfg, setPeakCfg] = useState<PeakConfig | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
@@ -44,7 +36,7 @@ export function ComparePanel({ onBack }: Props) {
   const [deviceFilter, setDeviceFilter] = useState<string>("all");
   const syncEnabled = !!syncConfig?.enabled && !!syncConfig.device_token;
 
-  // 初始读同步配置 + 设备列表 + 高峰配置
+  // 初始读同步配置 + 设备列表
   useEffect(() => {
     getSyncConfig()
       .then((cfg) => {
@@ -55,9 +47,6 @@ export function ComparePanel({ onBack }: Props) {
             .catch(() => {});
         }
       })
-      .catch(() => {});
-    getPeakConfig()
-      .then(setPeakCfg)
       .catch(() => {});
   }, []);
 
@@ -73,7 +62,6 @@ export function ComparePanel({ onBack }: Props) {
 
       if (ps.length === 0) {
         setTokens([]);
-        setConsumed([]);
         return;
       }
 
@@ -98,16 +86,14 @@ export function ComparePanel({ onBack }: Props) {
           ? { excludeDevice: syncConfig.device_id }
           : { devices: deviceFilter });
 
-      // 2. 并发：本地（token+折算）+ 远端（trend 折 token + 明细折折算）
+      // 2. 并发：本地 token + 远端（trend 折 token）
       const tasks: Promise<unknown>[] = [];
 
-      // 本地 token + 折算
+      // 本地 token
       let localTokens: WeeklyTokenBucket[] = [];
-      let localConsumed: ConsumedBucket[] = [];
       if (wantLocal) {
         tasks.push(
-          getCompareTokens(periodPairs).then((t) => (localTokens = t)),
-          getCompareConsumed(periodPairs).then((c) => (localConsumed = c))
+          getCompareTokens(periodPairs).then((t) => (localTokens = t))
         );
       } else {
         // 仅远端：构造空本地骨架，后面填远端值
@@ -117,19 +103,11 @@ export function ComparePanel({ onBack }: Props) {
           total_tokens: 0,
           requests: 0,
         }));
-        localConsumed = periodPairs.map(([reset_at, end_at]) => ({
-          reset_at,
-          end_at,
-          consumed: 0,
-          requests: 0,
-        }));
       }
 
       // 远端 token（按周期累加 trend.total_tokens）
       let remoteTokenByPeriod = new Map<number, number>();
       let remoteReqByPeriod = new Map<number, number>();
-      // 远端折算消耗（拉逐条明细，本地 peak 折算）
-      let remoteConsumedByPeriod = new Map<number, { consumed: number; requests: number }>();
 
       if (wantRemote && syncConfig && opts && toMs > fromMs) {
         // token：trend(day) 按归属周期累加
@@ -159,36 +137,6 @@ export function ComparePanel({ onBack }: Props) {
               if (deviceFilter !== "all") throw new Error("远端数据获取失败");
             })
         );
-
-        // 折算消耗：远端逐条明细 + 本地 peak 配置折算（仅配置了 plan_type 才拉）
-        const peak = peakCfg;
-        if (peak?.plan_type) {
-          tasks.push(
-            remotePeriodDetail(periodPairs, opts)
-              .then((buckets) => {
-                const consumed = detailToConsumed(
-                  buckets.map((b) => ({
-                    rows: b.rows.map((r) => ({
-                      started_at: r.started_at,
-                      model_id: r.model_id,
-                      input_tokens: r.input_tokens,
-                      output_tokens: r.output_tokens,
-                      cache_read_tokens: r.cache_read_tokens,
-                      total_tokens: r.total_tokens,
-                    })),
-                  })),
-                  peak
-                );
-                consumed.forEach((c, i) => {
-                  remoteConsumedByPeriod.set(i, c);
-                });
-              })
-              .catch(() => {
-                if (deviceFilter !== "all")
-                  throw new Error("远端折算明细获取失败");
-              })
-          );
-        }
       }
 
       await Promise.all(tasks);
@@ -205,17 +153,6 @@ export function ComparePanel({ onBack }: Props) {
       }));
       setTokens(mergedTokens);
 
-      // 4. 合并折算消耗
-      const mergedConsumed: ConsumedBucket[] = localConsumed.map((c, i) => {
-        const rc = remoteConsumedByPeriod.get(i);
-        return {
-          ...c,
-          consumed: (wantLocal ? c.consumed : 0) + (rc?.consumed ?? 0),
-          requests: (wantLocal ? c.requests : 0) + (rc?.requests ?? 0),
-        };
-      });
-      setConsumed(mergedConsumed);
-
       // 仅在用户未选中或选中索引超出新周期范围时才落到当前周期，
       // 否则保持用户选择：60s 自动刷新不应把用户点选的历史周期静默跳回
       setSelectedIdx((prev) =>
@@ -228,7 +165,7 @@ export function ComparePanel({ onBack }: Props) {
       // 只有最新请求才允许结束 loading，避免旧请求把新请求的加载态清掉
       if (reqId === loadReqId.current) setLoading(false);
     }
-  }, [deviceFilter, syncConfig, syncEnabled, peakCfg]);
+  }, [deviceFilter, syncConfig, syncEnabled]);
 
   useEffect(() => {
     load();
@@ -324,8 +261,6 @@ export function ComparePanel({ onBack }: Props) {
             <PeriodDetail
               period={periods[selectedIdx]}
               token={tokens[selectedIdx]}
-              consumed={consumed[selectedIdx]}
-              peakCfg={peakCfg}
             />
           )}
 
@@ -379,12 +314,7 @@ export function ComparePanel({ onBack }: Props) {
       <div className="px-3.5 py-2 border-t border-slate-900/10 text-[9px] text-slate-700/40 leading-relaxed">
         周百分比来自智谱账户级采样（含所有设备/工具消耗）；
         <br />
-        {peakCfg?.plan_type
-          ? peakCfg.plan_type === "v2"
-            ? "消耗按 V2 倍率折算（token×倍率）"
-            : "消耗按 V3 积分公式折算"
-          : "Token 仅统计 ZCode CLI"}
-        {peakCfg?.zcode_discount ? "，含 ZCode ×0.67 优惠" : ""}。
+        Token 仅统计 ZCode CLI。
       </div>
     </div>
   );
@@ -457,31 +387,12 @@ function PeriodChart({
 function PeriodDetail({
   period,
   token,
-  consumed,
-  peakCfg,
 }: {
   period: WeeklyPeriod;
   token?: WeeklyTokenBucket;
-  consumed?: ConsumedBucket;
-  peakCfg: PeakConfig | null;
 }) {
   const totalTokens = token?.total_tokens ?? 0;
-  const consumedVal = consumed?.consumed ?? 0;
   const sampleLow = period.sample_count < 10;
-
-  const hasPlan = !!peakCfg?.plan_type;
-  // 折算列的标签和副文案
-  const consumedLabel =
-    peakCfg?.plan_type === "v3" ? "积分消耗" : "额度消耗";
-  const consumedSub =
-    peakCfg?.plan_type === "v3"
-      ? `积分公式${peakCfg?.zcode_discount ? " + ZCode优惠" : ""}`
-      : `token×倍率${peakCfg?.zcode_discount ? " + ZCode优惠" : ""}`;
-  // 格式化：V2 用 token 格式（M/K），V3 积分用普通数字
-  const fmtConsumed = (v: number) =>
-    peakCfg?.plan_type === "v3"
-      ? v.toLocaleString("zh-CN", { maximumFractionDigits: 0 })
-      : formatTokens(Math.round(v));
 
   return (
     <div className="rounded-lg bg-white/30 border border-white/40 px-3 py-2.5 space-y-2">
@@ -501,26 +412,15 @@ function PeriodDetail({
         </span>
       </div>
 
-      {/* token 两列 */}
-      <div className="grid grid-cols-2 gap-2">
-        <div className="rounded-md bg-white/25 py-1.5 px-2">
-          <div className="text-[9px] text-slate-700/55">实际 Token</div>
-          <div className="num text-[13px] font-semibold text-slate-900/85 mt-0.5">
-            {formatTokens(totalTokens)}
-          </div>
-          {token && (
-            <div className="text-[9px] num text-slate-700/45 mt-0.5">
-              {token.requests} 次请求
-            </div>
-          )}
+      {/* token 统计 */}
+      <div className="rounded-md bg-white/25 py-1.5 px-2">
+        <div className="text-[9px] text-slate-700/55">实际 Token</div>
+        <div className="num text-[13px] font-semibold text-slate-900/85 mt-0.5">
+          {formatTokens(totalTokens)}
         </div>
-        {hasPlan && (
-          <div className="rounded-md bg-white/25 py-1.5 px-2">
-            <div className="text-[9px] text-slate-700/55">{consumedLabel}</div>
-            <div className="num text-[13px] font-semibold text-violet-700/85 mt-0.5">
-              {fmtConsumed(consumedVal)}
-            </div>
-            <div className="text-[9px] text-slate-700/45 mt-0.5">{consumedSub}</div>
+        {token && (
+          <div className="text-[9px] num text-slate-700/45 mt-0.5">
+            {token.requests} 次请求
           </div>
         )}
       </div>

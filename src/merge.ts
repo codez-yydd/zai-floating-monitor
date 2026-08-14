@@ -1,5 +1,5 @@
 // 跨设备数据合并的公共工具：本地 stats/cost/trend 与远端 RemoteUsage 合并。
-// 抽自 StatsPanel，供 StatsPanel / ReportPanel / ComparePanel 共用。
+// 抽自 StatsPanel，供 StatsPanel / ReportPanel 共用。
 
 import type {
   CostResult,

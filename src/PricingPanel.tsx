@@ -5,16 +5,12 @@ import type {
   CursorConfig,
   ModelInfo,
   ModelPrice,
-  PeakConfig,
-  PeakSegment,
-  PlanType,
   PricingConfig,
   PricingDiff,
   QuotaConfig,
   QuotaEndpoint,
   ShortcutConfig,
 } from "./types";
-import { MASK_WEEKDAY } from "./types";
 import {
   applyPricingUpdates,
   checkPricingUpdates,
@@ -23,13 +19,10 @@ import {
   fetchPricing,
   fetchQuotaConfig,
   getCursorConfig,
-  getPeakConfig,
   getShortcutConfig,
   savePricing,
   saveQuotaConfig,
   setCursorConfig,
-  setPeakConfig,
-  setPlanType,
   setShortcutConfig,
   testCursorAuth,
   cursorDebug,
@@ -982,9 +975,6 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
       {/* 模型列表 */}
       <div className="px-3.5 py-2.5">
         <div className="space-y-2">
-          {/* 高峰期倍率设置 */}
-          <PeakConfigEditor />
-
           {modelIds.map((id) => (
             <ModelPriceRow
               key={id}
@@ -1008,9 +998,6 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
     </div>
   );
 }
-
-/** 周几名称（与 weekday_mask 的 bit 对应：bit0=周日） */
-const WEEKDAY_LABELS = ["日", "一", "二", "三", "四", "五", "六"];
 
 /** 单个模型的价格卡片（memo：草稿用三个原始类型 props 传递，
  *  键入时只重渲染这一张卡片而非整个模型列表） */
@@ -1076,270 +1063,3 @@ const ModelPriceRow = memo(function ModelPriceRow({
     </div>
   );
 });
-
-/** 高峰期倍率设置卡片：独立加载/编辑/保存（memo：自持有状态，不随父面板重渲染） */
-const PeakConfigEditor = memo(function PeakConfigEditor() {
-  const [cfg, setCfg] = useState<PeakConfig | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [savedFlash, setSavedFlash] = useState(false);
-  const [switching, setSwitching] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    getPeakConfig()
-      .then(setCfg)
-      .catch((e) => setError(String(e)));
-  }, []);
-
-  const update = (next: PeakConfig) => setCfg(next);
-
-  const handleSave = async () => {
-    if (!cfg) return;
-    setSaving(true);
-    setError(null);
-    try {
-      await setPeakConfig(cfg);
-      setSavedFlash(true);
-      setTimeout(() => setSavedFlash(false), 1500);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  // 切换订阅类型：后端重置该类型默认时段（保留 zcode_discount）
-  const handleSwitchPlan = async (plan: PlanType) => {
-    if (!cfg || cfg.plan_type === plan) return;
-    setSwitching(true);
-    setError(null);
-    try {
-      const next = await setPlanType(plan);
-      setCfg(next);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setSwitching(false);
-    }
-  };
-
-  if (!cfg) {
-    return (
-      <div className="rounded-lg bg-slate-900/5 border border-slate-900/10 p-2.5 text-center text-[10px] text-slate-700/50">
-        加载高峰期配置…
-      </div>
-    );
-  }
-
-  const noPlan = cfg.plan_type === null;
-
-  return (
-    <div className="rounded-lg bg-slate-900/5 border border-slate-900/10 p-2.5">
-      {/* 标题行 */}
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-[11px] font-medium text-slate-900/85">
-          高峰期倍率设置
-        </span>
-        <button
-          onClick={handleSave}
-          disabled={saving || noPlan}
-          className="text-[10px] px-2 py-0.5 rounded-md bg-violet-500 text-white hover:bg-violet-600 disabled:opacity-40 transition-colors"
-          title={noPlan ? "请先选择订阅类型" : undefined}
-        >
-          {saving ? "保存中…" : savedFlash ? "已保存 ✓" : "保存"}
-        </button>
-      </div>
-
-      {/* 订阅类型选择（必选，否则无法折算） */}
-      <div className="mb-2">
-        <div className="text-[10px] text-slate-700/55 mb-1">订阅类型</div>
-        <div className="flex gap-1">
-          {(["v2", "v3"] as PlanType[]).map((p) => (
-            <button
-              key={p}
-              onClick={() => handleSwitchPlan(p)}
-              disabled={switching}
-              className={`flex-1 px-2 py-1 rounded-md text-[10px] transition-colors ${
-                cfg.plan_type === p
-                  ? "bg-violet-500 text-white"
-                  : "bg-slate-900/8 text-slate-700/65 hover:bg-slate-900/15"
-              }`}
-            >
-              {p === "v2" ? "V2 按请求倍率" : "V3 按积分"}
-            </button>
-          ))}
-        </div>
-        {noPlan && (
-          <p className="text-[9px] text-amber-600/80 mt-1">
-            请选择订阅类型以启用额度折算
-          </p>
-        )}
-      </div>
-
-      {/* ZCode 150% 提额优惠开关 */}
-      <label className="flex items-center gap-1.5 mb-2 cursor-pointer">
-        <input
-          type="checkbox"
-          checked={cfg.zcode_discount}
-          onChange={(e) =>
-            update({ ...cfg, zcode_discount: e.target.checked })
-          }
-          className="w-2.5 h-2.5 accent-violet-500"
-        />
-        <span className="text-[10px] text-slate-700/65">
-          ZCode 150% 提额优惠（全周期 ×0.67）
-        </span>
-      </label>
-
-      {/* 启用开关 */}
-      <label className="flex items-center gap-1.5 mb-2 cursor-pointer">
-        <input
-          type="checkbox"
-          checked={cfg.enabled}
-          onChange={(e) => update({ ...cfg, enabled: e.target.checked })}
-          className="w-2.5 h-2.5 accent-violet-500"
-        />
-        <span className="text-[10px] text-slate-700/65">启用折算</span>
-      </label>
-
-      {/* 规则说明（根据订阅类型） */}
-      {!noPlan && (
-        <p className="text-[9px] text-slate-700/45 mb-2 leading-relaxed">
-          {cfg.plan_type === "v2"
-            ? "V2：消耗 = token × 时段倍率（高峰3×/非高峰1×），周末全天非高峰。"
-            : "V3：消耗 = 积分 = (input×系数 + cache×系数 + output×系数)/10000 × 时段倍率（高峰1.0/非高峰0.5）。"}
-          {"时段支持跨午夜（如 22:00-02:00），午夜后按发生时刻的星期判断：仅勾周五则周六凌晨段不命中，需同时勾周五+周六。"}
-          {cfg.zcode_discount ? " 已启用 ZCode ×0.67 优惠。" : ""}
-        </p>
-      )}
-
-      {/* 时段列表（未选订阅类型时隐藏） */}
-      {!noPlan && (
-        <>
-          <div className="space-y-1.5">
-            {cfg.segments.map((seg, idx) => (
-              <div
-                key={idx}
-                className="rounded-md bg-white/30 border border-slate-900/8 p-1.5"
-              >
-                <div className="flex items-center gap-1.5 mb-1">
-                  <input
-                    type="time"
-                    value={seg.start}
-                    onChange={(e) =>
-                      updateSegment(cfg, idx, { start: e.target.value }, update)
-                    }
-                    className="num px-1 py-0.5 rounded text-[10px] bg-slate-900/5 border border-slate-900/10 focus:outline-none focus:border-violet-400/60 text-slate-900/85"
-                  />
-                  <span className="text-[9px] text-slate-700/40">-</span>
-                  <input
-                    type="time"
-                    value={seg.end}
-                    onChange={(e) =>
-                      updateSegment(cfg, idx, { end: e.target.value }, update)
-                    }
-                    className="num px-1 py-0.5 rounded text-[10px] bg-slate-900/5 border border-slate-900/10 focus:outline-none focus:border-violet-400/60 text-slate-900/85"
-                  />
-                  <span className="text-[9px] text-slate-700/45 shrink-0">倍率</span>
-                  <input
-                    type="number"
-                    step="0.1"
-                    min="0"
-                    value={seg.multiplier}
-                    onChange={(e) =>
-                      updateSegment(
-                        cfg,
-                        idx,
-                        { multiplier: parseFloat(e.target.value) || 0 },
-                        update
-                      )
-                    }
-                    className="num w-12 px-1 py-0.5 rounded text-[10px] bg-slate-900/5 border border-slate-900/10 focus:outline-none focus:border-violet-400/60 text-slate-900/85"
-                  />
-                  <button
-                    onClick={() =>
-                      update({
-                        ...cfg,
-                        segments: cfg.segments.filter((_, i) => i !== idx),
-                      })
-                    }
-                    className="ml-auto text-[10px] text-slate-700/35 hover:text-red-500/70 transition-colors shrink-0"
-                    title="删除时段"
-                  >
-                    ✕
-                  </button>
-                </div>
-                <div className="flex items-center gap-1">
-                  {WEEKDAY_LABELS.map((lbl, bit) => {
-                    const hit = ((seg.weekday_mask >> bit) & 1) === 1;
-                    return (
-                      <button
-                        key={bit}
-                        onClick={() =>
-                          updateSegment(
-                            cfg,
-                            idx,
-                            { weekday_mask: seg.weekday_mask ^ (1 << bit) },
-                            update
-                          )
-                        }
-                        className={`w-5 h-5 rounded text-[9px] flex items-center justify-center transition-colors ${
-                          hit
-                            ? "bg-violet-500 text-white"
-                            : "bg-slate-900/8 text-slate-700/40 hover:bg-slate-900/15"
-                        }`}
-                      >
-                        {lbl}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <div className="flex items-center justify-between mt-1.5">
-            <button
-              onClick={() =>
-                update({
-                  ...cfg,
-                  segments: [
-                    ...cfg.segments,
-                    {
-                      start: "00:00",
-                      end: "23:59",
-                      multiplier: 1.0,
-                      weekday_mask: MASK_WEEKDAY,
-                    } as PeakSegment,
-                  ],
-                })
-              }
-              className="text-[10px] text-violet-600 hover:text-violet-700 transition-colors"
-            >
-              + 添加时段
-            </button>
-            <span className="text-[9px] text-slate-700/40">
-              未匹配时段按 1.0 倍
-            </span>
-          </div>
-        </>
-      )}
-      {error && (
-        <div className="mt-1.5 text-[9px] text-red-600/80">{error}</div>
-      )}
-    </div>
-  );
-});
-
-/** 更新某个时段的字段 */
-function updateSegment(
-  cfg: PeakConfig,
-  idx: number,
-  patch: Partial<PeakSegment>,
-  commit: (next: PeakConfig) => void
-) {
-  const segments = cfg.segments.map((s, i) =>
-    i === idx ? { ...s, ...patch } : s
-  );
-  commit({ ...cfg, segments });
-}

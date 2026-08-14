@@ -3,7 +3,6 @@ import type {
   AutoCleanupConfig,
   CleanupResult,
   CleanupStatus,
-  ConsumedBucket,
   CostResult,
   Currency,
   CursorConfig,
@@ -11,8 +10,6 @@ import type {
   DeviceInfo,
   MergeResult,
   ModelInfo,
-  PeakConfig,
-  PlanType,
   PricingConfig,
   PricingDiff,
   ApplyPriceItem,
@@ -20,7 +17,6 @@ import type {
   QuotaResult,
   QuotaSnapshot,
   RegisterRequest,
-  RemotePeriodDetail,
   RenameResult,
   RemoteSnapshot,
   RemoteUsage,
@@ -192,20 +188,6 @@ export async function remoteSnapshots(
   });
 }
 
-/** 拉取远端各周期逐条用量明细（前端用本地 peak 配置折算消耗）。 */
-export async function remotePeriodDetail(
-  periods: [number, number][],
-  options: { excludeDevice?: string; devices?: string } = {}
-): Promise<RemotePeriodDetail[]> {
-  return invoke<RemotePeriodDetail[]>("remote_period_detail", {
-    req: {
-      periods,
-      exclude_device: options.excludeDevice ?? "",
-      devices: options.devices ?? "",
-    },
-  });
-}
-
 export async function listRemoteDevices(): Promise<DeviceInfo[]> {
   return invoke<DeviceInfo[]>("list_remote_devices");
 }
@@ -288,7 +270,7 @@ export async function setPin(enabled: boolean): Promise<void> {
   await invoke("set_pin", { enabled });
 }
 
-// ===== 周额度追踪 / 对比页 / 高峰期 =====
+// ===== 周额度追踪 / 对比页 =====
 
 /** 读取全部额度快照历史（按 ts 升序） */
 export async function getQuotaHistory(): Promise<QuotaSnapshot[]> {
@@ -315,28 +297,6 @@ export async function getCompareTokens(
   periods: [number, number][]
 ): Promise<WeeklyTokenBucket[]> {
   return invoke<WeeklyTokenBucket[]>("get_compare_tokens", { periods });
-}
-
-/** 对比页"折算消耗"（本地部分）：按订阅类型折算（V2=等效token, V3=积分） */
-export async function getCompareConsumed(
-  periods: [number, number][]
-): Promise<ConsumedBucket[]> {
-  return invoke<ConsumedBucket[]>("get_compare_consumed", { periods });
-}
-
-/** 读取高峰期配置 */
-export async function getPeakConfig(): Promise<PeakConfig> {
-  return invoke<PeakConfig>("get_peak_config");
-}
-
-/** 保存高峰期配置 */
-export async function setPeakConfig(config: PeakConfig): Promise<void> {
-  await invoke("set_peak_config", { config });
-}
-
-/** 切换订阅类型并重置该类型默认时段（保留 zcode_discount） */
-export async function setPlanType(plan: PlanType): Promise<PeakConfig> {
-  return invoke<PeakConfig>("set_plan_type", { plan });
 }
 
 // ===== Cursor 用量统计 =====
