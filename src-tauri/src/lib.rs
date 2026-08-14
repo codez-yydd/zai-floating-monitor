@@ -1,6 +1,5 @@
 mod cursor;
 mod db;
-mod notify;
 mod peak;
 mod pricing;
 mod quota;
@@ -164,18 +163,6 @@ fn get_quota_config() -> Result<QuotaConfig, String> {
 #[tauri::command]
 fn set_quota_config(config: QuotaConfig) -> Result<(), String> {
     save_quota(&config)
-}
-
-/// get_notify_config：读取额度预警配置
-#[tauri::command]
-fn get_notify_config() -> Result<notify::NotifyConfig, String> {
-    Ok(notify::load_notify())
-}
-
-/// set_notify_config：保存额度预警配置
-#[tauri::command]
-fn set_notify_config(config: notify::NotifyConfig) -> Result<(), String> {
-    notify::save_notify(&config)
 }
 
 /// get_shortcut_config：读取全局快捷键配置
@@ -1031,8 +1018,6 @@ pub fn run() {
             apply_pricing_updates,
             get_quota_config,
             set_quota_config,
-            get_notify_config,
-            set_notify_config,
             get_shortcut_config,
             set_shortcut_config,
             unregister_shortcut,

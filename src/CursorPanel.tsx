@@ -5,7 +5,13 @@ import type {
   TrendPoint,
 } from "./types";
 import { formatCost, formatTokens, formatPct } from "./format";
-import { Metric, ProgressBar, TrendChart } from "./widgets";
+import {
+  Metric,
+  ProgressBar,
+  TrendChart,
+  remainingGradient,
+  remainingTextColor,
+} from "./widgets";
 
 interface Props {
   snapshot: CursorSnapshot | null;
@@ -133,62 +139,57 @@ export function CursorPanel({
             </span>
             {planPct != null && (
               <span
-                className={`num text-[11px] font-semibold ${
-                  planPct > 90
-                    ? "text-rose-600"
-                    : planPct > 70
-                      ? "text-amber-600"
-                      : "text-emerald-600"
-                }`}
+                className="num text-[11px] font-semibold"
+                style={{ color: remainingTextColor(100 - planPct) }}
               >
-                {planPct.toFixed(0)}%
+                剩 {Math.max(0, Math.round(100 - planPct))}%
               </span>
             )}
           </div>
-          <ProgressBar
-            pct={(planPct ?? 0) / 100}
-            color={
-              (planPct ?? 0) > 90
-                ? "bg-rose-400"
-                : (planPct ?? 0) > 70
-                  ? "bg-amber-400"
-                  : "bg-emerald-400"
-            }
-          />
-          {/* Auto / API 百分比 */}
-          {(plan.auto_pct != null || plan.api_pct != null) && (
-            <div className="flex gap-3 pt-1 border-t border-slate-900/8">
-              {plan.auto_pct != null && (
-                <div className="flex-1">
-                  <div className="text-[9px] text-slate-700/45">Auto+Composer</div>
-                  <div className="flex items-center gap-1.5 mt-0.5">
-                    <ProgressBar
-                      pct={plan.auto_pct / 100}
-                      height="h-1"
-                      color="bg-sky-300"
-                    />
-                    <span className="num text-[9px] text-slate-700/60 w-7 text-right">
-                      {plan.auto_pct.toFixed(0)}%
-                    </span>
-                  </div>
+          {planPct != null ? (
+            <>
+              <ProgressBar
+                pct={(100 - planPct) / 100}
+                gradient={remainingGradient(100 - planPct)}
+              />
+              {/* Auto / API 百分比（剩余版） */}
+              {(plan.auto_pct != null || plan.api_pct != null) && (
+                <div className="flex gap-3 pt-1 border-t border-slate-900/8">
+                  {plan.auto_pct != null && (
+                    <div className="flex-1">
+                      <div className="text-[9px] text-slate-700/45">Auto+Composer</div>
+                      <div className="flex items-center gap-1.5 mt-0.5">
+                        <ProgressBar
+                          pct={(100 - plan.auto_pct) / 100}
+                          height="h-1"
+                          gradient={remainingGradient(100 - plan.auto_pct)}
+                        />
+                        <span className="num text-[9px] text-slate-700/60 w-9 text-right">
+                          剩 {Math.max(0, Math.round(100 - plan.auto_pct))}%
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                  {plan.api_pct != null && (
+                    <div className="flex-1">
+                      <div className="text-[9px] text-slate-700/45">API</div>
+                      <div className="flex items-center gap-1.5 mt-0.5">
+                        <ProgressBar
+                          pct={(100 - plan.api_pct) / 100}
+                          height="h-1"
+                          gradient={remainingGradient(100 - plan.api_pct)}
+                        />
+                        <span className="num text-[9px] text-slate-700/60 w-9 text-right">
+                          剩 {Math.max(0, Math.round(100 - plan.api_pct))}%
+                        </span>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
-              {plan.api_pct != null && (
-                <div className="flex-1">
-                  <div className="text-[9px] text-slate-700/45">API</div>
-                  <div className="flex items-center gap-1.5 mt-0.5">
-                    <ProgressBar
-                      pct={plan.api_pct / 100}
-                      height="h-1"
-                      color="bg-violet-300"
-                    />
-                    <span className="num text-[9px] text-slate-700/60 w-7 text-right">
-                      {plan.api_pct.toFixed(0)}%
-                    </span>
-                  </div>
-                </div>
-              )}
-            </div>
+            </>
+          ) : (
+            <div className="text-[10px] text-slate-700/40">暂无额度数据</div>
           )}
         </div>
       )}
@@ -218,9 +219,11 @@ export function CursorPanel({
           </div>
           {odLimitUsd != null && odLimitUsd > 0 && odUsedUsd != null && (
             <ProgressBar
-              pct={odUsedUsd / odLimitUsd}
+              pct={(odLimitUsd - odUsedUsd) / odLimitUsd}
               height="h-1"
-              color="bg-amber-400"
+              gradient={remainingGradient(
+                ((odLimitUsd - odUsedUsd) / odLimitUsd) * 100
+              )}
             />
           )}
         </div>

@@ -390,17 +390,9 @@ export interface ApplyPriceItem {
   price: ModelPrice;
 }
 
-// ===== 额度阈值通知（~/.zbar/notify.json）=====
+// ===== 全局快捷键（~/.zbar/shortcut.json）=====
 
-/** 额度预警配置 */
-export interface NotifyConfig {
-  enabled: boolean;
-  hour5_threshold: number;
-  weekly_threshold: number;
-  mcp_threshold: number;
-}
-
-/** 全局快捷键配置（~/.zbar/shortcut.json） */
+/** 全局快捷键配置 */
 export interface ShortcutConfig {
   enabled: boolean;
   /** Tauri accelerator 格式，如 "alt+shift+z" */

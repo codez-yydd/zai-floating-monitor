@@ -6,7 +6,12 @@ import type {
   TrendPoint,
 } from "./types";
 import { formatCost, formatTokens } from "./format";
-import { ProgressBar, TrendChart } from "./widgets";
+import {
+  ProgressBar,
+  TrendChart,
+  remainingGradient,
+  remainingTextColor,
+} from "./widgets";
 import { useDataCache } from "./DataCache";
 import { useState } from "react";
 
@@ -150,53 +155,36 @@ export function SummaryTab({
 
       {/* 双看板：额度进度 */}
       <div className="grid grid-cols-2 gap-1.5">
-        {/* ZCode 周额度 */}
+        {/* ZCode 周额度（剩余版） */}
         <div className="rounded-lg bg-white/25 border border-white/30 px-2 py-1.5">
           <div className="flex items-center justify-between">
             <span className="text-[9px] text-slate-700/45">ZCode 周额度</span>
             {weeklyPct != null && (
               <span
-                className={`num text-[10px] font-semibold ${
-                  weeklyPct > 90
-                    ? "text-rose-600"
-                    : weeklyPct > 70
-                      ? "text-amber-600"
-                      : "text-emerald-600"
-                }`}
+                className="num text-[10px] font-semibold"
+                style={{ color: remainingTextColor(100 - weeklyPct) }}
               >
-                {Math.round(weeklyPct)}%
+                剩 {Math.max(0, Math.round(100 - weeklyPct))}%
               </span>
             )}
           </div>
           {weeklyPct != null ? (
             <>
               <ProgressBar
-                pct={weeklyPct / 100}
+                pct={(100 - weeklyPct) / 100}
                 height="h-1"
-                color={
-                  weeklyPct > 90
-                    ? "bg-rose-400"
-                    : weeklyPct > 70
-                      ? "bg-amber-400"
-                      : "bg-emerald-400"
-                }
+                gradient={remainingGradient(100 - weeklyPct)}
               />
               {hour5Pct != null && (
                 <div className="flex items-center gap-1.5 mt-1">
                   <span className="text-[8px] text-slate-700/40 shrink-0">5h</span>
                   <ProgressBar
-                    pct={hour5Pct / 100}
+                    pct={(100 - hour5Pct) / 100}
                     height="h-1"
-                    color={
-                      hour5Pct > 90
-                        ? "bg-rose-400"
-                        : hour5Pct > 70
-                          ? "bg-amber-400"
-                          : "bg-emerald-400"
-                    }
+                    gradient={remainingGradient(100 - hour5Pct)}
                   />
-                  <span className="num text-[8px] text-slate-700/50 w-6 text-right">
-                    {Math.round(hour5Pct)}%
+                  <span className="num text-[8px] text-slate-700/50 w-8 text-right">
+                    剩 {Math.max(0, Math.round(100 - hour5Pct))}%
                   </span>
                 </div>
               )}
@@ -211,35 +199,24 @@ export function SummaryTab({
             </div>
           )}
         </div>
-        {/* Cursor 套餐 */}
+        {/* Cursor 套餐（剩余版） */}
         <div className="rounded-lg bg-white/25 border border-white/30 px-2 py-1.5">
           <div className="flex items-center justify-between">
             <span className="text-[9px] text-slate-700/45">Cursor 套餐</span>
             {planPct != null && (
               <span
-                className={`num text-[10px] font-semibold ${
-                  planPct > 90
-                    ? "text-rose-600"
-                    : planPct > 70
-                      ? "text-amber-600"
-                      : "text-emerald-600"
-                }`}
+                className="num text-[10px] font-semibold"
+                style={{ color: remainingTextColor(100 - planPct) }}
               >
-                {planPct.toFixed(0)}%
+                剩 {Math.max(0, Math.round(100 - planPct))}%
               </span>
             )}
           </div>
           {planPct != null ? (
             <ProgressBar
-              pct={planPct / 100}
+              pct={(100 - planPct) / 100}
               height="h-1"
-              color={
-                planPct > 90
-                  ? "bg-rose-400"
-                  : planPct > 70
-                    ? "bg-amber-400"
-                    : "bg-emerald-400"
-              }
+              gradient={remainingGradient(100 - planPct)}
             />
           ) : (
             <div className="text-[10px] text-slate-700/40 mt-1">未登录</div>

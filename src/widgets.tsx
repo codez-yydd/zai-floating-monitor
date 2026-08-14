@@ -2,23 +2,71 @@ import { useState } from "react";
 import type { Currency, TrendPoint } from "./types";
 import { formatCost, formatTokens } from "./format";
 
+// ============================================================
+// 额度剩余渐变色：所有额度进度条统一按「剩余百分比」着色。
+// 分档：>80% 绿、30-80% 黄、<30% 红；档内随剩余连续渐变
+// （剩余越低颜色越深，如 <10% 时明显更红）。边界色连续无跳变。
+// ============================================================
+
+/** 插值锚点：[剩余%, 色相, 饱和度, 亮度]。色相用 -10 等价 350，避免跨 360 插值走反方向 */
+const REMAINING_STOPS: [number, number, number, number][] = [
+  [0, -10, 88, 40], // 深红（额度耗尽）
+  [30, 22, 92, 50], // 橙红（红/黄边界）
+  [80, 58, 82, 47], // 黄（黄/绿边界）
+  [100, 152, 72, 40], // 绿（额度充裕）
+];
+
+/** 剩余百分比 → 基色 HSL（分段线性插值） */
+function remainingHsl(remaining: number): [number, number, number] {
+  const r = Math.min(Math.max(remaining, 0), 100);
+  for (let i = 0; i < REMAINING_STOPS.length - 1; i++) {
+    const [r0, h0, s0, l0] = REMAINING_STOPS[i];
+    const [r1, h1, s1, l1] = REMAINING_STOPS[i + 1];
+    if (r <= r1) {
+      const t = (r - r0) / (r1 - r0);
+      const h = (((h0 + (h1 - h0) * t) % 360) + 360) % 360;
+      return [h, s0 + (s1 - s0) * t, l0 + (l1 - l0) * t];
+    }
+  }
+  const [, h, s, l] = REMAINING_STOPS[REMAINING_STOPS.length - 1];
+  return [h, s, l];
+}
+
+/** 剩余百分比 → 进度条填充渐变（左深右浅，基色随剩余分段渐变） */
+export function remainingGradient(remaining: number): string {
+  const [h, s, l] = remainingHsl(remaining);
+  return `linear-gradient(90deg, hsl(${h}, ${s}%, ${l}%), hsl(${h}, ${s}%, ${Math.min(l + 12, 62)}%))`;
+}
+
+/** 剩余百分比 → 文字颜色（与进度条同基色） */
+export function remainingTextColor(remaining: number): string {
+  const [h, s, l] = remainingHsl(remaining);
+  return `hsl(${h}, ${s}%, ${l}%)`;
+}
+
 /** 通用进度条 */
 export function ProgressBar({
   pct,
   color = "bg-sky-400",
+  gradient,
   track = "bg-slate-900/10",
   height = "h-1.5",
 }: {
   pct: number;
   color?: string;
+  /** CSS background 渐变（额度剩余条用，优先于 color） */
+  gradient?: string;
   track?: string;
   height?: string;
 }) {
   return (
     <div className={`flex-1 ${height} rounded-full overflow-hidden ${track}`}>
       <div
-        className={`h-full rounded-full ${color} transition-all duration-500`}
-        style={{ width: `${Math.min(Math.max(pct * 100, 0), 100)}%` }}
+        className={`h-full rounded-full ${gradient ? "" : color} transition-all duration-500`}
+        style={{
+          width: `${Math.min(Math.max(pct * 100, 0), 100)}%`,
+          ...(gradient ? { background: gradient } : null),
+        }}
       />
     </div>
   );

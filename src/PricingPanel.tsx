@@ -5,7 +5,6 @@ import type {
   CursorConfig,
   ModelInfo,
   ModelPrice,
-  NotifyConfig,
   PeakConfig,
   PeakSegment,
   PlanType,
@@ -23,13 +22,11 @@ import {
   fetchPricing,
   fetchQuotaConfig,
   getCursorConfig,
-  getNotifyConfig,
   getPeakConfig,
   getShortcutConfig,
   savePricing,
   saveQuotaConfig,
   setCursorConfig,
-  setNotifyConfig,
   setPeakConfig,
   setPlanType,
   setShortcutConfig,
@@ -69,11 +66,6 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
   const [savingQuota, setSavingQuota] = useState(false);
   const [quotaSavedFlash, setQuotaSavedFlash] = useState(false);
 
-  // ===== 额度阈值通知配置 =====
-  const [notifyCfg, setNotifyCfg] = useState<NotifyConfig | null>(null);
-  const [savingNotify, setSavingNotify] = useState(false);
-  const [notifySavedFlash, setNotifySavedFlash] = useState(false);
-
   // ===== 全局快捷键配置 =====
   const [shortcutCfg, setShortcutCfg] = useState<ShortcutConfig | null>(null);
   const [shortcutDraft, setShortcutDraft] = useState("");
@@ -108,16 +100,14 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
       fetchPricing(),
       fetchModels(),
       fetchQuotaConfig(),
-      getNotifyConfig(),
       getShortcutConfig(),
       getCursorConfig(),
     ])
-      .then(([p, m, q, n, s, cc]) => {
+      .then(([p, m, q, s, cc]) => {
         setPricing(p);
         setModels(m);
         setQuotaCfg(q);
         setTokenDraft(q.token);
-        setNotifyCfg(n);
         setShortcutCfg(s);
         setShortcutDraft(s.accelerator);
         setCursorCfg(cc);
@@ -198,22 +188,6 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
       setCursorTestResult(`✗ ${String(e)}`);
     } finally {
       setCursorTesting(false);
-    }
-  };
-
-  // 保存额度预警配置
-  const handleSaveNotify = async () => {
-    if (!notifyCfg) return;
-    setSavingNotify(true);
-    setError(null);
-    try {
-      await setNotifyConfig(notifyCfg);
-      setNotifySavedFlash(true);
-      setTimeout(() => setNotifySavedFlash(false), 1500);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setSavingNotify(false);
     }
   };
 
@@ -726,77 +700,6 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
             </pre>
           )}
         </div>
-
-        {/* ===== 额度阈值通知 ===== */}
-        {notifyCfg && (
-          <div className="mt-2 rounded-lg bg-slate-900/5 border border-slate-900/10 p-2.5">
-            <div className="flex items-center justify-between mb-1.5">
-              <span className="text-[11px] font-medium text-slate-900/85">
-                额度颜色阈值
-              </span>
-              <div className="flex items-center gap-2">
-                <label className="flex items-center gap-1 text-[10px] text-slate-700/60 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={notifyCfg.enabled}
-                    onChange={(e) =>
-                      setNotifyCfg({ ...notifyCfg, enabled: e.target.checked })
-                    }
-                    className="accent-rose-500 w-3 h-3"
-                  />
-                  启用
-                </label>
-                <button
-                  onClick={handleSaveNotify}
-                  disabled={savingNotify}
-                  className="text-[10px] px-2 py-0.5 rounded-md bg-rose-500 text-white hover:bg-rose-600 disabled:opacity-40 transition-colors"
-                >
-                  {savingNotify
-                    ? "保存中…"
-                    : notifySavedFlash
-                      ? "已保存 ✓"
-                      : "保存"}
-                </button>
-              </div>
-            </div>
-            <p className="text-[9px] text-slate-700/45 mb-2 leading-relaxed">
-              用量达到阈值时进度条变黄，超出阈值 +15% 变红。各项阈值对应面板里的 5h / 周 / MCP 进度条。
-            </p>
-            <div className="grid grid-cols-3 gap-2">
-              {(
-                [
-                  { key: "hour5_threshold", label: "5h 窗口" },
-                  { key: "weekly_threshold", label: "每周额度" },
-                  { key: "mcp_threshold", label: "MCP 月度" },
-                ] as const
-              ).map((f) => (
-                <label
-                  key={f.key}
-                  className="flex flex-col gap-0.5 text-[10px]"
-                >
-                  <span className="text-slate-700/55">{f.label}</span>
-                  <div className="flex items-center rounded-md bg-slate-900/5 border border-slate-900/10 focus-within:border-rose-400/60 focus-within:ring-1 focus-within:ring-rose-400/40 transition-colors">
-                    <input
-                      type="number"
-                      min={1}
-                      max={99}
-                      value={notifyCfg[f.key]}
-                      onChange={(e) => {
-                        const v = Math.min(
-                          99,
-                          Math.max(1, parseInt(e.target.value) || 0)
-                        );
-                        setNotifyCfg({ ...notifyCfg, [f.key]: v });
-                      }}
-                      className="num w-full px-1.5 py-1 text-right bg-transparent text-slate-900/90 focus:outline-none text-[11px]"
-                    />
-                    <span className="text-slate-700/50 pr-1.5">%</span>
-                  </div>
-                </label>
-              ))}
-            </div>
-          </div>
-        )}
 
         {/* ===== 全局快捷键 ===== */}
         {shortcutCfg && (

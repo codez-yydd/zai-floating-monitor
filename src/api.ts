@@ -11,7 +11,6 @@ import type {
   DeviceInfo,
   MergeResult,
   ModelInfo,
-  NotifyConfig,
   PeakConfig,
   PlanType,
   PricingConfig,
@@ -88,16 +87,6 @@ export async function saveQuotaConfig(config: QuotaConfig): Promise<void> {
 
 export async function fetchQuota(): Promise<QuotaResult> {
   return invoke<QuotaResult>("fetch_quota");
-}
-
-/** 读取额度预警配置 */
-export async function getNotifyConfig(): Promise<NotifyConfig> {
-  return invoke<NotifyConfig>("get_notify_config");
-}
-
-/** 保存额度预警配置 */
-export async function setNotifyConfig(config: NotifyConfig): Promise<void> {
-  await invoke("set_notify_config", { config });
 }
 
 /** 读取全局快捷键配置 */

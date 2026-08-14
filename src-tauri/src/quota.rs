@@ -150,7 +150,7 @@ pub fn endpoint_base(endpoint: &str) -> &str {
 /// 5 小时窗口刚刷新后可能没有 nextResetTime，反而会被排序到最后。
 ///
 /// 注意：本函数不写 quota_history 快照。仅前端 QuotaPanel 的主动刷新（fetch_quota）
-/// 才写快照；后台 notify watcher 应调用本函数，避免高频轮询污染历史。
+/// 才写快照；其他调用方应使用本函数，避免高频轮询污染历史。
 pub fn query_quota(cfg: &QuotaConfig) -> Result<QuotaResult, String> {
     if cfg.token.trim().is_empty() {
         return Err("未配置 Token，请在设置中填写 Coding Plan API Token".into());

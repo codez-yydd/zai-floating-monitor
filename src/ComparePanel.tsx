@@ -19,6 +19,7 @@ import {
 } from "./api";
 import { formatTokens } from "./format";
 import { detailToConsumed } from "./peak";
+import { remainingGradient, remainingTextColor } from "./widgets";
 
 interface Props {
   onBack: () => void;
@@ -351,7 +352,7 @@ export function ComparePanel({ onBack }: Props) {
                       <div className="flex items-center gap-2 text-slate-700/60 num shrink-0">
                         <span>{formatTokens(tk)}</span>
                         <span className="text-slate-700/25">·</span>
-                        <span className={pctColor(p.pct_peak)}>{p.pct_peak}%</span>
+                        <span style={{ color: remainingTextColor(100 - p.pct_peak) }}>{p.pct_peak}%</span>
                       </div>
                     </button>
                   );
@@ -400,7 +401,8 @@ function PeriodChart({
         {periods.map((p, i) => {
           const h = p.pct_peak; // 0-100
           const isSel = i === selectedIdx;
-          const color = pctBarColor(p.pct_peak);
+          // 峰值高度按已用，颜色统一按剩余渐变（与全局额度条一致）
+          const bg = remainingGradient(100 - p.pct_peak);
           return (
             <button
               key={p.reset_at}
@@ -409,10 +411,10 @@ function PeriodChart({
               title={`${dateLabel(p.reset_at)}: 峰值 ${p.pct_peak}%`}
             >
               <div
-                className={`w-full rounded-t-sm transition-all duration-300 ${color} ${
+                className={`w-full rounded-t-sm transition-all duration-300 ${
                   isSel ? "opacity-100 ring-1 ring-sky-400" : "opacity-70 group-hover:opacity-90"
                 }`}
-                style={{ height: `${Math.max(h, 2)}%` }}
+                style={{ height: `${Math.max(h, 2)}%`, background: bg }}
               />
             </button>
           );
@@ -478,7 +480,10 @@ function PeriodDetail({
             {period.is_current ? " ~ 进行中" : ` ~ ${dateLabel(period.end_at)}`}
           </span>
         </div>
-        <span className={`text-[11px] num font-semibold ${pctColor(period.pct_peak)}`}>
+        <span
+          className="text-[11px] num font-semibold"
+          style={{ color: remainingTextColor(100 - period.pct_peak) }}
+        >
           峰值 {period.pct_peak}%
         </span>
       </div>
@@ -517,8 +522,11 @@ function PeriodDetail({
         </div>
         <div className="h-1.5 rounded-full bg-slate-900/8 overflow-hidden">
           <div
-            className={`h-full rounded-full ${pctBarColor(period.pct_peak)} opacity-80`}
-            style={{ width: `${period.pct_peak}%` }}
+            className="h-full rounded-full opacity-80"
+            style={{
+              width: `${period.pct_peak}%`,
+              background: remainingGradient(100 - period.pct_peak),
+            }}
           />
         </div>
       </div>
@@ -527,20 +535,6 @@ function PeriodDetail({
 }
 
 // ===== 辅助 =====
-
-/** 百分比对应的文字颜色 */
-function pctColor(pct: number): string {
-  if (pct >= 90) return "text-red-600";
-  if (pct >= 70) return "text-amber-600";
-  return "text-emerald-600";
-}
-
-/** 百分比对应的柱子背景色 */
-function pctBarColor(pct: number): string {
-  if (pct >= 90) return "bg-red-400";
-  if (pct >= 70) return "bg-amber-400";
-  return "bg-emerald-400";
-}
 
 /** 毫秒 → "MM-DD" label */
 function dateLabel(ms: number): string {
