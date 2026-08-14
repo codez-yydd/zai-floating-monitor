@@ -48,6 +48,17 @@ IMPORTANT: These rules apply to the "Generate with AI" in the Git panel.
 - `refactor:优化任务管理页面结构`
 - `perf:优化批量查询性能`
 
+---
+
+# GIT PUSH RULES
+
+IMPORTANT: 用户要求提交推送时，必须同时推送两个远程仓库：
+
+- `git push`（origin，GitHub，分支 `main`）
+- `git push gitee main:master`（gitee，Gitee，分支 `master`）
+
+两条推送都成功后才算完成，任一失败需如实报告。
+
 <!-- SUB_AGENTS_RULES_BEGIN -->
 # 子智能体协作与调度规则
 
