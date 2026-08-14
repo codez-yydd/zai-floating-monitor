@@ -42,6 +42,7 @@ import {
   remoteToStats,
   remoteTrendToLocal,
 } from "./merge";
+import { loadCache, saveCache } from "./cache";
 
 /**
  * 全局数据缓存层。
@@ -121,22 +122,38 @@ export function DataProvider({ pricing, currency, children }: ProviderProps) {
     preset === "today" || preset === "1d" ? "hour" : "day";
   const [deviceFilter, setDeviceFilter] = useState<string>("all");
 
-  // ===== z.ai 数据 =====
-  const [stats, setStats] = useState<Stats | null>(null);
-  const [cost, setCost] = useState<CostResult | null>(null);
-  const [trend, setTrend] = useState<TrendPoint[]>([]);
+  // ===== z.ai 数据（冷启动先用 localStorage 缓存渲染，后台刷新覆盖）=====
+  const [stats, setStats] = useState<Stats | null>(() =>
+    loadCache<Stats>("zbar-stats")
+  );
+  const [cost, setCost] = useState<CostResult | null>(() =>
+    loadCache<CostResult>("zbar-cost")
+  );
+  const [trend, setTrend] = useState<TrendPoint[]>(
+    () => loadCache<TrendPoint[]>("zbar-trend") ?? []
+  );
   const [error, setError] = useState<string | null>(null);
-  const [lastUpdate, setLastUpdate] = useState<number>(0);
+  const [lastUpdate, setLastUpdate] = useState<number>(
+    () => loadCache<number>("zbar-lastupdate") ?? 0
+  );
   const [refreshing, setRefreshing] = useState(false);
 
-  // ===== Cursor 数据 =====
-  const [cursor, setCursor] = useState<CursorSnapshot | null>(null);
+  // ===== Cursor 数据（冷启动先用缓存渲染，后台刷新覆盖）=====
+  const [cursor, setCursor] = useState<CursorSnapshot | null>(() =>
+    loadCache<CursorSnapshot>("zbar-cursor")
+  );
   const [cursorError, setCursorError] = useState<string | null>(null);
-  const [fxRate, setFxRate] = useState(7.2);
+  const [fxRate, setFxRate] = useState<number>(
+    () => loadCache<number>("zbar-fxrate") ?? 7.2
+  );
 
-  // ===== Quota 数据 =====
-  const [quota, setQuota] = useState<QuotaResult | null>(null);
-  const [todayDelta, setTodayDelta] = useState<[number, number] | null>(null);
+  // ===== Quota 数据（冷启动先用缓存渲染，后台刷新覆盖）=====
+  const [quota, setQuota] = useState<QuotaResult | null>(() =>
+    loadCache<QuotaResult>("zbar-quota")
+  );
+  const [todayDelta, setTodayDelta] = useState<[number, number] | null>(() =>
+    loadCache<[number, number]>("zbar-today-delta")
+  );
   const [quotaError, setQuotaError] = useState<string | null>(null);
 
   // ===== 同步配置 =====
@@ -165,6 +182,34 @@ export function DataProvider({ pricing, currency, children }: ProviderProps) {
       .then((cfg) => setFxRate(cfg.usd_cny_rate))
       .catch(() => {});
   }, []);
+
+  // ===== 持久化：数据变化即落盘 localStorage，供下次冷启动首屏秒开。
+  //      与内存缓存互补——进程重启后内存清空，这里保证冷启动先用上次结果渲染，
+  //      后台请求刷新后无缝覆盖。写入失败静默（QuotaExceeded 等），不影响主流程。 =====
+  useEffect(() => {
+    if (stats) saveCache("zbar-stats", stats);
+  }, [stats]);
+  useEffect(() => {
+    if (cost) saveCache("zbar-cost", cost);
+  }, [cost]);
+  useEffect(() => {
+    saveCache("zbar-trend", trend);
+  }, [trend]);
+  useEffect(() => {
+    if (cursor) saveCache("zbar-cursor", cursor);
+  }, [cursor]);
+  useEffect(() => {
+    saveCache("zbar-fxrate", fxRate);
+  }, [fxRate]);
+  useEffect(() => {
+    if (quota) saveCache("zbar-quota", quota);
+  }, [quota]);
+  useEffect(() => {
+    if (todayDelta) saveCache("zbar-today-delta", todayDelta);
+  }, [todayDelta]);
+  useEffect(() => {
+    if (lastUpdate) saveCache("zbar-lastupdate", lastUpdate);
+  }, [lastUpdate]);
 
   // z.ai 数据加载（本地 SQLite + 远端同步合并）。
   // 刷新期间不清空旧值，只设 refreshing —— 面板始终展示上次成功的结果。
