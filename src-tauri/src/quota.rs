@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::pricing::config_dir;
 
@@ -159,8 +160,11 @@ pub fn query_quota(cfg: &QuotaConfig) -> Result<QuotaResult, String> {
     let base = endpoint_base(&cfg.endpoint);
     let url = format!("{base}/api/monitor/usage/quota/limit");
 
+    // 15s 请求总超时：ureq 默认无超时，网络异常时会无限等待卡死调用方；
+    // 对齐其他模块的做法（cursor.rs 用 agent 级 30s 总超时，此处请求级 15s 即可）
     let resp: QuotaResponse = ureq::get(&url)
         .set("Authorization", cfg.token.trim())
+        .timeout(Duration::from_secs(15))
         .call()
         .map_err(|e| format!("请求额度接口失败: {e}"))?
         .into_json()

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   CostResult,
   Currency,
@@ -63,6 +63,10 @@ export function ReportPanel({ onBack, pricing }: Props) {
   // 货币：报告里同时展示 CNY + USD，这里取 pricing 默认（无需 UI 切换）
   const currency: Currency = "cny";
 
+  // 请求序号守卫：切报告类型/设备筛选会触发新 load，慢网络下旧响应后到
+  // 会覆盖新数据（仿 DataCache 的 quotaReqId 模式）
+  const loadReqId = useRef(0);
+
   // 初次读取同步配置 + 设备列表
   useEffect(() => {
     getSyncConfig()
@@ -78,6 +82,7 @@ export function ReportPanel({ onBack, pricing }: Props) {
   }, []);
 
   const load = useCallback(async () => {
+    const reqId = ++loadReqId.current;
     setLoading(true);
     setError(null);
     const now = Date.now();
@@ -144,6 +149,7 @@ export function ReportPanel({ onBack, pricing }: Props) {
 
     try {
       await Promise.all(tasks);
+      if (reqId !== loadReqId.current) return; // 已有更新的请求，丢弃旧响应
 
       // 合并 stats + cost
       let mergedStats: Stats | null = null;
@@ -179,10 +185,14 @@ export function ReportPanel({ onBack, pricing }: Props) {
       ].sort((a, b) => a.ts - b.ts);
       setSnaps(mergedSnaps);
     } catch (e) {
+      if (reqId !== loadReqId.current) return; // 已有更新的请求，丢弃旧错误
       setError(String(e));
     } finally {
-      // 关键：无论成功/失败都要结束 loading，否则页面永远停在"生成中…"
-      setLoading(false);
+      // 只有最新请求才允许结束 loading，避免旧请求把新请求的加载态清掉
+      if (reqId === loadReqId.current) {
+        // 关键：无论成功/失败都要结束 loading，否则页面永远停在"生成中…"
+        setLoading(false);
+      }
     }
   }, [kind, deviceFilter, syncConfig, syncEnabled, pricing, currency]);
 

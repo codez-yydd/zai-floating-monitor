@@ -51,7 +51,13 @@ export function rangeToMs(
   }
 }
 
-/** 格式化日期为 YYYY-MM-DD */
+/** 格式化日期为 YYYY-MM-DD（本地时区）。
+ *  不能用 toISOString（UTC）：东八区凌晨 0-8 点会得到"昨天"，
+ *  导致 RangePicker 的日期上限错一天。 */
 export function dateStr(ms: number): string {
-  return new Date(ms).toISOString().slice(0, 10);
+  const d = new Date(ms);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
 }

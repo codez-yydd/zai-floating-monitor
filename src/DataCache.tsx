@@ -34,6 +34,7 @@ import {
   remoteUsage,
 } from "./api";
 import { resolveRange } from "./RangePicker";
+import { dateStr } from "./format";
 import {
   computeRemoteCost,
   mergeCost,
@@ -205,10 +206,9 @@ export function DataProvider({ pricing, children }: ProviderProps) {
   const [custom, setCustom] = useState<{ from: string; to: string }>(() => {
     const saved = loadCache<{ from: string; to: string }>("zbar-custom");
     if (saved) return saved;
-    const today = new Date().toISOString().slice(0, 10);
-    const week = new Date(Date.now() - 6 * 86400000)
-      .toISOString()
-      .slice(0, 10);
+    // 本地时区日期（dateStr）；不能用 toISOString（UTC），东八区凌晨会错一天
+    const today = dateStr(Date.now());
+    const week = dateStr(Date.now() - 6 * 86400000);
     return { from: week, to: today };
   });
   const [deviceFilter, setDeviceFilter] = useState<string>(

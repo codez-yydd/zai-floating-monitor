@@ -71,10 +71,16 @@ export function SummaryTab({
       : null);
 
   // 合并趋势：按 label 对齐 z.ai 趋势 + Cursor daily（仅日桶有意义）
-  const cursorDailyMap = new Map<string, { cost: number; tokens: number }>();
+  // 双货币各自计算：usd 用原值，cny = usd × 汇率，分别写入对应字段，
+  // 避免同一个换算值同时进 cost_cny/cost_usd 造成非当前货币字段错误
+  const cursorDailyMap = new Map<
+    string,
+    { costCny: number; costUsd: number; tokens: number }
+  >();
   (cursor?.daily ?? []).forEach((d) => {
     cursorDailyMap.set(d.date, {
-      cost: currency === "cny" ? d.cost_usd * fxRate : d.cost_usd,
+      costCny: d.cost_usd * fxRate,
+      costUsd: d.cost_usd,
       tokens: d.total_tokens,
     });
   });
@@ -84,8 +90,8 @@ export function SummaryTab({
       label: p.label,
       total_tokens: p.total_tokens + (c?.tokens ?? 0),
       requests: p.requests,
-      cost_cny: p.cost_cny + (c?.cost ?? 0),
-      cost_usd: p.cost_usd + (c?.cost ?? 0),
+      cost_cny: p.cost_cny + (c?.costCny ?? 0),
+      cost_usd: p.cost_usd + (c?.costUsd ?? 0),
     };
   });
 

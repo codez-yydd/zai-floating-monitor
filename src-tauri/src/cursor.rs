@@ -696,17 +696,17 @@ fn aggregate_events(events: &[UsageEvent]) -> (CursorEventsSummary, Vec<CursorDa
 // events 缓存
 // ============================================================
 
-#[derive(Default)]
-struct EventsCache {
-    key: String,
-    events: Arc<Vec<UsageEvent>>,
-    fetched_at: Option<Instant>,
-}
+/// 缓存槽位上限：前端每 180s 轮刷 today/1d/7d/30d 四个不同窗口，
+/// 单槽会互相踢出（命中率≈0），多槽共存让各窗口独立命中；超上限淘汰最旧的。
+const EVENTS_CACHE_SLOTS: usize = 8;
 
-static EVENTS_CACHE: OnceLock<Mutex<EventsCache>> = OnceLock::new();
+/// key → (事件列表, 拉取时间)。事件列表用 Arc 共享：
+/// 命中路径只克隆引用计数，不再深拷贝几万条事件。
+static EVENTS_CACHE: OnceLock<Mutex<HashMap<String, (Arc<Vec<UsageEvent>>, Instant)>>> =
+    OnceLock::new();
 
-fn events_cache() -> &'static Mutex<EventsCache> {
-    EVENTS_CACHE.get_or_init(|| Mutex::new(EventsCache::default()))
+fn events_cache() -> &'static Mutex<HashMap<String, (Arc<Vec<UsageEvent>>, Instant)>> {
+    EVENTS_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// 将毫秒时间戳向下取整到 10 分钟刻度，作为缓存 key 的一部分。
@@ -717,8 +717,14 @@ fn round_for_cache(ms: i64) -> i64 {
     (ms / INTERVAL) * INTERVAL
 }
 
-/// 带缓存的 events 拉取：相同时间窗口（取整后）在 TTL 内复用
-fn fetch_events_cached(cookie: &str, from_ms: i64, to_ms: i64) -> Result<Vec<UsageEvent>, String> {
+/// 带缓存的 events 拉取：相同时间窗口（取整后）在 TTL 内复用。
+/// 返回 Arc 共享的事件列表（命中/未命中路径均无深拷贝），
+/// 调用侧聚合函数吃 &[UsageEvent]，Arc deref 即可只读借用。
+fn fetch_events_cached(
+    cookie: &str,
+    from_ms: i64,
+    to_ms: i64,
+) -> Result<Arc<Vec<UsageEvent>>, String> {
     // 取整后构建 key，避免 to_ms=Date.now() 导致每次 miss
     let key = format!(
         "{}|{}|{}",
@@ -728,12 +734,10 @@ fn fetch_events_cached(cookie: &str, from_ms: i64, to_ms: i64) -> Result<Vec<Usa
     );
     {
         let cache = events_cache().lock().map_err(|e| format!("缓存锁失败: {e}"))?;
-        if cache.key == key {
-            if let Some(at) = cache.fetched_at {
-                if at.elapsed() < EVENTS_CACHE_TTL {
-                    // Arc clone（仅引用计数 +1，不复制底层数据）
-                    return Ok((*cache.events).clone());
-                }
+        if let Some((events, at)) = cache.get(&key) {
+            if at.elapsed() < EVENTS_CACHE_TTL {
+                // Arc clone（仅引用计数 +1，不复制底层数据）
+                return Ok(Arc::clone(events));
             }
         }
     }
@@ -741,12 +745,21 @@ fn fetch_events_cached(cookie: &str, from_ms: i64, to_ms: i64) -> Result<Vec<Usa
     let events = Arc::new(fetch_usage_events(cookie, from_ms, to_ms)?);
 
     let mut cache = events_cache().lock().map_err(|e| format!("缓存锁失败: {e}"))?;
-    cache.key = key;
-    cache.events = Arc::clone(&events);
-    cache.fetched_at = Some(Instant::now());
+    // 先清掉已过期的槽位，腾出空间的同时避免过期数据长期占内存
+    cache.retain(|_, (_, at)| at.elapsed() < EVENTS_CACHE_TTL);
+    // 槽位已满时淘汰最旧的（按拉取时间），保证多窗口共存
+    if cache.len() >= EVENTS_CACHE_SLOTS && !cache.contains_key(&key) {
+        if let Some(oldest) = cache
+            .iter()
+            .min_by_key(|(_, (_, at))| *at)
+            .map(|(k, _)| k.clone())
+        {
+            cache.remove(&oldest);
+        }
+    }
+    cache.insert(key, (Arc::clone(&events), Instant::now()));
 
-    // 返回 owned Vec（调用方需要 &[UsageEvent]）
-    Ok((*events).clone())
+    Ok(events)
 }
 
 // ============================================================

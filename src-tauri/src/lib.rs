@@ -79,10 +79,14 @@ struct StatsRequest {
     to_ms: i64,
 }
 
-/// get_stats：返回时间范围内的统计 + 按模型分组
+/// get_stats：返回时间范围内的统计 + 按模型分组。
+/// async + spawn_blocking：SQLite 查询（busy_timeout 3s），前端每 30s 高频调用，
+/// ZCode 写入高峰期同步执行会让主线程秒级阻塞，卸载到阻塞线程池。
 #[tauri::command]
-fn get_stats(req: StatsRequest) -> Result<db::Stats, String> {
-    db::query_stats(req.from_ms, req.to_ms)
+async fn get_stats(req: StatsRequest) -> Result<db::Stats, String> {
+    tauri::async_runtime::spawn_blocking(move || db::query_stats(req.from_ms, req.to_ms))
+        .await
+        .map_err(|e| format!("统计查询任务失败: {e}"))?
 }
 
 /// list_models：列出数据库中所有出现过的模型
@@ -240,24 +244,35 @@ async fn fetch_quota() -> Result<QuotaResult, String> {
 }
 
 // ===== 周额度追踪 / 对比页 / 高峰期 =====
+// 以下命令内部为全文件读取/逐行解析（quota_history，90 天约 38MB）或 SQLite 查询
+// （busy_timeout 3s），对比页每 60s 触发一轮，统一 async + spawn_blocking
+// 卸载到阻塞线程池，避免阻塞主线程（与 get_stats 同款模式）。
 
 /// 读取全部额度快照历史（按 ts 升序）。
 #[tauri::command]
-fn get_quota_history() -> Result<Vec<quota_history::QuotaSnapshot>, String> {
-    quota_history::load_all()
+async fn get_quota_history() -> Result<Vec<quota_history::QuotaSnapshot>, String> {
+    tauri::async_runtime::spawn_blocking(quota_history::load_all)
+        .await
+        .map_err(|e| format!("读取快照历史任务失败: {e}"))?
 }
 
 /// 解析快照为"智谱重置周期"列表（对比页用）。
 #[tauri::command]
-fn get_weekly_compare() -> Result<Vec<quota_history::WeeklyPeriod>, String> {
-    let snaps = quota_history::load_all()?;
-    Ok(quota_history::split_periods(&snaps))
+async fn get_weekly_compare() -> Result<Vec<quota_history::WeeklyPeriod>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let snaps = quota_history::load_all()?;
+        Ok(quota_history::split_periods(&snaps))
+    })
+    .await
+    .map_err(|e| format!("周期解析任务失败: {e}"))?
 }
 
 /// 今日增量：(增量百分比, 今日采样数)。
 #[tauri::command]
-fn get_today_delta() -> Result<(u32, u32), String> {
-    quota_history::today_delta()
+async fn get_today_delta() -> Result<(u32, u32), String> {
+    tauri::async_runtime::spawn_blocking(quota_history::today_delta)
+        .await
+        .map_err(|e| format!("今日增量任务失败: {e}"))?
 }
 
 /// 清空额度快照历史（设置页"清理历史"用）。
@@ -269,19 +284,23 @@ fn clear_quota_history() -> Result<(), String> {
 /// 对比页"实际 token"列（本地部分）：对一组周期 [reset_at, end_at)
 /// 逐周期聚合本地 model_usage 的 token。前端再合并远端。
 #[tauri::command]
-fn get_compare_tokens(
+async fn get_compare_tokens(
     periods: Vec<(i64, i64)>,
 ) -> Result<Vec<WeeklyTokenBucket>, String> {
-    let buckets = db::query_period_buckets(&periods)?;
-    Ok(buckets
-        .into_iter()
-        .map(|b| WeeklyTokenBucket {
-            reset_at: b.reset_at,
-            end_at: b.end_at,
-            total_tokens: b.total_tokens,
-            requests: b.requests,
-        })
-        .collect())
+    tauri::async_runtime::spawn_blocking(move || {
+        let buckets = db::query_period_buckets(&periods)?;
+        Ok(buckets
+            .into_iter()
+            .map(|b| WeeklyTokenBucket {
+                reset_at: b.reset_at,
+                end_at: b.end_at,
+                total_tokens: b.total_tokens,
+                requests: b.requests,
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| format!("对比 token 任务失败: {e}"))?
 }
 
 /// 对比页"折算额度消耗"列（本地部分）：按订阅类型折算。
@@ -290,20 +309,24 @@ fn get_compare_tokens(
 /// - 都可再 × ZCode 优惠系数
 /// 返回的 consumed 字段即折算后的消耗值。
 #[tauri::command]
-fn get_compare_consumed(
+async fn get_compare_consumed(
     periods: Vec<(i64, i64)>,
 ) -> Result<Vec<ConsumedBucket>, String> {
-    let cfg = peak::load_peak().unwrap_or_default();
-    let buckets = db::query_period_consumed(&periods, &cfg)?;
-    Ok(buckets
-        .into_iter()
-        .map(|b| ConsumedBucket {
-            reset_at: b.reset_at,
-            end_at: b.end_at,
-            consumed: b.consumed,
-            requests: b.requests,
-        })
-        .collect())
+    tauri::async_runtime::spawn_blocking(move || {
+        let cfg = peak::load_peak().unwrap_or_default();
+        let buckets = db::query_period_consumed(&periods, &cfg)?;
+        Ok(buckets
+            .into_iter()
+            .map(|b| ConsumedBucket {
+                reset_at: b.reset_at,
+                end_at: b.end_at,
+                consumed: b.consumed,
+                requests: b.requests,
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| format!("对比消耗任务失败: {e}"))?
 }
 
 /// 读取高峰期配置。
@@ -415,34 +438,40 @@ struct ModelCost {
     cost: f64,
 }
 
+/// async + spawn_blocking：内部为 SQLite 查询（busy_timeout 3s），前端每 30s
+/// 高频调用，与 get_stats 同款卸载到阻塞线程池，避免写入高峰期阻塞主线程。
 #[tauri::command]
-fn compute_cost(req: StatsRequest) -> Result<CostResult, String> {
-    let stats = db::query_stats(req.from_ms, req.to_ms)?;
-    let pricing = load_pricing().unwrap_or_default();
+async fn compute_cost(req: StatsRequest) -> Result<CostResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let stats = db::query_stats(req.from_ms, req.to_ms)?;
+        let pricing = load_pricing().unwrap_or_default();
 
-    let per_model_cny: Vec<ModelCost> = stats
-        .by_model
-        .iter()
-        .map(|s| ModelCost {
-            model_id: s.model_id.clone(),
-            cost: cost_for(s, &pricing.cny),
-        })
-        .collect();
-    let per_model_usd: Vec<ModelCost> = stats
-        .by_model
-        .iter()
-        .map(|s| ModelCost {
-            model_id: s.model_id.clone(),
-            cost: cost_for(s, &pricing.usd),
-        })
-        .collect();
+        let per_model_cny: Vec<ModelCost> = stats
+            .by_model
+            .iter()
+            .map(|s| ModelCost {
+                model_id: s.model_id.clone(),
+                cost: cost_for(s, &pricing.cny),
+            })
+            .collect();
+        let per_model_usd: Vec<ModelCost> = stats
+            .by_model
+            .iter()
+            .map(|s| ModelCost {
+                model_id: s.model_id.clone(),
+                cost: cost_for(s, &pricing.usd),
+            })
+            .collect();
 
-    Ok(CostResult {
-        total_cny: per_model_cny.iter().map(|m| m.cost).sum(),
-        total_usd: per_model_usd.iter().map(|m| m.cost).sum(),
-        per_model_cny,
-        per_model_usd,
+        Ok(CostResult {
+            total_cny: per_model_cny.iter().map(|m| m.cost).sum(),
+            total_usd: per_model_usd.iter().map(|m| m.cost).sum(),
+            per_model_cny,
+            per_model_usd,
+        })
     })
+    .await
+    .map_err(|e| format!("花费计算任务失败: {e}"))?
 }
 
 /// 打开配置目录（~/.zbar）
@@ -542,78 +571,107 @@ fn set_sync_config(config: SyncConfig) -> Result<(), String> {
     sync::save_sync_config(&config)
 }
 
+// 以下 sync 系列命令内部直通 sync.rs 的 ureq 同步 HTTP（超时 10-15s），
+// 同步 command 在 Tauri v2 跑主线程，网络慢会冻结托盘/窗口事件。
+// 统一 async + spawn_blocking 卸载到阻塞线程池（与 fetch_quota 同款模式）。
+
 /// 向服务器注册设备（UI 填写 server_url + master_token + name 后调用）
 #[tauri::command]
-fn register_device(req: sync::RegisterRequest) -> Result<SyncConfig, String> {
-    sync::register_device(req)
+async fn register_device(req: sync::RegisterRequest) -> Result<SyncConfig, String> {
+    tauri::async_runtime::spawn_blocking(move || sync::register_device(req))
+        .await
+        .map_err(|e| format!("注册设备任务失败: {e}"))?
 }
 
 /// 手动触发一次增量上传
 #[tauri::command]
-fn sync_now() -> Result<SyncOutcome, String> {
-    sync::upload_incremental()
+async fn sync_now() -> Result<SyncOutcome, String> {
+    tauri::async_runtime::spawn_blocking(sync::upload_incremental)
+        .await
+        .map_err(|e| format!("同步任务失败: {e}"))?
 }
 
 /// 断开连接（清凭证，不删服务器数据）
 #[tauri::command]
-fn disconnect_device() -> Result<(), String> {
-    sync::disconnect()
+async fn disconnect_device() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(sync::disconnect)
+        .await
+        .map_err(|e| format!("断开连接任务失败: {e}"))?
 }
 
-/// 拉取远端聚合数据（其他设备）
+/// 拉取远端聚合数据（其他设备）。
+/// 在前端 30s 后台刷新链路上（每轮 × 4 个范围），必须卸载主线程。
 #[tauri::command]
-fn remote_usage(req: RemoteUsageRequest) -> Result<RemoteUsage, String> {
-    sync::fetch_remote_usage(req)
+async fn remote_usage(req: RemoteUsageRequest) -> Result<RemoteUsage, String> {
+    tauri::async_runtime::spawn_blocking(move || sync::fetch_remote_usage(req))
+        .await
+        .map_err(|e| format!("远端用量任务失败: {e}"))?
 }
 
 /// 拉取远端额度快照（带 device_id，供对比页/报告页跨设备周额度解析）
 #[tauri::command]
-fn remote_snapshots(req: RemoteSnapshotRequest) -> Result<Vec<RemoteSnapshot>, String> {
-    sync::fetch_remote_snapshots(req)
+async fn remote_snapshots(req: RemoteSnapshotRequest) -> Result<Vec<RemoteSnapshot>, String> {
+    tauri::async_runtime::spawn_blocking(move || sync::fetch_remote_snapshots(req))
+        .await
+        .map_err(|e| format!("远端快照任务失败: {e}"))?
 }
 
 /// 拉取远端各周期逐条用量明细（前端用本地 peak 配置折算消耗）
 #[tauri::command]
-fn remote_period_detail(
+async fn remote_period_detail(
     req: RemotePeriodDetailRequest,
 ) -> Result<Vec<RemotePeriodDetail>, String> {
-    sync::fetch_remote_period_detail(req)
+    tauri::async_runtime::spawn_blocking(move || sync::fetch_remote_period_detail(req))
+        .await
+        .map_err(|e| format!("远端明细任务失败: {e}"))?
 }
 
 /// 拉取设备列表
 #[tauri::command]
-fn list_remote_devices() -> Result<Vec<DeviceInfo>, String> {
-    sync::fetch_devices()
+async fn list_remote_devices() -> Result<Vec<DeviceInfo>, String> {
+    tauri::async_runtime::spawn_blocking(sync::fetch_devices)
+        .await
+        .map_err(|e| format!("设备列表任务失败: {e}"))?
 }
 
 /// 查询清理状态
 #[tauri::command]
-fn get_cleanup_status() -> Result<CleanupStatus, String> {
-    sync::fetch_cleanup_status()
+async fn get_cleanup_status() -> Result<CleanupStatus, String> {
+    tauri::async_runtime::spawn_blocking(sync::fetch_cleanup_status)
+        .await
+        .map_err(|e| format!("清理状态任务失败: {e}"))?
 }
 
 /// 执行服务端清理
 #[tauri::command]
-fn cleanup_server(req: CleanupServerRequest) -> Result<sync::CleanupResult, String> {
-    sync::cleanup_server(req)
+async fn cleanup_server(req: CleanupServerRequest) -> Result<sync::CleanupResult, String> {
+    tauri::async_runtime::spawn_blocking(move || sync::cleanup_server(req))
+        .await
+        .map_err(|e| format!("服务端清理任务失败: {e}"))?
 }
 
 /// 合并设备：把来源设备数据并入目标设备后删除来源
 #[tauri::command]
-fn merge_devices(req: MergeDevicesRequest) -> Result<sync::MergeResult, String> {
-    sync::merge_devices(req)
+async fn merge_devices(req: MergeDevicesRequest) -> Result<sync::MergeResult, String> {
+    tauri::async_runtime::spawn_blocking(move || sync::merge_devices(req))
+        .await
+        .map_err(|e| format!("合并设备任务失败: {e}"))?
 }
 
 /// 修改设备显示名
 #[tauri::command]
-fn rename_device(req: RenameDeviceRequest) -> Result<sync::RenameResult, String> {
-    sync::rename_device(req)
+async fn rename_device(req: RenameDeviceRequest) -> Result<sync::RenameResult, String> {
+    tauri::async_runtime::spawn_blocking(move || sync::rename_device(req))
+        .await
+        .map_err(|e| format!("重命名设备任务失败: {e}"))?
 }
 
 /// 配置服务端自动清理
 #[tauri::command]
-fn set_auto_cleanup(req: AutoCleanupServerRequest) -> Result<sync::AutoCleanupConfig, String> {
-    sync::set_auto_cleanup(req)
+async fn set_auto_cleanup(req: AutoCleanupServerRequest) -> Result<sync::AutoCleanupConfig, String> {
+    tauri::async_runtime::spawn_blocking(move || sync::set_auto_cleanup(req))
+        .await
+        .map_err(|e| format!("自动清理配置任务失败: {e}"))?
 }
 
 /// 查询本机待上传的记录数（本机 max_rowid - 已上传游标），供同步面板显示。
@@ -650,35 +708,41 @@ struct TrendBucket {
 
 /// get_trend：返回时间范围内的分桶统计，供趋势图使用。
 /// 粒度由 bucket 决定（hour/day），桶数随范围自适应。
+/// async + spawn_blocking：内部为 SQLite 查询（busy_timeout 3s），前端每 30s
+/// 高频调用，与 get_stats 同款卸载到阻塞线程池，避免写入高峰期阻塞主线程。
 #[tauri::command]
-fn get_trend(req: TrendRequest) -> Result<Vec<TrendBucket>, String> {
-    let buckets = db::query_trend(req.from_ms, req.to_ms, &req.bucket)?;
-    let pricing = load_pricing().unwrap_or_default();
+async fn get_trend(req: TrendRequest) -> Result<Vec<TrendBucket>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let buckets = db::query_trend(req.from_ms, req.to_ms, &req.bucket)?;
+        let pricing = load_pricing().unwrap_or_default();
 
-    let out = buckets
-        .into_iter()
-        .map(|b| {
-            let cost_cny = b
-                .by_model
-                .iter()
-                .map(|m| cost_for(m, &pricing.cny))
-                .sum::<f64>();
-            let cost_usd = b
-                .by_model
-                .iter()
-                .map(|m| cost_for(m, &pricing.usd))
-                .sum::<f64>();
-            TrendBucket {
-                label: b.label,
-                total_tokens: b.total_tokens,
-                requests: b.requests,
-                cost_cny,
-                cost_usd,
-            }
-        })
-        .collect();
+        let out = buckets
+            .into_iter()
+            .map(|b| {
+                let cost_cny = b
+                    .by_model
+                    .iter()
+                    .map(|m| cost_for(m, &pricing.cny))
+                    .sum::<f64>();
+                let cost_usd = b
+                    .by_model
+                    .iter()
+                    .map(|m| cost_for(m, &pricing.usd))
+                    .sum::<f64>();
+                TrendBucket {
+                    label: b.label,
+                    total_tokens: b.total_tokens,
+                    requests: b.requests,
+                    cost_cny,
+                    cost_usd,
+                }
+            })
+            .collect();
 
-    Ok(out)
+        Ok(out)
+    })
+    .await
+    .map_err(|e| format!("趋势查询任务失败: {e}"))?
 }
 
 /// 调整原生毛玻璃视图的不透明度，让背景保持柔和透出而不让文字穿透。
@@ -973,7 +1037,11 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let quit_item = MenuItem::with_id(app, "quit", "退出 ZBar", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&quit_item])?;
 
-    let title = today_tray_title(app);
+    // 初始标题只用占位文字：真实标题（今日花费 + token）的生成依次做
+    // SQLite 查询、开启同步后的远程 HTTP、Cursor events 冷缓存全量分页拉取，
+    // 冷启动网络慢时会把主线程卡数十秒。spawn_title_updater 启动后会在
+    // 后台线程立即执行一次刷新（先刷新再 sleep），占位很快被真实标题替换。
+    let title = "ZBar".to_string();
     let _tray = TrayIconBuilder::with_id("main")
         .icon(app.default_window_icon().unwrap().clone())
         .tooltip("ZBar · ZCode Token 监控")

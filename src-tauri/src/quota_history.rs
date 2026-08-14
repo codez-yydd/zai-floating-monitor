@@ -5,13 +5,24 @@
 //! - 存储：~/.zbar/quota_history.jsonl（每行一条 JSON），轻量、可 append、易调试。
 //! - 周期划分：用 weekly_reset (nextResetTime) 的变化点切分"智谱重置周期"。
 //! - 去重/限频：同秒内只写一条（用最后一条的 ts 防抖）。
+//! - 滚动保留：定期（每 24h 至多一次）删除超过保留期的行，防止文件无限增长。
 
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, SystemTime};
 
 use crate::pricing::config_dir;
+
+/// 快照保留期：超过 90 天的行在滚动清理时删除（约 430KB/天，不清理会无限增长）
+const RETENTION_MS: i64 = 90 * 86_400_000;
+/// 清理检查最小间隔：避免每次写入都触发全量重写（读写整个文件）
+const CLEANUP_INTERVAL: Duration = Duration::from_secs(24 * 3600);
+/// 上次清理时间（None = 本进程尚未清理过）。
+/// 模块级 Mutex 节流：快照写入来自多个线程（fetch_quota / 同步 worker）。
+static LAST_CLEANUP: OnceLock<Mutex<Option<SystemTime>>> = OnceLock::new();
 
 /// 单条额度快照（jsonl 一行）。
 /// 字段尽量与 QuotaResult 对齐，只挑有价值的几项，控制单条体积。
@@ -60,6 +71,9 @@ fn try_append(snap: &QuotaSnapshot) -> Result<(), String> {
     fs::create_dir_all(&dir).map_err(|e| format!("创建配置目录失败: {e}"))?;
     let path = history_path()?;
 
+    // 滚动清理：写入前检查（内部有 24h 节流，不会每次写都全量重写）
+    maybe_cleanup(&path);
+
     // 防抖：读最后一条，若同秒则覆盖最后一条而非新增。
     if path.exists() {
         if let Ok(last_ts) = read_last_ts(&path) {
@@ -68,6 +82,10 @@ fn try_append(snap: &QuotaSnapshot) -> Result<(), String> {
                 return Ok(());
             }
         }
+        // 防残行拼接：若上次进程崩溃残留了无换行的半截行，直接 append 会
+        // 与残行拼成一行导致 JSON 损坏（load_all 会跳过整行丢新快照）。
+        // 文件尾字节非 \n 时先补一个换行，让新快照独占一行。
+        ensure_trailing_newline(&path)?;
     }
 
     let line = serde_json::to_string(snap)
@@ -81,33 +99,169 @@ fn try_append(snap: &QuotaSnapshot) -> Result<(), String> {
     writeln!(file, "{line}").map_err(|e| format!("写入快照失败: {e}"))
 }
 
-/// 读取最后一条快照的 ts（用于防抖判断）。
-/// 采用从文件末尾回扫的方式，避免全文件读取。
-fn read_last_ts(path: &PathBuf) -> Result<i64, String> {
+/// 确保文件以换行符结尾：尾部是半截残行（进程崩溃残留）时补一个 \n，
+/// 避免后续 append 的快照与残行拼成一行。空文件视为无需处理。
+fn ensure_trailing_newline(path: &std::path::Path) -> Result<(), String> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("打开快照文件失败: {e}"))?;
+    let len = file
+        .seek(SeekFrom::End(0))
+        .map_err(|e| format!("定位快照文件失败: {e}"))?;
+    if len == 0 {
+        return Ok(());
+    }
+    let mut last = [0u8; 1];
+    file.seek(SeekFrom::Start(len - 1))
+        .map_err(|e| format!("定位快照文件失败: {e}"))?;
+    file.read_exact(&mut last)
+        .map_err(|e| format!("读取快照文件末字节失败: {e}"))?;
+    if last[0] != b'\n' {
+        file.seek(SeekFrom::End(0))
+            .map_err(|e| format!("定位快照文件失败: {e}"))?;
+        file.write_all(b"\n")
+            .map_err(|e| format!("补写换行失败: {e}"))?;
+    }
+    Ok(())
+}
+
+/// 滚动清理入口：删除超过保留期的快照行。
+/// 用 LAST_CLEANUP 节流为每 24h 至多执行一次；失败时也推进节流时钟
+/// （最坏情况文件多保留一天，避免持续失败时每 30s 全量重写）。
+fn maybe_cleanup(path: &PathBuf) {
+    let cell = LAST_CLEANUP.get_or_init(|| Mutex::new(None));
+    let Ok(mut last) = cell.lock() else {
+        return; // 锁中毒等异常：跳过清理，不影响写入主流程
+    };
+    if let Some(t) = *last {
+        if t.elapsed().unwrap_or(Duration::ZERO) < CLEANUP_INTERVAL {
+            return; // 距上次清理不足 24h，跳过
+        }
+    }
+    // 无论本次是否删出内容都推进时钟，之后再释放锁（重写文件耗时不应阻塞写入方）
+    *last = Some(SystemTime::now());
+    drop(last);
+
+    if let Err(e) = try_cleanup(path) {
+        eprintln!("[zbar-history] 滚动清理失败（24h 后重试）: {e}");
+    }
+}
+
+/// 清理实现：过滤掉 ts 早于保留边界的行，写临时文件后 rename 原子替换。
+/// 损坏的行原样保留（不丢数据，与 load_all 的跳过策略对齐）。
+///
+/// 已知取舍：rename 与并发 try_append 之间存在毫秒级窗口——若恰在此刻有写入
+/// 落到旧 inode，rename 后那一条快照会丢失（文件本身不会损坏）。考虑到清理
+/// 每 24h 才执行一次、丢的至多 1 条非关键采样（30s 后就会补采），接受现状，
+/// 不为此引入全局写锁。
+fn try_cleanup(path: &std::path::Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let cutoff = chrono::Local::now().timestamp_millis() - RETENTION_MS;
+
     let file = OpenOptions::new()
         .read(true)
         .open(path)
         .map_err(|e| format!("打开快照文件失败: {e}"))?;
-    let mut reader = BufReader::new(file);
-    let mut last_line = String::new();
-    let mut buf = String::new();
-    // 逐行读，保留最后非空行
-    while reader
-        .read_line(&mut buf)
-        .map_err(|e| format!("读取快照失败: {e}"))?
-        > 0
-    {
-        if !buf.trim().is_empty() {
-            last_line = buf.trim().to_string();
+    let reader = BufReader::new(file);
+
+    let mut kept: Vec<String> = Vec::new();
+    let mut removed = 0usize;
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue, // 读失败的行无法判断，直接丢弃（与 load_all 跳过策略一致）
+        };
+        if line.trim().is_empty() {
+            continue;
         }
-        buf.clear();
+        // 只取 ts 字段判断是否过期，避免严格反序列化其他字段格式变化导致误删
+        let ts = serde_json::from_str::<serde_json::Value>(&line)
+            .ok()
+            .and_then(|v| v.get("ts").and_then(|t| t.as_i64()));
+        match ts {
+            Some(t) if t < cutoff => removed += 1,
+            _ => kept.push(line), // 无 ts 的损坏行按保留处理，不丢数据
+        }
     }
-    if last_line.is_empty() {
+    if removed == 0 {
+        return Ok(()); // 无过期行，不必重写
+    }
+
+    // 临时文件与目标同目录，rename 在同一文件系统上保证原子性
+    let tmp = path.with_extension("jsonl.tmp");
+    let mut out = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&tmp)
+        .map_err(|e| format!("打开临时文件失败: {e}"))?;
+    for line in &kept {
+        writeln!(out, "{line}").map_err(|e| format!("写入临时文件失败: {e}"))?;
+    }
+    out.flush().map_err(|e| format!("刷新临时文件失败: {e}"))?;
+    drop(out);
+    fs::rename(&tmp, path).map_err(|e| format!("替换快照文件失败: {e}"))
+}
+
+/// 读取最后一条快照的 ts（用于防抖判断）。
+/// 从文件末尾往回读一个小窗口，在窗口内找最后一个完整 JSON 行解析，
+/// 避免全文件读取。单行快照 JSON 可能超过初始窗口，不够时逐倍扩大（上限 64KB）。
+fn read_last_ts(path: &PathBuf) -> Result<i64, String> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .open(path)
+        .map_err(|e| format!("打开快照文件失败: {e}"))?;
+    let len = file
+        .metadata()
+        .map_err(|e| format!("读取快照文件元数据失败: {e}"))?
+        .len();
+    if len == 0 {
         return Ok(0);
     }
-    let v: QuotaSnapshot = serde_json::from_str(&last_line)
-        .map_err(|e| format!("解析最后一条快照失败: {e}"))?;
-    Ok(v.ts)
+
+    let mut window: u64 = 2048;
+    const MAX_WINDOW: u64 = 64 * 1024;
+    loop {
+        let start = len.saturating_sub(window);
+        file.seek(SeekFrom::Start(start))
+            .map_err(|e| format!("定位快照文件失败: {e}"))?;
+        let mut buf = Vec::with_capacity((len - start) as usize);
+        file.read_to_end(&mut buf)
+            .map_err(|e| format!("读取快照失败: {e}"))?;
+        let text = String::from_utf8_lossy(&buf);
+
+        // 窗口首行可能被左边界截断（start > 0 时），不可信，跳过；
+        // 其余行前面必有换行边界，均为完整行。
+        let mut last_line: Option<&str> = None;
+        for (i, line) in text.lines().enumerate() {
+            if start > 0 && i == 0 {
+                continue;
+            }
+            if !line.trim().is_empty() {
+                last_line = Some(line);
+            }
+        }
+
+        match last_line {
+            Some(line) => {
+                return serde_json::from_str::<QuotaSnapshot>(line.trim())
+                    .map(|v| v.ts)
+                    .map_err(|e| format!("解析最后一条快照失败: {e}"));
+            }
+            None => {
+                // 窗口内没找到完整非空行：已读全文件则确实没有；否则扩大窗口重试
+                if start > 0 && window < MAX_WINDOW {
+                    window *= 2;
+                    continue;
+                }
+                return Ok(0);
+            }
+        }
+    }
 }
 
 /// 读取全部快照（按 ts 升序）。损坏的行跳过，不整体失败。
@@ -281,4 +435,117 @@ pub fn today_delta() -> Result<(u32, u32), String> {
     let peak = today.iter().map(|s| s.weekly_pct).max().unwrap_or(0);
     // peak 一定 >= start；增量用峰值减起点，反映当日真实消耗
     Ok((peak.saturating_sub(start), today.len() as u32))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 生成临时测试文件路径（用例各自创建/清理，不引入 tempfile 依赖）
+    fn temp_jsonl(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir();
+        std::fs::create_dir_all(&dir).ok();
+        dir.join(format!(
+            "zbar-history-test-{name}-{}.jsonl",
+            std::process::id()
+        ))
+    }
+
+    fn snap(ts: i64, level: &str) -> QuotaSnapshot {
+        QuotaSnapshot {
+            ts,
+            level: level.to_string(),
+            weekly_pct: 10,
+            weekly_reset: Some(ts + 86_400_000),
+            hour5_pct: 5,
+            mcp_pct: 0,
+            mcp_used: None,
+            mcp_total: None,
+        }
+    }
+
+    /// 尾部回读：常规多行文件能取到最后一条的 ts
+    #[test]
+    fn read_last_ts_returns_last_line() {
+        let path = temp_jsonl("last");
+        let content = format!(
+            "{}\n{}\n{}\n",
+            serde_json::to_string(&snap(1000, "pro")).unwrap(),
+            serde_json::to_string(&snap(2000, "pro")).unwrap(),
+            serde_json::to_string(&snap(3000, "max")).unwrap()
+        );
+        std::fs::write(&path, &content).unwrap();
+        assert_eq!(read_last_ts(&path).unwrap(), 3000, "应返回最后一条快照的 ts");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// 尾部回读：单行 JSON 超过初始 2KB 窗口时逐倍扩大窗口仍能取到
+    #[test]
+    fn read_last_ts_expands_window_for_long_line() {
+        let path = temp_jsonl("long");
+        let long = snap(42, &"x".repeat(5000));
+        let content = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&snap(1000, "pro")).unwrap(),
+            serde_json::to_string(&long).unwrap()
+        );
+        std::fs::write(&path, &content).unwrap();
+        assert_eq!(read_last_ts(&path).unwrap(), 42, "长行应通过扩大窗口解析到");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// 尾部回读：空文件返回 0（视作无历史，防抖直接放行）
+    #[test]
+    fn read_last_ts_empty_file_returns_zero() {
+        let path = temp_jsonl("empty");
+        std::fs::write(&path, "").unwrap();
+        assert_eq!(read_last_ts(&path).unwrap(), 0, "空文件应返回 0");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// 滚动清理：过期行被删、保留行原样保留，重写后仍可正常解析
+    #[test]
+    fn cleanup_removes_expired_lines() {
+        let path = temp_jsonl("cleanup");
+        let now = chrono::Local::now().timestamp_millis();
+        let old_ts = now - RETENTION_MS - 86_400_000; // 超过保留期一天
+        let content = format!(
+            "{}\n{}\n{}\n",
+            serde_json::to_string(&snap(old_ts, "old")).unwrap(),
+            serde_json::to_string(&snap(now - 1000, "keep1")).unwrap(),
+            serde_json::to_string(&snap(now, "keep2")).unwrap()
+        );
+        std::fs::write(&path, &content).unwrap();
+
+        try_cleanup(&path).unwrap();
+
+        let cleaned = std::fs::read_to_string(&path).unwrap();
+        assert!(!cleaned.contains("old"), "过期行应被删除");
+        assert_eq!(cleaned.lines().count(), 2, "保留行应原样保留");
+        assert_eq!(read_last_ts(&path).unwrap(), now);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// 残行补丁：文件尾是无换行的半截残行时补 \n，正常文件不动
+    #[test]
+    fn ensure_trailing_newline_patches_partial_line() {
+        let path = temp_jsonl("newline");
+        let ok_line = serde_json::to_string(&snap(1000, "pro")).unwrap();
+        // 模拟进程崩溃残留：尾行是半截 JSON 且无换行
+        std::fs::write(&path, format!("{ok_line}\n{{\"ts\":2000,\"level\":\"pr"))
+            .unwrap();
+        ensure_trailing_newline(&path).unwrap();
+        let patched = std::fs::read_to_string(&path).unwrap();
+        assert!(patched.ends_with('\n'), "残行后应补上换行");
+        assert_eq!(patched.lines().count(), 2, "不应改变行数");
+
+        // 已正常结尾的文件：幂等，不再追加换行
+        ensure_trailing_newline(&path).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            patched,
+            "正常结尾时不应追加换行"
+        );
+        std::fs::remove_file(&path).ok();
+    }
 }

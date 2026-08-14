@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   ConsumedBucket,
   DeviceInfo,
@@ -34,6 +34,10 @@ export function ComparePanel({ onBack }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
 
+  // 请求序号守卫：load 会被 60s 定时器/筛选变化/手动刷新并发触发，
+  // 慢网络下旧响应后到会覆盖新数据（仿 DataCache 的 quotaReqId 模式）
+  const loadReqId = useRef(0);
+
   // 多设备同步相关
   const [syncConfig, setSyncConfig] = useState<SyncConfig | null>(null);
   const [remoteDevices, setRemoteDevices] = useState<DeviceInfo[]>([]);
@@ -58,11 +62,13 @@ export function ComparePanel({ onBack }: Props) {
   }, []);
 
   const load = useCallback(async () => {
+    const reqId = ++loadReqId.current;
     setLoading(true);
     setError(null);
     try {
       // 1. 周期列表（账户级，本机快照解析即代表全局额度周期）
       const ps = await getWeeklyCompare();
+      if (reqId !== loadReqId.current) return; // 已有更新的请求，丢弃旧响应
       setPeriods(ps);
 
       if (ps.length === 0) {
@@ -186,6 +192,7 @@ export function ComparePanel({ onBack }: Props) {
       }
 
       await Promise.all(tasks);
+      if (reqId !== loadReqId.current) return; // 已有更新的请求，丢弃旧响应
 
       // 3. 合并 token
       const mergedTokens: WeeklyTokenBucket[] = localTokens.map((t, i) => ({
@@ -209,11 +216,17 @@ export function ComparePanel({ onBack }: Props) {
       });
       setConsumed(mergedConsumed);
 
-      setSelectedIdx(ps.length - 1); // 默认选中当前周期
+      // 仅在用户未选中或选中索引超出新周期范围时才落到当前周期，
+      // 否则保持用户选择：60s 自动刷新不应把用户点选的历史周期静默跳回
+      setSelectedIdx((prev) =>
+        prev === null || prev >= ps.length ? ps.length - 1 : prev
+      );
     } catch (e) {
+      if (reqId !== loadReqId.current) return; // 已有更新的请求，丢弃旧错误
       setError(String(e));
     } finally {
-      setLoading(false);
+      // 只有最新请求才允许结束 loading，避免旧请求把新请求的加载态清掉
+      if (reqId === loadReqId.current) setLoading(false);
     }
   }, [deviceFilter, syncConfig, syncEnabled, peakCfg]);
 
