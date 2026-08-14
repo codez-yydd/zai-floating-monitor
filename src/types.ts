@@ -375,12 +375,16 @@ export interface PriceDiffItem {
 
 /** 完整差异结果 */
 export interface PricingDiff {
-  /** 内置表的版本号 */
+  /** 价格来源："models.dev"（实时）| "builtin"（离线内置表） */
+  source: "models.dev" | "builtin";
+  /** 参考表版本号（仅内置表有） */
   version: string;
-  /** 新增模型（默认有、用户无） */
+  /** 新增模型（参考有、用户无） */
   new_models: PriceDiffItem[];
   /** 价格变动（两边都有但不同） */
   changed: PriceDiffItem[];
+  /** 实际在用但无任何价格的模型（花费按 0 计，需手动补价） */
+  missing: string[];
 }
 
 /** 应用价格更新的单条请求 */

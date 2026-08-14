@@ -258,7 +258,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
   const handleCheckUpdates = async () => {
     setError(null);
     try {
-      const d = await checkPricingUpdates();
+      const d = await checkPricingUpdates(true);
       setDiff(d);
       setUpdateCount(d.new_models.length + d.changed.length);
       setSelected(new Set(d.new_models.map((i) => `${i.model_id}|${i.currency}`)));
@@ -404,19 +404,57 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
             )}
           </button>
           {diff && updateCount === 0 && !diffPanel && (
-            <span className="text-[10px] text-emerald-600/80">已是最新 ✓</span>
+            <span
+              className={`text-[10px] ${
+                diff.missing.length > 0
+                  ? "text-amber-600/90"
+                  : "text-emerald-600/80"
+              }`}
+            >
+              {diff.missing.length > 0
+                ? `${diff.missing.length} 个模型未配价`
+                : "已是最新 ✓"}
+            </span>
           )}
         </div>
 
         {/* 差异面板：展开时显示可勾选的新增/变动项 */}
         {diffPanel && diff && (
           <div className="mt-2 rounded-lg bg-slate-900/5 border border-slate-900/10 p-2.5">
-            <div className="text-[11px] font-medium text-slate-900/85 mb-1.5">
-              价格更新（内置参考表{diff.version ? ` v${diff.version}` : ""}）
+            <div className="flex items-center justify-between mb-1.5">
+              <div className="text-[11px] font-medium text-slate-900/85">
+                价格更新
+                {diff.source === "models.dev" ? (
+                  <span className="ml-1.5 px-1 py-0 rounded text-[8px] font-medium bg-sky-500/15 text-sky-700">
+                    models.dev 实时
+                  </span>
+                ) : (
+                  <span className="ml-1.5 px-1 py-0 rounded text-[8px] font-medium bg-slate-900/10 text-slate-700/60">
+                    内置表（离线{diff.version ? ` v${diff.version}` : ""}）
+                  </span>
+                )}
+              </div>
             </div>
             <p className="text-[9px] text-slate-700/50 mb-2 leading-relaxed">
-              勾选后点「应用选中」才会写入。新增项默认勾选，变动项默认不勾（保护你的自定义）。
+              {diff.source === "models.dev"
+                ? "来自 models.dev 的智谱国际站 USD 指导价，CNY 按汇率换算。勾选后点「应用选中」才会写入。"
+                : "models.dev 不可达，已回退内置参考表。勾选后点「应用选中」才会写入。"}
+              新增项默认勾选，变动项默认不勾（保护你的自定义）。
             </p>
+            {/* 无价格模型警示：实际在用但两边都没价格，花费按 0 计 */}
+            {diff.missing.length > 0 && (
+              <div className="mb-2 rounded-md bg-amber-500/10 border border-amber-500/20 px-2 py-1.5">
+                <div className="text-[9px] text-amber-700/90 font-medium">
+                  以下模型实际在用但未配置价格（花费按 0 计）：
+                </div>
+                <div className="text-[9px] text-slate-700/60 mt-0.5 num leading-relaxed break-all">
+                  {diff.missing.join("、")}
+                </div>
+                <div className="text-[8px] text-slate-700/40 mt-0.5">
+                  请在下方模型列表中手动补价
+                </div>
+              </div>
+            )}
             <div className="space-y-1 max-h-44 overflow-y-auto">
               {/* 新增模型 */}
               {diff.new_models.map((i) => {

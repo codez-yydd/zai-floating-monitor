@@ -119,11 +119,13 @@ fn set_currency(currency: String, app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// check_pricing_updates：对比内置默认价格表与用户当前配置，返回差异。
-/// 仅用于"检查更新"提示，绝不自动覆盖。
-/// 仅对「数据库出现过 ∪ 用户已手动配置」的模型做对比，避免提示用户没用过的模型。
+/// check_pricing_updates：对比用户当前配置与参考价格（models.dev 优先，失败回退内置表），
+/// 返回差异。仅用于"检查更新"提示，绝不自动覆盖。
+/// 遍历主体 =「数据库实际调用过 ∪ 用户已手动配置」的模型：
+/// 实际在用但两边都没价格的模型会以 missing 暴露（花费按 0 计）。
+/// `force`：true 时绕过 models.dev 的 24h 磁盘缓存强制联网（手动点按钮用）。
 #[tauri::command]
-fn check_pricing_updates() -> Result<pricing::PricingDiff, String> {
+fn check_pricing_updates(force: Option<bool>) -> Result<pricing::PricingDiff, String> {
     let user = load_pricing()?;
     // 相关模型 = 数据库里出现过的 + 用户已配置（任一货币）的
     let mut relevant: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -132,7 +134,18 @@ fn check_pricing_updates() -> Result<pricing::PricingDiff, String> {
     });
     relevant.extend(user.cny.keys().cloned());
     relevant.extend(user.usd.keys().cloned());
-    Ok(pricing::diff_with_defaults(&user, &relevant))
+
+    // force 时先强制刷新 models.dev 缓存（失败静默，diff_pricing 内部会回退）
+    if force.unwrap_or(false) {
+        let _ = pricing::fetch_models_dev_prices(true);
+    }
+
+    // USD→CNY 汇率：与 Cursor 配置共用同一来源（models.dev 模式下 CNY 参考价 = USD × 汇率）
+    let fx_rate = cursor::load_cursor_config()
+        .map(|c| c.usd_cny_rate)
+        .unwrap_or(7.2);
+
+    Ok(pricing::diff_pricing(&user, &relevant, fx_rate))
 }
 
 /// apply_pricing_updates：把用户勾选的价格项合并进 pricing 并保存。

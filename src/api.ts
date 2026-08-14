@@ -65,9 +65,10 @@ export async function saveCurrency(currency: Currency): Promise<void> {
   await invoke("set_currency", { currency });
 }
 
-/** 对比内置默认价格表与用户当前配置，返回差异（不修改任何文件） */
-export async function checkPricingUpdates(): Promise<PricingDiff> {
-  return invoke<PricingDiff>("check_pricing_updates");
+/** 对比参考价格（models.dev 优先，失败回退内置表）与用户当前配置，返回差异（不修改任何文件）。
+ *  force=true 时绕过 models.dev 的 24h 磁盘缓存强制联网刷新。 */
+export async function checkPricingUpdates(force = false): Promise<PricingDiff> {
+  return invoke<PricingDiff>("check_pricing_updates", { force });
 }
 
 /** 把用户勾选的价格项合并进 pricing 并保存 */
