@@ -10,7 +10,6 @@ import {
 import type { ReactNode } from "react";
 import type {
   CostResult,
-  Currency,
   CursorSnapshot,
   DeviceInfo,
   PricingConfig,
@@ -195,12 +194,10 @@ const Ctx = createContext<DataCacheValue | null>(null);
 interface ProviderProps {
   /** 价格表（合并远程花费时需要） */
   pricing: PricingConfig;
-  /** 货币偏好（合并远程花费时需要） */
-  currency: Currency;
   children: ReactNode;
 }
 
-export function DataProvider({ pricing, currency, children }: ProviderProps) {
+export function DataProvider({ pricing, children }: ProviderProps) {
   // ===== 查询参数（持久化，冷启动恢复上次视图，与上次缓存匹配）=====
   const [preset, setPreset] = useState<RangePreset>(
     () => loadCache<RangePreset>("zbar-preset") ?? "today"
@@ -326,11 +323,11 @@ export function DataProvider({ pricing, currency, children }: ProviderProps) {
           trend = localTrend;
         } else if (remote && !localStats) {
           stats = remoteToStats(remote);
-          cost = computeRemoteCost(remote, pricing, currency);
+          cost = computeRemoteCost(remote, pricing);
           trend = remoteTrendToLocal(remote, pricing, bucket);
         } else if (localStats && remote) {
           stats = mergeStats(localStats, remote);
-          cost = mergeCost(localCost, remote, pricing, currency);
+          cost = mergeCost(localCost, remote, pricing);
           trend = mergeTrend(localTrend, remote, pricing, bucket);
         } else {
           stats = localStats;
@@ -374,7 +371,9 @@ export function DataProvider({ pricing, currency, children }: ProviderProps) {
         zaiInflight.current.delete(key);
       }
     },
-    [syncConfig, syncEnabled, pricing, currency]
+    // 注意不含 currency：花费是双货币一次算齐的，切货币只需展示层换字段，
+    // 不需要重刷数据；若把 currency 列进依赖会导致切货币触发全范围刷新风暴（UI 卡顿）
+    [syncConfig, syncEnabled, pricing]
   );
 
   /** 刷新单个 Cursor 范围（账号级，不受设备筛选影响）。刷新期间不清空旧值。 */
@@ -459,12 +458,18 @@ export function DataProvider({ pricing, currency, children }: ProviderProps) {
         refreshZaiRange(df, `${df}|${p}`, f, t, bucketOf(p));
       }
     };
-    tick(); // 挂载/依赖变化立即刷一次，尽快填充缓存
+    // 延后首刷（500ms）：WebView 重载（首次打开 / 长期隐藏后被系统回收）后，
+    // 首屏先靠 localStorage 缓存渲染；挂载即并发发起 12 个数据命令的话，
+    // 响应陆续回来的主线程处理（IPC 解析 + 全量缓存写盘）会推迟首帧，造成白屏
+    const first = setTimeout(tick, 500);
     const timer = setInterval(tick, 30_000);
-    return () => clearInterval(timer);
+    return () => {
+      clearTimeout(first);
+      clearInterval(timer);
+    };
     // 故意不把 custom 列入依赖：后台只刷预设范围，custom 由按需补刷负责
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deviceFilter, syncConfig, syncEnabled, pricing, currency, refreshZaiRange]);
+  }, [deviceFilter, syncConfig, syncEnabled, pricing, refreshZaiRange]);
 
   // ===== 后台定时刷新 Cursor：所有预设范围，降频 180s（网络慢，4 范围并行）。
   //      账号级，不受 deviceFilter 影响。汇率每 tick 只读一次（与范围循环解耦）。 =====
@@ -479,17 +484,24 @@ export function DataProvider({ pricing, currency, children }: ProviderProps) {
         refreshCursorRange(p, f, t);
       }
     };
-    tick();
+    // 延后首刷（1.5s）错峰：避免与 z.ai 首刷、首屏渲染竞争主线程
+    const first = setTimeout(tick, 1_500);
     const timer = setInterval(tick, 180_000);
-    return () => clearInterval(timer);
+    return () => {
+      clearTimeout(first);
+      clearInterval(timer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshCursorRange]);
 
-  // Quota 定时 30s（与范围无关）
+  // Quota 定时 30s（与范围无关）。延后首刷（2.5s）错峰，避免与首屏渲染竞争
   useEffect(() => {
-    loadQuota();
+    const first = setTimeout(loadQuota, 2_500);
     const timer = setInterval(loadQuota, 30_000);
-    return () => clearInterval(timer);
+    return () => {
+      clearTimeout(first);
+      clearInterval(timer);
+    };
   }, [loadQuota]);
 
   // ===== 按需补刷：切到无缓存/过期范围，或配置就绪后补一次。

@@ -65,11 +65,10 @@ export function remoteToStats(r: RemoteUsage): Stats {
   };
 }
 
-/** 仅远端时算花费（远端不含 cost，前端用 pricing 自算） */
+/** 仅远端时算花费（远端不含 cost，前端用 pricing 自算；双货币一次算齐） */
 export function computeRemoteCost(
   r: RemoteUsage,
-  pricing: PricingConfig,
-  _currency: Currency
+  pricing: PricingConfig
 ): CostResult {
   const perModel = (currency: Currency) =>
     r.by_model.map((m) => ({
@@ -152,12 +151,11 @@ export function mergeStats(local: Stats, remote: RemoteUsage): Stats {
   };
 }
 
-/** 合并花费：本地 cost + 远端（用 pricing 自算） */
+/** 合并花费：本地 cost + 远端（用 pricing 自算；双货币一次算齐） */
 export function mergeCost(
   local: CostResult | null,
   remote: RemoteUsage,
-  pricing: PricingConfig,
-  _currency: Currency
+  pricing: PricingConfig
 ): CostResult {
   const base = local ?? {
     total_cny: 0,

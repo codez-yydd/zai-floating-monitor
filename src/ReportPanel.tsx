@@ -150,13 +150,13 @@ export function ReportPanel({ onBack, pricing }: Props) {
       let mergedCost: CostResult | null = null;
       if (wantLocal && localStats && remote) {
         mergedStats = mergeStats(localStats, remote);
-        mergedCost = mergeCost(localCost, remote, pricing, currency);
+        mergedCost = mergeCost(localCost, remote, pricing);
       } else if (wantLocal && localStats) {
         mergedStats = localStats;
         mergedCost = localCost;
       } else if (remote) {
         mergedStats = remoteToStats(remote);
-        mergedCost = computeRemoteCost(remote, pricing, currency);
+        mergedCost = computeRemoteCost(remote, pricing);
       }
 
       setStats(mergedStats);

@@ -47,13 +47,20 @@ export default function App() {
 
   const backToStats = () => {
     fetchPricing()
-      .then(setPricing)
+      .then((p) => {
+        // 内容没变则复用旧引用：fetchPricing 每次都返回新对象，若直接 setPricing，
+        // pricing 引用变化会让 DataProvider 的刷新函数重建并立即对 4 个预设范围
+        // 发起 12 个并发命令（含 7d/30d 全量扫描）+ 多次全量缓存写盘，造成返回卡顿
+        setPricing((prev) =>
+          JSON.stringify(prev) === JSON.stringify(p) ? prev : p
+        );
+      })
       .catch(() => {});
     setView("stats");
   };
 
   return (
-    <DataProvider pricing={pricing} currency={currency}>
+    <DataProvider pricing={pricing}>
       <div className="panel-shell">
         {view === "stats" ? (
           <StatsPanel

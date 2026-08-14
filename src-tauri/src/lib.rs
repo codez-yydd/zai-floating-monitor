@@ -111,11 +111,15 @@ fn get_currency() -> String {
 
 /// set_currency：保存货币偏好。前端切换货币时同步给后端，菜单栏标题据此显示。
 /// 保存后立即刷新一次菜单栏标题，避免用户切换后还要等 30 秒后台周期。
+/// 标题刷新含 SQLite 查询（开启同步后还有 HTTP 请求），必须卸载到阻塞线程池，
+/// 否则同步 command 在主线程执行会阻塞 UI（与 spawn_title_updater 同款模式）。
 #[tauri::command]
 fn set_currency(currency: String, app: AppHandle) -> Result<(), String> {
     pricing::save_currency(&currency)?;
-    let title = today_tray_title(&app);
-    let _ = app.tray_by_id("main").map(|t| t.set_title(Some(title)));
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        let title = today_tray_title(&app);
+        let _ = app.tray_by_id("main").map(|t| t.set_title(Some(title)));
+    });
     Ok(())
 }
 
@@ -222,11 +226,17 @@ fn unregister_shortcut(app: AppHandle) -> Result<(), String> {
     gs.unregister_all().map_err(|e| format!("注销快捷键失败: {e}"))
 }
 
-/// fetch_quota：实时查询 Coding Plan 额度（5小时窗口 + 每周）
+/// fetch_quota：实时查询 Coding Plan 额度（5小时窗口 + 每周）。
+/// async + spawn_blocking：内部为同步 HTTP（ureq），必须卸载到阻塞线程池，
+/// 否则同步 command 在主线程执行时，网络慢会冻结托盘/窗口事件（前端每 30s 调一次）。
 #[tauri::command]
-fn fetch_quota() -> Result<QuotaResult, String> {
-    let cfg = load_quota()?;
-    quota::fetch_quota(&cfg)
+async fn fetch_quota() -> Result<QuotaResult, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let cfg = load_quota()?;
+        quota::fetch_quota(&cfg)
+    })
+    .await
+    .map_err(|e| format!("额度查询任务失败: {e}"))?
 }
 
 // ===== 周额度追踪 / 对比页 / 高峰期 =====
@@ -901,8 +911,25 @@ fn today_tray_title(app: &AppHandle) -> String {
     }
 }
 
+/// 阻止 App Nap：菜单栏常驻应用的面板窗口长期隐藏时，macOS 会判定应用空闲并
+/// 挂起进程，WKWebView 的 WebContent 进程随之被挂起甚至回收——再次唤起面板时
+/// 需整页重载（bundle + React 挂载 + 数据初始化），造成数秒白屏。
+/// 启动时声明持续用户活动断言，让 WebView 在窗口隐藏期间保持存活。
+/// 用 AllowingIdleSystemSleep 变体：阻止 App Nap 但允许系统空闲睡眠，兼顾笔记本电池。
+#[cfg(target_os = "macos")]
+fn prevent_app_nap() {
+    use objc2_foundation::{NSActivityOptions, NSProcessInfo};
+
+    let activity =
+        NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+            NSActivityOptions::UserInitiatedAllowingIdleSystemSleep,
+            &objc2_foundation::NSString::from_str("ZBar panel keep-alive"),
+        );
+    // 断言必须存活整个进程生命周期：forget 防止 drop 触发 endActivity 让断言失效
+    std::mem::forget(activity);
+}
+
 /// 应用快捷键配置：先注销全部，再按配置注册。
-/// 注册的 handler 调用 toggle_panel 唤起/隐藏面板。
 fn apply_shortcut(app: &AppHandle, cfg: &shortcut::ShortcutConfig) -> Result<(), String> {
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
     let gs = app.global_shortcut();
@@ -1016,6 +1043,9 @@ pub fn run() {
                     ));
                     tune_panel_vibrancy(&panel);
                 }
+
+                // 常驻活动断言：防止面板长期隐藏时应用被系统挂起、WebView 被回收
+                prevent_app_nap();
             }
             setup_tray(app.handle())?;
             spawn_title_updater(app.handle().clone());

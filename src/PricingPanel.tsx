@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
   ApplyPriceItem,
   Currency,
@@ -56,6 +56,9 @@ function fmtTriplet(p: ModelPrice): string {
   return `${fmtPrice(p.input)}/${fmtPrice(p.output)}/${fmtPrice(p.cache_read)}`;
 }
 
+/// 无价格模型的占位（复用同一引用，保证 memo 的模型卡片不会因 fallback 新对象而失效）
+const ZERO_PRICE: ModelPrice = { input: 0, output: 0, cache_read: 0 };
+
 export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
   const [pricing, setPricing] = useState<PricingConfig | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -67,6 +70,20 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
   // 草稿：把每个输入框的编辑值作为字符串暂存，避免小数点输入被 parseFloat 吞掉。
   // key = `${modelId}|${field}`
   const [draft, setDraft] = useState<Record<string, string>>({});
+  // draft 的 ref 镜像：onBlur 提交时读最新值，避免把回调绑进 draft 依赖导致整列表重渲染。
+  // 用 useLayoutEffect 同步：渲染后立刻刷新，保证任何后续事件（onBlur）读到的是最新草稿
+  const draftRef = useRef<Record<string, string>>({});
+  useLayoutEffect(() => {
+    draftRef.current = draft;
+  }, [draft]);
+
+  // 草稿变更（稳定引用）：单个输入框的键入只重渲染对应的 memo 模型卡片，而非整个列表
+  const handleDraftChange = useCallback(
+    (id: string, key: keyof ModelPrice, v: string) => {
+      setDraft((d) => ({ ...d, [`${id}|${key}`]: v }));
+    },
+    []
+  );
 
   // ===== Coding Plan 额度查询配置 =====
   const [quotaCfg, setQuotaCfg] = useState<QuotaConfig>({
@@ -299,27 +316,29 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
     return isNaN(n) ? 0 : n;
   };
 
-  // 某输入框失焦：把草稿写回 pricing 数值
-  const commitDraft = (modelId: string, key: keyof ModelPrice) => {
-    const dk = `${modelId}|${key}`;
-    const raw = draft[dk];
-    if (raw === undefined) return; // 没编辑过，跳过
-    const num = parseDraft(raw);
-    setPricing((prev) => {
-      if (!prev) return prev;
-      const cur = prev[currency] ?? {};
-      return {
-        ...prev,
-        [currency]: {
-          ...cur,
-          [modelId]: {
-            ...(cur[modelId] ?? { input: 0, output: 0, cache_read: 0 }),
-            [key]: num,
+  // 某输入框失焦：把草稿写回 pricing 数值（读 draftRef 最新值，引用随 currency 重建）
+  const commitDraft = useCallback(
+    (modelId: string, key: keyof ModelPrice) => {
+      const raw = draftRef.current[`${modelId}|${key}`];
+      if (raw === undefined) return; // 没编辑过，跳过
+      const num = parseDraft(raw);
+      setPricing((prev) => {
+        if (!prev) return prev;
+        const cur = prev[currency] ?? {};
+        return {
+          ...prev,
+          [currency]: {
+            ...cur,
+            [modelId]: {
+              ...(cur[modelId] ?? ZERO_PRICE),
+              [key]: num,
+            },
           },
-        },
-      };
-    });
-  };
+        };
+      });
+    },
+    [currency]
+  );
 
   const handleSave = async () => {
     if (!pricing) return;
@@ -350,6 +369,22 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
     }
   };
 
+  // 合并：数据库里的模型 + 价格表里手动加的模型（记忆化，避免每次渲染重算集合与排序）。
+  // 必须位于下方 if (!pricing) 早退之前：条件早退会跳过 hooks，导致前后渲染 hooks 数不一致而崩溃
+  const modelIds = useMemo(
+    () =>
+      pricing
+        ? Array.from(
+            new Set([
+              ...models.map((m) => m.model_id),
+              ...Object.keys(pricing.cny),
+              ...Object.keys(pricing.usd),
+            ])
+          ).sort()
+        : [],
+    [models, pricing]
+  );
+
   if (!pricing) {
     return (
       <div className="flex items-center justify-center h-full text-xs text-slate-700/55">
@@ -357,15 +392,6 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
       </div>
     );
   }
-
-  // 合并：数据库里的模型 + 价格表里手动加的模型
-  const modelIds = Array.from(
-    new Set([
-      ...models.map((m) => m.model_id),
-      ...Object.keys(pricing.cny),
-      ...Object.keys(pricing.usd),
-    ])
-  ).sort();
 
   const symbol = currency === "cny" ? "¥" : "$";
 
@@ -858,60 +884,19 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
           {/* 高峰期倍率设置 */}
           <PeakConfigEditor />
 
-          {modelIds.map((id) => {
-            const price =
-              pricing[currency][id] ?? {
-                input: 0,
-                output: 0,
-                cache_read: 0,
-              };
-            return (
-              <div
-                key={id}
-                className="rounded-lg bg-slate-900/5 border border-slate-900/10 p-2.5"
-              >
-                <div className="text-xs font-medium text-slate-900/90 mb-2">
-                  {id}
-                </div>
-                <div className="grid grid-cols-3 gap-1.5">
-                  {FIELDS.map((f) => {
-                    const dk = `${id}|${f.key}`;
-                    const draftVal = draft[dk];
-                    const shown =
-                      draftVal !== undefined
-                        ? draftVal
-                        : price[f.key]
-                        ? String(price[f.key])
-                        : "";
-                    return (
-                      <label
-                        key={f.key}
-                        className="flex flex-col gap-0.5 text-[10px]"
-                      >
-                        <span className="text-slate-700/55">{f.label}</span>
-                        <div className="flex items-center rounded-md bg-slate-900/5 border border-slate-900/10 focus-within:border-sky-400/60 focus-within:ring-1 focus-within:ring-sky-400/40 transition-colors">
-                          <span className="text-slate-700/50 pl-1.5">{symbol}</span>
-                          <input
-                            type="text"
-                            inputMode="decimal"
-                            value={shown}
-                            placeholder="0"
-                            onChange={(e) => {
-                              // 只允许数字和小数点
-                              const v = e.target.value.replace(/[^\d.]/g, "");
-                              setDraft((d) => ({ ...d, [dk]: v }));
-                            }}
-                            onBlur={() => commitDraft(id, f.key)}
-                            className="num w-full px-1.5 py-1 text-right bg-transparent text-slate-900/90 placeholder:text-slate-700/35 focus:outline-none"
-                          />
-                        </div>
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
-            );
-          })}
+          {modelIds.map((id) => (
+            <ModelPriceRow
+              key={id}
+              id={id}
+              symbol={symbol}
+              price={pricing[currency][id] ?? ZERO_PRICE}
+              dIn={draft[`${id}|input`]}
+              dOut={draft[`${id}|output`]}
+              dCache={draft[`${id}|cache_read`]}
+              onDraftChange={handleDraftChange}
+              onCommit={commitDraft}
+            />
+          ))}
           {modelIds.length === 0 && (
             <div className="text-center text-xs text-slate-700/50 py-8">
               暂无模型数据。请确认 ZCode 已产生使用记录。
@@ -926,8 +911,73 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
 /** 周几名称（与 weekday_mask 的 bit 对应：bit0=周日） */
 const WEEKDAY_LABELS = ["日", "一", "二", "三", "四", "五", "六"];
 
-/** 高峰期倍率设置卡片：独立加载/编辑/保存 */
-function PeakConfigEditor() {
+/** 单个模型的价格卡片（memo：草稿用三个原始类型 props 传递，
+ *  键入时只重渲染这一张卡片而非整个模型列表） */
+const ModelPriceRow = memo(function ModelPriceRow({
+  id,
+  symbol,
+  price,
+  dIn,
+  dOut,
+  dCache,
+  onDraftChange,
+  onCommit,
+}: {
+  id: string;
+  symbol: string;
+  price: ModelPrice;
+  dIn: string | undefined;
+  dOut: string | undefined;
+  dCache: string | undefined;
+  onDraftChange: (id: string, key: keyof ModelPrice, v: string) => void;
+  onCommit: (id: string, key: keyof ModelPrice) => void;
+}) {
+  const drafts: Record<keyof ModelPrice, string | undefined> = {
+    input: dIn,
+    output: dOut,
+    cache_read: dCache,
+  };
+  return (
+    <div className="rounded-lg bg-slate-900/5 border border-slate-900/10 p-2.5">
+      <div className="text-xs font-medium text-slate-900/90 mb-2">{id}</div>
+      <div className="grid grid-cols-3 gap-1.5">
+        {FIELDS.map((f) => {
+          const draftVal = drafts[f.key];
+          const shown =
+            draftVal !== undefined
+              ? draftVal
+              : price[f.key]
+                ? String(price[f.key])
+                : "";
+          return (
+            <label key={f.key} className="flex flex-col gap-0.5 text-[10px]">
+              <span className="text-slate-700/55">{f.label}</span>
+              <div className="flex items-center rounded-md bg-slate-900/5 border border-slate-900/10 focus-within:border-sky-400/60 focus-within:ring-1 focus-within:ring-sky-400/40 transition-colors">
+                <span className="text-slate-700/50 pl-1.5">{symbol}</span>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={shown}
+                  placeholder="0"
+                  onChange={(e) => {
+                    // 只允许数字和小数点
+                    const v = e.target.value.replace(/[^\d.]/g, "");
+                    onDraftChange(id, f.key, v);
+                  }}
+                  onBlur={() => onCommit(id, f.key)}
+                  className="num w-full px-1.5 py-1 text-right bg-transparent text-slate-900/90 placeholder:text-slate-700/35 focus:outline-none"
+                />
+              </div>
+            </label>
+          );
+        })}
+      </div>
+    </div>
+  );
+});
+
+/** 高峰期倍率设置卡片：独立加载/编辑/保存（memo：自持有状态，不随父面板重渲染） */
+const PeakConfigEditor = memo(function PeakConfigEditor() {
   const [cfg, setCfg] = useState<PeakConfig | null>(null);
   const [saving, setSaving] = useState(false);
   const [savedFlash, setSavedFlash] = useState(false);
@@ -1177,7 +1227,7 @@ function PeakConfigEditor() {
       )}
     </div>
   );
-}
+});
 
 /** 更新某个时段的字段 */
 function updateSegment(
