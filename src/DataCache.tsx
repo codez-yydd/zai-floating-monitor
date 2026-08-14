@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -52,14 +53,18 @@ import { loadCache, saveCache } from "./cache";
  *    零请求、秒显。stats/cost/trend/cursor 全部取自当前 key 的缓存。
  *  - 后台独立定时任务：定期把各预设范围（today/1d/7d/30d）的数据刷新进缓存，
  *    与范围切换完全解耦——切回来时数据已在缓存里。
- *  - 按需补刷：切到无缓存/过期范围（如全新 custom、首次进入、数据老化）才
- *    触发一次加载，之后也进缓存。
+ *  - 按需补刷：切到无缓存/过期范围（如全新 custom、首次进入、数据老化、配置
+ *    就绪）才触发一次加载，之后也进缓存。
  *  - 刷新期间不清空旧值（只设 refreshing），新数据到达后平滑替换 → 无闪烁。
+ *  - pricing 未就绪时保留旧 cost，避免空价格表把花费覆盖成 0。
  *  - localStorage 持久化：进程重启后各范围仍秒显。
  */
 
 // 需要后台持续刷新的预设范围（custom 由按需补刷负责，无法预缓存）
 const PRESET_RANGES: RangePreset[] = ["today", "1d", "7d", "30d"];
+
+// custom 缓存条目上限：超过则按 ts 淘汰最老的，避免长期累积撑爆 localStorage
+const MAX_CUSTOM_ENTRIES = 8;
 
 /** 由 preset 派生趋势分桶：今日/24h 按小时，更长范围按日 */
 function bucketOf(preset: RangePreset): TrendBucket {
@@ -72,6 +77,28 @@ function rangeKey(
   custom: { from: string; to: string }
 ): string {
   return preset === "custom" ? `custom:${custom.from}~${custom.to}` : preset;
+}
+
+/** 价格表是否为空（未加载占位）——空时不覆盖 cost，避免把花费算成 0 */
+function isPricingEmpty(p: PricingConfig): boolean {
+  return Object.keys(p.cny).length === 0 && Object.keys(p.usd).length === 0;
+}
+
+/**
+ * 淘汰超额的 custom 缓存条目（按 ts 升序删除最老的）。
+ * key 形如 `${df}|custom:...` 或 `custom:...`，均含 "custom:"。
+ * 预设范围 key（today/1d/7d/30d）固定 4 个，不参与淘汰。
+ */
+function trimCustomEntries<T extends { ts: number }>(
+  map: Record<string, T>,
+  max: number
+): Record<string, T> {
+  const customKeys = Object.keys(map).filter((k) => k.includes("custom:"));
+  if (customKeys.length <= max) return map;
+  customKeys.sort((a, b) => map[a].ts - map[b].ts);
+  const next = { ...map };
+  for (const k of customKeys.slice(0, customKeys.length - max)) delete next[k];
+  return next;
 }
 
 // 缓存过期阈值：超过则按需补刷（略大于后台刷新间隔，避免边界抖动）
@@ -110,6 +137,14 @@ const EMPTY_CURSOR: CursorEntry = {
   ts: 0,
 };
 
+/** 冷启动加载缓存时清掉可能被持久化的 refreshing 标志（崩溃恢复场景）。 */
+function stripRefreshing<T extends { refreshing: boolean }>(
+  map: Record<string, T>
+): Record<string, T> {
+  for (const k of Object.keys(map)) map[k] = { ...map[k], refreshing: false };
+  return map;
+}
+
 export interface DataCacheValue {
   // ===== 查询参数（UI 可修改，变化时只切当前 key，不触发请求）=====
   preset: RangePreset;
@@ -143,6 +178,7 @@ export interface DataCacheValue {
   syncEnabled: boolean;
 
   // ===== 元信息 =====
+  /** 当前各数据源中最旧一次成功刷新的时间（最保守的新鲜度下限） */
   lastUpdate: number;
   /** 当前范围是否在后台拉取（仅用于刷新按钮转圈，不阻塞渲染） */
   refreshing: boolean;
@@ -186,10 +222,10 @@ export function DataProvider({ pricing, currency, children }: ProviderProps) {
 
   // ===== 按范围缓存（持久化，key: zai=`${df}|${rangeKey}`，cursor=rangeKey）=====
   const [zaiCache, setZaiCache] = useState<Record<string, ZaiEntry>>(
-    () => loadCache<Record<string, ZaiEntry>>("zbar-zai-cache") ?? {}
+    () => stripRefreshing(loadCache<Record<string, ZaiEntry>>("zbar-zai-cache") ?? {})
   );
   const [cursorCache, setCursorCache] = useState<Record<string, CursorEntry>>(
-    () => loadCache<Record<string, CursorEntry>>("zbar-cursor-cache") ?? {}
+    () => stripRefreshing(loadCache<Record<string, CursorEntry>>("zbar-cursor-cache") ?? {})
   );
 
   // ===== 其他数据（持久化）=====
@@ -227,6 +263,7 @@ export function DataProvider({ pricing, currency, children }: ProviderProps) {
   /**
    * 刷新单个 z.ai 范围（范围无关，参数化 df/from/to/bucket）。
    * 保留原 local/remote/merge 合并逻辑；刷新期间不清空旧值，只设 refreshing。
+   * pricing 未就绪时保留旧 cost，避免空价格表把花费覆盖成 0（冷启动保护）。
    */
   const refreshZaiRange = useCallback(
     async (
@@ -301,20 +338,38 @@ export function DataProvider({ pricing, currency, children }: ProviderProps) {
           trend = localTrend;
         }
 
-        setZaiCache((prev) => ({
-          ...prev,
-          [key]: { stats, cost, trend, error: null, refreshing: false, ts: Date.now() },
-        }));
+        setZaiCache((prev) =>
+          trimCustomEntries(
+            {
+              ...prev,
+              [key]: {
+                stats,
+                // pricing 未就绪时保留旧 cost，避免空价格表覆盖成 0
+                cost: isPricingEmpty(pricing) ? (prev[key]?.cost ?? null) : cost,
+                trend,
+                error: null,
+                refreshing: false,
+                ts: Date.now(),
+              },
+            },
+            MAX_CUSTOM_ENTRIES
+          )
+        );
       } catch (e) {
-        setZaiCache((prev) => ({
-          ...prev,
-          [key]: {
-            ...(prev[key] ?? EMPTY_ZAI),
-            error: String(e),
-            refreshing: false,
-            ts: Date.now(),
-          },
-        }));
+        setZaiCache((prev) =>
+          trimCustomEntries(
+            {
+              ...prev,
+              [key]: {
+                ...(prev[key] ?? EMPTY_ZAI),
+                error: String(e),
+                refreshing: false,
+                ts: Date.now(),
+              },
+            },
+            MAX_CUSTOM_ENTRIES
+          )
+        );
       } finally {
         zaiInflight.current.delete(key);
       }
@@ -333,30 +388,35 @@ export function DataProvider({ pricing, currency, children }: ProviderProps) {
 
     fetchCursorUsage(from, to)
       .then((data) => {
-        setCursorCache((prev) => ({
-          ...prev,
-          [key]: { snapshot: data, error: null, refreshing: false, ts: Date.now() },
-        }));
+        setCursorCache((prev) =>
+          trimCustomEntries(
+            {
+              ...prev,
+              [key]: { snapshot: data, error: null, refreshing: false, ts: Date.now() },
+            },
+            MAX_CUSTOM_ENTRIES
+          )
+        );
       })
       .catch((e) => {
-        setCursorCache((prev) => ({
-          ...prev,
-          [key]: {
-            ...(prev[key] ?? EMPTY_CURSOR),
-            error: String(e),
-            refreshing: false,
-            ts: Date.now(),
-          },
-        }));
+        setCursorCache((prev) =>
+          trimCustomEntries(
+            {
+              ...prev,
+              [key]: {
+                ...(prev[key] ?? EMPTY_CURSOR),
+                error: String(e),
+                refreshing: false,
+                ts: Date.now(),
+              },
+            },
+            MAX_CUSTOM_ENTRIES
+          )
+        );
       })
       .finally(() => {
         cursorInflight.current.delete(key);
       });
-
-    // 顺带刷新 USD→CNY 汇率：用户可能在设置页改过。本地配置读取，开销可忽略。
-    getCursorConfig()
-      .then((cfg) => setFxRate(cfg.usd_cny_rate))
-      .catch(() => {});
   }, []);
 
   // Quota 数据加载（与范围无关，每次调用会采样写入 quota_history）。
@@ -407,9 +467,13 @@ export function DataProvider({ pricing, currency, children }: ProviderProps) {
   }, [deviceFilter, syncConfig, syncEnabled, pricing, currency, refreshZaiRange]);
 
   // ===== 后台定时刷新 Cursor：所有预设范围，降频 180s（网络慢，4 范围并行）。
-  //      账号级，不受 deviceFilter 影响。 =====
+  //      账号级，不受 deviceFilter 影响。汇率每 tick 只读一次（与范围循环解耦）。 =====
   useEffect(() => {
     const tick = () => {
+      // 每 tick 读一次汇率（用户可能在设置页改过），避免每个范围重复读
+      getCursorConfig()
+        .then((cfg) => setFxRate(cfg.usd_cny_rate))
+        .catch(() => {});
       for (const p of PRESET_RANGES) {
         const [f, t] = resolveRange(p, custom);
         refreshCursorRange(p, f, t);
@@ -428,8 +492,10 @@ export function DataProvider({ pricing, currency, children }: ProviderProps) {
     return () => clearInterval(timer);
   }, [loadQuota]);
 
-  // ===== 按需补刷：切到无缓存/过期范围时补一次（覆盖 custom、首次、数据老化）。
-  //      预设范围通常已被后台任务刷新 → 命中新鲜缓存 → 不请求、秒显。 =====
+  // ===== 按需补刷：切到无缓存/过期范围，或配置就绪后补一次。
+  //      预设范围通常已被后台任务刷新 → 命中新鲜缓存 → 不请求、秒显。
+  //      依赖含 refreshZaiRange/refreshCursorRange：pricing/syncConfig 就绪后函数重建，
+  //      本 effect 重跑 → custom 范围用就绪配置重刷自愈（修复冷启动覆盖问题）。 =====
   useEffect(() => {
     const [f, t] = resolveRange(preset, custom);
     const zKey = `${deviceFilter}|${rangeKey(preset, custom)}`;
@@ -442,9 +508,26 @@ export function DataProvider({ pricing, currency, children }: ProviderProps) {
     if (!cEntry || Date.now() - cEntry.ts > CURSOR_STALE_MS) {
       refreshCursorRange(cKey, f, t);
     }
-    // 仅在范围/设备变化时触发；不依赖 cache 内容（靠 ref 读最新值），避免反复触发
+    // 仅在范围/设备/刷新函数变化时触发；不依赖 cache 内容（靠 ref 读最新值）
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [preset, custom, deviceFilter, trendBucket]);
+  }, [preset, custom, deviceFilter, trendBucket, refreshZaiRange, refreshCursorRange]);
+
+  // ===== 窗口恢复可见时主动补刷：隐藏期间 setInterval 常被节流，恢复后立即补齐
+  //      当前 deviceFilter 的预设范围，保证"常驻新鲜"。 =====
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      const df = deviceFilter;
+      for (const p of PRESET_RANGES) {
+        const [f, t] = resolveRange(p, custom);
+        refreshZaiRange(df, `${df}|${p}`, f, t, bucketOf(p));
+        refreshCursorRange(p, f, t);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deviceFilter, refreshZaiRange, refreshCursorRange]);
 
   // ===== 持久化：各 state 变化即落盘，供下次冷启动各范围秒显 =====
   useEffect(() => {
@@ -488,32 +571,58 @@ export function DataProvider({ pricing, currency, children }: ProviderProps) {
   const curZai = zaiCache[curZaiKey] ?? EMPTY_ZAI;
   const curCursor = cursorCache[curCursorKey] ?? EMPTY_CURSOR;
 
-  const value: DataCacheValue = {
-    preset,
-    custom,
-    trendBucket,
-    deviceFilter,
-    setPreset,
-    setCustom,
-    setDeviceFilter,
-    stats: curZai.stats,
-    cost: curZai.cost,
-    trend: curZai.trend,
-    error: curZai.error,
-    cursor: curCursor.snapshot,
-    cursorError: curCursor.error,
-    fxRate,
-    quota,
-    todayDelta,
-    quotaError,
-    syncConfig,
-    remoteDevices,
-    syncEnabled,
-    lastUpdate: Math.max(curZai.ts, curCursor.ts),
-    refreshing: curZai.refreshing || curCursor.refreshing,
-    refresh,
-    refreshQuota,
-  };
+  // lastUpdate 取当前范围各数据源里最旧的成功时间（保守的新鲜度下限）
+  const updateTs = [curZai.ts, curCursor.ts].filter((t) => t > 0);
+  const lastUpdate = updateTs.length ? Math.min(...updateTs) : 0;
+  const refreshing = curZai.refreshing || curCursor.refreshing;
+
+  const value = useMemo<DataCacheValue>(
+    () => ({
+      preset,
+      custom,
+      trendBucket,
+      deviceFilter,
+      setPreset,
+      setCustom,
+      setDeviceFilter,
+      stats: curZai.stats,
+      cost: curZai.cost,
+      trend: curZai.trend,
+      error: curZai.error,
+      cursor: curCursor.snapshot,
+      cursorError: curCursor.error,
+      fxRate,
+      quota,
+      todayDelta,
+      quotaError,
+      syncConfig,
+      remoteDevices,
+      syncEnabled,
+      lastUpdate,
+      refreshing,
+      refresh,
+      refreshQuota,
+    }),
+    [
+      preset,
+      custom,
+      trendBucket,
+      deviceFilter,
+      curZai,
+      curCursor,
+      fxRate,
+      quota,
+      todayDelta,
+      quotaError,
+      syncConfig,
+      remoteDevices,
+      syncEnabled,
+      lastUpdate,
+      refreshing,
+      refresh,
+      refreshQuota,
+    ]
+  );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
