@@ -317,16 +317,16 @@ export interface WeeklyTokenBucket {
 
 // ===== 价格同步（内置默认表 diff 提示，不自动覆盖）=====
 
-/** 单条价格差异（某个货币维度上，用户价与默认价不一致） */
+/** 单条价格差异（模型级：以 USD 参考原始价为判定基准） */
 export interface PriceDiffItem {
   /** 模型 id */
   model_id: string;
-  /** "cny" | "usd" */
-  currency: Currency;
-  /** 用户当前价格（新增模型时为 null） */
+  /** 用户当前 USD 价格（新增模型时为 null） */
   user: ModelPrice | null;
-  /** 内置默认价格 */
+  /** 参考 USD 价格（每百万 token） */
   default: ModelPrice;
+  /** 参考 CNY 价格（折算展示值，应用时与 USD 一并写入） */
+  default_cny: ModelPrice;
 }
 
 /** 完整差异结果 */
@@ -335,9 +335,9 @@ export interface PricingDiff {
   source: "models.dev" | "builtin";
   /** 参考表版本号（仅内置表有） */
   version: string;
-  /** 新增模型（参考有、用户无） */
+  /** 新增模型（参考有、用户两种货币均无，应用时 USD+CNY 一并写入） */
   new_models: PriceDiffItem[];
-  /** 价格变动（两边都有但不同） */
+  /** USD 价格变动（用户已配 USD 但与参考不同；CNY 折算价不参与判定，汇率变化不误报） */
   changed: PriceDiffItem[];
   /** 实际在用但无任何价格的模型（花费按 0 计，需手动补价） */
   missing: string[];

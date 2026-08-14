@@ -108,7 +108,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
   const [updateCount, setUpdateCount] = useState(0);
   const [diffPanel, setDiffPanel] = useState(false);
   const [diff, setDiff] = useState<PricingDiff | null>(null);
-  // 用户勾选的项 key：`${model_id}|${currency}`（区分 cny/usd）
+  // 用户勾选的模型 id 集合（差异条目为模型级，勾选后 USD 与 CNY 折算价一并应用）
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [applying, setApplying] = useState(false);
 
@@ -155,6 +155,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
   // 进入价格设置时静默检查一次更新，有差异则在按钮显示红点（不弹窗打扰）。
   // 默认（LocalFirst）：读本地缓存对比（秒回，不管缓存新旧），完全无缓存才联网兜底。
   // 缓存每天由后台定时任务自动联网刷新一次；手动拉最新数据点「更新」按钮。
+  // 差异判定只看 USD 原始价（每个模型最多 1 条），CNY 折算价不参与判定。
   useEffect(() => {
     checkPricingUpdates()
       .then((d) => {
@@ -163,9 +164,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
         setDiff(d);
         // 默认勾选：新增模型全勾，变动项默认不勾（保护用户自定义）
         const sel = new Set<string>();
-        d.new_models.forEach(
-          (i) => sel.add(`${i.model_id}|${i.currency}`)
-        );
+        d.new_models.forEach((i) => sel.add(i.model_id));
         setSelected(sel);
       })
       .catch(() => {});
@@ -282,7 +281,8 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
     });
   };
 
-  // 应用勾选的价格更新：把勾选项合并进 pricing 并保存，绝不自动覆盖未勾选项
+  // 应用勾选的价格更新：把勾选项合并进 pricing 并保存，绝不自动覆盖未勾选项。
+  // 勾选按模型进行，应用时该模型的 USD 参考价与 CNY 折算价一并写入（两种货币都有价）
   const handleApplyUpdates = async () => {
     if (!diff) return;
     setApplying(true);
@@ -290,12 +290,11 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
     try {
       const all = [...diff.new_models, ...diff.changed];
       const items: ApplyPriceItem[] = all
-        .filter((i) => selected.has(`${i.model_id}|${i.currency}`))
-        .map((i) => ({
-          model_id: i.model_id,
-          currency: i.currency,
-          price: i.default,
-        }));
+        .filter((i) => selected.has(i.model_id))
+        .flatMap((i) => [
+          { model_id: i.model_id, currency: "usd" as const, price: i.default },
+          { model_id: i.model_id, currency: "cny" as const, price: i.default_cny },
+        ]);
       if (items.length === 0) {
         setDiffPanel(false);
         return;
@@ -308,7 +307,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
       const n = d.new_models.length + d.changed.length;
       setDiff(d);
       setUpdateCount(n);
-      setSelected(new Set(d.new_models.map((i) => `${i.model_id}|${i.currency}`)));
+      setSelected(new Set(d.new_models.map((i) => i.model_id)));
       if (n === 0) setDiffPanel(false);
     } catch (e) {
       setError(String(e));
@@ -325,7 +324,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
       const d = await checkPricingUpdates(force);
       setDiff(d);
       setUpdateCount(d.new_models.length + d.changed.length);
-      setSelected(new Set(d.new_models.map((i) => `${i.model_id}|${i.currency}`)));
+      setSelected(new Set(d.new_models.map((i) => i.model_id)));
       setDiffPanel(true);
     } catch (e) {
       setError(String(e));
@@ -529,9 +528,9 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
             </div>
             <p className="text-[9px] text-slate-700/50 mb-2 leading-relaxed">
               {diff.source === "models.dev"
-                ? "来自 models.dev 的全厂商模型 USD 参考价（你在 ZCode 里用到的任意厂商模型都会检测），CNY 按汇率换算；后台每天自动更新一次缓存，点「更新」可立即联网刷新。"
+                ? "来自 models.dev 的全厂商模型参考价（你在 ZCode 里用到的任意厂商模型都会检测）。差异判定只看 USD 原始价；CNY 为按当前汇率的折算参考，汇率每日更新不会再触发误报。后台每天自动更新一次缓存，点「更新」可立即联网刷新。"
                 : "models.dev 不可达，已回退内置参考表；点「更新」可重试联网。"}
-              勾选后点「应用选中」才会写入；新增项默认勾选，变动项默认不勾（保护你的自定义）。价格三项依次为 输入/输出/缓存（每百万 token）。
+              勾选后点「应用选中」才会写入（USD 与 CNY 折算价一并写入）；新增项默认勾选，变动项默认不勾（保护你的自定义）。价格三项依次为 输入/输出/缓存（每百万 token）。
             </p>
             {/* 无价格模型警示：实际在用但两边都没价格，花费按 0 计 */}
             {diff.missing.length > 0 && (
@@ -554,8 +553,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
             <div className="space-y-1 max-h-52 overflow-y-auto">
               {/* 新增模型 */}
               {diff.new_models.map((i) => {
-                const key = `${i.model_id}|${i.currency}`;
-                const sym = i.currency === "cny" ? "¥" : "$";
+                const key = i.model_id;
                 return (
                   <label
                     key={`new-${key}`}
@@ -577,17 +575,19 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
                         </span>
                       </div>
                       <div className="mt-0.5 text-[10px] text-slate-700/60 num whitespace-nowrap">
-                        {sym} {fmtTriplet(i.default)}
+                        $ {fmtTriplet(i.default)}
+                        <span className="text-slate-700/40 ml-1.5">
+                          ≈ ¥ {fmtTriplet(i.default_cny)}
+                        </span>
                       </div>
                     </div>
                   </label>
                 );
               })}
-              {/* 价格变动 */}
+              {/* 价格变动（以 USD 参考价为准） */}
               {diff.changed.map((i) => {
-                const key = `${i.model_id}|${i.currency}`;
+                const key = i.model_id;
                 const u = i.user;
-                const sym = i.currency === "cny" ? "¥" : "$";
                 return (
                   <label
                     key={`chg-${key}`}
@@ -611,11 +611,14 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
                       <div className="mt-0.5 text-[10px] num leading-relaxed">
                         <span className="text-slate-700/40 text-[9px]">旧 </span>
                         <span className="text-slate-700/55 whitespace-nowrap">
-                          {u ? `${sym} ${fmtTriplet(u)}` : "未配价"}
+                          {u ? `$ ${fmtTriplet(u)}` : "未配价"}
                         </span>
                         <span className="text-slate-700/35 mx-1">→</span>
                         <span className="text-sky-600/90 font-medium whitespace-nowrap">
-                          {sym} {fmtTriplet(i.default)}
+                          $ {fmtTriplet(i.default)}
+                        </span>
+                        <span className="text-slate-700/40 ml-1.5 whitespace-nowrap">
+                          ≈ ¥ {fmtTriplet(i.default_cny)}
                         </span>
                       </div>
                     </div>

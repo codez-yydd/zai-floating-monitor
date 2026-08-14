@@ -60,16 +60,24 @@ impl Billable for db::BucketModelStat {
 /// 按 price map 计算单个模型的花费（每百万 token 计价）。
 /// input_tokens 已包含 cache_read_tokens，缓存读部分按缓存价计费，
 /// 剩余非缓存输入部分才按输入价计费。
+/// 查找先精确匹配 db 原始形态；miss 时再按小写归一兜底（价格条目与 db 的
+/// model_id 大小写可能不一致，让任何形态都能算出花费）。线性扫描仅在 miss 时发生。
 fn cost_for<B: Billable>(s: &B, map: &BTreeMap<String, ModelPrice>) -> f64 {
-    map.get(s.model_id())
-        .map(|p| {
-            let non_cache_input =
-                (s.input_tokens() - s.cache_read_tokens()).max(0) as f64;
-            (non_cache_input * p.input
-                + s.output_tokens() as f64 * p.output
-                + s.cache_read_tokens() as f64 * p.cache_read)
-                / 1_000_000.0
-        })
+    let lookup = |p: &ModelPrice| {
+        let non_cache_input =
+            (s.input_tokens() - s.cache_read_tokens()).max(0) as f64;
+        (non_cache_input * p.input
+            + s.output_tokens() as f64 * p.output
+            + s.cache_read_tokens() as f64 * p.cache_read)
+            / 1_000_000.0
+    };
+    if let Some(p) = map.get(s.model_id()) {
+        return lookup(p);
+    }
+    let lc = s.model_id().to_lowercase();
+    map.iter()
+        .find(|(k, _)| k.to_lowercase() == lc)
+        .map(|(_, p)| lookup(p))
         .unwrap_or(0.0)
 }
 
@@ -130,6 +138,8 @@ fn set_currency(currency: String, app: AppHandle) -> Result<(), String> {
 
 /// check_pricing_updates：对比用户当前配置与参考价格（models.dev 优先，失败回退内置表），
 /// 返回差异。仅用于"检查更新"提示，绝不自动覆盖。
+/// 差异判定只看 USD 原始价；CNY 参考价（USD × 汇率）仅作折算展示随条目带出，
+/// 不参与"是否变动"判定——汇率每日自动更新，参与判定会导致持续误报。
 /// 遍历主体 =「数据库实际调用过 ∪ 用户已手动配置」的模型：
 /// 实际在用但两边都没价格的模型会以 missing 暴露（花费按 0 计）。
 /// `force`：true 时绕过缓存强制联网刷新（「更新」按钮）；默认 LocalFirst——
@@ -163,7 +173,8 @@ async fn check_pricing_updates(
         relevant.extend(user.cny.keys().cloned());
         relevant.extend(user.usd.keys().cloned());
 
-        // USD→CNY 汇率：与 Cursor 配置共用同一来源（models.dev 模式下 CNY 参考价 = USD × 汇率）
+        // USD→CNY 汇率：与 Cursor 配置共用同一来源。仅用于折算条目里的 CNY 展示价
+        //（models.dev 模式下 default_cny = USD × 汇率），不参与差异判定
         let fx_rate = cursor::load_cursor_config()
             .map(|c| c.usd_cny_rate)
             .unwrap_or(7.2);
