@@ -710,7 +710,7 @@ function MergeDialog({
 
   return (
     <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/30 rounded-2xl">
-      <div className="mx-4 w-full rounded-lg bg-white p-3 shadow-xl">
+      <div className="mx-4 w-full rounded-lg bg-elevated border border-slate-900/10 p-3 shadow-xl">
         <div className="text-[12px] font-semibold text-slate-900 mb-1">
           合并设备
         </div>
@@ -777,7 +777,7 @@ function RenameDialog({
 
   return (
     <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/30 rounded-2xl">
-      <div className="mx-4 w-full rounded-lg bg-white p-3 shadow-xl">
+      <div className="mx-4 w-full rounded-lg bg-elevated border border-slate-900/10 p-3 shadow-xl">
         <div className="text-[12px] font-semibold text-slate-900 mb-1">
           设备改名
         </div>
@@ -855,7 +855,7 @@ function ConfirmDialog({
 
   return (
     <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/30 rounded-2xl">
-      <div className="mx-4 w-full rounded-lg bg-white p-3 shadow-xl">
+      <div className="mx-4 w-full rounded-lg bg-elevated border border-slate-900/10 p-3 shadow-xl">
         <div className="text-[12px] font-semibold text-slate-900 mb-1">
           {title}
         </div>

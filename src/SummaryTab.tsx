@@ -537,7 +537,7 @@ export function SummaryTab({
   return (
     <div className="flex-1 min-h-0 overflow-y-auto px-3.5 pt-3 pb-2 flex flex-col gap-2.5">
       {/* 总览：数字 → 一条占比 → 来源表 */}
-      <div className="rounded-xl bg-white/30 border border-white/35 px-3 py-2.5 shrink-0">
+      <div className="rounded-xl bg-surface/30 border border-surface/35 px-3 py-2.5 shrink-0">
         <div className="flex items-end justify-between gap-3">
           <div>
             <div className="text-[10px] text-slate-500">合计花费</div>
@@ -583,7 +583,7 @@ export function SummaryTab({
       </div>
 
       {/* 额度：每个 agent 一块，纵向排列，方便以后继续加 */}
-      <div className="rounded-xl bg-white/30 border border-white/35 shrink-0 divide-y divide-slate-900/8">
+      <div className="rounded-xl bg-surface/30 border border-surface/35 shrink-0 divide-y divide-slate-900/8">
         {agents.map((a) => (
           <div key={a.id} className="px-3 py-2">
             <div className="flex items-center justify-between gap-1 mb-1.5">

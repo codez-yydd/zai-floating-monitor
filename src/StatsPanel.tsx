@@ -18,6 +18,7 @@ interface Props {
   onGoSync: () => void;
   onGoCompare: () => void;
   onGoReport: () => void;
+  onGoSettings: () => void;
 }
 
 /**
@@ -34,6 +35,7 @@ export function StatsPanel({
   onGoSync,
   onGoCompare,
   onGoReport,
+  onGoSettings,
 }: Props) {
   const cache = useDataCache();
   const {
@@ -138,6 +140,13 @@ export function StatsPanel({
             >
               ⇅
             </button>
+            <button
+              onClick={onGoSettings}
+              className="text-xs text-slate-700/40 hover:text-slate-900/70 transition-colors"
+              title="设置"
+            >
+              ⚙
+            </button>
             {isWindows && (
               <button
                 onClick={() => {
@@ -203,14 +212,14 @@ export function StatsPanel({
                 className={`flex-1 py-1 rounded-md text-[10px] font-medium transition-colors ${
                   tab === t
                     ? t === "cursor"
-                      ? "bg-white text-violet-700 shadow-sm"
+                      ? "bg-surface text-violet-700 shadow-sm"
                       : t === "claude"
-                        ? "bg-white text-orange-700 shadow-sm"
+                        ? "bg-surface text-orange-700 shadow-sm"
                         : t === "codex"
-                          ? "bg-white text-emerald-700 shadow-sm"
+                          ? "bg-surface text-emerald-700 shadow-sm"
                           : t === "zai"
-                            ? "bg-white text-sky-700 shadow-sm"
-                            : "bg-white text-slate-900 shadow-sm"
+                            ? "bg-surface text-sky-700 shadow-sm"
+                            : "bg-surface text-slate-900 shadow-sm"
                     : "text-slate-700/50 hover:text-slate-900/70"
                 }`}
               >
@@ -231,7 +240,7 @@ export function StatsPanel({
 
       {/* Coding Plan 额度监控 —— 仅在 z.ai 标签显示。
           额度采样由 DataProvider 全局定时器负责，与组件挂载无关，无需 display:none hack。 */}
-      {tab === "zai" && <QuotaPanel onGoSettings={onGoPricing} />}
+      {tab === "zai" && <QuotaPanel onGoSettings={onGoSettings} />}
 
       {/* 标签内容 */}
       {tab === "zai" ? (
@@ -305,7 +314,7 @@ export function StatsPanel({
           onClick={onGoPricing}
           className="hover:text-sky-600 transition-colors"
         >
-          ⚙ 价格设置
+          价格设置
         </button>
       </div>
     </div>

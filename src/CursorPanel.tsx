@@ -156,7 +156,7 @@ export function CursorPanel({
 
       {/* 套餐额度：与 Cursor 客户端一致，只展示 Auto / API（本计费周期，不随时间范围变化） */}
       {plan && (
-        <div className="rounded-lg bg-white/25 border border-white/30 px-2.5 py-2 space-y-2">
+        <div className="rounded-lg bg-surface/25 border border-surface/30 px-2.5 py-2 space-y-2">
           {plan.auto_pct != null || plan.api_pct != null ? (
             <>
               {plan.auto_pct != null && (
@@ -177,7 +177,7 @@ export function CursorPanel({
 
       {/* 按需用量 */}
       {onDemand && onDemand.enabled !== false && (
-        <div className="rounded-lg bg-white/25 border border-white/30 px-2.5 py-2 space-y-1.5">
+        <div className="rounded-lg bg-surface/25 border border-surface/30 px-2.5 py-2 space-y-1.5">
           <div className="flex items-center justify-between">
             <span className="text-[10px] uppercase tracking-wide text-slate-700/55">
               按需用量
@@ -358,7 +358,7 @@ export function CursorPanel({
 
       {/* 无 events 数据但已登录 */}
       {!events && (
-        <div className="rounded-lg bg-white/25 border border-white/30 px-3 py-6 text-center text-[10px] text-slate-700/40">
+        <div className="rounded-lg bg-surface/25 border border-surface/30 px-3 py-6 text-center text-[10px] text-slate-700/40">
           {snapshot.events_error
             ? `Token 明细拉取失败：${snapshot.events_error}`
             : "所选时间范围内暂无 Token 使用明细"}

@@ -266,7 +266,7 @@ function StatsSkeleton() {
       </div>
 
       {/* 趋势图框 */}
-      <div className="rounded-lg bg-white/25 border border-white/30 px-2.5 py-2">
+      <div className="rounded-lg bg-surface/25 border border-surface/30 px-2.5 py-2">
         <div className="h-2.5 w-12 rounded bg-slate-900/20 animate-pulse mb-2" />
         <div className="flex items-end gap-1 h-12">
           {barHeights.map((h, i) => (
@@ -284,7 +284,7 @@ function StatsSkeleton() {
         {[0, 1, 2].map((i) => (
           <div
             key={i}
-            className="rounded-lg bg-white/25 border border-white/30 py-2 text-center"
+            className="rounded-lg bg-surface/25 border border-surface/30 py-2 text-center"
           >
             <div className="h-2 w-8 rounded bg-slate-900/20 animate-pulse mx-auto mb-1.5" />
             <div className="h-3.5 w-12 rounded bg-slate-900/20 animate-pulse mx-auto" />

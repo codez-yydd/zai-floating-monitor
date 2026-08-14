@@ -336,7 +336,7 @@ function PeriodChart({
   const barGap = n > 20 ? "gap-px" : n > 10 ? "gap-0.5" : "gap-1";
 
   return (
-    <div className="rounded-lg bg-white/25 border border-white/30 px-2.5 py-2">
+    <div className="rounded-lg bg-surface/25 border border-surface/30 px-2.5 py-2">
       <div className="flex items-center justify-between mb-1.5">
         <span className="text-[10px] uppercase tracking-wide text-slate-700/55">
           周额度峰值趋势
@@ -397,7 +397,7 @@ function PeriodDetail({
   const sampleLow = period.sample_count < 10;
 
   return (
-    <div className="rounded-lg bg-white/30 border border-white/40 px-3 py-2.5 space-y-2">
+    <div className="rounded-lg bg-surface/30 border border-surface/40 px-3 py-2.5 space-y-2">
       {/* 标题行 */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-1.5">
@@ -415,7 +415,7 @@ function PeriodDetail({
       </div>
 
       {/* token 统计 */}
-      <div className="rounded-md bg-white/25 py-1.5 px-2">
+      <div className="rounded-md bg-surface/25 py-1.5 px-2">
         <div className="text-[9px] text-slate-700/55">实际 Token</div>
         <div className="num text-[13px] font-semibold text-slate-900/85 mt-0.5">
           {formatTokens(totalTokens)}

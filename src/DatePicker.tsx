@@ -155,7 +155,7 @@ export function DatePicker({
             transform: "translateX(-50%)",
             width: POPUP_WIDTH,
           }}
-          className="z-50 p-2.5 rounded-lg bg-white/95 backdrop-blur-md border border-slate-900/10 shadow-[0_6px_20px_-4px_rgba(15,23,42,0.14)]"
+          className="z-50 p-2.5 rounded-lg bg-elevated backdrop-blur-md border border-slate-900/10 shadow-[0_6px_20px_-4px_rgba(15,23,42,0.14)]"
         >
           {/* 月份切换 */}
           <div className="flex items-center justify-between mb-2">

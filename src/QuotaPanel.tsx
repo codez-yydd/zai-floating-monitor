@@ -63,7 +63,7 @@ export function QuotaPanel({ onGoSettings }: Props) {
   const levelLabel = LEVEL_LABEL[quota.level] || quota.level || "—";
 
   return (
-    <div className="mx-3.5 mb-1 rounded-lg bg-white/30 border border-white/40 px-2.5 py-2">
+    <div className="mx-3.5 mb-1 rounded-lg bg-surface/30 border border-surface/40 px-2.5 py-2">
       {/* 标题行 */}
       <div className="flex items-center justify-between mb-1.5">
         <div className="flex items-center gap-1.5">

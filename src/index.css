@@ -1,5 +1,12 @@
 @import "tailwindcss";
 
+@theme {
+  /* 语义表面色：亮=白，暗色下在 .dark 覆盖为深灰，配合透明度形成玻璃卡片 */
+  --color-surface: #ffffff;
+  /* 浮层底：弹窗/日历等近实底浮层专用（与半透明玻璃 surface 区分） */
+  --color-elevated: #ffffff;
+}
+
 :root {
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
     "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -7,6 +14,18 @@
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   font-variant-numeric: tabular-nums;
+
+  /* 面板玻璃底：RGB 三元组 + 透明度分离，设置页滑块只改 --panel-alpha 即时生效 */
+  --panel-bg: 255 255 255;
+  --panel-alpha: 0.55;
+  --panel-border: rgba(15, 23, 42, 0.14);
+  --panel-text: #1f2937;
+  /* 面板内侧高光描边（.dark 覆盖为微弱浅光） */
+  --panel-highlight: rgba(255, 255, 255, 0.64);
+
+  /* 滚动条 thumb 颜色（.dark 覆盖为浅色） */
+  --scrollbar-thumb: rgba(15, 23, 42, 0.18);
+  --scrollbar-thumb-hover: rgba(15, 23, 42, 0.28);
 }
 
 html,
@@ -17,7 +36,7 @@ body,
   height: 100%;
   overflow: hidden;
   border-radius: 16px;
-  color: #1f2937;
+  color: var(--panel-text);
   color-scheme: light;
   /* 必须透明，让原生 NSVisualEffectView 毛玻璃透出。 */
   background: transparent !important;
@@ -33,13 +52,13 @@ body,
   height: 100%;
   border-radius: 16px;
   overflow: hidden;
-  background: rgba(255, 255, 255, 0.55);
-  border: 1px solid rgba(15, 23, 42, 0.14);
+  background: rgb(var(--panel-bg) / var(--panel-alpha));
+  border: 1px solid var(--panel-border);
   box-shadow:
     0 18px 48px rgba(15, 23, 42, 0.16),
     0 2px 8px rgba(15, 23, 42, 0.08),
-    inset 0 0 0 0.5px rgba(255, 255, 255, 0.64);
-  color: #1f2937;
+    inset 0 0 0 0.5px var(--panel-highlight);
+  color: var(--panel-text);
 }
 
 /* 数字用 SF Mono 等宽，更精致 */
@@ -57,9 +76,58 @@ body,
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(15, 23, 42, 0.18);
+  background: var(--scrollbar-thumb);
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(15, 23, 42, 0.28);
+  background: var(--scrollbar-thumb-hover);
+}
+
+/* ============================================================
+ * 暗色主题：只覆盖 Tailwind v4 主题变量与面板变量，
+ * 所有引用这些变量的工具类（text-slate-*、bg-surface/*、
+ * text-sky-600 等）随之翻转，无需逐组件加 dark: 前缀。
+ * 映射逻辑：
+ *  - slate 深档（文字用）→ 浅档；浅档（辅字/占位）→ 中灰，
+ *    bg-slate-900/低 alpha 卡片与 border-slate-900/10 变微亮；
+ *  - --color-surface → 中灰，bg-surface/25~60 在深底上呈递进的亮面；
+ *  - 品牌深档（-600/-700 文字用）提亮为对应浅档保证可读，
+ *    实底 -500 全部保留原色（始终配 text-white，不受影响）；
+ *  - --color-white 不覆盖（彩底白字依赖它）。
+ * ============================================================ */
+.dark {
+  color-scheme: dark;
+  /* slate 反转：深档文字变浅；浅档文字/图形变中灰 */
+  --color-slate-300: #475569;
+  --color-slate-400: #64748b;
+  --color-slate-500: #7c8ba3;
+  --color-slate-600: #8b9bb0;
+  --color-slate-700: #94a3b8;
+  --color-slate-800: #cbd5e1;
+  --color-slate-900: #e2e8f0;
+  /* 玻璃表面：中灰，bg-surface/25~60 在深底上呈递进的亮面 */
+  --color-surface: #64748b;
+  /* 浮层底：深色近实底，保证浮层内文字对比 */
+  --color-elevated: #1e293b;
+  /* 品牌深档（文字用）提亮为对应浅档；实底 -500 不动（配白字） */
+  --color-sky-600: #38bdf8;
+  --color-sky-700: #7dd3fc;
+  --color-violet-600: #a78bfa;
+  --color-violet-700: #c4b5fd;
+  --color-emerald-600: #34d399;
+  --color-emerald-700: #6ee7b7;
+  --color-amber-600: #fbbf24;
+  --color-amber-700: #fcd34d;
+  --color-orange-700: #fdba74;
+  --color-red-600: #f87171;
+  --color-red-700: #fca5a5;
+  --color-rose-600: #fb7185;
+  /* 面板底：深色玻璃 */
+  --panel-bg: 15 23 42;
+  --panel-border: rgba(226, 232, 240, 0.14);
+  --panel-text: #e5e7eb;
+  --panel-highlight: rgba(226, 232, 240, 0.08);
+  /* 滚动条：浅色微透明 */
+  --scrollbar-thumb: rgba(226, 232, 240, 0.18);
+  --scrollbar-thumb-hover: rgba(226, 232, 240, 0.28);
 }

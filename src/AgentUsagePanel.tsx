@@ -184,7 +184,7 @@ export function AgentUsagePanel({
     <div className="flex-1 overflow-y-auto px-3.5 py-3 space-y-3">
       {/* 速率限制：5 小时窗口 + 周窗口（额度来自订阅账号，不随时间范围变化） */}
       {hasRateRow && rate && (
-        <div className="rounded-lg bg-white/25 border border-white/30 px-2.5 py-2 space-y-2">
+        <div className="rounded-lg bg-surface/25 border border-surface/30 px-2.5 py-2 space-y-2">
           <div className="flex items-center justify-between">
             <span className="text-[10px] uppercase tracking-wide text-slate-700/55">
               额度

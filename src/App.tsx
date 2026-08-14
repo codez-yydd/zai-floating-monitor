@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { StatsPanel } from "./StatsPanel";
 import { PricingPanel } from "./PricingPanel";
+import { SettingsPanel } from "./SettingsPanel";
 import { SyncPanel } from "./SyncPanel";
 import { ComparePanel } from "./ComparePanel";
 import { ReportPanel } from "./ReportPanel";
@@ -8,7 +9,7 @@ import { DataProvider } from "./DataCache";
 import { fetchPricing, fetchCurrency, saveCurrency } from "./api";
 import type { Currency, PricingConfig } from "./types";
 
-type View = "stats" | "pricing" | "sync" | "compare" | "report";
+type View = "stats" | "pricing" | "sync" | "compare" | "report" | "settings";
 
 export default function App() {
   const [view, setView] = useState<View>("stats");
@@ -78,6 +79,7 @@ export default function App() {
             onGoSync={() => setView("sync")}
             onGoCompare={() => setView("compare")}
             onGoReport={() => setView("report")}
+            onGoSettings={() => setView("settings")}
           />
         ) : view === "pricing" ? (
           <PricingPanel
@@ -92,6 +94,8 @@ export default function App() {
             onBack={() => setView("stats")}
             pricing={pricing}
           />
+        ) : view === "settings" ? (
+          <SettingsPanel onBack={backToStats} />
         ) : (
           <SyncPanel onBack={backToStats} />
         )}

@@ -86,7 +86,7 @@ export function Metric({
   accent?: string;
 }) {
   return (
-    <div className="rounded-lg bg-white/25 border border-white/30 py-2 text-center">
+    <div className="rounded-lg bg-surface/25 border border-surface/30 py-2 text-center">
       <div className="text-[10px] text-slate-700/55">{label}</div>
       <div
         className={`num text-[13px] font-semibold mt-0.5 ${
@@ -198,7 +198,7 @@ export function TrendChart({
 
   return (
     <div
-      className={`rounded-xl bg-white/30 border border-white/35 px-3 pt-2.5 pb-2 ${
+      className={`rounded-xl bg-surface/30 border border-surface/35 px-3 pt-2.5 pb-2 ${
         fill ? "flex-1 min-h-0 flex flex-col" : ""
       }`}
     >
@@ -263,7 +263,7 @@ export function TrendChart({
             >
               {/* tooltip */}
               {isHover && (
-                <div className="absolute bottom-full mb-1 left-1/2 -translate-x-1/2 z-10 whitespace-nowrap rounded-md bg-slate-900/85 text-white px-1.5 py-1 text-[9px] leading-tight pointer-events-none">
+                <div className="absolute bottom-full mb-1 left-1/2 -translate-x-1/2 z-10 whitespace-nowrap rounded-md bg-black/80 text-white px-1.5 py-1 text-[9px] leading-tight pointer-events-none">
                   <div className="num">{d.label}</div>
                   <div className="num">
                     {formatCost(
