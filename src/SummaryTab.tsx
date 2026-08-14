@@ -7,6 +7,7 @@ import type {
 } from "./types";
 import { formatCost, formatTokens } from "./format";
 import { ProgressBar, TrendChart } from "./widgets";
+import { useDataCache } from "./DataCache";
 import { useState } from "react";
 
 interface Props {
@@ -29,6 +30,11 @@ export function SummaryTab({
   fxRate,
 }: Props) {
   const [trendMetric, setTrendMetric] = useState<"cost" | "token">("cost");
+
+  // ZCode 额度（与范围无关，读全局缓存，与 QuotaPanel 同源）
+  const { quota, quotaError } = useDataCache();
+  const hour5Pct = quota?.hour5?.percentage ?? null;
+  const weeklyPct = quota?.weekly?.percentage ?? null;
 
   // z.ai 花费 & token
   const zaiCost =
@@ -144,12 +150,66 @@ export function SummaryTab({
 
       {/* 双看板：额度进度 */}
       <div className="grid grid-cols-2 gap-1.5">
-        {/* ZCode 额度入口提示 */}
+        {/* ZCode 周额度 */}
         <div className="rounded-lg bg-white/25 border border-white/30 px-2 py-1.5">
-          <div className="text-[9px] text-slate-700/45">ZCode 周额度</div>
-          <div className="text-[10px] text-slate-700/50 mt-1 leading-tight">
-            切换至 ZCode 标签查看 5 小时 / 每周额度详情
+          <div className="flex items-center justify-between">
+            <span className="text-[9px] text-slate-700/45">ZCode 周额度</span>
+            {weeklyPct != null && (
+              <span
+                className={`num text-[10px] font-semibold ${
+                  weeklyPct > 90
+                    ? "text-rose-600"
+                    : weeklyPct > 70
+                      ? "text-amber-600"
+                      : "text-emerald-600"
+                }`}
+              >
+                {Math.round(weeklyPct)}%
+              </span>
+            )}
           </div>
+          {weeklyPct != null ? (
+            <>
+              <ProgressBar
+                pct={weeklyPct / 100}
+                height="h-1"
+                color={
+                  weeklyPct > 90
+                    ? "bg-rose-400"
+                    : weeklyPct > 70
+                      ? "bg-amber-400"
+                      : "bg-emerald-400"
+                }
+              />
+              {hour5Pct != null && (
+                <div className="flex items-center gap-1.5 mt-1">
+                  <span className="text-[8px] text-slate-700/40 shrink-0">5h</span>
+                  <ProgressBar
+                    pct={hour5Pct / 100}
+                    height="h-1"
+                    color={
+                      hour5Pct > 90
+                        ? "bg-rose-400"
+                        : hour5Pct > 70
+                          ? "bg-amber-400"
+                          : "bg-emerald-400"
+                    }
+                  />
+                  <span className="num text-[8px] text-slate-700/50 w-6 text-right">
+                    {Math.round(hour5Pct)}%
+                  </span>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="text-[10px] text-slate-700/40 mt-1">
+              {quotaError
+                ? /未配置|Token/i.test(quotaError)
+                  ? "未配置 Token"
+                  : "额度获取失败"
+                : "加载中…"}
+            </div>
+          )}
         </div>
         {/* Cursor 套餐 */}
         <div className="rounded-lg bg-white/25 border border-white/30 px-2 py-1.5">
@@ -197,49 +257,6 @@ export function SummaryTab({
           onMetricChange={setTrendMetric}
         />
       )}
-
-      {/* 明细行 */}
-      <div className="space-y-1.5 pt-0.5">
-        <SummaryRow
-          label="ZCode 花费"
-          value={formatCost(zaiCost, currency)}
-          pct={totalCost > 0 ? zaiCostPct : 0}
-          color="bg-sky-400"
-        />
-        <SummaryRow
-          label="Cursor 花费"
-          value={formatCost(cursorCost, currency)}
-          pct={totalCost > 0 ? 1 - zaiCostPct : 0}
-          color="bg-violet-400"
-        />
-      </div>
-    </div>
-  );
-}
-
-function SummaryRow({
-  label,
-  value,
-  pct,
-  color,
-}: {
-  label: string;
-  value: string;
-  pct: number;
-  color: string;
-}) {
-  return (
-    <div className="flex items-center gap-2 text-[11px]">
-      <span className="text-slate-700/60 w-16 shrink-0">{label}</span>
-      <div className="flex-1 h-1 rounded-full bg-slate-900/8 overflow-hidden">
-        <div
-          className={`h-full rounded-full ${color} opacity-70`}
-          style={{ width: `${Math.min(pct * 100, 100)}%` }}
-        />
-      </div>
-      <span className="num text-slate-900/85 font-medium w-14 text-right">
-        {value}
-      </span>
     </div>
   );
 }
