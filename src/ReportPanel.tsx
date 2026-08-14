@@ -13,6 +13,7 @@ import type {
 import {
   computeCost,
   fetchStats,
+  getCursorConfig,
   getQuotaHistory,
   getSyncConfig,
   listRemoteDevices,
@@ -108,6 +109,16 @@ export function ReportPanel({ onBack, pricing }: Props) {
 
     const tasks: Promise<unknown>[] = [];
 
+    // 汇率：价格只存美元，远端合并的人民币花费 = 美元 × 汇率（与 Cursor 设置共用同一来源）
+    let fxRate = 7.2;
+    tasks.push(
+      getCursorConfig()
+        .then((cfg) => {
+          if (cfg.usd_cny_rate > 0) fxRate = cfg.usd_cny_rate;
+        })
+        .catch(() => {})
+    );
+
     // 本地 stats + cost
     let localStats: Stats | null = null;
     let localCost: CostResult | null = null;
@@ -158,13 +169,13 @@ export function ReportPanel({ onBack, pricing }: Props) {
       let mergedCost: CostResult | null = null;
       if (wantLocal && localStats && remote) {
         mergedStats = mergeStats(localStats, remote);
-        mergedCost = mergeCost(localCost, remote, pricing);
+        mergedCost = mergeCost(localCost, remote, pricing, fxRate);
       } else if (wantLocal && localStats) {
         mergedStats = localStats;
         mergedCost = localCost;
       } else if (remote) {
         mergedStats = remoteToStats(remote);
-        mergedCost = computeRemoteCost(remote, pricing);
+        mergedCost = computeRemoteCost(remote, pricing, fxRate);
       }
 
       setStats(mergedStats);

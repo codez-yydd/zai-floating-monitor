@@ -19,7 +19,6 @@ export default function App() {
     return (localStorage.getItem("zbar-currency") as Currency) || "cny";
   });
   const [pricing, setPricing] = useState<PricingConfig>({
-    cny: {},
     usd: {},
   });
 

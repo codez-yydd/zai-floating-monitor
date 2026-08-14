@@ -18,8 +18,9 @@ use tauri::{
     AppHandle, LogicalPosition, Manager, PhysicalSize, WindowEvent,
 };
 
-/// 计费所需的字段抽象。ModelStat 与 DailyModelStat 都实现它，
-/// 这样 cost_for 可同时服务 compute_cost 和 get_daily_stats。
+/// 计费所需的字段抽象。ModelStat 与 BucketModelStat 都实现它，
+/// 这样 cost_for 可同时服务 compute_cost 和 get_trend 等
+/// （get_codex_usage / get_claude_usage 的桶内模型聚合同款）。
 trait Billable {
     fn model_id(&self) -> &str;
     fn input_tokens(&self) -> i64;
@@ -80,6 +81,19 @@ fn cost_for<B: Billable>(s: &B, map: &BTreeMap<String, ModelPrice>) -> f64 {
         .find(|(k, _)| pricing::normalize_dots(&k.to_lowercase()) == target)
         .map(|(_, p)| lookup(p))
         .unwrap_or(0.0)
+}
+
+/// 当前 USD→CNY 汇率（与 Cursor 配置共用同一来源，每日自动更新；非法值回退 7.2）。
+/// 价格只存美元，人民币花费 = 美元花费 × 该汇率实时折算。
+fn load_fx_rate() -> f64 {
+    let rate = cursor::load_cursor_config()
+        .map(|c| c.usd_cny_rate)
+        .unwrap_or(7.2);
+    if rate > 0.0 {
+        rate
+    } else {
+        7.2
+    }
 }
 
 /// get_stats 命令的入参
@@ -176,23 +190,18 @@ fn set_currency(currency: String, app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// check_pricing_updates：对比用户当前配置与参考价格（models.dev 优先，失败回退内置表），
-/// 返回差异。仅用于"检查更新"提示，绝不自动覆盖。
-/// 差异判定只看 USD 原始价；CNY 参考价（USD × 汇率）仅作折算展示随条目带出，
-/// 不参与"是否变动"判定——汇率每日自动更新，参与判定会导致持续误报。
+/// check_pricing_updates：对比用户当前配置与内置参考表（编译期嵌入），返回差异。
+/// 仅用于"检查更新"提示，绝不自动覆盖。价格对比本身无网络请求（唯一例外：
+/// 启用多设备同步时 remote_models_cached 缓存过期会顺带刷新一次设备模型清单）。
+/// 差异判定只看 USD 原始价（人民币按汇率折算展示，由前端实时计算）。
 /// 遍历主体 =「数据库实际调用过 ∪ 用户已手动配置 ∪ 远端同步（其他设备）」的模型：
 /// 实际在用但两边都没价格的模型会以 missing 暴露（花费按 0 计）。
-/// `force`：true 时绕过缓存强制联网刷新（「更新」按钮）；默认 LocalFirst——
-/// 有本地缓存直接用（秒回，不管新旧），完全无缓存才联网兜底。
-/// 缓存的每日保鲜由 spawn_pricing_refresher 后台定时任务负责。
-/// async + spawn_blocking：网络请求绝不能跑在主线程（同步 command 会卡死 UI）。
+/// async + spawn_blocking：多库查询（SQLite/文件 IO）不能跑在主线程。
 #[tauri::command]
-async fn check_pricing_updates(
-    force: Option<bool>,
-) -> Result<pricing::PricingDiff, String> {
+async fn check_pricing_updates() -> Result<pricing::PricingDiff, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let user = load_pricing()?;
-        // 相关模型 = 数据库里出现过的 + 用户已配置（任一货币）的
+        // 相关模型 = 数据库里出现过的 + 用户已配置的
         let mut relevant: std::collections::HashSet<String> = std::collections::HashSet::new();
         db::list_models()?.into_iter().for_each(|m| {
             relevant.insert(m.model_id);
@@ -211,26 +220,14 @@ async fn check_pricing_updates(
             });
         }
         // 远端同步（其他设备上传）的模型同样纳入：本机没有但其他设备在用的
-        // 模型（如 gpt-5.6-sol）也需要配价——models.dev 收录则提示新增可一键应用，
+        // 模型（如 gpt-5.6-sol）也需要配价——内置表收录则提示新增可一键应用，
         // 未收录则以 missing 暴露提醒手动补价；服务器不可用时静默降级为空
         sync::remote_models_cached().into_iter().for_each(|m| {
             relevant.insert(m.model_id);
         });
-        relevant.extend(user.cny.keys().cloned());
         relevant.extend(user.usd.keys().cloned());
 
-        // USD→CNY 汇率：与 Cursor 配置共用同一来源。仅用于折算条目里的 CNY 展示价
-        //（models.dev 模式下 default_cny = USD × 汇率），不参与差异判定
-        let fx_rate = cursor::load_cursor_config()
-            .map(|c| c.usd_cny_rate)
-            .unwrap_or(7.2);
-
-        let mode = if force.unwrap_or(false) {
-            pricing::FetchMode::Force
-        } else {
-            pricing::FetchMode::LocalFirst
-        };
-        Ok(pricing::diff_pricing(&user, &relevant, fx_rate, mode))
+        Ok(pricing::diff_pricing(&user, &relevant))
     })
     .await
     .map_err(|e| format!("检查任务执行失败: {e}"))?
@@ -471,15 +468,12 @@ async fn get_codex_usage(req: CodexUsageRequest) -> Result<CodexSnapshot, String
             Err(_) => codex::latest_rate_limits().ok().flatten(),
         };
 
-        // 花费计算与 get_trend 完全同款：桶内按模型聚合后用 cost_for 求和
+        // 花费计算与 get_trend 完全同款：桶内按模型聚合后用 cost_for 求和。
+        // 只存美元价：人民币花费 = 美元花费 × 当前汇率（实时折算）
+        let fx = load_fx_rate();
         let trend = buckets
             .into_iter()
             .map(|b| {
-                let cost_cny = b
-                    .by_model
-                    .iter()
-                    .map(|m| cost_for(m, &pricing.cny))
-                    .sum::<f64>();
                 let cost_usd = b
                     .by_model
                     .iter()
@@ -489,7 +483,7 @@ async fn get_codex_usage(req: CodexUsageRequest) -> Result<CodexSnapshot, String
                     label: b.label,
                     total_tokens: b.total_tokens,
                     requests: b.requests,
-                    cost_cny,
+                    cost_cny: cost_usd * fx,
                     cost_usd,
                 }
             })
@@ -545,15 +539,12 @@ async fn get_claude_usage(req: ClaudeUsageRequest) -> Result<ClaudeSnapshot, Str
 
         let rate_limits = claude::fetch_live_rate_limits().ok().flatten();
 
-        // 花费计算与 get_trend 完全同款：桶内按模型聚合后用 cost_for 求和
+        // 花费计算与 get_trend 完全同款：桶内按模型聚合后用 cost_for 求和。
+        // 只存美元价：人民币花费 = 美元花费 × 当前汇率（实时折算）
+        let fx = load_fx_rate();
         let trend = buckets
             .into_iter()
             .map(|b| {
-                let cost_cny = b
-                    .by_model
-                    .iter()
-                    .map(|m| cost_for(m, &pricing.cny))
-                    .sum::<f64>();
                 let cost_usd = b
                     .by_model
                     .iter()
@@ -563,7 +554,7 @@ async fn get_claude_usage(req: ClaudeUsageRequest) -> Result<ClaudeSnapshot, Str
                     label: b.label,
                     total_tokens: b.total_tokens,
                     requests: b.requests,
-                    cost_cny,
+                    cost_cny: cost_usd * fx,
                     cost_usd,
                 }
             })
@@ -622,21 +613,22 @@ async fn compute_cost(req: StatsRequest) -> Result<CostResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let stats = db::query_stats(req.from_ms, req.to_ms)?;
         let pricing = load_pricing().unwrap_or_default();
+        // 只存美元价：人民币花费 = 美元花费 × 当前汇率（实时折算）
+        let fx = load_fx_rate();
 
-        let per_model_cny: Vec<ModelCost> = stats
-            .by_model
-            .iter()
-            .map(|s| ModelCost {
-                model_id: s.model_id.clone(),
-                cost: cost_for(s, &pricing.cny),
-            })
-            .collect();
         let per_model_usd: Vec<ModelCost> = stats
             .by_model
             .iter()
             .map(|s| ModelCost {
                 model_id: s.model_id.clone(),
                 cost: cost_for(s, &pricing.usd),
+            })
+            .collect();
+        let per_model_cny: Vec<ModelCost> = per_model_usd
+            .iter()
+            .map(|m| ModelCost {
+                model_id: m.model_id.clone(),
+                cost: m.cost * fx,
             })
             .collect();
 
@@ -649,14 +641,6 @@ async fn compute_cost(req: StatsRequest) -> Result<CostResult, String> {
     })
     .await
     .map_err(|e| format!("花费计算任务失败: {e}"))?
-}
-
-/// 打开配置目录（~/.zbar）
-#[tauri::command]
-fn open_config_dir() -> Result<(), String> {
-    let dir = pricing::config_dir()?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{e}"))?;
-    open::that(dir).map_err(|e| format!("打开目录失败: {e}"))
 }
 
 /// 把报告内容写入 ~/.zbar/reports/<filename>，并在系统文件管理器中打开该目录。
@@ -894,15 +878,12 @@ async fn get_trend(req: TrendRequest) -> Result<Vec<TrendBucket>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let buckets = db::query_trend(req.from_ms, req.to_ms, &req.bucket)?;
         let pricing = load_pricing().unwrap_or_default();
+        // 只存美元价：人民币花费 = 美元花费 × 当前汇率（实时折算）
+        let fx = load_fx_rate();
 
         let out = buckets
             .into_iter()
             .map(|b| {
-                let cost_cny = b
-                    .by_model
-                    .iter()
-                    .map(|m| cost_for(m, &pricing.cny))
-                    .sum::<f64>();
                 let cost_usd = b
                     .by_model
                     .iter()
@@ -912,7 +893,7 @@ async fn get_trend(req: TrendRequest) -> Result<Vec<TrendBucket>, String> {
                     label: b.label,
                     total_tokens: b.total_tokens,
                     requests: b.requests,
-                    cost_cny,
+                    cost_cny: cost_usd * fx,
                     cost_usd,
                 }
             })
@@ -1074,10 +1055,10 @@ fn today_tray_title(app: &AppHandle) -> String {
 
     let stats = db::query_stats(today_start, now_ms);
     let pricing = load_pricing().unwrap_or_default();
-    // 货币偏好决定菜单栏显示 ¥ 还是 $，以及用哪套价格表
-    let cur = pricing::load_currency();
-    let is_usd = cur == "usd";
-    let price_map = if is_usd { &pricing.usd } else { &pricing.cny };
+    // 货币偏好决定菜单栏显示 ¥ 还是 $；人民币花费 = 美元花费 × 当前汇率
+    let is_usd = pricing::load_currency() == "usd";
+    let fx = load_fx_rate();
+    let to_display = |cost_usd: f64| if is_usd { cost_usd } else { cost_usd * fx };
 
     // 本机数据
     let mut total = stats.as_ref().map(|s| s.overall.total_tokens).unwrap_or(0);
@@ -1086,7 +1067,7 @@ fn today_tray_title(app: &AppHandle) -> String {
         .map(|s| {
             s.by_model
                 .iter()
-                .map(|m| cost_for(m, price_map))
+                .map(|m| cost_for(m, &pricing.usd))
                 .sum::<f64>()
         })
         .unwrap_or(0.0);
@@ -1122,7 +1103,7 @@ fn today_tray_title(app: &AppHandle) -> String {
                             reasoning_tokens: m.reasoning_tokens,
                             total_tokens: m.total_tokens,
                         },
-                        price_map,
+                        &pricing.usd,
                     )
                 })
                 .sum::<f64>();
@@ -1135,15 +1116,7 @@ fn today_tray_title(app: &AppHandle) -> String {
         cursor::fetch_cursor_usage_totals(today_start, now_ms)
     {
         total += cursor_tokens;
-        // Cursor 花费为 USD，按货币偏好换算（CNY 乘汇率）
-        let rate = cursor::load_cursor_config()
-            .map(|c| c.usd_cny_rate)
-            .unwrap_or(7.2);
-        cost += if is_usd {
-            cursor_cost_usd
-        } else {
-            cursor_cost_usd * rate
-        };
+        cost += cursor_cost_usd;
     }
 
     // Codex：合并今日用量（本地导入库；未安装/失败静默降级，
@@ -1153,7 +1126,7 @@ fn today_tray_title(app: &AppHandle) -> String {
         cost += stats
             .by_model
             .iter()
-            .map(|m| cost_for(m, price_map))
+            .map(|m| cost_for(m, &pricing.usd))
             .sum::<f64>();
     }
 
@@ -1163,14 +1136,14 @@ fn today_tray_title(app: &AppHandle) -> String {
         cost += stats
             .by_model
             .iter()
-            .map(|m| cost_for(m, price_map))
+            .map(|m| cost_for(m, &pricing.usd))
             .sum::<f64>();
     }
 
     let _ = app; // 占位
     let sym = if is_usd { "$" } else { "¥" };
     if total > 0 {
-        format!("{sym}{:.2}  {}", cost, fmt_tok(total))
+        format!("{sym}{:.2}  {}", to_display(cost), fmt_tok(total))
     } else {
         "ZBar".to_string()
     }
@@ -1216,20 +1189,6 @@ fn spawn_title_updater(app: AppHandle) {
         let title = today_tray_title(&app);
         let _ = app.tray_by_id("main").map(|t| t.set_title(Some(title)));
         std::thread::sleep(std::time::Duration::from_secs(30));
-    });
-}
-
-/// 后台线程：每天自动联网刷新一次 models.dev 价格缓存。
-/// Cached 模式：缓存未过期直接返回（不联网），过期才刷新；
-/// 源记忆让联网直连上次成功的源（通常 1~2s 完成）。
-/// 只刷缓存，不做 diff——「检查价格更新」按钮始终读本地缓存（秒回），
-/// 数据的每日保鲜由本任务在后台默默完成。
-fn spawn_pricing_refresher() {
-    std::thread::spawn(move || loop {
-        if let Err(e) = pricing::fetch_models_dev_prices(pricing::FetchMode::Cached) {
-            eprintln!("[zbar-pricing] 每日缓存刷新失败（明日重试）: {e}");
-        }
-        std::thread::sleep(std::time::Duration::from_secs(24 * 3600));
     });
 }
 
@@ -1339,7 +1298,6 @@ pub fn run() {
             }
             setup_tray(app.handle())?;
             spawn_title_updater(app.handle().clone());
-            spawn_pricing_refresher();
             spawn_fx_rate_refresher();
 
             // 应用全局快捷键配置（启动时若已启用则注册）
@@ -1382,7 +1340,6 @@ pub fn run() {
             fetch_quota,
             compute_cost,
             get_trend,
-            open_config_dir,
             save_report,
             get_sync_config,
             set_sync_config,

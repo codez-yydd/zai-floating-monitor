@@ -47,6 +47,8 @@ interface Props {
   loading: boolean;
   error: string | null;
   currency: Currency;
+  /** USD→CNY 汇率：人民币花费 = 美元 × 汇率（价格只存美元） */
+  fxRate: number;
   trendBucket: TrendBucket;
   /** 按模型折算花费用（与 Z.ai 页同款前端自算） */
   pricing: PricingConfig;
@@ -108,6 +110,7 @@ export function AgentUsagePanel({
   loading,
   error,
   currency,
+  fxRate,
   trendBucket,
   pricing,
   theme,
@@ -326,7 +329,8 @@ export function AgentUsagePanel({
           <div className="space-y-1">
             {(() => {
               const rows = stats.by_model.map((m) => {
-                const price = pricing[currency][m.model_id];
+                // 配价判断与货币无关（只存美元价）；人民币花费 = 美元 × 汇率折算
+                const price = pricing.usd[m.model_id];
                 const hasPrice = Boolean(
                   price && (price.input > 0 || price.output > 0)
                 );
@@ -336,7 +340,8 @@ export function AgentUsagePanel({
                   m.output_tokens,
                   m.cache_read_tokens,
                   pricing,
-                  currency
+                  currency,
+                  fxRate
                 );
                 return {
                   m,

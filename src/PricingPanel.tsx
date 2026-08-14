@@ -12,6 +12,7 @@ import {
   checkPricingUpdates,
   fetchModels,
   fetchPricing,
+  getCursorConfig,
   savePricing,
 } from "./api";
 
@@ -37,6 +38,15 @@ function fmtTriplet(p: ModelPrice): string {
   return `${fmtPrice(p.input)}/${fmtPrice(p.output)}/${fmtPrice(p.cache_read)}`;
 }
 
+/// 按汇率把美元价折算为人民币价（仅展示用，不落盘）
+function scaleCny(p: ModelPrice, rate: number): ModelPrice {
+  return {
+    input: Number((p.input * rate).toPrecision(6)),
+    output: Number((p.output * rate).toPrecision(6)),
+    cache_read: Number((p.cache_read * rate).toPrecision(6)),
+  };
+}
+
 /// 无价格模型的占位（复用同一引用，保证 memo 的模型卡片不会因 fallback 新对象而失效）
 const ZERO_PRICE: ModelPrice = { input: 0, output: 0, cache_read: 0 };
 
@@ -46,8 +56,8 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
   const [saving, setSaving] = useState(false);
   const [savedFlash, setSavedFlash] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // 手动检查联网中（Force 拉取需要几秒，按钮显示 loading 防重复点击）
-  const [checking, setChecking] = useState(false);
+  // USD→CNY 汇率：¥ 视图的折算展示用（价格只存美元，人民币一律实时折算）
+  const [fxRate, setFxRate] = useState(7.2);
   // 草稿：把每个输入框的编辑值作为字符串暂存，避免小数点输入被 parseFloat 吞掉。
   // key = `${modelId}|${field}`
   const [draft, setDraft] = useState<Record<string, string>>({});
@@ -66,12 +76,12 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
     []
   );
 
-  // ===== 价格同步（内置默认表 diff 提示）=====
+  // ===== 价格同步（内置参考表 diff 提示）=====
   // updateCount：待应用的差异总数（用于按钮红点）；diffPanel：是否展开差异面板
   const [updateCount, setUpdateCount] = useState(0);
   const [diffPanel, setDiffPanel] = useState(false);
   const [diff, setDiff] = useState<PricingDiff | null>(null);
-  // 用户勾选的模型 id 集合（差异条目为模型级，勾选后 USD 与 CNY 折算价一并应用）
+  // 用户勾选的模型 id 集合（差异条目为模型级）
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [applying, setApplying] = useState(false);
 
@@ -82,12 +92,16 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
         setModels(m);
       })
       .catch((e) => setError(String(e)));
+    // 汇率与 Cursor 设置共用同一来源（设置页可改、每日自动更新）
+    getCursorConfig()
+      .then((c) => {
+        if (c.usd_cny_rate > 0) setFxRate(c.usd_cny_rate);
+      })
+      .catch(() => {});
   }, []);
 
-  // 进入价格设置时静默检查一次更新，有差异则在按钮显示红点（不弹窗打扰）。
-  // 默认（LocalFirst）：读本地缓存对比（秒回，不管缓存新旧），完全无缓存才联网兜底。
-  // 缓存每天由后台定时任务自动联网刷新一次；手动拉最新数据点「更新」按钮。
-  // 差异判定只看 USD 原始价（每个模型最多 1 条），CNY 折算价不参与判定。
+  // 进入价格设置时静默检查一次差异，有差异则在按钮显示红点（纯本地对比，秒回不联网）。
+  // 差异判定只看 USD 原始价（人民币按汇率折算展示，不参与判定）。
   useEffect(() => {
     checkPricingUpdates()
       .then((d) => {
@@ -112,8 +126,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
     });
   };
 
-  // 应用勾选的价格更新：把勾选项合并进 pricing 并保存，绝不自动覆盖未勾选项。
-  // 勾选按模型进行，应用时该模型的 USD 参考价与 CNY 折算价一并写入（两种货币都有价）
+  // 应用勾选的价格更新：把勾选项的美元价合并进 pricing 并保存，绝不自动覆盖未勾选项
   const handleApplyUpdates = async () => {
     if (!diff) return;
     setApplying(true);
@@ -122,10 +135,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
       const all = [...diff.new_models, ...diff.changed];
       const items: ApplyPriceItem[] = all
         .filter((i) => selected.has(i.model_id))
-        .flatMap((i) => [
-          { model_id: i.model_id, currency: "usd" as const, price: i.default },
-          { model_id: i.model_id, currency: "cny" as const, price: i.default_cny },
-        ]);
+        .map((i) => ({ model_id: i.model_id, currency: "usd" as const, price: i.default }));
       if (items.length === 0) {
         setDiffPanel(false);
         return;
@@ -147,28 +157,19 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
     }
   };
 
-  // 对比并展示差异。force=false 用本地缓存（秒回）；force=true 联网刷新缓存后对比。
-  const runDiff = async (force: boolean) => {
+  // 对比并展示差异（纯本地对比内置参考表，无网络请求）
+  const runDiff = async () => {
     setError(null);
-    if (force) setChecking(true);
     try {
-      const d = await checkPricingUpdates(force);
+      const d = await checkPricingUpdates();
       setDiff(d);
       setUpdateCount(d.new_models.length + d.changed.length);
       setSelected(new Set(d.new_models.map((i) => i.model_id)));
       setDiffPanel(true);
     } catch (e) {
       setError(String(e));
-    } finally {
-      if (force) setChecking(false);
     }
   };
-
-  // 「检查价格更新」：用本地缓存对比差异（秒回，不联网）
-  const handleCheckUpdates = () => runDiff(false);
-
-  // 「更新」：手动联网拉取 models.dev 最新数据刷新缓存，完成后展示新对比
-  const handleRefreshPrices = () => runDiff(true);
 
   // 把草稿字符串解析回数字。非法/空 → 0。
   const parseDraft = (val: string): number => {
@@ -178,7 +179,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
     return isNaN(n) ? 0 : n;
   };
 
-  // 某输入框失焦：把草稿写回 pricing 数值（读 draftRef 最新值，引用随 currency 重建）
+  // 某输入框失焦：把草稿写回 pricing 数值（读 draftRef 最新值）。只编辑美元价
   const commitDraft = useCallback(
     (modelId: string, key: keyof ModelPrice) => {
       const raw = draftRef.current[`${modelId}|${key}`];
@@ -186,10 +187,10 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
       const num = parseDraft(raw);
       setPricing((prev) => {
         if (!prev) return prev;
-        const cur = prev[currency] ?? {};
+        const cur = prev.usd ?? {};
         return {
           ...prev,
-          [currency]: {
+          usd: {
             ...cur,
             [modelId]: {
               ...(cur[modelId] ?? ZERO_PRICE),
@@ -199,14 +200,14 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
         };
       });
     },
-    [currency]
+    []
   );
 
   const handleSave = async () => {
     if (!pricing) return;
-    // 保存前把所有未 commit 的草稿落盘
+    // 保存前把所有未 commit 的草稿落盘（只存美元价）
     const merged = { ...pricing };
-    const cur = { ...(merged[currency] ?? {}) };
+    const cur = { ...(merged.usd ?? {}) };
     for (const [dk, raw] of Object.entries(draft)) {
       const [modelId, key] = dk.split("|") as [string, keyof ModelPrice];
       cur[modelId] = {
@@ -214,7 +215,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
         [key]: parseDraft(raw),
       };
     }
-    merged[currency] = cur;
+    merged.usd = cur;
 
     setSaving(true);
     setError(null);
@@ -237,11 +238,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
     () =>
       pricing
         ? Array.from(
-            new Set([
-              ...models.map((m) => m.model_id),
-              ...Object.keys(pricing.cny),
-              ...Object.keys(pricing.usd),
-            ])
+            new Set([...models.map((m) => m.model_id), ...Object.keys(pricing.usd)])
           ).sort()
         : [],
     [models, pricing]
@@ -254,8 +251,6 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
       </div>
     );
   }
-
-  const symbol = currency === "cny" ? "¥" : "$";
 
   return (
     // 整页单一滚动：配置区 + 模型列表一起滚，避免配置区撑爆固定高度后下方被截断
@@ -278,7 +273,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
             {saving ? "保存中…" : savedFlash ? "已保存 ✓" : "保存"}
           </button>
         </div>
-        {/* 货币切换 */}
+        {/* 货币切换：仅切换全局显示货币（各统计页联动）；本页表单恒定为美元编辑 */}
         <div className="flex gap-1">
           {(["cny", "usd"] as Currency[]).map((c) => (
             <button
@@ -298,33 +293,25 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
           ))}
         </div>
         <p className="text-[10px] text-slate-700/50 mt-1.5">
-          单位：{symbol}/百万 token。只填需要计费的模型即可。
+          单位：$/百万 token，只填需要计费的模型即可。人民币花费按美元 × 汇率
+          <span className="num"> {fxRate} </span>
+          自动折算，无需单独维护。
         </p>
 
-        {/* ===== 价格同步（models.dev 差异提示，不自动覆盖）===== */}
+        {/* ===== 价格同步（内置参考表差异提示，不自动覆盖）===== */}
         <div className="mt-2 flex items-center justify-between">
-          <div className="flex items-center gap-1.5">
-            <button
-              onClick={handleCheckUpdates}
-              title="用本地缓存的价格数据对比差异（秒回，不联网）"
-              className="relative text-[11px] px-2 py-0.5 rounded-md bg-slate-900/5 text-slate-700/70 hover:bg-slate-900/10 hover:text-slate-900/90 transition-colors"
-            >
-              🔄 检查价格更新
-              {updateCount > 0 && (
-                <span className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-1 flex items-center justify-center rounded-full bg-rose-500 text-white text-[9px] leading-none">
-                  {updateCount}
-                </span>
-              )}
-            </button>
-            <button
-              onClick={handleRefreshPrices}
-              disabled={checking}
-              title="联网拉取 models.dev 最新价格并刷新本地缓存（后台每天也会自动更新一次）"
-              className="text-[11px] px-2 py-0.5 rounded-md bg-sky-500/10 text-sky-700/80 hover:bg-sky-500/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {checking ? "⏳ 更新中…" : "⬇️ 更新"}
-            </button>
-          </div>
+          <button
+            onClick={runDiff}
+            title="与内置参考表对比差异（价格对比本身不联网；如启用了多设备同步，可能顺带刷新其他设备的模型清单）"
+            className="relative text-[11px] px-2 py-0.5 rounded-md bg-slate-900/5 text-slate-700/70 hover:bg-slate-900/10 hover:text-slate-900/90 transition-colors"
+          >
+            🔄 检查价格更新
+            {updateCount > 0 && (
+              <span className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-1 flex items-center justify-center rounded-full bg-rose-500 text-white text-[9px] leading-none">
+                {updateCount}
+              </span>
+            )}
+          </button>
           {diff && updateCount === 0 && !diffPanel && (
             <span
               className={`text-[10px] ${
@@ -346,22 +333,16 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
             <div className="flex items-center justify-between mb-1.5">
               <div className="text-[11px] font-medium text-slate-900/85">
                 价格更新
-                {diff.source === "models.dev" ? (
-                  <span className="ml-1.5 px-1 py-0 rounded text-[8px] font-medium bg-sky-500/15 text-sky-700">
-                    models.dev 实时
-                  </span>
-                ) : (
-                  <span className="ml-1.5 px-1 py-0 rounded text-[8px] font-medium bg-slate-900/10 text-slate-700/60">
-                    内置表（离线{diff.version ? ` v${diff.version}` : ""}）
-                  </span>
-                )}
+                <span className="ml-1.5 px-1 py-0 rounded text-[8px] font-medium bg-slate-900/10 text-slate-700/60">
+                  内置参考表{diff.version ? ` v${diff.version}` : ""}
+                </span>
               </div>
             </div>
             <p className="text-[9px] text-slate-700/50 mb-2 leading-relaxed">
-              {diff.source === "models.dev"
-                ? "来自 models.dev 的全厂商模型参考价（你在 ZCode / Codex / Claude 里用到的任意模型都会检测，含其他设备同步的模型）。差异判定只看 USD 原始价；CNY 为按当前汇率的折算参考，汇率每日更新不会再触发误报。带 ≈ 标记的是变体名匹配的基础模型参考价（如 gpt-5.6-sol ≈ gpt-5），应用前请确认。后台每天自动更新一次缓存，点「更新」可立即联网刷新。"
-                : "models.dev 不可达，已回退内置参考表；点「更新」可重试联网。"}
-              勾选后点「应用选中」才会写入（USD 与 CNY 折算价一并写入）；新增项默认勾选，变动项默认不勾（保护你的自定义）。价格三项依次为 输入/输出/缓存（每百万 token）。
+              参考价取自内置参考表（定价数据源自 cc-switch
+              开源项目的成本定价模块，离线对比不联网）。带 ≈ 标记的是变体名匹配的基础模型参考价（如
+              gpt-5.6-sol ≈ gpt-5），应用前请确认。勾选后点「应用选中」写入美元价（人民币按汇率自动折算）；新增项默认勾选，变动项默认不勾（保护你的自定义）。价格三项依次为
+              输入/输出/缓存（每百万 token）。
             </p>
             {/* 无价格模型警示：实际在用但两边都没价格，花费按 0 计 */}
             {diff.missing.length > 0 && (
@@ -406,7 +387,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
                         </span>
                         {i.reference_id && (
                           <span
-                            title={`参考价格表未收录该模型名，参考价取自基础模型 ${i.reference_id}（同系变体），应用前请确认价格`}
+                            title={`参考价取自基础模型 ${i.reference_id}（同系变体），应用前请确认价格`}
                             className="shrink-0 px-1 rounded bg-amber-500/15 text-amber-700 text-[8px] font-medium"
                           >
                             ≈ {i.reference_id}
@@ -416,7 +397,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
                       <div className="mt-0.5 text-[10px] text-slate-700/60 num whitespace-nowrap">
                         $ {fmtTriplet(i.default)}
                         <span className="text-slate-700/40 ml-1.5">
-                          ≈ ¥ {fmtTriplet(i.default_cny)}
+                          ≈ ¥ {fmtTriplet(scaleCny(i.default, fxRate))}
                         </span>
                       </div>
                     </div>
@@ -457,7 +438,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
                           $ {fmtTriplet(i.default)}
                         </span>
                         <span className="text-slate-700/40 ml-1.5 whitespace-nowrap">
-                          ≈ ¥ {fmtTriplet(i.default_cny)}
+                          ≈ ¥ {fmtTriplet(scaleCny(i.default, fxRate))}
                         </span>
                       </div>
                     </div>
@@ -504,8 +485,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
             <ModelPriceRow
               key={id}
               id={id}
-              symbol={symbol}
-              price={pricing[currency][id] ?? ZERO_PRICE}
+              price={pricing.usd[id] ?? ZERO_PRICE}
               dIn={draft[`${id}|input`]}
               dOut={draft[`${id}|output`]}
               dCache={draft[`${id}|cache_read`]}
@@ -525,10 +505,9 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
 }
 
 /** 单个模型的价格卡片（memo：草稿用三个原始类型 props 传递，
- *  键入时只重渲染这一张卡片而非整个模型列表） */
+ *  键入时只重渲染这一张卡片而非整个模型列表）。表单恒定为美元编辑 */
 const ModelPriceRow = memo(function ModelPriceRow({
   id,
-  symbol,
   price,
   dIn,
   dOut,
@@ -537,7 +516,6 @@ const ModelPriceRow = memo(function ModelPriceRow({
   onCommit,
 }: {
   id: string;
-  symbol: string;
   price: ModelPrice;
   dIn: string | undefined;
   dOut: string | undefined;
@@ -566,7 +544,7 @@ const ModelPriceRow = memo(function ModelPriceRow({
             <label key={f.key} className="flex flex-col gap-0.5 text-[10px]">
               <span className="text-slate-700/55">{f.label}</span>
               <div className="flex items-center rounded-md bg-surface/60 border border-slate-900/10 focus-within:border-sky-400/60 focus-within:ring-1 focus-within:ring-sky-400/40 transition-colors">
-                <span className="text-slate-700/50 pl-1.5">{symbol}</span>
+                <span className="text-slate-700/50 pl-1.5">$</span>
                 <input
                   type="text"
                   inputMode="decimal"

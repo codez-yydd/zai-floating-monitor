@@ -63,12 +63,9 @@ export async function saveCurrency(currency: Currency): Promise<void> {
   await invoke("set_currency", { currency });
 }
 
-/** 对比参考价格（models.dev 优先，失败回退内置表）与用户当前配置，返回差异（不修改任何文件）。
- *  默认（LocalFirst）：读本地缓存做对比（秒回，不管缓存新旧），完全无缓存才联网兜底；
- *  force=true 时强制联网刷新缓存后对比（「更新」按钮）。
- *  缓存的每日保鲜由后台定时任务负责，无需前端触发。 */
-export async function checkPricingUpdates(force = false): Promise<PricingDiff> {
-  return invoke<PricingDiff>("check_pricing_updates", { force });
+/** 对比内置参考表（编译期嵌入，无网络请求）与用户当前配置，返回差异（不修改任何文件） */
+export async function checkPricingUpdates(): Promise<PricingDiff> {
+  return invoke<PricingDiff>("check_pricing_updates");
 }
 
 /** 把用户勾选的价格项合并进 pricing 并保存 */
@@ -119,10 +116,6 @@ export async function computeCost(
   return invoke<CostResult>("compute_cost", {
     req: { from_ms: fromMs, to_ms: toMs },
   });
-}
-
-export async function openConfigDir(): Promise<void> {
-  await invoke("open_config_dir");
 }
 
 /** 把报告保存为 .md 文件并在文件管理器打开所在目录 */

@@ -4,6 +4,7 @@
 import type {
   CostResult,
   Currency,
+  ModelPrice,
   ModelStat,
   OverallStat,
   PricingConfig,
@@ -13,26 +14,37 @@ import type {
   TrendPoint,
 } from "./types";
 
-/** 单个模型的花费（按 input/output/cache_read 三段计价）。
- * 价格表无该模型 → 返回 0。input 已减去 cache_read 部分（避免重复计费）。 */
+/** 单个模型的花费（按 input/output/cache_read 三段计价，价格表只存美元价）。
+ * 人民币花费 = 美元花费 × fxRate（汇率每日自动更新，实时折算）。
+ * 价格表无该模型 → 返回 0。input 已减去 cache_read 部分（避免重复计费）。
+ * 精确 miss 时按「小写 + 点号归一」兜底重查（与后端 cost_for 同款口径：
+ * 手输 claude-sonnet-4.5 与 db 落盘 claude-sonnet-4-5 视为同一模型）。 */
 export function modelCost(
   modelId: string,
   inputTokens: number,
   outputTokens: number,
   cacheReadTokens: number,
   pricing: PricingConfig,
-  currency: Currency
+  currency: Currency,
+  fxRate: number
 ): number {
-  const map = pricing[currency];
-  const p = map[modelId];
-  if (!p) return 0;
-  const nonCacheInput = Math.max(0, inputTokens - cacheReadTokens);
-  return (
-    (nonCacheInput * p.input +
-      outputTokens * p.output +
-      cacheReadTokens * p.cache_read) /
-    1_000_000
-  );
+  const lookup = (p: ModelPrice) => {
+    const nonCacheInput = Math.max(0, inputTokens - cacheReadTokens);
+    const usd =
+      (nonCacheInput * p.input +
+        outputTokens * p.output +
+        cacheReadTokens * p.cache_read) /
+      1_000_000;
+    return currency === "cny" ? usd * fxRate : usd;
+  };
+  const exact = pricing.usd[modelId];
+  if (exact) return lookup(exact);
+  // 小写 + 点号归一兜底：与后端 cost_for 的兜底查找保持同一口径
+  const target = modelId.toLowerCase().replace(/\./g, "-");
+  for (const [k, p] of Object.entries(pricing.usd)) {
+    if (k.toLowerCase().replace(/\./g, "-") === target) return lookup(p);
+  }
+  return 0;
 }
 
 /** 把远端 RemoteUsage 转成 Stats 结构（仅远端时用） */
@@ -68,7 +80,8 @@ export function remoteToStats(r: RemoteUsage): Stats {
 /** 仅远端时算花费（远端不含 cost，前端用 pricing 自算；双货币一次算齐） */
 export function computeRemoteCost(
   r: RemoteUsage,
-  pricing: PricingConfig
+  pricing: PricingConfig,
+  fxRate: number
 ): CostResult {
   const perModel = (currency: Currency) =>
     r.by_model.map((m) => ({
@@ -79,7 +92,8 @@ export function computeRemoteCost(
         m.output_tokens,
         m.cache_read_tokens,
         pricing,
-        currency
+        currency,
+        fxRate
       ),
     }));
   const cny = perModel("cny");
@@ -155,7 +169,8 @@ export function mergeStats(local: Stats, remote: RemoteUsage): Stats {
 export function mergeCost(
   local: CostResult | null,
   remote: RemoteUsage,
-  pricing: PricingConfig
+  pricing: PricingConfig,
+  fxRate: number
 ): CostResult {
   const base = local ?? {
     total_cny: 0,
@@ -171,7 +186,8 @@ export function mergeCost(
       m.output_tokens,
       m.cache_read_tokens,
       pricing,
-      "cny"
+      "cny",
+      fxRate
     ),
   }));
   const usdExtra = remote.by_model.map((m) => ({
@@ -182,7 +198,8 @@ export function mergeCost(
       m.output_tokens,
       m.cache_read_tokens,
       pricing,
-      "usd"
+      "usd",
+      fxRate
     ),
   }));
   return {
@@ -219,6 +236,7 @@ export function msToLocalLabel(msStr: string, bucket: TrendBucket): string | nul
 export function remoteTrendToLocal(
   remote: RemoteUsage,
   pricing: PricingConfig,
+  fxRate: number,
   bucket: TrendBucket
 ): TrendPoint[] {
   return remote.trend
@@ -234,7 +252,8 @@ export function remoteTrendToLocal(
             m.output_tokens,
             m.cache_read_tokens,
             pricing,
-            "cny"
+            "cny",
+            fxRate
           ),
         0
       );
@@ -247,7 +266,8 @@ export function remoteTrendToLocal(
             m.output_tokens,
             m.cache_read_tokens,
             pricing,
-            "usd"
+            "usd",
+            fxRate
           ),
         0
       );
@@ -267,9 +287,10 @@ export function mergeTrend(
   local: TrendPoint[],
   remote: RemoteUsage,
   pricing: PricingConfig,
+  fxRate: number,
   bucket: TrendBucket
 ): TrendPoint[] {
-  const remotePts = remoteTrendToLocal(remote, pricing, bucket);
+  const remotePts = remoteTrendToLocal(remote, pricing, fxRate, bucket);
   // 远端按 label 建索引
   const remoteMap = new Map<string, TrendPoint>();
   for (const r of remotePts) {

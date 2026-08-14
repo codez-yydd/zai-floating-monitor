@@ -115,7 +115,7 @@ function buildModelRows(
   });
 
   for (const m of stats?.by_model ?? []) {
-    const price = pricing[currency][m.model_id];
+    const price = pricing.usd[m.model_id];
     const hasPrice = Boolean(price && (price.input > 0 || price.output > 0));
     rows.push({
       key: `zcode:${m.provider_id}:${m.model_id}`,
@@ -132,7 +132,7 @@ function buildModelRows(
 
   // Codex：后端无按模型花费命令，前端按价格表自算（与 zcode 行同款口径）
   for (const m of codex?.stats.by_model ?? []) {
-    const price = pricing[currency][m.model_id];
+    const price = pricing.usd[m.model_id];
     const hasPrice = Boolean(price && (price.input > 0 || price.output > 0));
     rows.push({
       key: `codex:${m.provider_id}:${m.model_id}`,
@@ -148,7 +148,8 @@ function buildModelRows(
         m.output_tokens,
         m.cache_read_tokens,
         pricing,
-        currency
+        currency,
+        fxRate
       ),
       hasPrice,
     });
@@ -156,7 +157,7 @@ function buildModelRows(
 
   // Claude：与 Codex 行同款（Anthropic 品牌橙）
   for (const m of claude?.stats.by_model ?? []) {
-    const price = pricing[currency][m.model_id];
+    const price = pricing.usd[m.model_id];
     const hasPrice = Boolean(price && (price.input > 0 || price.output > 0));
     rows.push({
       key: `claude:${m.provider_id}:${m.model_id}`,
@@ -172,7 +173,8 @@ function buildModelRows(
         m.output_tokens,
         m.cache_read_tokens,
         pricing,
-        currency
+        currency,
+        fxRate
       ),
       hasPrice,
     });

@@ -87,7 +87,7 @@ function rangeKey(
 
 /** 价格表是否为空（未加载占位）——空时不覆盖 cost，避免把花费算成 0 */
 function isPricingEmpty(p: PricingConfig): boolean {
-  return Object.keys(p.cny).length === 0 && Object.keys(p.usd).length === 0;
+  return Object.keys(p.usd).length === 0;
 }
 
 /**
@@ -402,12 +402,12 @@ export function DataProvider({ pricing, children }: ProviderProps) {
           trend = localTrend;
         } else if (remote && !localStats) {
           stats = remoteToStats(remote);
-          cost = computeRemoteCost(remote, pricing);
-          trend = remoteTrendToLocal(remote, pricing, bucket);
+          cost = computeRemoteCost(remote, pricing, fxRate);
+          trend = remoteTrendToLocal(remote, pricing, fxRate, bucket);
         } else if (localStats && remote) {
           stats = mergeStats(localStats, remote);
-          cost = mergeCost(localCost, remote, pricing);
-          trend = mergeTrend(localTrend, remote, pricing, bucket);
+          cost = mergeCost(localCost, remote, pricing, fxRate);
+          trend = mergeTrend(localTrend, remote, pricing, fxRate, bucket);
         } else {
           stats = localStats;
           cost = localCost;
@@ -452,7 +452,7 @@ export function DataProvider({ pricing, children }: ProviderProps) {
     },
     // 注意不含 currency：花费是双货币一次算齐的，切货币只需展示层换字段，
     // 不需要重刷数据；若把 currency 列进依赖会导致切货币触发全范围刷新风暴（UI 卡顿）
-    [syncConfig, syncEnabled, pricing]
+    [syncConfig, syncEnabled, pricing, fxRate]
   );
 
   /** 刷新单个 Cursor 范围（账号级，不受设备筛选影响）。刷新期间不清空旧值。 */
@@ -581,13 +581,13 @@ export function DataProvider({ pricing, children }: ProviderProps) {
         } else if (remote && !local) {
           snapshot = {
             stats: remoteToStats(remote),
-            trend: remoteTrendToLocal(remote, pricing, bucket),
+            trend: remoteTrendToLocal(remote, pricing, fxRate, bucket),
             rate_limits: null,
           };
         } else if (local && remote) {
           snapshot = {
             stats: mergeStats(local.stats, remote),
-            trend: mergeTrend(local.trend, remote, pricing, bucket),
+            trend: mergeTrend(local.trend, remote, pricing, fxRate, bucket),
             rate_limits: local.rate_limits,
           };
         } else {
@@ -630,7 +630,7 @@ export function DataProvider({ pricing, children }: ProviderProps) {
         inflight.delete(key);
       }
     },
-    [syncConfig, syncEnabled, pricing]
+    [syncConfig, syncEnabled, pricing, fxRate]
   );
 
   const refreshCodexRange = useCallback(
@@ -757,9 +757,12 @@ export function DataProvider({ pricing, children }: ProviderProps) {
   //      tick 同款 ref 模式；cursorCache 的 inflight 去重复用）。 =====
   useEffect(() => {
     const tick = () => {
-      // 每 tick 读一次汇率（用户可能在设置页改过），避免每个范围重复读
+      // 每 tick 读一次汇率（用户可能在设置页改过），避免每个范围重复读。
+      // >0 校验：非法值（手改文件等）保持现值，与后端 load_fx_rate 的 7.2 兜底口径一致
       getCursorConfig()
-        .then((cfg) => setFxRate(cfg.usd_cny_rate))
+        .then((cfg) => {
+          if (cfg.usd_cny_rate > 0) setFxRate(cfg.usd_cny_rate);
+        })
         .catch(() => {});
       for (const p of PRESET_RANGES) {
         const [f, t] = resolveRange(p, custom);

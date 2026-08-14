@@ -265,6 +265,7 @@ export function StatsPanel({
           loading={!codex && !codexError}
           error={codexError}
           currency={currency}
+          fxRate={fxRate}
           trendBucket={trendBucket}
           pricing={pricing}
         />
@@ -274,6 +275,7 @@ export function StatsPanel({
           loading={!claude && !claudeError}
           error={claudeError}
           currency={currency}
+          fxRate={fxRate}
           trendBucket={trendBucket}
           pricing={pricing}
         />

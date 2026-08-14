@@ -554,6 +554,9 @@ export function SettingsPanel({ onBack }: Props) {
                 自动更新中，取消勾选可手动输入
               </p>
             )}
+            <p className="text-[8px] text-slate-700/40 mt-0.5">
+              模型价格只存美元，人民币花费按此汇率自动折算（价格设置页的 ¥ 视图同源）。
+            </p>
           </div>
 
           {cursorTestResult && (

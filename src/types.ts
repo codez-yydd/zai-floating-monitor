@@ -43,7 +43,6 @@ export interface ModelPrice {
 }
 
 export interface PricingConfig {
-  cny: Record<string, ModelPrice>;
   usd: Record<string, ModelPrice>;
 }
 
@@ -315,7 +314,7 @@ export interface WeeklyTokenBucket {
   requests: number;
 }
 
-// ===== 价格同步（内置默认表 diff 提示，不自动覆盖）=====
+// ===== 价格同步（内置参考表 diff 提示，不自动覆盖）=====
 
 /** 单条价格差异（模型级：以 USD 参考原始价为判定基准） */
 export interface PriceDiffItem {
@@ -325,8 +324,6 @@ export interface PriceDiffItem {
   user: ModelPrice | null;
   /** 参考 USD 价格（每百万 token） */
   default: ModelPrice;
-  /** 参考 CNY 价格（折算展示值，应用时与 USD 一并写入） */
-  default_cny: ModelPrice;
   /** 变体名回退匹配时实际命中的参考表模型 id（如 "gpt-5.6-sol" 命中 "gpt-5"），
    *  精确/点号归一命中时为 null */
   reference_id: string | null;
@@ -334,13 +331,11 @@ export interface PriceDiffItem {
 
 /** 完整差异结果 */
 export interface PricingDiff {
-  /** 价格来源："models.dev"（实时）| "builtin"（离线内置表） */
-  source: "models.dev" | "builtin";
-  /** 参考表版本号（仅内置表有） */
+  /** 内置参考表版本号 */
   version: string;
-  /** 新增模型（参考有、用户两种货币均无，应用时 USD+CNY 一并写入） */
+  /** 新增模型（参考有、用户未配置，应用时写入 USD） */
   new_models: PriceDiffItem[];
-  /** USD 价格变动（用户已配 USD 但与参考不同；CNY 折算价不参与判定，汇率变化不误报） */
+  /** USD 价格变动（用户已配但与参考不同） */
   changed: PriceDiffItem[];
   /** 实际在用但无任何价格的模型（花费按 0 计，需手动补价） */
   missing: string[];

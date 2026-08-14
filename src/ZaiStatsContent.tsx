@@ -166,11 +166,11 @@ export function ZaiStatsContent({
             });
 
             // 合并 by_model 与聚合后的 cost，按 sortBy 降序排序
+            // （配价判断与货币无关：价格只存美元，人民币按汇率折算）
             const rows = stats.by_model.map((m) => {
+              const price = pricing.usd[m.model_id];
               const hasPrice = Boolean(
-                pricing[currency][m.model_id] &&
-                  (pricing[currency][m.model_id].input > 0 ||
-                    pricing[currency][m.model_id].output > 0)
+                price && (price.input > 0 || price.output > 0)
               );
               const costVal = costById.get(m.model_id) ?? 0;
               return {

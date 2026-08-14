@@ -3,9 +3,10 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
-/// 单个模型的三项单价（每百万 token）。各货币各存一份。
+/// 单个模型的三项单价（USD/百万 token）。
 /// 注：input_tokens 已包含 cache_read_tokens，计费时缓存读部分单独按缓存价计算，
 /// 因此非缓存输入 = input_tokens - cache_read_tokens。
+/// 人民币不再单独存价：展示/计费时按「美元价 × 当前汇率」实时折算。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelPrice {
     pub input: f64,
@@ -23,18 +24,17 @@ impl Default for ModelPrice {
     }
 }
 
-/// 完整价格配置：两套货币
+/// 完整价格配置：只存美元价（人民币按汇率自动折算，不再手工维护两套价格）。
+/// 兼容旧版 pricing.json：其中已废弃的 cny 字段会被 serde 忽略，不影响解析。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PricingConfig {
     /// key = "model_id"，便于前端按模型查找
-    pub cny: BTreeMap<String, ModelPrice>,
     pub usd: BTreeMap<String, ModelPrice>,
 }
 
 impl Default for PricingConfig {
     fn default() -> Self {
         Self {
-            cny: BTreeMap::new(),
             usd: BTreeMap::new(),
         }
     }
@@ -72,24 +72,17 @@ pub fn save_pricing(cfg: &PricingConfig) -> Result<(), String> {
     fs::write(&path, data).map_err(|e| format!("写入价格配置失败: {e}"))
 }
 
-// ===== 内置默认价格表 + 差异检查（用于"检查更新"提示，绝不自动覆盖）=====
+// ===== 内置参考价格表 + 差异检查（用于"检查更新"提示，绝不自动覆盖）=====
 
-/// 编译期嵌入的内置参考价格表（public/pricing-defaults.json）。
-/// 作为 models.dev 不可达时的离线兜底；主数据源见 fetch_models_dev_prices。
+/// 编译期嵌入的内置参考价格表（public/pricing-defaults.json，USD/百万 token）。
+/// 定价数据源自 cc-switch 开源项目的成本定价模块，另有新模型时在本文件补充发布。
 const DEFAULTS_JSON: &str = include_str!("../../public/pricing-defaults.json");
-
-/// models.dev 全厂商模型目录（USD / 百万 token，社区维护，随官方调价更新）
-const MODELS_DEV_URL: &str = "https://models.dev/api.json";
-/// models.dev 响应缓存有效期（磁盘缓存 ~/.zbar/models-dev-cache.json）
-const MODELS_DEV_TTL_MS: u64 = 24 * 3600 * 1000;
 
 /// 内置默认表的反序列化结构（多一个 version / note 字段）。
 #[derive(Debug, Deserialize)]
 struct PricingDefaults {
     #[serde(default)]
     version: String,
-    #[serde(default)]
-    cny: BTreeMap<String, ModelPrice>,
     #[serde(default)]
     usd: BTreeMap<String, ModelPrice>,
 }
@@ -98,290 +91,12 @@ struct PricingDefaults {
 fn load_defaults() -> PricingDefaults {
     serde_json::from_str::<PricingDefaults>(DEFAULTS_JSON).unwrap_or_else(|_| PricingDefaults {
         version: String::new(),
-        cny: BTreeMap::new(),
         usd: BTreeMap::new(),
     })
 }
 
-// ---------- models.dev 拉取 + 磁盘缓存 ----------
-
-/// models.dev 磁盘缓存结构
-#[derive(Debug, Serialize, Deserialize)]
-struct ModelsDevCache {
-    fetched_at: u64,
-    /// USD 价格（key 为小写 model id）
-    usd: BTreeMap<String, ModelPrice>,
-    /// 上次成功的数据源 URL（下次优先直连，避免每次都等失败源的超时）
-    #[serde(default)]
-    url: String,
-}
-
-fn models_dev_cache_path() -> Result<PathBuf, String> {
-    Ok(config_dir()?.join("models-dev-cache.json"))
-}
-
-fn load_models_dev_cache() -> Option<ModelsDevCache> {
-    let path = models_dev_cache_path().ok()?;
-    let data = fs::read_to_string(path).ok()?;
-    serde_json::from_str::<ModelsDevCache>(&data).ok()
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-/// JSON 值 → f64（兼容数值与字符串两种序列化，社区 API 常见保精度用字符串）。
-/// 无法解析时返回 None（调用方跳过该字段）。
-fn value_as_f64(v: &serde_json::Value) -> Option<f64> {
-    match v {
-        serde_json::Value::Number(n) => n.as_f64(),
-        serde_json::Value::String(s) => s.trim().parse::<f64>().ok(),
-        _ => None,
-    }
-}
-
-/// 官方直连厂商白名单（models.dev provider key，小写比较）。
-/// 同一 model_id 会在多个厂商/聚合商下出现（如 glm-4.6 同时在 zhipuai 与 openrouter），
-/// 提取时官方价优先，聚合商价仅在官方未收录时兜底。
-const OFFICIAL_PROVIDERS: &[&str] = &[
-    "zhipuai", "openai", "anthropic", "google", "alibaba", "qwen", "deepseek", "moonshot",
-    "moonshotai", "minimax", "01-ai", "yi", "xai", "meta", "mistral", "cohere", "perplexity",
-    "amazon", "microsoft", "nvidia", "baidu", "tencent", "stepfun", "ai21", "writer",
-];
-
-/// 从 models.dev api.json 提取**全厂商**模型价格（USD/百万 token，key 为小写 model_id）。
-/// ZCode 可接入任意厂商模型（qwen / claude / deepseek …），因此不做厂商过滤。
-/// 逐模型容错：单个模型字段缺失/类型异常只跳过该模型；同名模型官方厂商价优先。
-fn extract_all_prices(root: &serde_json::Value) -> BTreeMap<String, ModelPrice> {
-    let Some(providers) = root.as_object() else {
-        return BTreeMap::new();
-    };
-
-    let mut usd = BTreeMap::new();
-    // 两轮遍历：官方厂商先入表（可占位），聚合商后入且不覆盖已有价
-    for pass in 0..2 {
-        for (provider_key, provider) in providers {
-            let is_official = OFFICIAL_PROVIDERS.contains(&provider_key.to_lowercase().as_str());
-            if (pass == 0) != is_official {
-                continue;
-            }
-            let Some(models) = provider.get("models").and_then(|m| m.as_object()) else {
-                continue;
-            };
-            for (id, model) in models {
-                let Some(cost) = model.get("cost") else { continue };
-                // input/output 必须都有且可解析；cache_read 缺省/异常按 0
-                let (Some(input), Some(output)) = (
-                    cost.get("input").and_then(value_as_f64),
-                    cost.get("output").and_then(value_as_f64),
-                ) else {
-                    continue;
-                };
-                if input <= 0.0 && output <= 0.0 {
-                    continue;
-                }
-                let key = id.to_lowercase();
-                if pass == 1 && usd.contains_key(&key) {
-                    continue; // 聚合商价不覆盖已有（官方）价
-                }
-                usd.insert(
-                    key,
-                    ModelPrice {
-                        input,
-                        output,
-                        cache_read: cost.get("cache_read").and_then(value_as_f64).unwrap_or(0.0),
-                    },
-                );
-            }
-        }
-    }
-    usd
-}
-
-/// 价格数值取整到 6 位小数（单位：每百万 token），消除浮点乘法尾巴
-/// （如 0.4 × 7.2 = 2.8800000000000003），保证展示与落盘干净。
-fn round_price(x: f64) -> f64 {
-    (x * 1e6).round() / 1e6
-}
-
-/// models.dev 拉取模式
-pub enum FetchMode {
-    /// 优先本地缓存（不管过期与否），完全无缓存才联网兜底。
-    /// 「检查价格更新」按钮与进面板静默检查用——保证秒回；缓存保鲜交给每日定时任务/「更新」按钮。
-    LocalFirst,
-    /// 缓存未过期直接跳过；过期联网刷新（后台每日定时任务用，保证每天更新一次）
-    Cached,
-    /// 绕过缓存强制联网（「更新」按钮：手动拉最新数据刷缓存）
-    Force,
-}
-
-/// 拉取 models.dev 全厂商模型 USD 价格（每百万 token）。
-/// 磁盘缓存 24h；网络失败时回退过期缓存（宁用昨日数据也不用静态内置表），
-/// 再失败返回 Err（调用方用内置表兜底）。
-pub fn fetch_models_dev_prices(mode: FetchMode) -> Result<BTreeMap<String, ModelPrice>, String> {
-    let cached = load_models_dev_cache();
-    if !matches!(mode, FetchMode::Force) {
-        if matches!(mode, FetchMode::LocalFirst) {
-            // 本地优先：有缓存就用（哪怕已过期——定时任务与「更新」按钮负责保鲜）
-            if let Some(c) = cached.as_ref() {
-                if !c.usd.is_empty() {
-                    return Ok(c.usd.clone());
-                }
-            }
-        } else if let Some(c) = cached.as_ref() {
-            // Cached（定时任务）：TTL 内不联网，过期才刷新
-            if now_ms().saturating_sub(c.fetched_at) < MODELS_DEV_TTL_MS {
-                return Ok(c.usd.clone());
-            }
-        }
-    }
-
-    // 多源 failover：官方源国内可能直连不通，依次尝试镜像。
-    // 源记忆：上次成功的源排最前，常规情况下无需再等失败源的超时。
-    let preferred = cached
-        .as_ref()
-        .map(|c| c.url.clone())
-        .unwrap_or_default();
-    let mut last_err = String::new();
-    let mut usd = BTreeMap::new();
-    let mut ok_url = String::new();
-    for url in models_dev_urls(&preferred) {
-        match fetch_models_dev_from(&url) {
-            Ok(prices) => {
-                usd = prices;
-                ok_url = url;
-                break;
-            }
-            Err(e) => last_err = e,
-        }
-    }
-    if usd.is_empty() {
-        // 全部源失败：回退过期缓存（若有），保持「models.dev 数据源」语义
-        if let Some(c) = cached {
-            if !c.usd.is_empty() {
-                return Ok(c.usd);
-            }
-        }
-        return Err(format!("models.dev 所有数据源均不可达: {last_err}"));
-    }
-
-    // 写缓存（失败静默：缓存只是优化），记录本次成功的数据源供下次直连
-    let cache = ModelsDevCache {
-        fetched_at: now_ms(),
-        usd: usd.clone(),
-        url: ok_url,
-    };
-    if let Ok(dir) = config_dir() {
-        if fs::create_dir_all(&dir).is_ok() {
-            if let Ok(path) = models_dev_cache_path() {
-                if let Ok(data) = serde_json::to_string_pretty(&cache) {
-                    let _ = fs::write(path, data);
-                }
-            }
-        }
-    }
-    Ok(usd)
-}
-
-/// models.dev 数据源列表（按优先级）：
-/// - 官方 api.json（国内可能直连不通）
-/// - jsDelivr CDN 镜像 GitHub anomalyco/models.dev 的 models.json（国内通常可达）
-/// - fastly 是 jsDelivr 的备用线路（连通性波动时兜底）
-///
-/// `preferred` 非空时（上次成功的源）挪到最前，直连命中即可省去失败源的超时等待。
-///
-/// 注：镜像的 models.json 是 canonical 视图（{data:[{id:"z-ai/glm-4.6", pricing:{...}}]}，
-/// 价格为 USD/token 字符串），与 api.json 的 provider 视图结构不同，解析时自动分派。
-fn models_dev_urls(preferred: &str) -> Vec<String> {
-    let mut urls = vec![
-        MODELS_DEV_URL.to_string(),
-        "https://cdn.jsdelivr.net/gh/anomalyco/models.dev@dev/models.json".to_string(),
-        "https://fastly.jsdelivr.net/gh/anomalyco/models.dev@dev/models.json".to_string(),
-    ];
-    if !preferred.is_empty() {
-        if let Some(idx) = urls.iter().position(|u| u == preferred) {
-            let hit = urls.remove(idx);
-            urls.insert(0, hit);
-        }
-    }
-    urls
-}
-
-/// 从单个 URL 拉取并提取全厂商价格（超时 6s，按响应结构自动分派视图）
-fn fetch_models_dev_from(url: &str) -> Result<BTreeMap<String, ModelPrice>, String> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(6))
-        .build();
-    let resp = agent
-        .get(url)
-        .call()
-        .map_err(|e| format!("请求失败: {e}"))?;
-    let root: serde_json::Value = resp
-        .into_json()
-        .map_err(|e| format!("响应解析失败: {e}"))?;
-    let usd = if root.get("data").and_then(|d| d.as_array()).is_some() {
-        extract_from_models_json(&root)
-    } else {
-        extract_all_prices(&root)
-    };
-    if usd.is_empty() {
-        return Err("未解析到任何模型价格".to_string());
-    }
-    Ok(usd)
-}
-
-/// jsDelivr 镜像 models.json 视图：{data:[{id:"z-ai/glm-4.6", pricing:{prompt, completion,
-/// input_cache_read}}]}，价格为 USD/token 字符串 → 换算为 USD/百万 token。
-/// 全厂商提取（ZCode 可接入任意厂商模型），剥掉 "厂商/" 前缀；canonical 视图本身已去重。
-/// 跳过 ":free" 等变体 id，避免免费端点价覆盖正式价。
-fn extract_from_models_json(root: &serde_json::Value) -> BTreeMap<String, ModelPrice> {
-    let mut usd = BTreeMap::new();
-    let Some(items) = root.get("data").and_then(|d| d.as_array()) else {
-        return usd;
-    };
-    for item in items {
-        let Some(id) = item.get("id").and_then(|i| i.as_str()) else { continue };
-        // 剥 "厂商/" 前缀（如 "z-ai/glm-4.6" → "glm-4.6"、"alibaba/qwen-max" → "qwen-max"）
-        let model_id = id.rsplit('/').next().unwrap_or(id);
-        if model_id.is_empty() || model_id.contains(':') {
-            continue; // ":free" 等变体端点，非正式定价
-        }
-        let Some(pricing) = item.get("pricing") else { continue };
-        // USD/token → USD/百万 token（取整去浮点尾巴：4e-7×1e6 会得 0.39999999999999997）
-        let to_m = |key: &str| -> Option<f64> {
-            pricing
-                .get(key)
-                .and_then(value_as_f64)
-                .map(|v| round_price(v * 1_000_000.0))
-        };
-        let (Some(input), Some(output)) = (to_m("prompt"), to_m("completion")) else {
-            continue;
-        };
-        if input <= 0.0 && output <= 0.0 {
-            continue;
-        }
-        usd.insert(
-            model_id.to_lowercase(),
-            ModelPrice {
-                input,
-                output,
-                cache_read: to_m("input_cache_read").unwrap_or(0.0),
-            },
-        );
-    }
-    usd
-}
-
-/// 单条差异（模型级）：判定基准 = 参考表 USD 原始价。
-/// new_models = 参考有、用户两种货币都未配置；changed = 用户已配 USD 但三项不等。
-///
-/// CNY 参考价不参与"是否变动"的判定，仅作为折算展示值随条目带出
-/// （models.dev 模式 = USD × 当日汇率；内置表 = 官方国内人民币价）：
-/// 汇率每日自动更新，若让 CNY 折算值参与相等性判定，用户应用过的价格
-/// 在汇率一动后必然被判"变动"，造成永无止境的误报。
+/// 单条差异（模型级）：判定基准 = 内置表 USD 原始价。
+/// new_models = 参考有、用户未配置；changed = 用户已配但三项不等。
 #[derive(Debug, Clone, Serialize)]
 pub struct PriceDiffItem {
     /// 模型 id
@@ -390,8 +105,6 @@ pub struct PriceDiffItem {
     pub user: Option<ModelPrice>,
     /// 参考 USD 价格（每百万 token）
     pub default: ModelPrice,
-    /// 参考 CNY 价格（应用时与 USD 一并写入）
-    pub default_cny: ModelPrice,
     /// 变体名回退匹配时实际命中的参考表模型 id（如 "gpt-5.6-sol" 命中 "gpt-5"
     /// 的参考价），供前端标注"参考自 xxx"；精确/点号归一命中时为 None
     pub reference_id: Option<String>,
@@ -400,63 +113,31 @@ pub struct PriceDiffItem {
 /// 完整差异结果
 #[derive(Debug, Clone, Serialize)]
 pub struct PricingDiff {
-    /// 价格来源："models.dev"（实时）| "builtin"（离线内置表）
-    pub source: String,
-    /// 参考表版本号（内置表的 version；models.dev 无版本概念则为空）
+    /// 内置参考表版本号
     pub version: String,
-    /// 新增模型（参考有、用户两种货币均无），默认勾选应用（USD+CNY 一并写入）
+    /// 新增模型（参考有、用户未配置），默认勾选应用
     pub new_models: Vec<PriceDiffItem>,
-    /// USD 价格变动（用户已配 USD 但与参考不同），默认不勾选以保护用户自定义
+    /// USD 价格变动（用户已配但与参考不同），默认不勾选以保护用户自定义
     pub changed: Vec<PriceDiffItem>,
     /// 实际在用但「参考表与本地配置都没有价格」的模型（花费按 0 计，需手动补价）
     pub missing: Vec<String>,
 }
 
-/// 对比用户当前 pricing 与参考价，返回差异。判定"是否变动"只看 USD 原始价
-/// （价格都是显式写死的配置值，用 == 比较即可）；CNY 参考价 = USD × 汇率
-/// （models.dev 模式）或内置表官方国内价，仅作折算展示（default_cny），
-/// 应用时与 USD 一并写入——汇率每日自动变化也不会再产生误报。
+/// 对比用户当前 pricing 与内置参考表，返回差异（纯本地对比，无网络请求）。
+/// 判定"是否变动"只看 USD 原始价（价格都是显式写死的配置值，用 == 比较即可）。
 ///
 /// `relevant`: 实际调用过 ∪ 用户已配置的模型 id —— **遍历主体**，
 /// 保证实际在用但参考表没收录的模型也能以 missing 暴露出来。
-/// `fx_rate`: USD→CNY 汇率（仅用于折算 default_cny；≤0 时按 7.2 兜底）。
-/// `mode`: models.dev 拉取模式（LocalFirst 优先本地缓存 / Cached 过期才联网 / Force 强制刷新）。
 pub fn diff_pricing(
     user: &PricingConfig,
     relevant: &std::collections::HashSet<String>,
-    fx_rate: f64,
-    mode: FetchMode,
 ) -> PricingDiff {
-    let fx_rate = if fx_rate > 0.0 { fx_rate } else { 7.2 };
-    // 参考价：优先 models.dev（USD），失败回退内置表（USD+CNY）
-    match fetch_models_dev_prices(mode) {
-        Ok(usd) => {
-            // CNY 参考价 = USD × 汇率（models.dev 只有国际站 USD 价）。
-            // 取整到 6 位小数：避免 0.4×7.2=2.8800000000000003 这类浮点尾巴进配置
-            let cny = usd
-                .iter()
-                .map(|(k, p)| {
-                    (
-                        k.clone(),
-                        ModelPrice {
-                            input: round_price(p.input * fx_rate),
-                            output: round_price(p.output * fx_rate),
-                            cache_read: round_price(p.cache_read * fx_rate),
-                        },
-                    )
-                })
-                .collect();
-            diff_with_reference(user, relevant, &usd, &cny, "models.dev", "")
-        }
-        Err(_) => {
-            let d = load_defaults();
-            diff_with_reference(user, relevant, &d.usd, &d.cny, "builtin", &d.version)
-        }
-    }
+    let d = load_defaults();
+    diff_with_reference(user, relevant, &d.usd, &d.version)
 }
 
-/// 参考价三级查找（解决 CLI 模型名与 models.dev 收录名不一致的问题）：
-/// - L1 精确 / 点号归一："claude-sonnet-4-5"（CLI 落盘名）与 models.dev 的
+/// 参考价三级查找（解决 CLI 模型名与参考表收录名不一致的问题）：
+/// - L1 精确 / 点号归一："claude-sonnet-4-5"（CLI 落盘名）与参考表的
 ///   "claude-sonnet-4.5" 是同一模型的两种写法，'.' 与 '-' 统一后比较，
 ///   视为精确命中、不标注来源；
 /// - L2 渐进去尾回退："gpt-5.6-sol" → "gpt-5.6" → "gpt-5"，命中即停，
@@ -516,17 +197,15 @@ fn lookup_variant<'a>(
     None
 }
 
-/// 纯对比逻辑（与网络解耦，便于测试）：参考价 map 的 key 需为小写模型 id。
-/// 判定基准 = 参考表 USD 原始价，CNY 参考（折算值）不参与相等性判定。
+/// 纯对比逻辑（便于测试）：参考价 map 的 key 需为小写模型 id。
+/// 判定基准 = 参考表 USD 原始价。
 fn diff_with_reference(
     user: &PricingConfig,
     relevant: &std::collections::HashSet<String>,
     ref_usd: &BTreeMap<String, ModelPrice>,
-    ref_cny: &BTreeMap<String, ModelPrice>,
-    source: &str,
     version: &str,
 ) -> PricingDiff {
-    // 小写归一：db 里的 model_id 大小写可能与参考表不一致（models.dev 全小写）
+    // 小写归一：db 里的 model_id 大小写可能与参考表不一致（参考表全小写）。
     // 用户配置按「小写 + 点号归一」建索引：db 原始 id 能命中用户以另一种大小写
     // 或点号/连字符形态保存的价格（手输 claude-sonnet-4.5 ↔ db 的 claude-sonnet-4-5）
     let user_usd: BTreeMap<String, &ModelPrice> = user
@@ -534,13 +213,7 @@ fn diff_with_reference(
         .iter()
         .map(|(k, v)| (normalize_dots(&k.to_lowercase()), v))
         .collect();
-    let user_cny: BTreeMap<String, &ModelPrice> = user
-        .cny
-        .iter()
-        .map(|(k, v)| (normalize_dots(&k.to_lowercase()), v))
-        .collect();
     let norm_usd = build_norm_index(ref_usd);
-    let norm_cny = build_norm_index(ref_cny);
 
     let mut new_models = Vec::new();
     let mut changed = Vec::new();
@@ -558,19 +231,13 @@ fn diff_with_reference(
             continue;
         }
         let user_u: Option<ModelPrice> = user_usd.get(&key).map(|p| (*p).clone());
-        let user_c = user_cny.get(&key);
 
         // L1（精确/点号归一）命中：参考表收录了该模型，正常走 new/changed 判定
         if let Some(default_usd) = lookup_exact(ref_usd, &norm_usd, &lc) {
-            // CNY 参考价缺失时以 0 兜底（正常两条参考链路同源，均有值）
-            let default_cny = lookup_exact(ref_cny, &norm_cny, &lc)
-                .cloned()
-                .unwrap_or_default();
             let item = |user: Option<ModelPrice>| PriceDiffItem {
                 model_id: model_id.clone(),
                 user,
                 default: default_usd.clone(),
-                default_cny: default_cny.clone(),
                 reference_id: None,
             };
 
@@ -584,36 +251,25 @@ fn diff_with_reference(
                         changed.push(item(Some(u)));
                     }
                 }
-                // 未配 USD：CNY 也未配 → 新增模型（默认勾选，应用时 USD+CNY 一并写入）；
-                // 仅配了 CNY → 视为用户已按自己的口径定价（如国内站人民币价），不打扰
+                // 未配置 → 新增模型（默认勾选，一键应用参考价）
                 None => {
-                    if user_c.is_none() {
-                        new_models.push(item(None));
-                    }
+                    new_models.push(item(None));
                 }
             }
             continue;
         }
 
-        // L1 未命中但本地已配（任一货币）→ 用户自定义价格，不用近似参考去打扰
-        if user_u.is_some() || user_c.is_some() {
-            continue;
-        }
-        // 仅 CNY 参考命中（内置表国内人民币价模型）→ USD 无基准可比，不打扰
-        if lookup_exact(ref_cny, &norm_cny, &lc).is_some() {
+        // L1 未命中但本地已配 → 用户自定义价格，不用近似参考去打扰
+        if user_u.is_some() {
             continue;
         }
         // L2 变体回退：未配置模型拿基础模型参考价兜底（如 gpt-5.6-sol → gpt-5），
         // 条目标注实际参考来源，默认勾选、由用户知情决定是否应用
         if let Some((usd_ref, hit_id)) = lookup_variant(ref_usd, &norm_usd, &lc) {
-            let default_cny = lookup_variant(ref_cny, &norm_cny, &lc)
-                .map(|(p, _)| p.clone())
-                .unwrap_or_default();
             new_models.push(PriceDiffItem {
                 model_id: model_id.clone(),
                 user: None,
                 default: usd_ref.clone(),
-                default_cny,
                 reference_id: Some(hit_id),
             });
             continue;
@@ -623,7 +279,6 @@ fn diff_with_reference(
     }
 
     PricingDiff {
-        source: source.to_string(),
         version: version.to_string(),
         new_models,
         changed,
@@ -643,179 +298,61 @@ mod tests {
         }
     }
 
-    /// 源记忆：上次成功的源排最前；未知源/空值保持默认顺序
-    #[test]
-    fn models_dev_urls_prefers_last_success() {
-        let mirror = "https://cdn.jsdelivr.net/gh/anomalyco/models.dev@dev/models.json";
-        let urls = models_dev_urls(mirror);
-        assert_eq!(urls[0], mirror, "上次成功的镜像源应排第一");
-        assert_eq!(urls[1], MODELS_DEV_URL, "官方源退居第二");
-
-        // 未知源（缓存被手改等）：不 panic，维持默认顺序
-        assert_eq!(models_dev_urls("https://unknown.example/api.json")[0], MODELS_DEV_URL);
-        // 无记忆
-        assert_eq!(models_dev_urls("")[0], MODELS_DEV_URL);
-    }
-
-    /// round_price：消除浮点尾巴（换算 USD×汇率 / USD/token×1M 场景）
-    #[test]
-    fn round_price_trims_float_tail() {
-        assert_eq!(round_price(0.4 * 7.2), 2.88); // 2.8800000000000003 → 2.88
-        assert_eq!(round_price(4e-7 * 1e6), 0.4); // 0.39999999999999997 → 0.4
-        assert_eq!(round_price(0.11), 0.11); // 正常值不变
-        assert_eq!(round_price(10.0), 10.0);
-    }
-
-    /// models.dev api.json 全厂商提取：逐模型容错 + 字符串/数值兼容 + 官方厂商优先
-    #[test]
-    fn extract_models_dev_prices() {
-        let json = r#"{
-            "openai": {
-                "name": "OpenAI",
-                "models": { "gpt-4o": { "cost": { "input": 2.5, "output": 10 } } }
-            },
-            "zhipuai": {
-                "name": "Zhipu AI",
-                "models": {
-                    "glm-4.6": { "cost": { "input": 0.35, "output": 1.4, "cache_read": 0.035, "cache_write": 0.05 } },
-                    "glm-4.7": { "cost": { "input": "0.2", "output": "0.8" } },
-                    "broken": { "cost": { "input": 1 } },
-                    "nocost": { "limit": { "context": 128000 } },
-                    "zeroprice": { "cost": { "input": 0, "output": 0 } }
-                }
-            },
-            "alibaba": {
-                "name": "Alibaba",
-                "models": { "qwen3.8-max": { "cost": { "input": 1.2, "output": 6 } } }
-            },
-            "someaggregator": {
-                "name": "Cheap Router",
-                "models": {
-                    "glm-4.6": { "cost": { "input": 0.99, "output": 2.5 } },
-                    "deepseek-v3": { "cost": { "input": 0.27, "output": 1.1 } }
-                }
-            }
-        }"#;
-        let root: serde_json::Value = serde_json::from_str(json).unwrap();
-        let usd = extract_all_prices(&root);
-        // gpt-4o + glm-4.6 + glm-4.7 + qwen3.8-max + deepseek-v3（聚合商独有）
-        assert_eq!(usd.len(), 5, "全厂商提取，含聚合商独有的 deepseek-v3");
-        let g46 = &usd["glm-4.6"];
-        assert_eq!(g46.input, 0.35, "同名模型官方厂商价优先于聚合商价");
-        assert_eq!(g46.output, 1.4);
-        assert_eq!(g46.cache_read, 0.035); // cache_write 不进 ModelPrice
-        let g47 = &usd["glm-4.7"];
-        assert_eq!(g47.input, 0.2, "字符串价格应可解析");
-        assert_eq!(g47.cache_read, 0.0, "缺 cache_read 按 0");
-        let qwen = &usd["qwen3.8-max"];
-        assert_eq!(qwen.input, 1.2, "非智谱厂商（阿里）也应被提取");
-        let ds = &usd["deepseek-v3"];
-        assert_eq!(ds.input, 0.27, "聚合商独有的模型保留聚合商价");
-    }
-
-    /// jsDelivr 镜像 models.json 视图：全厂商前缀剥离 + USD/token 字符串 → USD/百万 token
-    #[test]
-    fn extract_from_models_json_view() {
-        let json = r#"{
-            "data": [
-                { "id": "z-ai/glm-4.6", "pricing": { "prompt": "0.00000043", "completion": "0.00000174", "input_cache_read": "0.00000008" } },
-                { "id": "z-ai/glm-4.5-air:free", "pricing": { "prompt": "0", "completion": "0" } },
-                { "id": "openai/gpt-4o", "pricing": { "prompt": "0.0000025", "completion": "0.00001" } },
-                { "id": "alibaba/qwen3.8-max", "pricing": { "prompt": "0.0000012", "completion": "0.000006" } },
-                { "id": "z-ai/glm-4.7", "pricing": {} }
-            ]
-        }"#;
-        let root: serde_json::Value = serde_json::from_str(json).unwrap();
-        let usd = extract_from_models_json(&root);
-        assert_eq!(usd.len(), 3, "glm-4.6 / gpt-4o / qwen3.8-max（free 变体与无价格跳过）");
-        let g = &usd["glm-4.6"];
-        assert_eq!(g.input, 0.43, "USD/token × 1M");
-        assert_eq!(g.output, 1.74);
-        assert_eq!(g.cache_read, 0.08);
-        assert_eq!(usd["gpt-4o"].input, 2.5, "多厂商前缀均应剥离");
-        assert_eq!(usd["qwen3.8-max"].input, 1.2, "阿里模型（ZCode 可接入非智谱模型）");
-    }
-
-    /// diff 分类：判定只看 USD 原始价 —— new / changed / missing + 大小写归一
+    /// diff 分类：new / changed / missing + 大小写归一
     #[test]
     fn diff_classifies_new_changed_missing() {
         let mut user = PricingConfig::default();
-        // glm-4.5：USD 与参考一致 → 无条目。CNY 与折算参考不同也不算变动
-        //（折算值随汇率每日漂移，参与判定会造成持续误报）
-        user.usd.insert("glm-4.5".into(), price(0.3, 1.3, 0.028));
-        user.cny.insert("glm-4.5".into(), price(2.0, 8.0, 0.2));
-        // glm-4-air：USD 与参考不同 → changed
+        // glm-4.5：与参考一致 → 无条目
+        user.usd.insert("glm-4.5".into(), price(0.7, 2.1, 0.07));
+        // glm-4-air：与参考不同 → changed
         user.usd.insert("glm-4-air".into(), price(0.1, 0.4, 0.01));
-        // glm-4-plus：仅配 CNY（国内站人民币自定义价）→ 参考有 USD 也不打扰
-        user.cny.insert("glm-4-plus".into(), price(5.0, 5.0, 0.5));
-        // gpt-5：用户小写配置 + relevant 混入 db 大写形态，归一后 USD 一致 → 无条目
+        // gpt-5：用户小写配置 + relevant 混入 db 大写形态，归一后一致 → 无条目
         user.usd.insert("gpt-5".into(), price(1.25, 10.0, 0.125));
 
         let relevant: std::collections::HashSet<String> = [
             "glm-4.5".to_string(),
-            "GLM-4.6".to_string(), // 数据库大写，两货币均无 → 新增（保留 db 原始 id）
+            "GLM-4.6".to_string(), // 数据库大写，未配置 → 新增（保留 db 原始 id）
             "glm-4-air".to_string(),
-            "glm-4-plus".to_string(),
             "GPT-5".to_string(), // 与用户小写 key 归一去重
             "gpt-5".to_string(),
             "glm-x-new".to_string(), // 实际在用但参考表与本地都无 → missing
-            "glm-4-cny-only".to_string(), // 参考仅 CNY（国内价）→ 不打扰、不 missing
         ]
         .into_iter()
         .collect();
 
         let ref_usd = BTreeMap::from([
-            ("glm-4.5".to_string(), price(0.3, 1.3, 0.028)),
-            ("glm-4.6".to_string(), price(0.35, 1.4, 0.035)),
+            ("glm-4.5".to_string(), price(0.7, 2.1, 0.07)),
+            ("glm-4.6".to_string(), price(0.6, 2.2, 0.11)),
             ("glm-4-air".to_string(), price(0.11, 0.42, 0.011)),
-            ("glm-4-plus".to_string(), price(0.7, 2.8, 0.07)),
             ("gpt-5".to_string(), price(1.25, 10.0, 0.125)),
         ]);
-        let ref_cny = BTreeMap::from([
-            ("glm-4.6".to_string(), price(2.5, 10.0, 0.25)), // glm-4-air 故意缺失，测 0 兜底
-            // cny-only：内置表仅有国内人民币价的模型（USD 参考缺失）
-            ("glm-4-cny-only".to_string(), price(0.6, 2.2, 0.06)),
-        ]);
 
-        let diff = diff_with_reference(&user, &relevant, &ref_usd, &ref_cny, "models.dev", "");
+        let diff = diff_with_reference(&user, &relevant, &ref_usd, "test");
 
-        // 新增：仅 glm-4.6（gpt-5 归一后已配置；glm-4-plus 仅 CNY 不打扰）
+        // 新增：仅 glm-4.6（gpt-5 归一后已配置）
         assert_eq!(diff.new_models.len(), 1);
         assert_eq!(diff.new_models[0].model_id, "GLM-4.6");
-        assert_eq!(
-            diff.new_models[0].default_cny,
-            price(2.5, 10.0, 0.25),
-            "新增条目应携带 CNY 折算参考价"
-        );
-        // 变动：仅 glm-4-air（USD 三项不等）
+        assert_eq!(diff.new_models[0].default, price(0.6, 2.2, 0.11));
+        // 变动：仅 glm-4-air（三项不等）
         assert_eq!(diff.changed.len(), 1);
         assert_eq!(diff.changed[0].model_id, "glm-4-air");
         assert_eq!(diff.changed[0].user, Some(price(0.1, 0.4, 0.01)));
-        assert_eq!(
-            diff.changed[0].default_cny,
-            ModelPrice::default(),
-            "参考 CNY 缺失时以 0 兜底"
-        );
-        // missing：glm-x-new；glm-4-plus 已配 CNY、glm-4-cny-only 参考有国内价，均不算 missing
+        // missing：glm-x-new
         assert_eq!(diff.missing, vec!["glm-x-new".to_string()]);
-        assert_eq!(diff.source, "models.dev");
+        assert_eq!(diff.version, "test");
     }
 
     /// 变体名三级匹配：点号归一视为精确、去尾回退标注参考来源、已配置不近似打扰
     #[test]
     fn diff_matches_variant_model_names() {
         let user = PricingConfig::default();
-        // 场景数据：参考表只有基础模型（模拟 gpt-5.6 系列尚未被 models.dev 收录）
+        // 场景数据：参考表只有基础模型（模拟 gpt-5.6 系列尚未收录）
         let ref_usd = BTreeMap::from([
             ("gpt-5".to_string(), price(1.25, 10.0, 0.125)),
             ("gpt-5.5".to_string(), price(1.5, 12.0, 0.15)),
             ("claude-sonnet-4.5".to_string(), price(3.0, 15.0, 0.3)),
             ("glm-4.5".to_string(), price(0.5, 2.0, 0.05)),
         ]);
-        let ref_cny = ref_usd
-            .iter()
-            .map(|(k, p)| (k.clone(), price(p.input * 7.2, p.output * 7.2, p.cache_read * 7.2)))
-            .collect();
 
         let relevant: std::collections::HashSet<String> = [
             "gpt-5.6-sol".to_string(),          // 两级去尾 → gpt-5，标注参考来源
@@ -828,7 +365,7 @@ mod tests {
         .into_iter()
         .collect();
 
-        let diff = diff_with_reference(&user, &relevant, &ref_usd, &ref_cny, "models.dev", "");
+        let diff = diff_with_reference(&user, &relevant, &ref_usd, "test");
 
         assert_eq!(diff.new_models.len(), 5, "五个未配置模型都应有参考价");
         let by_id: std::collections::HashMap<&str, &PriceDiffItem> = diff
@@ -839,11 +376,6 @@ mod tests {
         // 点号归一命中视为精确，不标注来源
         assert_eq!(by_id["claude-sonnet-4-5"].reference_id, None);
         assert_eq!(by_id["claude-sonnet-4-5"].default, price(3.0, 15.0, 0.3));
-        assert_eq!(
-            by_id["claude-sonnet-4-5"].default_cny,
-            price(3.0 * 7.2, 15.0 * 7.2, 0.3 * 7.2),
-            "CNY 参考与 ref_cny 构造同源（同乘法路径，浮点一致）"
-        );
         // 去尾回退命中标注实际参考来源
         assert_eq!(by_id["gpt-5.6-sol"].reference_id, Some("gpt-5".to_string()));
         assert_eq!(by_id["gpt-5.6-terra"].reference_id, Some("gpt-5".to_string()));
@@ -852,12 +384,7 @@ mod tests {
             Some("gpt-5.5".to_string())
         );
         assert_eq!(by_id["glm-4.5-air"].reference_id, Some("glm-4.5".to_string()));
-        // 变体条目同样带 CNY 折算参考
         assert_eq!(by_id["gpt-5.6-sol"].default, price(1.25, 10.0, 0.125));
-        assert_eq!(
-            by_id["gpt-5.6-sol"].default_cny,
-            price(1.25 * 7.2, 10.0 * 7.2, 0.125 * 7.2)
-        );
         // 三级均 miss → missing
         assert_eq!(diff.missing, vec!["glm-x-unknown".to_string()]);
     }
@@ -872,11 +399,10 @@ mod tests {
             price(1.25, 10.0, 0.125),
         );
         let ref_usd = BTreeMap::from([("gpt-5".to_string(), price(2.0, 20.0, 0.2))]);
-        let ref_cny = BTreeMap::from([("gpt-5".to_string(), price(14.4, 144.0, 1.44))]);
 
         let relevant: std::collections::HashSet<String> =
             ["gpt-5.6-sol".to_string()].into_iter().collect();
-        let diff = diff_with_reference(&user, &relevant, &ref_usd, &ref_cny, "models.dev", "");
+        let diff = diff_with_reference(&user, &relevant, &ref_usd, "test");
 
         assert!(diff.new_models.is_empty());
         assert!(diff.changed.is_empty(), "不拿基础模型参考价判变动");
@@ -888,7 +414,7 @@ mod tests {
     #[test]
     fn diff_normalizes_user_dot_notation() {
         let mut user = PricingConfig::default();
-        // 用户照抄 models.dev 形态手动配置的价格
+        // 用户照抄参考表形态手动配置的价格
         user.usd.insert("claude-sonnet-4.5".to_string(), price(3.0, 15.0, 0.3));
 
         let relevant: std::collections::HashSet<String> = [
@@ -898,10 +424,9 @@ mod tests {
         .into_iter()
         .collect();
         let ref_usd = BTreeMap::from([("claude-sonnet-4.5".to_string(), price(3.0, 15.0, 0.3))]);
-        let ref_cny = BTreeMap::new();
 
-        let diff = diff_with_reference(&user, &relevant, &ref_usd, &ref_cny, "models.dev", "");
-        // 已配置（点号形态命中）且与参考一致 → 不产出任何条目，只输出一个模型
+        let diff = diff_with_reference(&user, &relevant, &ref_usd, "test");
+        // 已配置（点号形态命中）且与参考一致 → 不产出任何条目
         assert!(diff.new_models.is_empty(), "用户点号配置应被识别，不误报新增");
         assert!(diff.changed.is_empty());
         assert!(diff.missing.is_empty());
@@ -918,7 +443,7 @@ mod tests {
     #[test]
     fn collapse_insert_removes_case_variants() {
         let mut map = BTreeMap::from([
-            ("glm-4.6".to_string(), price(0.3, 1.3, 0.028)), // 手输小写旧值
+            ("glm-4.6".to_string(), price(0.6, 2.2, 0.11)), // 手输小写旧值
             ("gpt-5".to_string(), price(1.25, 10.0, 0.125)), // 无关模型，应保留
         ]);
         collapse_insert(&mut map, "GLM-4.6", price(0.35, 1.4, 0.035));
@@ -928,34 +453,27 @@ mod tests {
         assert!(map.contains_key("gpt-5"), "其他模型不受影响");
     }
 
-    /// 真实镜像数据管道验证（需网络，手动 `cargo test -- --ignored` 执行）
+    /// 内置参考表可解析且条目非空（防止 JSON 格式损坏后静默退化为空表）
     #[test]
-    #[ignore = "需要网络"]
-    fn fetch_real_jsdelivr_mirror() {
-        let usd = fetch_models_dev_from(
-            "https://cdn.jsdelivr.net/gh/anomalyco/models.dev@dev/models.json",
-        )
-        .expect("jsDelivr 镜像应可达且解析出模型价格");
-        assert!(
-            usd.contains_key("glm-4.6"),
-            "应包含 glm-4.6，实际: {:?}",
-            usd.keys().collect::<Vec<_>>()
-        );
-        println!("glm-4.6 = {:?}", usd["glm-4.6"]);
+    fn builtin_defaults_load_nonempty() {
+        let d = load_defaults();
+        assert!(!d.version.is_empty(), "内置表应带版本号");
+        assert!(d.usd.len() > 100, "内置表条目异常少: {}", d.usd.len());
+        // 关键模型抽查（数据源自 cc-switch 成本定价模块）
+        assert_eq!(d.usd["gpt-5.6-sol"], price(5.0, 30.0, 0.5));
+        assert_eq!(d.usd["glm-4.6"], price(0.6, 2.2, 0.11));
+        assert_eq!(d.usd["claude-sonnet-5"], price(3.0, 15.0, 0.3));
+        assert!(d.usd.contains_key("glm-4.5"), "Z.ai 特有模型应保留");
     }
 }
 
 /// 把用户勾选的若干 (model_id, currency, price) 合并进 pricing 并保存。
 /// 已存在的会被覆盖（用户主动勾选即视为同意）。
+/// currency 参数保留以兼容前端结构，实际一律写入 usd（只存美元价）。
 pub fn apply_updates(items: &[(String, String, ModelPrice)]) -> Result<PricingConfig, String> {
     let mut cfg = load_pricing()?;
-    for (model_id, currency, price) in items {
-        let map = if currency == "cny" {
-            &mut cfg.cny
-        } else {
-            &mut cfg.usd
-        };
-        collapse_insert(map, model_id, price.clone());
+    for (model_id, _currency, price) in items {
+        collapse_insert(&mut cfg.usd, model_id, price.clone());
     }
     save_pricing(&cfg)?;
     Ok(cfg)
