@@ -80,13 +80,33 @@ interface ReportAgent {
   models: ReportModel[];
 }
 
+interface ReportQuotaWindow {
+  label: string;
+  usedPct: number;
+  resetAt: number | null;
+}
+
+interface ReportQuota {
+  id: AgentId;
+  label: string;
+  brand: BrandIconName;
+  color: string;
+  windows: ReportQuotaWindow[];
+  accountLevel?: boolean;
+}
+
+interface LoadedSource {
+  source: ReportSource;
+  quota: ReportQuota | null;
+}
+
 interface ReportData {
   from_ms: number;
   to_ms: number;
   bucket: TrendBucket;
   agents: ReportAgent[];
   trend: TrendPoint[];
-  quota: QuotaSnapshot[];
+  agentQuotas: ReportQuota[];
   warnings: string[];
   notes: string[];
 }
@@ -395,6 +415,124 @@ function quotaResetText(resetAt: number | null, now: number): string {
   return "约 " + hours + " 小时后重置";
 }
 
+function formatQuotaPct(value: number): string {
+  if (!Number.isFinite(value)) return "—";
+  return String(Math.round(value * 100) / 100);
+}
+
+function makeZaiQuota(snapshots: QuotaSnapshot[]): ReportQuota | null {
+  if (snapshots.length === 0) return null;
+  const latest = snapshots[snapshots.length - 1];
+  const windows: ReportQuotaWindow[] = [
+    {
+      label: "周额度当前",
+      usedPct: latest.weekly_pct,
+      resetAt: latest.weekly_reset,
+    },
+    { label: "5h 当前", usedPct: latest.hour5_pct, resetAt: null },
+    {
+      label: "周额度峰值",
+      usedPct: Math.max(...snapshots.map((snapshot) => snapshot.weekly_pct)),
+      resetAt: latest.weekly_reset,
+    },
+    {
+      label: "5h 峰值",
+      usedPct: Math.max(...snapshots.map((snapshot) => snapshot.hour5_pct)),
+      resetAt: null,
+    },
+  ];
+  if (
+    latest.mcp_total != null ||
+    latest.mcp_used != null ||
+    latest.mcp_pct > 0
+  ) {
+    windows.push({ label: "MCP", usedPct: latest.mcp_pct, resetAt: null });
+  }
+  return {
+    id: "zai",
+    label: AGENT_META.zai.label,
+    brand: AGENT_META.zai.brand,
+    color: AGENT_META.zai.color,
+    windows,
+    accountLevel: true,
+  };
+}
+
+function makeRateLimitQuota(
+  id: "codex" | "claude",
+  rateLimits: {
+    primary_pct: number | null;
+    primary_reset_at: number | null;
+    secondary_pct: number | null;
+    secondary_reset_at: number | null;
+  } | null
+): ReportQuota | null {
+  if (!rateLimits) return null;
+  const windows: ReportQuotaWindow[] = [];
+  if (rateLimits.primary_pct != null) {
+    windows.push({
+      label: "5h",
+      usedPct: rateLimits.primary_pct,
+      resetAt: rateLimits.primary_reset_at,
+    });
+  }
+  if (rateLimits.secondary_pct != null) {
+    windows.push({
+      label: "本周",
+      usedPct: rateLimits.secondary_pct,
+      resetAt: rateLimits.secondary_reset_at,
+    });
+  }
+  if (windows.length === 0) return null;
+  return {
+    id,
+    label: AGENT_META[id].label,
+    brand: AGENT_META[id].brand,
+    color: AGENT_META[id].color,
+    windows,
+  };
+}
+
+function makeCursorQuota(snapshot: CursorSnapshot): ReportQuota | null {
+  const windows: ReportQuotaWindow[] = [];
+  const plan = snapshot.plan;
+  if (plan) {
+    if (plan.auto_pct != null) {
+      windows.push({ label: "Auto", usedPct: plan.auto_pct, resetAt: null });
+    }
+    if (plan.api_pct != null) {
+      windows.push({ label: "API", usedPct: plan.api_pct, resetAt: null });
+    }
+    if (windows.length === 0 && plan.total_pct != null) {
+      windows.push({
+        label: "套餐",
+        usedPct: plan.total_pct,
+        resetAt: null,
+      });
+    }
+  }
+  const onDemand = snapshot.on_demand;
+  if (
+    onDemand?.used_cents != null &&
+    onDemand.limit_cents != null &&
+    onDemand.limit_cents > 0
+  ) {
+    windows.push({
+      label: "按需",
+      usedPct: (onDemand.used_cents / onDemand.limit_cents) * 100,
+      resetAt: null,
+    });
+  }
+  if (windows.length === 0) return null;
+  return {
+    id: "cursor",
+    label: AGENT_META.cursor.label,
+    brand: AGENT_META.cursor.brand,
+    color: AGENT_META.cursor.color,
+    windows,
+  };
+}
+
 export function ReportPanel({
   onBack,
   pricing,
@@ -463,7 +601,7 @@ export function ReportPanel({
             return { stats, trend };
           })
         : Promise.resolve(null);
-    const localCodexPromise: Promise<ReportSource | null> =
+    const localCodexPromise: Promise<LoadedSource | null> =
       agentVisibility.codex && wantLocal
         ? safe("本机 Codex", async () => {
             const snapshot: CodexSnapshot = await fetchCodexUsage(
@@ -471,10 +609,13 @@ export function ReportPanel({
               toMs,
               bucket
             );
-            return { stats: snapshot.stats, trend: snapshot.trend };
+            return {
+              source: { stats: snapshot.stats, trend: snapshot.trend },
+              quota: makeRateLimitQuota("codex", snapshot.rate_limits),
+            };
           })
         : Promise.resolve(null);
-    const localClaudePromise: Promise<ReportSource | null> =
+    const localClaudePromise: Promise<LoadedSource | null> =
       agentVisibility.claude && wantLocal
         ? safe("本机 Claude", async () => {
             const snapshot: ClaudeSnapshot = await fetchClaudeUsage(
@@ -482,7 +623,10 @@ export function ReportPanel({
               toMs,
               bucket
             );
-            return { stats: snapshot.stats, trend: snapshot.trend };
+            return {
+              source: { stats: snapshot.stats, trend: snapshot.trend },
+              quota: makeRateLimitQuota("claude", snapshot.rate_limits),
+            };
           })
         : Promise.resolve(null);
     const localCursorPromise: Promise<CursorSnapshot | null> =
@@ -583,8 +727,8 @@ export function ReportPanel({
       };
 
       addSourceAgent("zai", localZai, remoteZai);
-      addSourceAgent("codex", localCodex, remoteCodex);
-      addSourceAgent("claude", localClaude, remoteClaude);
+      addSourceAgent("codex", localCodex?.source ?? null, remoteCodex);
+      addSourceAgent("claude", localClaude?.source ?? null, remoteClaude);
       const cursorAgent =
         agentVisibility.cursor && localCursor
           ? makeCursorAgent(localCursor, fromMs, toMs, fxRate)
@@ -620,16 +764,33 @@ export function ReportPanel({
         notes.push("Cursor 官方明细按日返回，日报小时趋势未混入 Cursor，Agent 汇总仍包含它。");
       }
 
+      const mergedQuotaSnapshots = mergeQuotaSnapshots(
+        localQuota ?? [],
+        (remoteQuota ?? []).map(toQuotaSnapshot)
+      );
+      const agentQuotas: ReportQuota[] = [];
+      if (agentVisibility.zai) {
+        const zaiQuota = makeZaiQuota(mergedQuotaSnapshots);
+        if (zaiQuota) agentQuotas.push(zaiQuota);
+      }
+      if (agentVisibility.codex && localCodex?.quota) {
+        agentQuotas.push(localCodex.quota);
+      }
+      if (agentVisibility.claude && localClaude?.quota) {
+        agentQuotas.push(localClaude.quota);
+      }
+      if (agentVisibility.cursor && localCursor) {
+        const cursorQuota = makeCursorQuota(localCursor);
+        if (cursorQuota) agentQuotas.push(cursorQuota);
+      }
+
       setReport({
         from_ms: fromMs,
         to_ms: toMs,
         bucket,
         agents,
         trend: mergeReportTrends(trendAgents, bucket),
-        quota: mergeQuotaSnapshots(
-          localQuota ?? [],
-          (remoteQuota ?? []).map(toQuotaSnapshot)
-        ),
+        agentQuotas,
         warnings: [],
         notes,
       });
@@ -999,8 +1160,8 @@ export function ReportPanel({
               </div>
             </section>
 
-            {report.quota.length > 0 && (
-              <QuotaSummary snapshots={report.quota} />
+            {report.agentQuotas.length > 0 && (
+              <QuotaSummary quotas={report.agentQuotas} />
             )}
 
             {showMarkdown && (
@@ -1184,47 +1345,79 @@ function ModelUsageRow({
   );
 }
 
-function QuotaSummary({ snapshots }: { snapshots: QuotaSnapshot[] }) {
-  const latest = snapshots[snapshots.length - 1];
-  const weeklyPeak = Math.max(...snapshots.map((snapshot) => snapshot.weekly_pct));
-  const hour5Peak = Math.max(...snapshots.map((snapshot) => snapshot.hour5_pct));
+function QuotaSummary({ quotas }: { quotas: ReportQuota[] }) {
   return (
     <section className="rounded-xl bg-surface/25 border border-surface/35 px-2.5 py-2.5">
       <div className="flex items-center justify-between mb-2">
         <span className="text-[10px] font-medium text-slate-900/75">
-          Z.ai 额度快照
+          Agent 额度快照
         </span>
         <span className="text-[9px] text-slate-700/40">
-          账户级，不等于 Agent Token
+          仅展示已开启且有额度数据的 Agent
         </span>
       </div>
-      <div className="grid grid-cols-2 gap-1.5">
-        <QuotaBar label="周额度当前" value={latest.weekly_pct} />
-        <QuotaBar label="5h 当前" value={latest.hour5_pct} />
-        <QuotaBar label="周额度峰值" value={weeklyPeak} />
-        <QuotaBar label="5h 峰值" value={hour5Peak} />
+      <div className="space-y-1.5">
+        {quotas.map((quota) => {
+          const resetWindow = quota.windows.find(
+            (window) => window.resetAt != null
+          );
+          return (
+            <div
+              key={quota.id}
+              className="rounded-lg bg-surface/20 px-2 py-1.5"
+            >
+              <div className="flex items-center gap-1.5 mb-1.5">
+                <BrandIcon
+                  brand={quota.brand}
+                  className="h-3.5 w-3.5"
+                  style={{ color: quota.color }}
+                />
+                <span className="text-[10px] font-medium text-slate-900/80">
+                  {quota.label}
+                </span>
+                <span className="text-[9px] text-slate-700/40 ml-auto">
+                  {quota.accountLevel ? "账户级" : "本机实时"}
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                {quota.windows.map((window) => (
+                  <QuotaBar
+                    key={window.label}
+                    label={window.label}
+                    value={window.usedPct}
+                  />
+                ))}
+              </div>
+              {resetWindow && (
+                <div className="text-[9px] text-slate-700/40 mt-1.5">
+                  {quotaResetText(resetWindow.resetAt, Date.now())}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
-      <div className="text-[9px] text-slate-700/45 mt-1.5">
-        {quotaResetText(latest.weekly_reset, Date.now())} · 采样{" "}
-        {snapshots.length} 条
+      <div className="text-[9px] text-slate-700/40 mt-1.5">
+        Z.ai 额度来自历史快照；Codex、Claude、Cursor 为本机实时额度接口。
       </div>
     </section>
   );
 }
 
 function QuotaBar({ label, value }: { label: string; value: number }) {
+  const pct = Number.isFinite(value) ? Math.min(100, Math.max(0, value)) : 0;
   return (
     <div className="rounded-md bg-surface/20 px-2 py-1.5">
       <div className="flex items-center justify-between text-[9px] text-slate-700/50">
         <span>{label}</span>
-        <span className="num text-slate-900/75">{value}%</span>
+        <span className="num text-slate-900/75">{formatQuotaPct(value)}%</span>
       </div>
       <div className="h-1 rounded-full bg-slate-900/8 overflow-hidden mt-1">
         <div
           className="h-full rounded-full opacity-75"
           style={{
-            width: Math.min(100, Math.max(0, value)) + "%",
-            background: remainingGradient(100 - value),
+            width: pct + "%",
+            background: remainingGradient(100 - pct),
           }}
         />
       </div>
@@ -1322,19 +1515,30 @@ function buildMarkdown(
         " Token"
     );
   }
-  if (report.quota.length > 0) {
-    const latest = report.quota[report.quota.length - 1];
-    const peak = Math.max(
-      ...report.quota.map((snapshot) => snapshot.weekly_pct)
-    );
+  if (report.agentQuotas.length > 0) {
     lines.push("");
-    lines.push(
-      "Z.ai 周额度：当前 " +
-        latest.weekly_pct +
-        "%，本范围峰值 " +
-        peak +
-        "%（账户级额度）"
-    );
+    lines.push("额度快照");
+    for (const quota of report.agentQuotas) {
+      const windows = quota.windows
+        .map((window) => window.label + " " + formatQuotaPct(window.usedPct) + "%")
+        .join("｜");
+      const resetWindow = quota.windows.find(
+        (window) => window.resetAt != null
+      );
+      const reset = resetWindow
+        ? "｜" + quotaResetText(resetWindow.resetAt, now)
+        : "";
+      lines.push(
+        "- " +
+          quota.label +
+          "（" +
+          (quota.accountLevel ? "账户级" : "本机实时") +
+          "）：「" +
+          windows +
+          "」" +
+          reset
+      );
+    }
   }
   if (report.warnings.length > 0 || report.notes.length > 0) {
     lines.push("");
