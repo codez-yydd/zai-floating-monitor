@@ -1281,6 +1281,16 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            // 注册官方开机自启插件：Windows 使用注册表，macOS 使用 LaunchAgent。
+            // 插件只在桌面目标启用，移动端不参与构建。
+            #[cfg(desktop)]
+            {
+                app.handle().plugin(tauri_plugin_autostart::init(
+                    tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+                    None,
+                ))?;
+            }
+
             // macOS 隐藏 Dock 图标，只保留菜单栏
             #[cfg(target_os = "macos")]
             {

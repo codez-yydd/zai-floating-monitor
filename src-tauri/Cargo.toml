@@ -32,6 +32,9 @@ open = "5"
 ureq = { version = "2", features = ["json", "socks-proxy"] }
 base64 = "0.22"
 
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-autostart = "2.5.1"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = "0.3"

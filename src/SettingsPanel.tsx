@@ -17,6 +17,11 @@ import {
   testCursorAuth,
 } from "./api";
 import {
+  disable as disableAutostart,
+  enable as enableAutostart,
+  isEnabled as isAutostartEnabled,
+} from "@tauri-apps/plugin-autostart";
+import {
   applyPanelAlpha,
   applyTheme,
   loadPanelAlpha,
@@ -47,7 +52,7 @@ function fmtFxTime(ms: number): string {
 
 /**
  * 设置页：外观（主题/面板透明度）+ 从价格设置页搬来的非价格配置
- * （Coding Plan 额度监控 / Cursor 统计 / 全局快捷键）。
+ * （开机自启 / Coding Plan 额度监控 / Cursor 统计 / 全局快捷键）。
  * 单列滚动，改完即存（无整页保存按钮）。
  */
 export function SettingsPanel({
@@ -63,6 +68,11 @@ export function SettingsPanel({
   // ===== 外观：主题与面板透明度（localStorage 持久化，改完即时生效）=====
   const [theme, setTheme] = useState<Theme>(() => loadTheme());
   const [alpha, setAlpha] = useState<number>(() => loadPanelAlpha());
+  // ===== 开机自启 =====
+  const [autostartEnabled, setAutostartEnabled] = useState(false);
+  const [autostartLoaded, setAutostartLoaded] = useState(false);
+  const [savingAutostart, setSavingAutostart] = useState(false);
+  const [autostartError, setAutostartError] = useState<string | null>(null);
   // 透明度持久化防抖：拖动滑块时只实时应用 DOM，写盘按 300ms 节流
   const alphaPersistTimer = useRef<number | undefined>(undefined);
   // 最新透明度镜像：卸载清理的闭包读不到最新 state，从 ref 取
@@ -129,6 +139,13 @@ export function SettingsPanel({
         setLoaded(true);
       })
       .catch((e) => setError(String(e)));
+  }, []);
+
+  useEffect(() => {
+    isAutostartEnabled()
+      .then(setAutostartEnabled)
+      .catch((e) => setAutostartError(`读取开机自启状态失败：${String(e)}`))
+      .finally(() => setAutostartLoaded(true));
   }, []);
 
   const handleSaveQuota = async () => {
@@ -232,6 +249,27 @@ export function SettingsPanel({
     }
   };
 
+  // 应用开机自启设置。插件会在 Windows 写入当前用户启动项，在 macOS
+  // 写入当前用户的 LaunchAgent，不需要管理员权限。
+  const handleAutostartChange = async (enabled: boolean) => {
+    setSavingAutostart(true);
+    setAutostartError(null);
+    try {
+      if (enabled) {
+        await enableAutostart();
+      } else {
+        await disableAutostart();
+      }
+      setAutostartEnabled(enabled);
+    } catch (e) {
+      setAutostartError(
+        `${enabled ? "开启" : "关闭"}开机自启失败：${String(e)}`
+      );
+    } finally {
+      setSavingAutostart(false);
+    }
+  };
+
   return (
     // 整页单一滚动，与价格设置页同款骨架
     <div className="h-full overflow-y-auto">
@@ -322,6 +360,36 @@ export function SettingsPanel({
             调整面板背景透明度，值越低毛玻璃越透；暗色主题建议保持 60%
             以上，过低时文字可能不清晰
           </p>
+        </div>
+
+        {/* ===== 开机自启 ===== */}
+        <div className="rounded-lg bg-slate-900/5 border border-slate-900/10 p-2.5">
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-[11px] font-medium text-slate-900/85">
+              开机自启
+            </span>
+            <label className="flex items-center gap-1 text-[10px] text-slate-700/60 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={autostartEnabled}
+                onChange={(e) => handleAutostartChange(e.target.checked)}
+                disabled={!autostartLoaded || savingAutostart}
+                className="accent-sky-500 h-3 w-3 disabled:opacity-40"
+              />
+              {savingAutostart ? "应用中…" : "启用"}
+            </label>
+          </div>
+          <p className="text-[9px] text-slate-700/45 leading-relaxed">
+            登录 Windows 或 macOS 后自动启动 ZBar，面板默认保持隐藏，可从托盘打开。
+          </p>
+          {!autostartLoaded && (
+            <p className="text-[9px] text-slate-700/45 mt-1">正在读取状态…</p>
+          )}
+          {autostartError && (
+            <p className="text-[9px] text-rose-600 mt-1 leading-relaxed break-all">
+              {autostartError}
+            </p>
+          )}
         </div>
 
         {/* ===== 统计展示来源 ===== */}
