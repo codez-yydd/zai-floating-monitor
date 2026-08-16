@@ -1,8 +1,9 @@
 //! 多设备同步：配置读写 + 增量上传 + HTTP 调用 + 后台同步线程。
 //!
 //! 设计要点（见 server/README.md）：
-//! - model_usage 是 append-only，用 (device_id, local_rowid) 去重。
-//! - 客户端维护游标 last_uploaded_rowid，只上传 rowid > 游标 的记录。
+//! - model_usage 的普通明细用 (device_id, local_rowid) 去重；模型名回填通过
+//!   独立修订游标补传，不影响普通 rowid 游标。
+//! - 客户端维护游标 last_uploaded_rowid，只上传 rowid > 游标 的新记录。
 //! - 复用项目现有 ureq HTTP 客户端 + pricing::config_dir() 的 ~/.zbar/ 目录。
 
 use serde::{Deserialize, Serialize};
@@ -61,6 +62,12 @@ pub struct SyncConfig {
     /// Claude 修订行补传游标（updated_at 毫秒时间戳，见 claude 模块修订机制）。
     #[serde(default)]
     pub last_uploaded_claude_rev_ts: i64,
+    /// Codex 模型名修订行补传游标（模型上下文回填时间戳）。
+    #[serde(default)]
+    pub last_uploaded_codex_model_rev_ts: i64,
+    /// 同一修订时间戳下的 Codex 模型修订 rowid（处理毫秒级并列）。
+    #[serde(default)]
+    pub last_uploaded_codex_model_rev_id: i64,
     /// 已上传到的快照 ts 游标（额度快照）。
     #[serde(default)]
     pub last_uploaded_snapshot_ts: i64,
@@ -87,6 +94,8 @@ impl Default for SyncConfig {
             last_uploaded_codex_rowid: 0,
             last_uploaded_claude_rowid: 0,
             last_uploaded_claude_rev_ts: 0,
+            last_uploaded_codex_model_rev_ts: 0,
+            last_uploaded_codex_model_rev_id: 0,
             last_uploaded_snapshot_ts: 0,
             last_sync_at: 0,
         }
@@ -470,7 +479,13 @@ fn upload_derived_source_incremental(
         "codex" => {
             let dir = crate::codex::sessions_dir().is_ok();
             let pending = dir
-                && !crate::codex::query_since(cfg.last_uploaded_codex_rowid, 1)?.is_empty();
+                && (!crate::codex::query_since(cfg.last_uploaded_codex_rowid, 1)?.is_empty()
+                    || !crate::codex::query_model_revised_since(
+                        cfg.last_uploaded_codex_model_rev_ts,
+                        cfg.last_uploaded_codex_model_rev_id,
+                        1,
+                    )?
+                    .is_empty());
             (dir, pending, cfg.last_uploaded_codex_rowid)
         }
         "claude" => {
@@ -542,6 +557,42 @@ fn upload_derived_source_incremental(
             "claude" => cfg.last_uploaded_claude_rowid = since,
             _ => unreachable!("来源已在上文校验"),
         }
+    }
+
+    // Codex 模型名回填不会产生新的 id，普通 rowid 游标选不出这些旧记录。
+    // 参照 Claude 修订补传：不携带 last_rowid，只让服务端按同一主键做修正，
+    // 同时独立维护修订时间游标，避免影响普通增量上传。
+    if source == "codex" {
+        let mut revision_ts = cfg.last_uploaded_codex_model_rev_ts;
+        let mut revision_id = cfg.last_uploaded_codex_model_rev_id;
+        loop {
+            let revised =
+                crate::codex::query_model_revised_since(revision_ts, revision_id, BATCH)?;
+            if revised.is_empty() {
+                break;
+            }
+            let last = revised.last().expect("修订记录非空");
+            revision_ts = last.revision_at;
+            revision_id = last.usage.local_rowid;
+            let records = revised.into_iter().map(|row| row.usage).collect();
+            let resp: SyncResponse = ureq::post(&format!("{base}/sync"))
+                .set("Authorization", &format!("Bearer {token}"))
+                .timeout(Duration::from_secs(15))
+                .send_json(&SyncPayload {
+                    records,
+                    // 修订行已经上传过，不推进普通 Codex rowid 游标。
+                    last_rowid: None,
+                    snapshots: Vec::new(),
+                    last_snapshot_ts: None,
+                })
+                .map_err(map_http_err("上传 Codex 模型修订"))?
+                .into_json()
+                .map_err(|e| format!("解析 Codex 模型修订响应失败: {e}"))?;
+            total += resp.accepted;
+        }
+        // 补传期间新产生且修订序号更大的记录留给下一轮，避免漏掉并发写入。
+        cfg.last_uploaded_codex_model_rev_ts = revision_ts;
+        cfg.last_uploaded_codex_model_rev_id = revision_id;
     }
 
     // Claude 修订补传：会话流式落盘时，某条消息的中间值可能已随早前批次上传，
@@ -999,6 +1050,8 @@ pub fn disconnect() -> Result<(), String> {
     cfg.last_uploaded_codex_rowid = 0;
     cfg.last_uploaded_claude_rowid = 0;
     cfg.last_uploaded_claude_rev_ts = 0;
+    cfg.last_uploaded_codex_model_rev_ts = 0;
+    cfg.last_uploaded_codex_model_rev_id = 0;
     cfg.last_sync_at = 0;
     // 保留 server_url + mode + interval，方便下次重连
     save_sync_config(&cfg)

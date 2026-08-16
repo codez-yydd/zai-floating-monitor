@@ -236,8 +236,8 @@ def insert_usage_records(device_id, records, uploaded_at):
     每条记录的 source 缺省为 'zcode'（旧客户端不传即 zcode，向后兼容）。
     同主键重传且 computed_total_tokens 更大时覆盖旧值：Claude Code 会话流式
     落盘，客户端可能先上传某条消息的中间值、稍后本地修正为终值并补传
-    （见客户端 claude 模块的 updated_at 修订机制）；其他来源记录不可变，
-    重传必然同值，覆盖守卫对其为无操作。
+    （见客户端 claude 模块的 updated_at 修订机制）。另外允许同 Token 数的
+    空 model_id 被后续非空模型名修正；已识别出的模型不会被空值覆盖。
     返回实际写入（插入或覆盖）条数。
     """
     if not records:
@@ -257,16 +257,58 @@ def insert_usage_records(device_id, records, uploaded_at):
                          computed_total_tokens, uploaded_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(device_id, source, local_rowid) DO UPDATE SET
-                        started_at = excluded.started_at,
-                        model_id = excluded.model_id,
-                        provider_id = excluded.provider_id,
-                        input_tokens = excluded.input_tokens,
-                        output_tokens = excluded.output_tokens,
-                        cache_read_input_tokens = excluded.cache_read_input_tokens,
-                        cache_creation_input_tokens = excluded.cache_creation_input_tokens,
-                        reasoning_tokens = excluded.reasoning_tokens,
-                        computed_total_tokens = excluded.computed_total_tokens
+                        started_at = CASE
+                            WHEN excluded.computed_total_tokens > usage_records.computed_total_tokens
+                                THEN excluded.started_at
+                            ELSE usage_records.started_at
+                        END,
+                        -- 空模型不能覆盖已经识别出的模型；反过来允许同 Token
+                        -- 数的空模型被后续回填的非空模型修正。
+                        model_id = CASE
+                            WHEN COALESCE(excluded.model_id, '') != ''
+                                THEN excluded.model_id
+                            ELSE usage_records.model_id
+                        END,
+                        provider_id = CASE
+                            WHEN excluded.computed_total_tokens > usage_records.computed_total_tokens
+                                THEN excluded.provider_id
+                            ELSE usage_records.provider_id
+                        END,
+                        input_tokens = CASE
+                            WHEN excluded.computed_total_tokens > usage_records.computed_total_tokens
+                                THEN excluded.input_tokens
+                            ELSE usage_records.input_tokens
+                        END,
+                        output_tokens = CASE
+                            WHEN excluded.computed_total_tokens > usage_records.computed_total_tokens
+                                THEN excluded.output_tokens
+                            ELSE usage_records.output_tokens
+                        END,
+                        cache_read_input_tokens = CASE
+                            WHEN excluded.computed_total_tokens > usage_records.computed_total_tokens
+                                THEN excluded.cache_read_input_tokens
+                            ELSE usage_records.cache_read_input_tokens
+                        END,
+                        cache_creation_input_tokens = CASE
+                            WHEN excluded.computed_total_tokens > usage_records.computed_total_tokens
+                                THEN excluded.cache_creation_input_tokens
+                            ELSE usage_records.cache_creation_input_tokens
+                        END,
+                        reasoning_tokens = CASE
+                            WHEN excluded.computed_total_tokens > usage_records.computed_total_tokens
+                                THEN excluded.reasoning_tokens
+                            ELSE usage_records.reasoning_tokens
+                        END,
+                        computed_total_tokens = CASE
+                            WHEN excluded.computed_total_tokens > usage_records.computed_total_tokens
+                                THEN excluded.computed_total_tokens
+                            ELSE usage_records.computed_total_tokens
+                        END
                     WHERE excluded.computed_total_tokens > usage_records.computed_total_tokens
+                       OR (
+                           COALESCE(usage_records.model_id, '') = ''
+                           AND COALESCE(excluded.model_id, '') != ''
+                       )
                     """,
                     (
                         device_id,

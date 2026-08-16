@@ -8,16 +8,16 @@
 //! 实现方式（原始文件只读 + 派生自有库）：
 //! - 原始 jsonl 不做任何修改；把解析结果导入自有库 ~/.zbar/codex.sqlite，
 //!   file_progress 表记录每个文件"已处理到的字节偏移"，之后只增量续读。
-//! - (session_id, event_seq) 唯一键 + INSERT OR IGNORE：文件被重写或重复解析
-//!   时幂等去重，绝不产生重复统计。
+//! - (session_id, event_seq) 唯一键 + 冲突 upsert：文件被重写或重复解析时幂等
+//!   去重；历史空模型在重新归因后允许只更新模型名。
 //! - token_count 事件本身不带模型名，用同文件内最近的 turn_context 事件
 //!   payload.model 归因（会话开始前的事件模型留空 ""）。
 //! - rate_limits 仅 ChatGPT 订阅登录模式非空（custom provider 全为 null），
 //!   最新快照存 rate_limits_state 单行表，resets_at 由 Unix 秒转毫秒。
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -64,7 +64,8 @@ fn open_codex_db() -> Result<Connection, String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建配置目录失败: {e}"))?;
     let path = codex_db_path()?;
     let conn = Connection::open(&path).map_err(|e| format!("打开 Codex 导入库失败: {e}"))?;
-    conn.busy_timeout(std::time::Duration::from_secs(3))
+    // 应用可能在启动时被多个实例同时唤起，结构迁移需要给另一实例提交事务留出时间。
+    conn.busy_timeout(std::time::Duration::from_secs(10))
         .map_err(|e| format!("设置 busy_timeout 失败: {e}"))?;
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;
@@ -81,6 +82,7 @@ fn open_codex_db() -> Result<Connection, String> {
             cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
             reasoning_tokens INTEGER NOT NULL DEFAULT 0,
             computed_total_tokens INTEGER NOT NULL DEFAULT 0,
+            model_revision_at INTEGER NOT NULL DEFAULT 0,
             UNIQUE(session_id, event_seq)
          );
          CREATE INDEX IF NOT EXISTS idx_codex_model_usage_started ON model_usage(started_at);
@@ -100,7 +102,50 @@ fn open_codex_db() -> Result<Connection, String> {
          );",
     )
     .map_err(|e| format!("初始化 Codex 导入库失败: {e}"))?;
+    ensure_model_revision_column(&conn)?;
     Ok(conn)
+}
+
+/// 进程内串行化导入库结构迁移；跨进程竞态由 ALTER TABLE 的重复列容错兜底。
+static SCHEMA_MIGRATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn schema_migration_lock() -> &'static Mutex<()> {
+    SCHEMA_MIGRATION_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// 为已有导入库补充模型修订时间列。
+///
+/// 该列只在历史空模型被回填时写入，用于同步客户端把已经上传过的行再次补传。
+/// 使用 PRAGMA + ALTER TABLE 而不是版本号，保证旧版数据库和重复启动都能幂等升级。
+fn ensure_model_revision_column(conn: &Connection) -> Result<(), String> {
+    let _guard = schema_migration_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(model_usage)")
+        .map_err(|e| format!("检查 Codex 导入库结构失败: {e}"))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| format!("检查 Codex 导入库结构失败: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("检查 Codex 导入库结构失败: {e}"))?;
+    drop(stmt);
+    if !columns.iter().any(|c| c == "model_revision_at") {
+        let result = conn.execute(
+            "ALTER TABLE model_usage
+             ADD COLUMN model_revision_at INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        if let Err(e) = result {
+            // 另一个进程可能在本次 PRAGMA 与 ALTER 之间完成了迁移，
+            // 此时重复列就是成功状态，后续查询可直接继续。
+            let message = e.to_string().to_ascii_lowercase();
+            if !message.contains("duplicate column name") {
+                return Err(format!("升级 Codex 导入库结构失败: {e}"));
+            }
+        }
+    }
+    Ok(())
 }
 
 // ===== jsonl 事件解析结构（全部 Option/默认值容错，坏行只跳过不中断）=====
@@ -177,6 +222,49 @@ struct TurnContextPayload {
     model: Option<String>,
 }
 
+/// 从一行 turn_context 中取出非空模型名。
+fn model_from_turn_context(line: &RolloutLine) -> Option<String> {
+    if line.line_type.as_deref() != Some("turn_context") {
+        return None;
+    }
+    let value = line.payload.as_ref()?;
+    let context = serde_json::from_value::<TurnContextPayload>(value.clone()).ok()?;
+    context.model.filter(|model| !model.is_empty())
+}
+
+/// 扫描文件在指定字节偏移之前最近一次出现的模型名。
+///
+/// Codex 会话文件是追加写入的，但桌面端可能在 turn_context 写入前就触发一次
+/// 导入。续读时如果只看导入库中最近一条非空记录，而该会话此前全是空模型，
+/// 就会一直丢失上下文。因此这里从文件头恢复一次上下文，避免依赖脏数据自愈。
+fn latest_model_before_offset(path: &Path, before_offset: u64) -> Result<String, String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("打开 Codex 会话文件失败: {e}"))?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut pos = 0u64;
+    let mut latest = String::new();
+    let mut buf = Vec::with_capacity(4096);
+
+    loop {
+        buf.clear();
+        let n = reader
+            .read_until(b'\n', &mut buf)
+            .map_err(|e| format!("读取 Codex 会话文件失败: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        pos += n as u64;
+        if pos > before_offset {
+            break;
+        }
+        if let Ok(line) = serde_json::from_slice::<RolloutLine>(&buf) {
+            if let Some(model) = model_from_turn_context(&line) {
+                latest = model;
+            }
+        }
+    }
+    Ok(latest)
+}
+
 /// 查询用的最新额度快照（resets_at 已转为毫秒）
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CodexRateLimits {
@@ -237,7 +325,7 @@ fn session_id_from_filename(path: &Path) -> String {
 // ===== 增量导入 =====
 
 /// 导入互斥锁：面板查询 / 托盘标题刷新 / 同步上传可能并发触发导入，
-/// 串行化避免同一文件被双份解析（INSERT OR IGNORE 可去重，但重复 IO 浪费）。
+/// 串行化避免同一文件被双份解析（冲突 upsert 可去重，但重复 IO 浪费）。
 static IMPORT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn import_lock() -> &'static Mutex<()> {
@@ -296,7 +384,7 @@ fn collect_session_files(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
 /// - file_progress 记录"已处理到的字节偏移"（对齐完整行末尾）；文件变短
 ///   （被重写）时从头重新解析，UNIQUE 键保证幂等。
 /// - 续读时 event_seq 从该会话已入库的最大序号继续，避免序号回退导致
-///   INSERT OR IGNORE 静默吞掉新事件。
+///   冲突 upsert 静默吞掉新事件。
 /// - 每个文件一个事务：中途崩溃整体回滚，下次从旧偏移重来。
 /// - 单文件失败（被占用/磁盘异常）只记日志跳过，不阻断其他文件。
 pub fn import_incremental_force() -> Result<(), String> {
@@ -339,6 +427,39 @@ pub fn import_incremental_force() -> Result<(), String> {
             eprintln!("[zbar-codex] 导入 {} 失败（下次重试）: {e}", path.display());
         }
     }
+
+    // 历史版本可能在模型上下文尚未写入时就落了空 model_id。对这些会话重扫
+    // 原始文件，借助同一套事件序号和 upsert 逻辑把模型名补回；没有模型上下文
+    // 的文件跳过，避免每次查询都重复扫描无法修复的数据。
+    let blank_sessions: HashSet<String> = {
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT session_id FROM model_usage WHERE model_id = ''")
+            .map_err(|e| format!("查询待修复 Codex 会话失败: {e}"))?;
+        let sessions = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("查询待修复 Codex 会话失败: {e}"))?
+            .collect::<Result<HashSet<_>, _>>()
+            .map_err(|e| format!("查询待修复 Codex 会话失败: {e}"))?;
+        sessions
+    };
+    for path in &files {
+        let session_id = session_id_from_filename(path);
+        if !blank_sessions.contains(&session_id) {
+            continue;
+        }
+        let has_model = latest_model_before_offset(path, u64::MAX)
+            .map(|model| !model.is_empty())
+            .unwrap_or(false);
+        if !has_model {
+            continue;
+        }
+        if let Err(e) = import_one_file(&mut conn, path, None) {
+            eprintln!(
+                "[zbar-codex] 回填 {} 的模型名失败（下次重试）: {e}",
+                path.display()
+            );
+        }
+    }
     Ok(())
 }
 
@@ -370,10 +491,8 @@ fn import_one_file(
         .map_err(|e| format!("定位读取偏移失败: {e}"))?;
 
     // 续读时 event_seq 接着该会话已入库的最大序号继续（唯一键稳定）；
-    // 同时恢复该会话最近一次归因的模型名——turn_context 事件可能已在
-    // 上次导入中被消费，续读段开头的 token_count 若无此上下文会被归因到
-    // 空模型，by_model 出现空名行且花费按 0 计。查询失败按 0/空兜底
-    // （聚合查询恒返回一行，失败仅出现在库异常等极端场景）。
+    // 同时恢复该会话最近一次归因的模型名。若历史记录全为空，则从原始文件
+    // 的 start_offset 之前恢复最近上下文，避免继续把新增 token 归到空模型。
     let mut seq: i64 = 0;
     let mut current_model = String::new();
     if !reparse {
@@ -390,16 +509,33 @@ fn import_one_file(
                 Ok(())
             },
         );
+        if current_model.is_empty() {
+            current_model = latest_model_before_offset(path, start_offset)?;
+        }
     }
 
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| format!("开启导入事务失败: {e}"))?;
 
     let mut pos = start_offset;
     let mut last_complete_end = start_offset;
     // 本文件内时间最新的非空额度快照（落库前与已存值比 observed_at 不回退）
     let mut latest_limits: Option<(CodexRateLimits, i64)> = None;
+    // 仅在已有空模型行被补回时写入，供同步客户端补传修订行。取数据库中
+    // 现有最大值 + 1，保证即使系统时钟回拨或同一毫秒发生多次修订，游标仍
+    // 能按严格递增顺序工作。
+    let max_model_revision: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(model_revision_at), 0) FROM model_usage",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("读取 Codex 模型修订游标失败: {e}"))?;
+    let model_revision_at = chrono::Local::now()
+        .timestamp_millis()
+        .max(max_model_revision.saturating_add(1));
+    let mut pending_model_seqs: Vec<i64> = Vec::new();
 
     let mut buf: Vec<u8> = Vec::with_capacity(4096);
     loop {
@@ -424,13 +560,24 @@ fn import_one_file(
         match line.line_type.as_deref() {
             // turn_context：更新当前模型（token_count 不带模型，靠它归因）
             Some("turn_context") => {
-                if let Some(v) = line.payload.as_ref() {
-                    if let Ok(tc) = serde_json::from_value::<TurnContextPayload>(v.clone()) {
-                        if let Some(m) = tc.model {
-                            if !m.is_empty() {
-                                current_model = m;
-                            }
-                        }
+                if let Some(model) = model_from_turn_context(&line) {
+                    current_model = model.clone();
+                    // 若本次文件扫描中 token_count 先于 turn_context，先前插入的
+                    // 空模型也属于这个会话；拿到首个模型上下文后立即补回，兼容
+                    // Codex 文件出现事件顺序暂时不稳定的情况。
+                    for pending_seq in pending_model_seqs.drain(..) {
+                        tx.execute(
+                            "UPDATE model_usage
+                             SET model_id = ?1, model_revision_at = ?2
+                             WHERE session_id = ?3 AND event_seq = ?4 AND model_id = ''",
+                            rusqlite::params![
+                                &model,
+                                model_revision_at,
+                                session_id,
+                                pending_seq,
+                            ],
+                        )
+                        .map_err(|e| format!("回填 Codex 模型名失败: {e}"))?;
                     }
                 }
             }
@@ -454,11 +601,16 @@ fn import_one_file(
 
                 seq += 1;
                 tx.execute(
-                    "INSERT OR IGNORE INTO model_usage
+                    "INSERT INTO model_usage
                         (session_id, event_seq, started_at, model_id, provider_id,
                          input_tokens, output_tokens, cache_read_input_tokens,
-                         cache_creation_input_tokens, reasoning_tokens, computed_total_tokens)
-                     VALUES (?1, ?2, ?3, ?4, 'codex', ?5, ?6, ?7, 0, ?8, ?9)",
+                         cache_creation_input_tokens, reasoning_tokens, computed_total_tokens,
+                         model_revision_at)
+                     VALUES (?1, ?2, ?3, ?4, 'codex', ?5, ?6, ?7, 0, ?8, ?9, 0)
+                     ON CONFLICT(session_id, event_seq) DO UPDATE SET
+                         model_id = excluded.model_id,
+                         model_revision_at = ?10
+                     WHERE model_usage.model_id = '' AND excluded.model_id != ''",
                     rusqlite::params![
                         session_id,
                         seq,
@@ -469,9 +621,14 @@ fn import_one_file(
                         usage.cached_input_tokens,
                         usage.reasoning_output_tokens,
                         usage.total_tokens,
+                        model_revision_at,
                     ],
                 )
                 .map_err(|e| format!("写入用量记录失败: {e}"))?;
+
+                if current_model.is_empty() {
+                    pending_model_seqs.push(seq);
+                }
 
                 // 仅 ChatGPT 订阅登录模式 primary 非空；custom provider 全为 null
                 if let Some(limits) = p.rate_limits.as_ref() {
@@ -715,6 +872,63 @@ pub fn query_since(since: i64, limit: usize) -> Result<Vec<db::UsageRow>, String
         .map_err(|e| format!("读取 Codex 增量记录失败: {e}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("读取 Codex 增量记录失败: {e}"))?;
+    Ok(rows)
+}
+
+/// 查询模型名被历史回填过的记录（同步补传用）。
+///
+/// 这些记录的 local_rowid 通常已经小于普通 Codex 上传游标，因此不能复用
+/// query_since；按修订时间 + id 双游标分页，上传时不携带 last_rowid，避免
+/// 把普通增量游标回退或推进到错误位置。
+#[derive(Debug, Clone)]
+pub struct ModelRevisionRow {
+    pub usage: db::UsageRow,
+    pub revision_at: i64,
+}
+
+pub fn query_model_revised_since(
+    since_ts: i64,
+    after_id: i64,
+    limit: usize,
+) -> Result<Vec<ModelRevisionRow>, String> {
+    import_incremental()?;
+    let conn = open_codex_db()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, started_at, model_id, provider_id,
+                    input_tokens, output_tokens, cache_read_input_tokens,
+                    cache_creation_input_tokens, reasoning_tokens, computed_total_tokens,
+                    model_revision_at
+             FROM model_usage
+             WHERE (model_revision_at > ?1
+                    OR (model_revision_at = ?1 AND id > ?2))
+               AND model_id != ''
+             ORDER BY model_revision_at ASC, id ASC
+             LIMIT ?3",
+        )
+        .map_err(|e| format!("准备 Codex 模型修订查询失败: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params![since_ts, after_id, limit as i64], |row| {
+            Ok(ModelRevisionRow {
+                usage: db::UsageRow {
+                    local_rowid: row.get(0)?,
+                    started_at: row.get(1)?,
+                    model_id: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    provider_id: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                    input_tokens: row.get(4)?,
+                    output_tokens: row.get(5)?,
+                    cache_read_input_tokens: row.get(6)?,
+                    cache_creation_input_tokens: row.get(7)?,
+                    reasoning_tokens: row.get(8)?,
+                    computed_total_tokens: row.get(9)?,
+                    source: "codex".into(),
+                },
+                revision_at: row.get(10)?,
+            })
+        })
+        .map_err(|e| format!("读取 Codex 模型修订失败: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("读取 Codex 模型修订失败: {e}"))?;
     Ok(rows)
 }
 
@@ -1226,6 +1440,15 @@ mod tests {
             first.overall.total_tokens,
             first.by_model.iter().map(|m| m.total_tokens).sum::<i64>(),
             "overall 与 by_model 汇总不一致"
+        );
+        assert!(
+            first.by_model.iter().all(|m| !m.model_id.is_empty()),
+            "Codex 统计中仍存在空模型分组: {:?}",
+            first
+                .by_model
+                .iter()
+                .filter(|m| m.model_id.is_empty())
+                .collect::<Vec<_>>()
         );
         // 趋势管道：以 [earliest, latest+1h) 小时桶查询，至少有一个非空桶
         if let (Some(e), Some(l)) = (first.earliest_ms, first.latest_ms) {
