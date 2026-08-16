@@ -212,15 +212,21 @@ export function mergeCost(
   };
 }
 
-/** 把远端桶的 ms label 转成本地时区 label，与本地 trend 的 label 对齐。
- * - hour 桶：本地用 "HH:00"，远端 ms 同样格式化为本地时区 "HH:00"
- * - day 桶：本地用 "MM-DD"，远端 ms 格式化为本地时区 "MM-DD"
+/** 把远端桶的时间 label 转成本地时区 label，与本地 trend 的 label 对齐。
+ * - hour 桶：本地用 "HH:00"，远端 ISO/时间戳同样格式化为本地时区 "HH:00"
+ * - day 桶：本地用 "MM-DD"，远端 ISO/时间戳格式化为本地时区 "MM-DD"
  * 关键：本地 hour 桶和服务端 hour 桶都用 UTC 整点对齐，ms 一致，
  * 格式化后 label 也一致，可精确匹配。day 桶本地按本地0点、服务端按UTC0点，
  * 在非 UTC 时区可能错位——这是已知的可接受偏差（长周期趋势影响小）。 */
 export function msToLocalLabel(msStr: string, bucket: TrendBucket): string | null {
-  const ms = parseInt(msStr, 10);
-  if (isNaN(ms)) return null;
+  // 远端服务返回的 label 可能是 ISO 时间，也兼容旧服务返回的毫秒/秒时间戳。
+  const numeric = Number(msStr);
+  const ms = Number.isFinite(numeric)
+    ? numeric < 1_000_000_000_000
+      ? numeric * 1000
+      : numeric
+    : Date.parse(msStr);
+  if (!Number.isFinite(ms)) return null;
   const d = new Date(ms);
   if (bucket === "hour") {
     const hh = String(d.getHours()).padStart(2, "0");

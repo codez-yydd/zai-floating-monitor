@@ -157,7 +157,7 @@ export async function remoteUsage(
   options: {
     excludeDevice?: string;
     devices?: string;
-    /** 数据来源筛选："zcode" | "codex"，空串 = 全部 */
+    /** 数据来源筛选："zcode" | "codex" | "claude"，空串 = 全部 */
     source?: string;
   } = {}
 ): Promise<RemoteUsage> {
@@ -283,6 +283,15 @@ export async function getWeeklyCompare(): Promise<WeeklyPeriod[]> {
   return invoke<WeeklyPeriod[]>("get_weekly_compare");
 }
 
+/** 用指定快照解析周额度周期（对比页多设备筛选用） */
+export async function getWeeklyCompareForSnapshots(
+  snapshots: QuotaSnapshot[]
+): Promise<WeeklyPeriod[]> {
+  return invoke<WeeklyPeriod[]>("get_weekly_compare_for_snapshots", {
+    snapshots,
+  });
+}
+
 /** 今日增量：[增量百分比, 今日采样数] */
 export async function getTodayDelta(): Promise<[number, number]> {
   return invoke<[number, number]>("get_today_delta");
@@ -298,6 +307,17 @@ export async function getCompareTokens(
   periods: [number, number][]
 ): Promise<WeeklyTokenBucket[]> {
   return invoke<WeeklyTokenBucket[]>("get_compare_tokens", { periods });
+}
+
+/** 对比页：按指定 Agent 和周期聚合 Token（支持 zai/codex/claude/cursor） */
+export async function getCompareTokensForAgent(
+  source: "zai" | "codex" | "claude" | "cursor",
+  periods: [number, number][]
+): Promise<WeeklyTokenBucket[]> {
+  return invoke<WeeklyTokenBucket[]>("get_compare_tokens_for_agent", {
+    source,
+    periods,
+  });
 }
 
 // ===== Cursor 用量统计 =====

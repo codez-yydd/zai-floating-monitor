@@ -337,6 +337,20 @@ async fn get_weekly_compare() -> Result<Vec<quota_history::WeeklyPeriod>, String
     .map_err(|e| format!("周期解析任务失败: {e}"))?
 }
 
+/// 用指定快照解析周额度周期。
+/// 对比页在启用多设备筛选时会把本机与远端快照合并后传入，避免周期列表
+/// 永远只由本机历史决定，导致“远端设备”没有周期或周期边界与 Token 不一致。
+#[tauri::command]
+async fn get_weekly_compare_for_snapshots(
+    snapshots: Vec<quota_history::QuotaSnapshot>,
+) -> Result<Vec<quota_history::WeeklyPeriod>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(quota_history::split_periods(&snapshots))
+    })
+    .await
+    .map_err(|e| format!("指定快照周期解析任务失败: {e}"))?
+}
+
 /// 今日增量：(增量百分比, 今日采样数)。
 #[tauri::command]
 async fn get_today_delta() -> Result<(u32, u32), String> {
@@ -371,6 +385,39 @@ async fn get_compare_tokens(
     })
     .await
     .map_err(|e| format!("对比 token 任务失败: {e}"))?
+}
+
+/// 按 Agent 和指定周期聚合 Token。
+/// source: zai / codex / claude / cursor；周期区间统一使用 [reset_at, end_at)。
+#[tauri::command]
+async fn get_compare_tokens_for_agent(
+    source: String,
+    periods: Vec<(i64, i64)>,
+) -> Result<Vec<WeeklyTokenBucket>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let buckets = match source.as_str() {
+            "zai" => db::query_period_buckets(&periods),
+            "codex" => codex::query_period_buckets(&periods),
+            "claude" => claude::query_period_buckets(&periods),
+            "cursor" => {
+                let from_ms = periods.iter().map(|(from, _)| *from).min().unwrap_or(0);
+                let to_ms = periods.iter().map(|(_, to)| *to).max().unwrap_or(0);
+                cursor::fetch_cursor_period_buckets(from_ms, to_ms, &periods)
+            }
+            _ => Err(format!("未知的对比 Agent: {source}")),
+        }?;
+        Ok(buckets
+            .into_iter()
+            .map(|b| WeeklyTokenBucket {
+                reset_at: b.reset_at,
+                end_at: b.end_at,
+                total_tokens: b.total_tokens,
+                requests: b.requests,
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| format!("按 Agent 对比 token 任务失败: {e}"))?
 }
 
 // ===== Cursor 用量统计 =====
@@ -1371,9 +1418,11 @@ pub fn run() {
             set_pin,
             get_quota_history,
             get_weekly_compare,
+            get_weekly_compare_for_snapshots,
             get_today_delta,
             clear_quota_history,
             get_compare_tokens,
+            get_compare_tokens_for_agent,
             get_cursor_usage,
             get_cursor_config,
             set_cursor_config,

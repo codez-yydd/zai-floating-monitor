@@ -1020,6 +1020,40 @@ pub fn latest_rate_limits() -> Result<Option<CodexRateLimits>, String> {
     Ok(Some(snap))
 }
 
+/// 按指定周期聚合 Codex Token。
+/// 对比页需要真实的 [reset_at, end_at) 边界，不能用只带 HH:00 的趋势 label 反推跨日周期。
+pub fn query_period_buckets(
+    periods: &[(i64, i64)],
+) -> Result<Vec<db::PeriodBucket>, String> {
+    import_incremental()?;
+    let conn = open_codex_db()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT
+                COALESCE(SUM(computed_total_tokens),0),
+                COUNT(*)
+             FROM model_usage
+             WHERE started_at >= ?1 AND started_at < ?2",
+        )
+        .map_err(|e| format!("准备 Codex 周期聚合查询失败: {e}"))?;
+
+    let mut out = Vec::with_capacity(periods.len());
+    for &(reset_at, end_at) in periods {
+        let (total_tokens, requests): (i64, i64) = stmt
+            .query_row(rusqlite::params![reset_at, end_at], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .map_err(|e| format!("查询 Codex 周期聚合失败: {e}"))?;
+        out.push(db::PeriodBucket {
+            reset_at,
+            end_at,
+            total_tokens,
+            requests,
+        });
+    }
+    Ok(out)
+}
+
 // ===== 实时额度（ChatGPT backend-api，参照 CodexBar 的实现）=====
 
 /// Codex 登录凭证（只读 ~/.codex/auth.json，绝不修改/刷新——

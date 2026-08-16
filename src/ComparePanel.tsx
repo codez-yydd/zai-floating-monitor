@@ -1,27 +1,49 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   DeviceInfo,
+  QuotaSnapshot,
+  RemoteSnapshot,
+  RemoteUsage,
   SyncConfig,
   WeeklyPeriod,
   WeeklyTokenBucket,
 } from "./types";
+import type { AgentId, AgentVisibility } from "./agentVisibility";
 import {
-  getCompareTokens,
+  getCompareTokensForAgent,
+  getQuotaHistory,
   getSyncConfig,
-  getWeeklyCompare,
+  getWeeklyCompareForSnapshots,
   listRemoteDevices,
+  remoteSnapshots,
   remoteUsage,
 } from "./api";
 import { formatTokens } from "./format";
 import { remainingGradient, remainingTextColor } from "./widgets";
+import { BrandIcon, type BrandIconName } from "./BrandIcon";
 
 interface Props {
   onBack: () => void;
+  agentVisibility: AgentVisibility;
 }
 
-export function ComparePanel({ onBack }: Props) {
+const COMPARE_AGENTS: AgentId[] = ["zai", "codex", "claude", "cursor"];
+const AGENT_META: Record<
+  AgentId,
+  { label: string; brand: BrandIconName; color: string; remoteSource?: string }
+> = {
+  zai: { label: "Z.ai", brand: "zai", color: "#0284c7", remoteSource: "zcode" },
+  codex: { label: "Codex", brand: "codex", color: "#059669", remoteSource: "codex" },
+  claude: { label: "Claude", brand: "claude", color: "#c2410c", remoteSource: "claude" },
+  cursor: { label: "Cursor", brand: "cursor", color: "#7c3aed" },
+};
+
+export function ComparePanel({ onBack, agentVisibility }: Props) {
   const [periods, setPeriods] = useState<WeeklyPeriod[]>([]);
   const [tokens, setTokens] = useState<WeeklyTokenBucket[]>([]);
+  const [tokensByAgent, setTokensByAgent] = useState<
+    Partial<Record<AgentId, WeeklyTokenBucket[]>>
+  >({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
@@ -55,13 +77,62 @@ export function ComparePanel({ onBack }: Props) {
     setLoading(true);
     setError(null);
     try {
-      // 1. 周期列表（账户级，本机快照解析即代表全局额度周期）
-      const ps = await getWeeklyCompare();
+      // 数据来源：all=本地+远端(排除本机)；local=仅本地；具体id=仅远端该设备
+      const wantLocal = deviceFilter === "all" || deviceFilter === "local";
+      const wantRemote =
+        syncEnabled &&
+        (deviceFilter === "all" ||
+          (deviceFilter !== "local" && deviceFilter !== "all"));
+
+      const snapshotOpts =
+        syncConfig &&
+        (deviceFilter === "all"
+          ? { excludeDevice: syncConfig.device_id }
+          : { devices: deviceFilter });
+      const enabledAgents = COMPARE_AGENTS.filter(
+        (agent) => agentVisibility[agent]
+      );
+
+      // 周期必须由当前筛选范围内的快照决定。旧逻辑永远只解析本机历史，
+      // 导致远端设备没有历史时周期为空、或周期边界与远端 Token 不一致。
+      // 快照保留期为 90 天，与后端滚动清理保持一致。
+      const nowMs = Date.now();
+      const historyFromMs = nowMs - 90 * 86_400_000;
+      let localHistory: QuotaSnapshot[] = [];
+      let remoteHistory: RemoteSnapshot[] = [];
+      const historyTasks: Promise<unknown>[] = [];
+      if (wantLocal) {
+        historyTasks.push(
+          getQuotaHistory().then((history) => (localHistory = history))
+        );
+      }
+      if (wantRemote && syncConfig && snapshotOpts) {
+        historyTasks.push(
+          remoteSnapshots(historyFromMs, nowMs, snapshotOpts)
+            .then((history) => (remoteHistory = history))
+            .catch((e) => {
+              // 汇总模式保留本机数据降级展示；具体设备筛选则明确提示失败。
+              if (deviceFilter !== "all") {
+                throw new Error(`远端额度历史获取失败：${String(e)}`);
+              }
+            })
+        );
+      }
+      await Promise.all(historyTasks);
+      if (reqId !== loadReqId.current) return;
+
+      const snapshots = mergeQuotaSnapshots(
+        localHistory,
+        remoteHistory.map(toQuotaSnapshot)
+      );
+      const ps = await getWeeklyCompareForSnapshots(snapshots);
       if (reqId !== loadReqId.current) return; // 已有更新的请求，丢弃旧响应
       setPeriods(ps);
 
       if (ps.length === 0) {
         setTokens([]);
+        setTokensByAgent({});
+        setSelectedIdx(null);
         return;
       }
 
@@ -73,87 +144,90 @@ export function ComparePanel({ onBack }: Props) {
       const fromMs = ps[0].reset_at;
       const toMs = ps[ps.length - 1].end_at;
 
-      // 数据来源：all=本地+远端(排除本机)；local=仅本地；具体id=仅远端该设备
-      const wantLocal = deviceFilter === "all" || deviceFilter === "local";
-      const wantRemote =
-        syncEnabled &&
-        (deviceFilter === "all" ||
-          (deviceFilter !== "local" && deviceFilter !== "all"));
-
-      // source 固定 zcode：对比页口径是智谱 quota vs ZCode 实际消耗，
-      // 不含 Codex（服务端不传 source 会合并全部来源）
-      const opts =
-        syncConfig &&
-        (deviceFilter === "all"
-          ? { excludeDevice: syncConfig.device_id, source: "zcode" }
-          : { devices: deviceFilter, source: "zcode" });
-
-      // 2. 并发：本地 token + 远端（trend 折 token）
+      // 所有已开启 Agent 分别聚合，再按周期相加。
+      // 本地 Codex/Claude 使用独立 SQLite 周期查询，Cursor 使用原始事件时间戳
+      // 聚合；远端三种可同步来源使用 ISO 小时桶归属周期。
       const tasks: Promise<unknown>[] = [];
+      const localByAgent: Partial<
+        Record<AgentId, WeeklyTokenBucket[]>
+      > = {};
+      const remoteByAgent: Partial<
+        Record<AgentId, WeeklyTokenBucket[]>
+      > = {};
 
-      // 本地 token
-      let localTokens: WeeklyTokenBucket[] = [];
       if (wantLocal) {
-        tasks.push(
-          getCompareTokens(periodPairs).then((t) => (localTokens = t))
-        );
-      } else {
-        // 仅远端：构造空本地骨架，后面填远端值
-        localTokens = periodPairs.map(([reset_at, end_at]) => ({
-          reset_at,
-          end_at,
-          total_tokens: 0,
-          requests: 0,
-        }));
+        for (const agent of enabledAgents) {
+          tasks.push(
+            getCompareTokensForAgent(agent, periodPairs)
+              .then((buckets) => {
+                localByAgent[agent] = buckets;
+              })
+              .catch(() => {
+                // 可选 Agent 未安装、未登录或没有会话时按空数据处理。
+                localByAgent[agent] = emptyTokenBuckets(periodPairs);
+              })
+          );
+        }
       }
 
-      // 远端 token（按周期累加 trend.total_tokens）
-      let remoteTokenByPeriod = new Map<number, number>();
-      let remoteReqByPeriod = new Map<number, number>();
-
-      if (wantRemote && syncConfig && opts && toMs > fromMs) {
-        // token：trend(day) 按归属周期累加
-        tasks.push(
-          remoteUsage(fromMs, toMs, "day", opts)
-            .then((remote) => {
-              for (const b of remote.trend) {
-                const ms = parseInt(b.label, 10);
-                if (isNaN(ms)) continue;
-                const idx = ps.findIndex(
-                  (p) => ms >= p.reset_at && ms < p.end_at
-                );
-                if (idx >= 0) {
-                  remoteTokenByPeriod.set(
-                    idx,
-                    (remoteTokenByPeriod.get(idx) ?? 0) + b.total_tokens
-                  );
-                  remoteReqByPeriod.set(
-                    idx,
-                    (remoteReqByPeriod.get(idx) ?? 0) + b.requests
-                  );
-                }
-              }
-            })
-            .catch(() => {
-              // "全部"模式远端失败静默降级；具体设备失败透出
-              if (deviceFilter !== "all") throw new Error("远端数据获取失败");
-            })
-        );
+      if (wantRemote && syncConfig && toMs > fromMs) {
+        for (const agent of enabledAgents) {
+          const source = AGENT_META[agent].remoteSource;
+          if (!source) continue; // Cursor 目前只采集本机，未上传到同步服务
+          const usageOpts =
+            deviceFilter === "all"
+              ? { excludeDevice: syncConfig.device_id, source }
+              : { devices: deviceFilter, source };
+          tasks.push(
+            remoteUsage(fromMs, toMs, "hour", usageOpts)
+              .then((remote) => {
+                remoteByAgent[agent] = aggregateRemoteTokens(ps, remote);
+              })
+              .catch(() => {
+                // 远端没有该来源或服务暂不可用时，不影响其他 Agent 展示。
+                remoteByAgent[agent] = emptyTokenBuckets(periodPairs);
+              })
+          );
+        }
       }
 
       await Promise.all(tasks);
       if (reqId !== loadReqId.current) return; // 已有更新的请求，丢弃旧响应
 
-      // 3. 合并 token
-      const mergedTokens: WeeklyTokenBucket[] = localTokens.map((t, i) => ({
-        ...t,
-        total_tokens:
-          (wantLocal ? t.total_tokens : 0) +
-          (remoteTokenByPeriod.get(i) ?? 0),
-        requests:
-          (wantLocal ? t.requests : 0) + (remoteReqByPeriod.get(i) ?? 0),
-      }));
+      const mergedByAgent: Partial<
+        Record<AgentId, WeeklyTokenBucket[]>
+      > = {};
+      for (const agent of enabledAgents) {
+        const local = localByAgent[agent] ?? emptyTokenBuckets(periodPairs);
+        const remote = remoteByAgent[agent] ?? emptyTokenBuckets(periodPairs);
+        mergedByAgent[agent] = periodPairs.map(([reset_at, end_at], index) => ({
+          reset_at,
+          end_at,
+          total_tokens:
+            (local[index]?.total_tokens ?? 0) +
+            (remote[index]?.total_tokens ?? 0),
+          requests:
+            (local[index]?.requests ?? 0) + (remote[index]?.requests ?? 0),
+        }));
+      }
+
+      const mergedTokens: WeeklyTokenBucket[] = periodPairs.map(
+        ([reset_at, end_at], index) => ({
+          reset_at,
+          end_at,
+          total_tokens: enabledAgents.reduce(
+            (sum, agent) =>
+              sum + (mergedByAgent[agent]?.[index]?.total_tokens ?? 0),
+            0
+          ),
+          requests: enabledAgents.reduce(
+            (sum, agent) => sum + (mergedByAgent[agent]?.[index]?.requests ?? 0),
+            0
+          ),
+        })
+      );
       setTokens(mergedTokens);
+      setTokensByAgent(mergedByAgent);
 
       // 仅在用户未选中或选中索引超出新周期范围时才落到当前周期，
       // 否则保持用户选择：60s 自动刷新不应把用户点选的历史周期静默跳回
@@ -167,7 +241,7 @@ export function ComparePanel({ onBack }: Props) {
       // 只有最新请求才允许结束 loading，避免旧请求把新请求的加载态清掉
       if (reqId === loadReqId.current) setLoading(false);
     }
-  }, [deviceFilter, syncConfig, syncEnabled]);
+  }, [agentVisibility, deviceFilter, syncConfig, syncEnabled]);
 
   useEffect(() => {
     load();
@@ -232,7 +306,6 @@ export function ComparePanel({ onBack }: Props) {
           {error}
         </div>
       )}
-
       {periods.length === 0 && !loading && !error && (
         <div className="flex-1 flex items-center justify-center px-6">
           <div className="text-center">
@@ -263,6 +336,7 @@ export function ComparePanel({ onBack }: Props) {
             <PeriodDetail
               period={periods[selectedIdx]}
               token={tokens[selectedIdx]}
+              tokensByAgent={tokensByAgent}
             />
           )}
 
@@ -302,7 +376,7 @@ export function ComparePanel({ onBack }: Props) {
                       <div className="flex items-center gap-2 text-slate-700/60 num shrink-0">
                         <span>{formatTokens(tk)}</span>
                         <span className="text-slate-700/25">·</span>
-                        <span style={{ color: remainingTextColor(100 - p.pct_peak) }}>{p.pct_peak}%</span>
+                        <span style={{ color: remainingTextColor(100 - p.pct_end) }}>{p.pct_end}%</span>
                       </div>
                     </button>
                   );
@@ -314,15 +388,17 @@ export function ComparePanel({ onBack }: Props) {
 
       {/* 底部说明 */}
       <div className="px-3.5 py-2 border-t border-slate-900/10 text-[9px] text-slate-700/40 leading-relaxed">
-        周百分比来自智谱账户级采样（含所有设备/工具消耗）；
+        周百分比是智谱账户级额度（含所有设备/工具）；
         <br />
-        Token 仅统计 ZCode CLI。
+        Token 统计当前筛选范围内设置中开启的 Agent；二者不是同一计量单位。
+        <br />
+        Cursor 目前只采集本机，远端设备筛选不会包含 Cursor 数据。
       </div>
     </div>
   );
 }
 
-/** 周期柱状图：每根柱=一个周期，高度=峰值百分比 */
+/** 周期柱状图：每根柱=一个周期，高度=周期结束时的已用百分比 */
 function PeriodChart({
   periods,
   selectedIdx,
@@ -339,21 +415,20 @@ function PeriodChart({
     <div className="rounded-lg bg-surface/25 border border-surface/30 px-2.5 py-2">
       <div className="flex items-center justify-between mb-1.5">
         <span className="text-[10px] uppercase tracking-wide text-slate-700/55">
-          周额度峰值趋势
+          周额度结束用量趋势
         </span>
       </div>
       <div className={`flex items-end ${barGap} h-16`}>
         {periods.map((p, i) => {
-          const h = p.pct_peak; // 0-100
+          const h = p.pct_end; // 0-100，避免峰值把历史周期夸大
           const isSel = i === selectedIdx;
-          // 峰值高度按已用，颜色统一按剩余渐变（与全局额度条一致）
-          const bg = remainingGradient(100 - p.pct_peak);
+          const bg = remainingGradient(100 - p.pct_end);
           return (
             <button
               key={p.reset_at}
               onClick={() => onSelect(i)}
               className="flex-1 h-full flex items-end justify-center min-w-0 group"
-              title={`${dateLabel(p.reset_at)}: 峰值 ${p.pct_peak}%`}
+              title={`${dateLabel(p.reset_at)}: 结束 ${p.pct_end}% · 峰值 ${p.pct_peak}%`}
             >
               <div
                 className={`w-full rounded-t-sm transition-all duration-300 ${
@@ -389,12 +464,20 @@ function PeriodChart({
 function PeriodDetail({
   period,
   token,
+  tokensByAgent,
 }: {
   period: WeeklyPeriod;
   token?: WeeklyTokenBucket;
+  tokensByAgent: Partial<Record<AgentId, WeeklyTokenBucket[]>>;
 }) {
   const totalTokens = token?.total_tokens ?? 0;
   const sampleLow = period.sample_count < 10;
+  const breakdown = COMPARE_AGENTS.map((agent) => ({
+    agent,
+    bucket: tokensByAgent[agent]?.find(
+      (item) => item.reset_at === period.reset_at
+    ),
+  })).filter((item) => (item.bucket?.total_tokens ?? 0) > 0);
 
   return (
     <div className="rounded-lg bg-surface/30 border border-surface/40 px-3 py-2.5 space-y-2">
@@ -408,15 +491,17 @@ function PeriodDetail({
         </div>
         <span
           className="text-[11px] num font-semibold"
-          style={{ color: remainingTextColor(100 - period.pct_peak) }}
+          style={{ color: remainingTextColor(100 - period.pct_end) }}
         >
-          峰值 {period.pct_peak}%
+          已用 {period.pct_end}%
         </span>
       </div>
 
       {/* token 统计 */}
       <div className="rounded-md bg-surface/25 py-1.5 px-2">
-        <div className="text-[9px] text-slate-700/55">实际 Token</div>
+        <div className="text-[9px] text-slate-700/55">
+          所有开启 Agent Token
+        </div>
         <div className="num text-[13px] font-semibold text-slate-900/85 mt-0.5">
           {formatTokens(totalTokens)}
         </div>
@@ -425,12 +510,39 @@ function PeriodDetail({
             {token.requests} 次请求
           </div>
         )}
+        {breakdown.length > 0 && (
+          <div className="flex flex-wrap gap-1 mt-1.5">
+            {breakdown.map(({ agent, bucket }) => (
+              <span
+                key={agent}
+                className="inline-flex items-center gap-1 rounded bg-slate-900/5 px-1 py-0.5 text-[9px] text-slate-700/60"
+              >
+                <BrandIcon
+                  brand={AGENT_META[agent].brand}
+                  className="h-2.5 w-2.5"
+                  style={{ color: AGENT_META[agent].color }}
+                />
+                <span>{AGENT_META[agent].label}</span>
+                <span className="num">
+                  {formatTokens(bucket?.total_tokens ?? 0)}
+                </span>
+              </span>
+            ))}
+          </div>
+        )}
+        {totalTokens === 0 && (
+          <div className="text-[9px] text-slate-700/40 mt-1">
+            当前周期没有开启 Agent 用量
+          </div>
+        )}
       </div>
 
       {/* 百分比进度 + 采样可信度 */}
       <div>
         <div className="flex items-center justify-between text-[10px] mb-0.5">
-          <span className="text-slate-700/55">起 {period.pct_start}% → 止 {period.pct_end}%</span>
+          <span className="text-slate-700/55">
+            起 {period.pct_start}% → 止 {period.pct_end}% · 峰值 {period.pct_peak}%
+          </span>
           <span className={`num ${sampleLow ? "text-amber-600/80" : "text-slate-700/45"}`}>
             采样 {period.sample_count} 条{sampleLow ? " · 不足" : ""}
           </span>
@@ -439,8 +551,8 @@ function PeriodDetail({
           <div
             className="h-full rounded-full opacity-80"
             style={{
-              width: `${period.pct_peak}%`,
-              background: remainingGradient(100 - period.pct_peak),
+              width: `${period.pct_end}%`,
+              background: remainingGradient(100 - period.pct_end),
             }}
           />
         </div>
@@ -450,6 +562,84 @@ function PeriodDetail({
 }
 
 // ===== 辅助 =====
+
+/** 远端快照去掉设备字段，转换为周期解析所需的本地结构。 */
+function toQuotaSnapshot(snapshot: RemoteSnapshot): QuotaSnapshot {
+  const {
+    device_id: _deviceId,
+    ...quotaSnapshot
+  } = snapshot;
+  return quotaSnapshot;
+}
+
+/** 合并本机与远端额度采样；同一毫秒多设备重复采样时只保留一条。 */
+function mergeQuotaSnapshots(
+  local: QuotaSnapshot[],
+  remote: QuotaSnapshot[]
+): QuotaSnapshot[] {
+  const byTs = new Map<number, QuotaSnapshot>();
+  for (const snapshot of [...local, ...remote]) {
+    if (!Number.isFinite(snapshot.ts)) continue;
+    const previous = byTs.get(snapshot.ts);
+    // 同一时刻应是同一账户状态；若多设备值略有差异，保留已用比例更高的
+    // 采样，避免汇总视图低估额度峰值。
+    if (
+      !previous ||
+      snapshot.weekly_pct > previous.weekly_pct ||
+      (snapshot.weekly_pct === previous.weekly_pct &&
+        snapshot.hour5_pct > previous.hour5_pct)
+    ) {
+      byTs.set(snapshot.ts, snapshot);
+    }
+  }
+  return [...byTs.values()].sort((a, b) => a.ts - b.ts);
+}
+
+function emptyTokenBuckets(
+  periods: Array<[number, number]>
+): WeeklyTokenBucket[] {
+  return periods.map(([reset_at, end_at]) => ({
+    reset_at,
+    end_at,
+    total_tokens: 0,
+    requests: 0,
+  }));
+}
+
+/** 把远端指定来源的小时桶按真实时间戳分配到额度周期。 */
+function aggregateRemoteTokens(
+  periods: WeeklyPeriod[],
+  remote: RemoteUsage
+): WeeklyTokenBucket[] {
+  const buckets = periods.map((period) => ({
+    reset_at: period.reset_at,
+    end_at: period.end_at,
+    total_tokens: 0,
+    requests: 0,
+  }));
+  for (const point of remote.trend) {
+    const timestamp = parseTrendTimestamp(point.label);
+    if (timestamp === null) continue;
+    const index = periods.findIndex(
+      (period) =>
+        timestamp >= period.reset_at && timestamp < period.end_at
+    );
+    if (index < 0) continue;
+    buckets[index].total_tokens += point.total_tokens;
+    buckets[index].requests += point.requests;
+  }
+  return buckets;
+}
+
+/** 兼容远端服务返回的 ISO 时间、毫秒时间戳和秒时间戳。 */
+function parseTrendTimestamp(label: string): number | null {
+  const numeric = Number(label);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    return numeric < 1_000_000_000_000 ? numeric * 1000 : numeric;
+  }
+  const parsed = Date.parse(label);
+  return Number.isFinite(parsed) ? parsed : null;
+}
 
 /** 毫秒 → "MM-DD" label */
 function dateLabel(ms: number): string {

@@ -988,6 +988,57 @@ pub fn fetch_cursor_usage_totals(from_ms: i64, to_ms: i64) -> Result<(f64, i64),
     Ok((summary.total_cost_usd, summary.total_tokens))
 }
 
+/// 按指定周期聚合 Cursor Token。
+/// Cursor events 接口一次返回原始事件，因此在这里按真实事件时间戳切分，
+/// 避免前端只能拿到按日明细时把跨重置日的 Token 错分到某个周期。
+pub fn fetch_cursor_period_buckets(
+    from_ms: i64,
+    to_ms: i64,
+    periods: &[(i64, i64)],
+) -> Result<Vec<crate::db::PeriodBucket>, String> {
+    if periods.is_empty() {
+        return Ok(Vec::new());
+    }
+    let cfg = load_cursor_config()?;
+    let cookie = resolve_cookie(&cfg)?;
+    let events = fetch_events_cached(&cookie, from_ms, to_ms)?;
+    let mut buckets: Vec<crate::db::PeriodBucket> = periods
+        .iter()
+        .map(|&(reset_at, end_at)| crate::db::PeriodBucket {
+            reset_at,
+            end_at,
+            total_tokens: 0,
+            requests: 0,
+        })
+        .collect();
+
+    for event in events.iter() {
+        let ts = match event.timestamp {
+            Some(value) if value > 0 => value,
+            _ => continue,
+        };
+        let usage = match &event.token_usage {
+            Some(value) => value,
+            None => continue,
+        };
+        let tokens = usage.input_tokens.unwrap_or(0).max(0)
+            + usage.output_tokens.unwrap_or(0).max(0)
+            + usage.cache_write_tokens.unwrap_or(0).max(0)
+            + usage.cache_read_tokens.unwrap_or(0).max(0);
+        if tokens <= 0 {
+            continue;
+        }
+        if let Some(index) = periods
+            .iter()
+            .position(|&(reset_at, end_at)| ts >= reset_at && ts < end_at)
+        {
+            buckets[index].total_tokens += tokens;
+            buckets[index].requests += 1;
+        }
+    }
+    Ok(buckets)
+}
+
 /// 诊断信息：排查 events API 为何返回空。
 /// 返回 cookie 来源、events 原始响应状态码 + body 摘要。
 #[derive(Debug, Serialize)]

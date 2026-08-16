@@ -105,11 +105,16 @@ export default function App() {
             onBack={backToStats}
           />
         ) : view === "compare" ? (
-          <ComparePanel onBack={() => setView("stats")} />
+          <ComparePanel
+            onBack={() => setView("stats")}
+            agentVisibility={agentVisibility}
+          />
         ) : view === "report" ? (
           <ReportPanel
             onBack={() => setView("stats")}
             pricing={pricing}
+            currency={currency}
+            agentVisibility={agentVisibility}
           />
         ) : view === "settings" ? (
           <SettingsPanel
