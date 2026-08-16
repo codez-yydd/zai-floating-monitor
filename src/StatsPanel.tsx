@@ -10,6 +10,7 @@ import { CodexPanel } from "./CodexPanel";
 import { ClaudePanel } from "./ClaudePanel";
 import { CursorPanel } from "./CursorPanel";
 import { SummaryTab } from "./SummaryTab";
+import { BrandIcon, type BrandIconName } from "./BrandIcon";
 
 interface Props {
   currency: Currency;
@@ -20,6 +21,18 @@ interface Props {
   onGoReport: () => void;
   onGoSettings: () => void;
 }
+
+const STAT_TABS: ReadonlyArray<{
+  id: StatsTab;
+  label: string;
+  brand?: BrandIconName;
+}> = [
+  { id: "summary", label: "汇总" },
+  { id: "zai", label: "Z.ai", brand: "zai" },
+  { id: "codex", label: "Codex", brand: "codex" },
+  { id: "claude", label: "Claude", brand: "claude" },
+  { id: "cursor", label: "Cursor", brand: "cursor" },
+];
 
 /**
  * 统计面板 —— 纯展示层。
@@ -182,9 +195,9 @@ export function StatsPanel({
             setCustom(c);
           }}
         />
-        {/* 设备筛选 + 三标签同一行，少占一排高度 */}
-        <div className="mt-2 flex items-center gap-1.5">
-          {syncEnabled && (
+        {/* 设备筛选单独占一行，标签保持完整名称；未来新增 Agent 时横向滚动。 */}
+        {syncEnabled && (
+          <div className="mt-2 flex items-center">
             <select
               value={deviceFilter}
               onChange={(e) => setDeviceFilter(e.target.value)}
@@ -203,37 +216,42 @@ export function StatsPanel({
                   </option>
                 ))}
             </select>
-          )}
-          <div className="flex-1 flex gap-0.5 p-0.5 rounded-lg bg-slate-900/5">
-            {(["summary", "zai", "codex", "claude", "cursor"] as const).map((t) => (
-              <button
-                key={t}
-                onClick={() => setTab(t)}
-                className={`flex-1 py-1 rounded-md text-[10px] font-medium transition-colors ${
-                  tab === t
-                    ? t === "cursor"
-                      ? "bg-surface text-violet-700 shadow-sm"
-                      : t === "claude"
-                        ? "bg-surface text-orange-700 shadow-sm"
-                        : t === "codex"
-                          ? "bg-surface text-emerald-700 shadow-sm"
-                          : t === "zai"
-                            ? "bg-surface text-sky-700 shadow-sm"
-                            : "bg-surface text-slate-900 shadow-sm"
-                    : "text-slate-700/50 hover:text-slate-900/70"
-                }`}
-              >
-                {t === "summary"
-                  ? "汇总"
-                  : t === "zai"
-                    ? "Z.ai"
-                    : t === "codex"
-                      ? "Codex"
-                      : t === "claude"
-                        ? "Claude"
-                        : "Cursor"}
-              </button>
-            ))}
+          </div>
+        )}
+        <div
+          className={`${syncEnabled ? "mt-1.5" : "mt-2"} min-w-0 overflow-x-auto rounded-lg bg-slate-900/5`}
+          aria-label="统计来源"
+        >
+          <div className="flex w-max min-w-full gap-0.5 p-0.5">
+            {STAT_TABS.map((item) => {
+              const t = item.id;
+              return (
+                <button
+                  key={t}
+                  onClick={() => setTab(t)}
+                  type="button"
+                  aria-pressed={tab === t}
+                  className={`flex shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-md px-2 py-1 text-[10px] font-medium transition-colors ${
+                    tab === t
+                      ? t === "cursor"
+                        ? "bg-surface text-violet-700 shadow-sm"
+                        : t === "claude"
+                          ? "bg-surface text-orange-700 shadow-sm"
+                          : t === "codex"
+                            ? "bg-surface text-emerald-700 shadow-sm"
+                            : t === "zai"
+                              ? "bg-surface text-sky-700 shadow-sm"
+                              : "bg-surface text-slate-900 shadow-sm"
+                      : "text-slate-700/50 hover:text-slate-900/70"
+                  }`}
+                >
+                  {item.brand && (
+                    <BrandIcon brand={item.brand} className="h-3 w-3 shrink-0" />
+                  )}
+                  <span>{item.label}</span>
+                </button>
+              );
+            })}
           </div>
         </div>
       </div>
