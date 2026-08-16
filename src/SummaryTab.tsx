@@ -18,6 +18,7 @@ import {
 } from "./widgets";
 import { useDataCache } from "./DataCache";
 import { useEffect, useState } from "react";
+import type { AgentId, AgentVisibility } from "./agentVisibility";
 
 interface Props {
   stats: Stats | null;
@@ -30,6 +31,7 @@ interface Props {
   bucket: "hour" | "day";
   fxRate: number;
   pricing: PricingConfig;
+  agentVisibility: AgentVisibility;
 }
 
 const LEVEL_LABEL: Record<string, string> = {
@@ -41,7 +43,7 @@ const LEVEL_LABEL: Record<string, string> = {
 
 /** 单个 agent 在汇总页的展示单元。以后加新 agent 往数组里追加一项即可。 */
 interface AgentSummary {
-  id: string;
+  id: AgentId;
   name: string;
   /** 占比条 / 圆点颜色（hex，避免 Tailwind 动态类名失效） */
   color: string;
@@ -103,7 +105,8 @@ function buildModelRows(
   cursor: CursorSnapshot | null,
   pricing: PricingConfig,
   currency: Currency,
-  fxRate: number
+  fxRate: number,
+  agentVisibility: AgentVisibility
 ): ModelRankRow[] {
   const rows: ModelRankRow[] = [];
 
@@ -114,7 +117,7 @@ function buildModelRows(
     costById.set(x.model_id, (costById.get(x.model_id) ?? 0) + x.cost);
   });
 
-  for (const m of stats?.by_model ?? []) {
+  for (const m of agentVisibility.zai ? stats?.by_model ?? [] : []) {
     const price = pricing.usd[m.model_id];
     const hasPrice = Boolean(price && (price.input > 0 || price.output > 0));
     rows.push({
@@ -131,7 +134,7 @@ function buildModelRows(
   }
 
   // Codex：后端无按模型花费命令，前端按价格表自算（与 zcode 行同款口径）
-  for (const m of codex?.stats.by_model ?? []) {
+  for (const m of agentVisibility.codex ? codex?.stats.by_model ?? [] : []) {
     const price = pricing.usd[m.model_id];
     const hasPrice = Boolean(price && (price.input > 0 || price.output > 0));
     rows.push({
@@ -156,7 +159,7 @@ function buildModelRows(
   }
 
   // Claude：与 Codex 行同款（Anthropic 品牌橙）
-  for (const m of claude?.stats.by_model ?? []) {
+  for (const m of agentVisibility.claude ? claude?.stats.by_model ?? [] : []) {
     const price = pricing.usd[m.model_id];
     const hasPrice = Boolean(price && (price.input > 0 || price.output > 0));
     rows.push({
@@ -180,7 +183,7 @@ function buildModelRows(
     });
   }
 
-  for (const m of cursor?.by_model ?? []) {
+  for (const m of agentVisibility.cursor ? cursor?.by_model ?? [] : []) {
     rows.push({
       key: `cursor:${m.model}`,
       name: m.model,
@@ -251,6 +254,7 @@ export function SummaryTab({
   bucket,
   fxRate,
   pricing,
+  agentVisibility,
 }: Props) {
   const [trendMetric, setTrendMetric] = useState<"cost" | "token">("cost");
   const [sortBy, setSortBy] = useState<"cost" | "token" | "requests">("cost");
@@ -409,9 +413,9 @@ export function SummaryTab({
     : "暂无数据";
 
   // 按 agent 组装。新增来源时在此追加，总览占比条 / 花费表 / 额度列表会一起跟上。
-  const agents: AgentSummary[] = [
+  const allAgents: AgentSummary[] = [
     {
-      id: "zcode",
+      id: "zai",
       name: "ZCode",
       color: "#0ea5e9",
       nameClass: "text-sky-700",
@@ -464,12 +468,12 @@ export function SummaryTab({
     },
   ];
 
+  const agents = allAgents.filter((agent) => agentVisibility[agent.id]);
   const totalCost = agents.reduce((s, a) => s + a.cost, 0);
   const totalTokens = agents.reduce((s, a) => s + a.tokens, 0);
 
-  // 合并趋势：按 label 对齐 z.ai 趋势 + Codex 趋势 + Cursor daily（仅日桶有意义）
-  // 双货币各自计算：usd 用原值，cny = usd × 汇率，分别写入对应字段，
-  // 避免同一个换算值同时进 cost_cny/cost_usd 造成非当前货币字段错误
+  // 合并趋势：只加入开启的 Agent，并按多个来源的 label 建立并集。
+  // 这样即使关闭 Z.ai，只剩 Codex/Claude/Cursor 时汇总趋势仍然可用。
   const cursorDailyMap = new Map<
     string,
     { costCny: number; costUsd: number; tokens: number }
@@ -481,30 +485,61 @@ export function SummaryTab({
       tokens: d.total_tokens,
     });
   });
+  const zcodeTrendMap = new Map<string, TrendPoint>();
+  trend.forEach((p) => zcodeTrendMap.set(p.label, p));
   // Codex / Claude 趋势桶自带双货币花费，按 label 索引后直接相加（与 z.ai 桶格式一致）
   const codexTrendMap = new Map<string, TrendPoint>();
   (codex?.trend ?? []).forEach((p) => codexTrendMap.set(p.label, p));
   const claudeTrendMap = new Map<string, TrendPoint>();
   (claude?.trend ?? []).forEach((p) => claudeTrendMap.set(p.label, p));
-  const mergedTrend: TrendPoint[] = trend.map((p) => {
-    const c = cursorDailyMap.get(p.label);
-    const x = codexTrendMap.get(p.label);
-    const a = claudeTrendMap.get(p.label);
+
+  const trendLabels: string[] = [];
+  const trendLabelSet = new Set<string>();
+  const addTrendLabel = (label: string) => {
+    if (!trendLabelSet.has(label)) {
+      trendLabelSet.add(label);
+      trendLabels.push(label);
+    }
+  };
+  if (agentVisibility.zai) trend.forEach((p) => addTrendLabel(p.label));
+  if (agentVisibility.codex)
+    codexTrendMap.forEach((_point, label) => addTrendLabel(label));
+  if (agentVisibility.claude)
+    claudeTrendMap.forEach((_point, label) => addTrendLabel(label));
+  if (agentVisibility.cursor)
+    cursorDailyMap.forEach((_point, label) => addTrendLabel(label));
+
+  const mergedTrend: TrendPoint[] = trendLabels.map((label) => {
+    const p =
+      zcodeTrendMap.get(label) ??
+      ({
+        label,
+        total_tokens: 0,
+        requests: 0,
+        cost_cny: 0,
+        cost_usd: 0,
+      } satisfies TrendPoint);
+    const c = agentVisibility.cursor ? cursorDailyMap.get(label) : undefined;
+    const x = agentVisibility.codex ? codexTrendMap.get(label) : undefined;
+    const a = agentVisibility.claude ? claudeTrendMap.get(label) : undefined;
     return {
       label: p.label,
       total_tokens:
-        p.total_tokens +
+        (agentVisibility.zai ? p.total_tokens : 0) +
         (x?.total_tokens ?? 0) +
         (a?.total_tokens ?? 0) +
         (c?.tokens ?? 0),
-      requests: p.requests + (x?.requests ?? 0) + (a?.requests ?? 0),
+      requests:
+        (agentVisibility.zai ? p.requests : 0) +
+        (x?.requests ?? 0) +
+        (a?.requests ?? 0),
       cost_cny:
-        p.cost_cny +
+        (agentVisibility.zai ? p.cost_cny : 0) +
         (x?.cost_cny ?? 0) +
         (a?.cost_cny ?? 0) +
         (c?.costCny ?? 0),
       cost_usd:
-        p.cost_usd +
+        (agentVisibility.zai ? p.cost_usd : 0) +
         (x?.cost_usd ?? 0) +
         (a?.cost_usd ?? 0) +
         (c?.costUsd ?? 0),
@@ -519,7 +554,8 @@ export function SummaryTab({
     cursor,
     pricing,
     currency,
-    fxRate
+    fxRate,
+    agentVisibility
   );
   const sortedModels = [...modelRows].sort((a, b) => {
     const av =

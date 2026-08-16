@@ -1,3 +1,5 @@
+#![allow(linker_messages)]
+
 mod claude;
 mod codex;
 mod cursor;

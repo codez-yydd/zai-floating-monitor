@@ -8,6 +8,12 @@ import { ReportPanel } from "./ReportPanel";
 import { DataProvider } from "./DataCache";
 import { fetchPricing, fetchCurrency, saveCurrency } from "./api";
 import type { Currency, PricingConfig } from "./types";
+import {
+  loadAgentVisibility,
+  saveAgentVisibility,
+  type AgentId,
+  type AgentVisibility,
+} from "./agentVisibility";
 
 type View = "stats" | "pricing" | "sync" | "compare" | "report" | "settings";
 
@@ -21,6 +27,17 @@ export default function App() {
   const [pricing, setPricing] = useState<PricingConfig>({
     usd: {},
   });
+  const [agentVisibility, setAgentVisibility] = useState<AgentVisibility>(() =>
+    loadAgentVisibility()
+  );
+
+  const handleAgentVisibilityChange = (id: AgentId, visible: boolean) => {
+    setAgentVisibility((current) => {
+      const next = { ...current, [id]: visible };
+      saveAgentVisibility(next);
+      return next;
+    });
+  };
 
   // 初始化：以后端货币偏好为准，覆盖前端本地缓存
   useEffect(() => {
@@ -74,6 +91,7 @@ export default function App() {
           <StatsPanel
             currency={currency}
             pricing={pricing}
+            agentVisibility={agentVisibility}
             onGoPricing={() => setView("pricing")}
             onGoSync={() => setView("sync")}
             onGoCompare={() => setView("compare")}
@@ -94,7 +112,11 @@ export default function App() {
             pricing={pricing}
           />
         ) : view === "settings" ? (
-          <SettingsPanel onBack={backToStats} />
+          <SettingsPanel
+            onBack={backToStats}
+            agentVisibility={agentVisibility}
+            onAgentVisibilityChange={handleAgentVisibilityChange}
+          />
         ) : (
           <SyncPanel onBack={backToStats} />
         )}

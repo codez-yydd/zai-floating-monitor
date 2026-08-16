@@ -25,9 +25,17 @@ import {
   persistTheme,
 } from "./appearance";
 import type { Theme } from "./appearance";
+import { BrandIcon } from "./BrandIcon";
+import {
+  AGENT_VISIBILITY_OPTIONS,
+  type AgentId,
+  type AgentVisibility,
+} from "./agentVisibility";
 
 interface Props {
   onBack: () => void;
+  agentVisibility: AgentVisibility;
+  onAgentVisibilityChange: (id: AgentId, visible: boolean) => void;
 }
 
 /// 汇率最近获取时间的显示格式：MM-DD HH:mm（本地时区）
@@ -42,7 +50,11 @@ function fmtFxTime(ms: number): string {
  * （Coding Plan 额度监控 / Cursor 统计 / 全局快捷键）。
  * 单列滚动，改完即存（无整页保存按钮）。
  */
-export function SettingsPanel({ onBack }: Props) {
+export function SettingsPanel({
+  onBack,
+  agentVisibility,
+  onAgentVisibilityChange,
+}: Props) {
   const [error, setError] = useState<string | null>(null);
   // 配置加载成功后才允许保存/测试/应用：加载失败时组件停在默认值，
   // 若仍可保存会把空 token 等默认值写回后端覆盖真实配置
@@ -310,6 +322,50 @@ export function SettingsPanel({ onBack }: Props) {
             调整面板背景透明度，值越低毛玻璃越透；暗色主题建议保持 60%
             以上，过低时文字可能不清晰
           </p>
+        </div>
+
+        {/* ===== 统计展示来源 ===== */}
+        <div className="rounded-lg bg-slate-900/5 border border-slate-900/10 p-2.5">
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-[11px] font-medium text-slate-900/85">
+              统计展示来源
+            </span>
+            <span className="text-[9px] text-slate-700/45">即时生效</span>
+          </div>
+          <p className="text-[9px] text-slate-700/45 mb-2 leading-relaxed">
+            关闭后仅从统计标签和汇总中隐藏，不影响本地采集与设备同步。
+          </p>
+          <div className="space-y-1">
+            {AGENT_VISIBILITY_OPTIONS.map((agent) => (
+              <label
+                key={agent.id}
+                className="flex items-center justify-between gap-2 rounded-md px-1.5 py-1 hover:bg-slate-900/5 cursor-pointer transition-colors"
+              >
+                <span className="flex items-center gap-1.5 min-w-0">
+                  <BrandIcon
+                    brand={agent.id}
+                    className="h-3.5 w-3.5 shrink-0 text-slate-700/65"
+                  />
+                  <span className="min-w-0">
+                    <span className="block text-[10px] text-slate-900/80">
+                      {agent.label}
+                    </span>
+                    <span className="block text-[9px] text-slate-700/45 truncate">
+                      {agent.description}
+                    </span>
+                  </span>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={agentVisibility[agent.id]}
+                  onChange={(e) =>
+                    onAgentVisibilityChange(agent.id, e.target.checked)
+                  }
+                  className="accent-sky-500 h-3 w-3 shrink-0"
+                />
+              </label>
+            ))}
+          </div>
         </div>
 
         {/* ===== Coding Plan 额度查询配置 ===== */}

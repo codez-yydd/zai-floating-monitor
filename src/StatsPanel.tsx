@@ -11,10 +11,15 @@ import { ClaudePanel } from "./ClaudePanel";
 import { CursorPanel } from "./CursorPanel";
 import { SummaryTab } from "./SummaryTab";
 import { BrandIcon, type BrandIconName } from "./BrandIcon";
+import {
+  AGENT_VISIBILITY_OPTIONS,
+  type AgentVisibility,
+} from "./agentVisibility";
 
 interface Props {
   currency: Currency;
   pricing: PricingConfig;
+  agentVisibility: AgentVisibility;
   onGoPricing: () => void;
   onGoSync: () => void;
   onGoCompare: () => void;
@@ -28,11 +33,30 @@ const STAT_TABS: ReadonlyArray<{
   brand?: BrandIconName;
 }> = [
   { id: "summary", label: "汇总" },
-  { id: "zai", label: "Z.ai", brand: "zai" },
-  { id: "codex", label: "Codex", brand: "codex" },
-  { id: "claude", label: "Claude", brand: "claude" },
-  { id: "cursor", label: "Cursor", brand: "cursor" },
+  ...AGENT_VISIBILITY_OPTIONS.map((agent) => ({
+    id: agent.id,
+    label: agent.label,
+    brand: agent.id,
+  })),
 ];
+
+function loadStatsTab(agentVisibility: AgentVisibility): StatsTab {
+  try {
+    const saved = localStorage.getItem("zbar-tab");
+    if (saved === "summary") return saved;
+    if (
+      saved === "zai" ||
+      saved === "codex" ||
+      saved === "claude" ||
+      saved === "cursor"
+    ) {
+      return agentVisibility[saved] ? saved : "summary";
+    }
+  } catch {
+    // 存储不可用时使用默认标签，不阻断统计面板启动。
+  }
+  return "summary";
+}
 
 /**
  * 统计面板 —— 纯展示层。
@@ -44,6 +68,7 @@ const STAT_TABS: ReadonlyArray<{
 export function StatsPanel({
   currency,
   pricing,
+  agentVisibility,
   onGoPricing,
   onGoSync,
   onGoCompare,
@@ -78,9 +103,19 @@ export function StatsPanel({
     refresh,
   } = cache;
 
-  // 五标签：汇总 | Z.ai | Codex | Claude | Cursor
+  // 标签：汇总 | Z.ai | Codex | Claude | Cursor（关闭的 Agent 不显示）
   const [tab, setTab] = useState<StatsTab>(
-    () => (localStorage.getItem("zbar-tab") as StatsTab) || "summary"
+    () => loadStatsTab(agentVisibility)
+  );
+
+  useEffect(() => {
+    if (tab !== "summary" && !agentVisibility[tab]) {
+      setTab("summary");
+    }
+  }, [agentVisibility, tab]);
+
+  const visibleTabs = STAT_TABS.filter((item) =>
+    item.id === "summary" ? true : agentVisibility[item.id]
   );
 
   // ===== 窗口置顶常驻（仅 Windows）=====
@@ -223,7 +258,7 @@ export function StatsPanel({
           aria-label="统计来源"
         >
           <div className="flex w-max min-w-full gap-0.5 p-0.5">
-            {STAT_TABS.map((item) => {
+            {visibleTabs.map((item) => {
               const t = item.id;
               return (
                 <button
@@ -317,6 +352,7 @@ export function StatsPanel({
           bucket={trendBucket}
           fxRate={fxRate}
           pricing={pricing}
+          agentVisibility={agentVisibility}
         />
       )}
 
