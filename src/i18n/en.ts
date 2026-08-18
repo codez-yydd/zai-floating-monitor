@@ -275,20 +275,44 @@ export const en: typeof zh = {
     "compare.emptyTitle": "No weekly quota history yet",
     "compare.emptyHint":
       "Weekly quotas are sampled automatically while the app runs.\nKeep it running to accumulate history.",
-    "compare.chartTitle": "Weekly quota usage trend",
-    "compare.barTitle": "{date}: ended {end}% · peak {peak}%",
+    "compare.chartTitle": "Z.ai weekly quota used",
+    "compare.percentUnit": "Unit: used %",
+    "compare.chartHint":
+      "Bar height = the used percentage of Z.ai's weekly quota at period end. It is not a token percentage; actual token consumption is shown below.",
+    "compare.barTitle":
+      "{date}: {end}% used at period end · {peak}% sampled peak",
+    "compare.subscriptionTitle": "All available subscription quotas",
+    "compare.subscriptionHint":
+      "Numbers are quota used percentages; bars show remaining percentages. Quotas from different subscriptions are not added together.",
+    "compare.quotaUsed": "{pct}% used",
+    "compare.sampledAt": "sampled {time}",
+    "compare.noQuotaSnapshot": "No quota snapshot available",
+    "compare.cursorAuto": "Auto",
+    "compare.cursorApi": "API",
+    "compare.noZaiHistory":
+      "No Z.ai weekly history yet; showing the current quotas available from other subscriptions.",
     "compare.allPeriods": "All periods",
     "compare.thisWeek": "This week",
     "compare.ongoing": "~ in progress",
-    "compare.used": "Used {pct}%",
-    "compare.tokensOfAgents": "Tokens of enabled agents",
+    "compare.zaiWeeklyQuota": "Z.ai weekly quota",
+    "compare.currentUsed": "Currently used {pct}%",
+    "compare.periodEndUsed": "Used {pct}% at period end",
+    "compare.currentUsedLabel": "Currently used %",
+    "compare.periodEndUsedLabel": "Used % at end",
+    "compare.startUsed": "Used % at start",
+    "compare.peakUsed": "Observed peak %",
+    "compare.periodPercentHint":
+      "Start, peak, and current/end are all the used percentage of Z.ai's account-level weekly quota, not an Agent token percentage.",
+    "compare.tokensOfAgents": "Agent actual token count (not a quota percentage)",
+    "compare.tokenShort": "tokens",
+    "compare.endUsedShort": "{pct}% used",
     "compare.requestsCount": "{count} requests",
     "compare.noUsage": "No enabled-agent usage in this period",
-    "compare.peakLine": "{start}% → {end}% · peak {peak}%",
+    "compare.progressLabel": "Used percentage at period end",
     "compare.samples": "{count} samples",
     "compare.samplesLow": " · sparse",
     "compare.footer":
-      "Weekly percentages reflect Z.ai account-level quotas (all devices and tools); tokens count enabled agents under the current filter.",
+      "Percentage = used share of the Z.ai account-level weekly quota; tokens = actual usage from enabled agents under the current filter. They are different metrics.",
   } satisfies typeof compare),
 
   ...({

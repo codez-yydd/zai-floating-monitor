@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
+  AgentQuotaSnapshot,
   DeviceInfo,
   QuotaSnapshot,
   RemoteSnapshot,
+  RemoteAgentQuotaSnapshot,
   RemoteUsage,
   SyncConfig,
   WeeklyPeriod,
@@ -11,15 +13,21 @@ import type {
 import type { AgentId, AgentVisibility } from "./agentVisibility";
 import {
   getCompareTokensForAgent,
+  getAgentQuotaHistory,
   getQuotaHistory,
   getSyncConfig,
   getWeeklyCompareForSnapshots,
   listRemoteDevices,
+  remoteAgentQuotaSnapshots,
   remoteSnapshots,
   remoteUsage,
 } from "./api";
-import { formatTokens } from "./format";
-import { remainingGradient, remainingTextColor } from "./widgets";
+import { formatCountdownCore, formatTokens } from "./format";
+import {
+  ProgressBar,
+  remainingGradient,
+  remainingTextColor,
+} from "./widgets";
 import { BrandIcon, type BrandIconName } from "./BrandIcon";
 import {
   PageShell,
@@ -30,6 +38,7 @@ import {
   AlertBanner,
 } from "./layout";
 import { useI18n } from "./i18n";
+import { mergeAgentQuotaSnapshots } from "./agentQuota";
 
 interface Props {
   onBack: () => void;
@@ -50,6 +59,8 @@ const AGENT_META: Record<
 export function ComparePanel({ onBack, agentVisibility }: Props) {
   const { t } = useI18n();
   const [periods, setPeriods] = useState<WeeklyPeriod[]>([]);
+  const [zaiQuotaSnapshots, setZaiQuotaSnapshots] = useState<QuotaSnapshot[]>([]);
+  const [agentQuotaSnapshots, setAgentQuotaSnapshots] = useState<AgentQuotaSnapshot[]>([]);
   const [tokens, setTokens] = useState<WeeklyTokenBucket[]>([]);
   const [tokensByAgent, setTokensByAgent] = useState<
     Partial<Record<AgentId, WeeklyTokenBucket[]>>
@@ -110,6 +121,8 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
       const historyFromMs = nowMs - 90 * 86_400_000;
       let localHistory: QuotaSnapshot[] = [];
       let remoteHistory: RemoteSnapshot[] = [];
+      let localAgentHistory: AgentQuotaSnapshot[] = [];
+      let remoteAgentHistory: RemoteAgentQuotaSnapshot[] = [];
       const historyTasks: Promise<unknown>[] = [];
       if (wantLocal) {
         historyTasks.push(
@@ -130,12 +143,34 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
               })
         );
       }
+      if (wantLocal) {
+        historyTasks.push(
+          getAgentQuotaHistory(historyFromMs, nowMs)
+            .then((history) => (localAgentHistory = history))
+            .catch(() => {
+              // Agent 历史读取失败不应阻断原有 Z.ai 周额度对比。
+            })
+        );
+      }
+      if (wantRemote && syncConfig && snapshotOpts) {
+        historyTasks.push(
+          remoteAgentQuotaSnapshots(historyFromMs, nowMs, snapshotOpts)
+            .then((history) => (remoteAgentHistory = history))
+            .catch(() => {
+              // 汇总页保留本机快照；指定设备没有远端快照时仍显示其他可用数据。
+            })
+        );
+      }
       await Promise.all(historyTasks);
       if (reqId !== loadReqId.current) return;
 
       const snapshots = mergeQuotaSnapshots(
         localHistory,
         remoteHistory.map(toQuotaSnapshot)
+      );
+      setZaiQuotaSnapshots(snapshots);
+      setAgentQuotaSnapshots(
+        mergeAgentQuotaSnapshots(localAgentHistory, remoteAgentHistory)
       );
       const ps = await getWeeklyCompareForSnapshots(snapshots);
       if (reqId !== loadReqId.current) return; // 已有更新的请求，丢弃旧响应
@@ -304,18 +339,30 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
 
       {error && <div className="px-3 pt-2"><AlertBanner>{error}</AlertBanner></div>}
 
-      {periods.length === 0 && !loading && !error && (
+      {periods.length === 0 && zaiQuotaSnapshots.length === 0 && agentQuotaSnapshots.length === 0 && !loading && !error && (
         <EmptyState title={t("compare.emptyTitle")} hint={t("compare.emptyHint")} />
       )}
 
-      {periods.length > 0 && (
+      {(periods.length > 0 || zaiQuotaSnapshots.length > 0 || agentQuotaSnapshots.length > 0) && (
         <PageBody className="page-stack">
-          {/* 周额度百分比柱状图 */}
-          <PeriodChart
-            periods={periods}
-            selectedIdx={selectedIdx}
-            onSelect={setSelectedIdx}
+          <SubscriptionQuotaPanel
+            zaiSnapshots={zaiQuotaSnapshots}
+            agentSnapshots={agentQuotaSnapshots}
+            agentVisibility={agentVisibility}
           />
+          {periods.length === 0 && (
+            <div className="text-[9px] text-slate-700/50 px-1">
+              {t("compare.noZaiHistory")}
+            </div>
+          )}
+          {/* 周额度百分比柱状图 */}
+          {periods.length > 0 && (
+            <PeriodChart
+              periods={periods}
+              selectedIdx={selectedIdx}
+              onSelect={setSelectedIdx}
+            />
+          )}
 
           {/* 选中周期明细 */}
           {selectedIdx !== null && periods[selectedIdx] && (
@@ -326,45 +373,49 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
             />
           )}
 
-          <SectionCard title={t("compare.allPeriods")}>
-            <div className="space-y-0.5">
-              {periods
-                .slice()
-                .reverse()
-                .map((p, ri) => {
-                  const realIdx = periods.length - 1 - ri;
-                  const isSel = realIdx === selectedIdx;
-                  const tk = tokens[realIdx]?.total_tokens ?? 0;
-                  return (
-                    <button
-                      key={p.reset_at}
-                      onClick={() => setSelectedIdx(realIdx)}
-                      className={`w-full flex items-center justify-between text-xs py-1.5 px-2 -mx-2 rounded-lg transition-colors ${
-                        isSel
-                          ? "bg-sky-500/10"
-                          : "hover:bg-slate-900/5"
-                      }`}
-                    >
-                      <div className="flex items-center gap-1.5 min-w-0">
-                        <span className="font-medium text-slate-900/90">
-                          {dateLabel(p.reset_at)}
-                        </span>
-                        {p.is_current && (
-                          <span className="px-1 py-0 rounded text-[9px] font-semibold bg-sky-500/15 text-sky-700">
-                            {t("compare.thisWeek")}
+          {periods.length > 0 && (
+            <SectionCard title={t("compare.allPeriods")}>
+              <div className="space-y-0.5">
+                {periods
+                  .slice()
+                  .reverse()
+                  .map((p, ri) => {
+                    const realIdx = periods.length - 1 - ri;
+                    const isSel = realIdx === selectedIdx;
+                    const tk = tokens[realIdx]?.total_tokens ?? 0;
+                    return (
+                      <button
+                        key={p.reset_at}
+                        onClick={() => setSelectedIdx(realIdx)}
+                        className={`w-full flex items-center justify-between text-xs py-1.5 px-2 -mx-2 rounded-lg transition-colors ${
+                          isSel
+                            ? "bg-sky-500/10"
+                            : "hover:bg-slate-900/5"
+                        }`}
+                      >
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="font-medium text-slate-900/90">
+                            {dateLabel(p.reset_at)}
                           </span>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2 text-slate-700/60 num shrink-0">
-                        <span>{formatTokens(tk)}</span>
-                        <span className="text-slate-700/25">·</span>
-                        <span style={{ color: remainingTextColor(100 - p.pct_end) }}>{p.pct_end}%</span>
-                      </div>
-                    </button>
-                  );
-                })}
-            </div>
-          </SectionCard>
+                          {p.is_current && (
+                            <span className="px-1 py-0 rounded text-[9px] font-semibold bg-sky-500/15 text-sky-700">
+                              {t("compare.thisWeek")}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 text-slate-700/60 num shrink-0">
+                          <span>{formatTokens(tk)} {t("compare.tokenShort")}</span>
+                          <span className="text-slate-700/25">·</span>
+                          <span style={{ color: remainingTextColor(100 - p.pct_end) }}>
+                            {t("compare.endUsedShort", { pct: p.pct_end })}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+              </div>
+            </SectionCard>
+          )}
         </PageBody>
       )}
 
@@ -373,6 +424,217 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
       </div>
     </PageShell>
   );
+}
+
+interface SubscriptionQuotaWindow {
+  key: string;
+  usedPct: number;
+  resetAt: number | null;
+  sampledAt: number;
+}
+
+interface SubscriptionQuotaGroup {
+  agent: AgentId;
+  planType: string | null;
+  sampledAt: number;
+  windows: SubscriptionQuotaWindow[];
+}
+
+/** 所有可获取订阅的最新额度：百分比统一解释为“已用”，进度条显示“剩余”。 */
+function SubscriptionQuotaPanel({
+  zaiSnapshots,
+  agentSnapshots,
+  agentVisibility,
+}: {
+  zaiSnapshots: QuotaSnapshot[];
+  agentSnapshots: AgentQuotaSnapshot[];
+  agentVisibility: AgentVisibility;
+}) {
+  const { t } = useI18n();
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const groups = buildSubscriptionQuotaGroups(
+    zaiSnapshots,
+    agentSnapshots,
+    agentVisibility
+  );
+  if (groups.length === 0) return null;
+
+  return (
+    <SectionCard title={t("compare.subscriptionTitle")}>
+      <div className="text-[9px] text-slate-700/50 leading-relaxed mb-2">
+        {t("compare.subscriptionHint")}
+      </div>
+      <div className="space-y-2.5">
+        {groups.map((group) => (
+          <div key={group.agent}>
+            <div className="flex items-center gap-1.5">
+              <BrandIcon
+                brand={AGENT_META[group.agent].brand}
+                className="h-3.5 w-3.5"
+                style={{ color: AGENT_META[group.agent].color }}
+              />
+              <span className="text-[11px] font-semibold text-slate-900/85">
+                {AGENT_META[group.agent].label}
+              </span>
+              {group.planType && (
+                <span className="rounded bg-slate-900/6 px-1 py-0.5 text-[9px] text-slate-700/60 capitalize">
+                  {group.planType}
+                </span>
+              )}
+              {group.sampledAt > 0 && (
+                <span className="ml-auto text-[8px] text-slate-700/40 num">
+                  {t("compare.sampledAt", { time: timeLabel(group.sampledAt) })}
+                </span>
+              )}
+            </div>
+            {group.windows.length === 0 ? (
+              <div className="text-[9px] text-slate-700/45 mt-1.5">
+                {t("compare.noQuotaSnapshot")}
+              </div>
+            ) : (
+              <div className="space-y-1.5 mt-1.5">
+                {group.windows.map((window) => {
+                  const remaining = Math.max(0, 100 - window.usedPct);
+                  const showReset = window.resetAt != null && window.resetAt > now;
+                  return (
+                    <div key={`${group.agent}:${window.key}`}>
+                      <div className="flex items-center gap-1.5 mb-0.5">
+                        <span className="text-[9px] text-slate-600 w-12 shrink-0">
+                          {quotaWindowLabel(window.key, t)}
+                        </span>
+                        {showReset && (
+                          <span className="text-[8px] text-slate-400 num">
+                            ↻ {formatCountdownCore(window.resetAt! - now)}
+                          </span>
+                        )}
+                        <span
+                          className="ml-auto text-[9px] num font-semibold whitespace-nowrap"
+                          style={{ color: remainingTextColor(remaining) }}
+                        >
+                          {t("compare.quotaUsed", { pct: Math.round(window.usedPct) })}
+                          <span className="font-normal text-slate-700/45 ml-1">
+                            {t("common.remaining", { pct: Math.round(remaining) })}
+                          </span>
+                        </span>
+                      </div>
+                      <ProgressBar
+                        pct={remaining / 100}
+                        height="h-1.5"
+                        gradient={remainingGradient(remaining)}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </SectionCard>
+  );
+}
+
+function buildSubscriptionQuotaGroups(
+  zaiSnapshots: QuotaSnapshot[],
+  agentSnapshots: AgentQuotaSnapshot[],
+  agentVisibility: AgentVisibility
+): SubscriptionQuotaGroup[] {
+  const groups = new Map<AgentId, SubscriptionQuotaGroup>();
+  const ensureGroup = (agent: AgentId): SubscriptionQuotaGroup => {
+    const existing = groups.get(agent);
+    if (existing) return existing;
+    const created: SubscriptionQuotaGroup = {
+      agent,
+      planType: null,
+      sampledAt: 0,
+      windows: [],
+    };
+    groups.set(agent, created);
+    return created;
+  };
+
+  for (const agent of COMPARE_AGENTS) {
+    if (agentVisibility[agent]) ensureGroup(agent);
+  }
+
+  if (agentVisibility.zai) {
+    const sorted = zaiSnapshots
+      .filter((snapshot) => Number.isFinite(snapshot.ts))
+      .sort((a, b) => a.ts - b.ts);
+    const latest = sorted[sorted.length - 1];
+    if (latest) {
+      const group = ensureGroup("zai");
+      group.planType = latest.level || null;
+      group.sampledAt = latest.ts;
+      group.windows.push({
+        key: "weekly",
+        usedPct: latest.weekly_pct,
+        resetAt: latest.weekly_reset,
+        sampledAt: latest.ts,
+      });
+    }
+  }
+
+  for (const agent of COMPARE_AGENTS.filter((item) => item !== "zai")) {
+    if (!agentVisibility[agent]) continue;
+    const latestByWindow = new Map<string, SubscriptionQuotaWindow>();
+    let planType: string | null = null;
+    for (const snapshot of agentSnapshots) {
+      if (snapshot.source !== agent) continue;
+      for (const window of snapshot.windows) {
+        if (
+          !Number.isFinite(window.used_pct) ||
+          window.used_pct < 0 ||
+          window.used_pct > 100
+        ) continue;
+        const previous = latestByWindow.get(window.key);
+        if (!previous || snapshot.ts >= previous.sampledAt) {
+          latestByWindow.set(window.key, {
+            key: window.key,
+            usedPct: window.used_pct,
+            resetAt: window.reset_at,
+            sampledAt: snapshot.ts,
+          });
+        }
+        if (snapshot.plan_type) planType = snapshot.plan_type;
+      }
+    }
+    if (latestByWindow.size === 0) continue;
+    const group = ensureGroup(agent);
+    group.planType = planType;
+    group.sampledAt = Math.max(
+      ...[...latestByWindow.values()].map((window) => window.sampledAt)
+    );
+    group.windows = [...latestByWindow.values()].sort((a, b) =>
+      quotaWindowOrder(agent, a.key) - quotaWindowOrder(agent, b.key)
+    );
+  }
+
+  return COMPARE_AGENTS.map((agent) => groups.get(agent)).filter(
+    (group): group is SubscriptionQuotaGroup => !!group
+  );
+}
+
+function quotaWindowOrder(agent: AgentId, key: string): number {
+  if (agent === "cursor") return key === "cursor_auto" ? 0 : 1;
+  return key === "hour5" ? 0 : 1;
+}
+
+function quotaWindowLabel(
+  key: string,
+  t: ReturnType<typeof useI18n>["t"]
+): string {
+  if (key === "hour5") return t("common.hour5");
+  if (key === "weekly") return t("common.weekly");
+  if (key === "cursor_auto") return t("compare.cursorAuto");
+  if (key === "cursor_api") return t("compare.cursorApi");
+  return key;
 }
 
 /** 周期柱状图：每根柱=一个周期，高度=周期结束时的已用百分比 */
@@ -391,7 +653,15 @@ function PeriodChart({
 
   return (
     <div className="card-base rounded-2xl px-2.5 py-2">
-      <div className="section-title mb-2">{t("compare.chartTitle")}</div>
+      <div className="flex items-center justify-between gap-2 mb-1">
+        <div className="section-title">{t("compare.chartTitle")}</div>
+        <span className="text-[9px] text-slate-700/45 shrink-0">
+          {t("compare.percentUnit")}
+        </span>
+      </div>
+      <div className="text-[9px] text-slate-700/50 leading-relaxed mb-2">
+        {t("compare.chartHint")}
+      </div>
       <div className={`flex items-end ${barGap} h-16`}>
         {periods.map((p, i) => {
           const h = p.pct_end; // 0-100，避免峰值把历史周期夸大
@@ -458,12 +728,23 @@ function PeriodDetail({
     ),
   })).filter((item) => (item.bucket?.total_tokens ?? 0) > 0);
 
+  const endLabel = period.is_current
+    ? t("compare.currentUsed", { pct: period.pct_end })
+    : t("compare.periodEndUsed", { pct: period.pct_end });
+
   return (
     <SectionCard>
       {/* 标题行 */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-1.5">
+          <BrandIcon
+            brand="zai"
+            className="h-3.5 w-3.5 text-sky-600"
+          />
           <span className="text-[11px] font-semibold text-slate-900/90">
+            {t("compare.zaiWeeklyQuota")}
+          </span>
+          <span className="rounded bg-sky-500/10 px-1 py-0.5 text-[9px] text-sky-700/70">
             {dateLabel(period.reset_at)}
             {period.is_current
               ? ` ${t("compare.ongoing")}`
@@ -474,8 +755,32 @@ function PeriodDetail({
           className="text-[11px] num font-semibold"
           style={{ color: remainingTextColor(100 - period.pct_end) }}
         >
-          {t("compare.used", { pct: period.pct_end })}
+          {endLabel}
         </span>
+      </div>
+
+      <div className="text-[9px] text-slate-700/50 mt-1">
+        {t("compare.periodPercentHint")}
+      </div>
+
+      <div className="grid grid-cols-3 gap-1.5 mt-2">
+        {[
+          [t("compare.startUsed"), period.pct_start],
+          [t("compare.peakUsed"), period.pct_peak],
+          [
+            period.is_current
+              ? t("compare.currentUsedLabel")
+              : t("compare.periodEndUsedLabel"),
+            period.pct_end,
+          ],
+        ].map(([label, value]) => (
+          <div key={label} className="rounded-md bg-slate-900/4 px-1.5 py-1">
+            <div className="text-[9px] text-slate-700/50 truncate">{label}</div>
+            <div className="num text-[12px] font-semibold text-slate-900/80 mt-0.5">
+              {value}%
+            </div>
+          </div>
+        ))}
       </div>
 
       {/* token 统计 */}
@@ -522,11 +827,7 @@ function PeriodDetail({
       <div>
         <div className="flex items-center justify-between text-[10px] mb-0.5">
           <span className="text-slate-700/55">
-            {t("compare.peakLine", {
-              start: period.pct_start,
-              end: period.pct_end,
-              peak: period.pct_peak,
-            })}
+            {t("compare.progressLabel")}
           </span>
           <span className={`num ${sampleLow ? "text-amber-600/80" : "text-slate-700/45"}`}>
             {t("compare.samples", { count: period.sample_count })}
@@ -633,4 +934,12 @@ function dateLabel(ms: number): string {
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   const dd = String(d.getDate()).padStart(2, "0");
   return `${mm}-${dd}`;
+}
+
+/** 毫秒 → "MM-DD HH:mm" label */
+function timeLabel(ms: number): string {
+  const d = new Date(ms);
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${dateLabel(ms)} ${hh}:${mm}`;
 }
