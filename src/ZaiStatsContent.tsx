@@ -58,7 +58,7 @@ export function ZaiStatsContent({
         badge={
           cacheRate > 0 ? (
             <StatusBadge color="emerald">
-              Cache {formatPct(cacheRate)}
+              缓存命中 {formatPct(cacheRate)}
             </StatusBadge>
           ) : undefined
         }

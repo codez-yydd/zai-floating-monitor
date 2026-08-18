@@ -125,7 +125,7 @@ function AgentCostCard({
               className="text-[9px] font-medium mt-0.5"
               style={{ color: agent.color }}
             >
-              Cache hit {Math.round(agent.cacheHitPct)}%
+              缓存命中 {Math.round(agent.cacheHitPct)}%
             </div>
           )}
         </div>
