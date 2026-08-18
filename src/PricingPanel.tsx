@@ -15,6 +15,18 @@ import {
   getCursorConfig,
   savePricing,
 } from "./api";
+import {
+  PageShell,
+  PageHeader,
+  PageBody,
+  SectionCard,
+  PillGroup,
+  PillButton,
+  BtnPrimary,
+  BtnSecondary,
+  AlertBanner,
+  LoadingState,
+} from "./layout";
 
 interface Props {
   currency: Currency;
@@ -245,104 +257,63 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
   );
 
   if (!pricing) {
-    return (
-      <div className="flex items-center justify-center h-full text-xs text-slate-700/55">
-        加载中…
-      </div>
-    );
+    return <LoadingState text="加载价格配置…" />;
   }
 
   return (
-    // 整页单一滚动：配置区 + 模型列表一起滚，避免配置区撑爆固定高度后下方被截断
-    <div className="h-full overflow-y-auto">
-      {/* 顶部 */}
-      <div className="px-3.5 py-2.5 border-b border-slate-900/10">
-        <div className="flex items-center justify-between mb-2">
-          <button
-            onClick={onBack}
-            className="text-xs text-slate-700/60 hover:text-sky-600 transition-colors"
-          >
-            ← 返回
-          </button>
-          <h1 className="text-[13px] font-semibold text-slate-900/90">价格设置</h1>
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="text-xs px-2.5 py-0.5 rounded-md bg-sky-500 text-white hover:bg-sky-600 disabled:opacity-40 transition-colors"
-          >
+    <PageShell>
+      <PageHeader
+        title="价格设置"
+        onBack={onBack}
+        right={
+          <BtnPrimary onClick={handleSave} disabled={saving}>
             {saving ? "保存中…" : savedFlash ? "已保存 ✓" : "保存"}
-          </button>
-        </div>
-        {/* 货币切换：仅切换全局显示货币（各统计页联动）；本页表单恒定为美元编辑 */}
-        <div className="flex gap-1">
-          {(["cny", "usd"] as Currency[]).map((c) => (
-            <button
-              key={c}
-              onClick={() => {
-                onCurrencyChange(c);
-                setDraft({});
-              }}
-              className={`px-2 py-0.5 rounded-md text-[11px] transition-colors ${
-                currency === c
-                  ? "bg-sky-500 text-white"
-                  : "bg-slate-900/5 text-slate-700/65 hover:bg-slate-900/10 hover:text-slate-900/80"
-              }`}
-            >
-              {c === "cny" ? "¥ 人民币" : "$ 美元"}
-            </button>
-          ))}
-        </div>
-        <p className="text-[10px] text-slate-700/50 mt-1.5">
-          单位：$/百万 token，只填需要计费的模型即可。人民币花费按美元 × 汇率
-          <span className="num"> {fxRate} </span>
-          自动折算，无需单独维护。
-        </p>
-
-        {/* ===== 价格同步（内置参考表差异提示，不自动覆盖）===== */}
-        <div className="mt-2 flex items-center justify-between">
-          <button
-            onClick={runDiff}
-            title="与内置参考表对比差异（价格对比本身不联网；如启用了多设备同步，可能顺带刷新其他设备的模型清单）"
-            className="relative text-[11px] px-2 py-0.5 rounded-md bg-slate-900/5 text-slate-700/70 hover:bg-slate-900/10 hover:text-slate-900/90 transition-colors"
-          >
-            🔄 检查价格更新
-            {updateCount > 0 && (
-              <span className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-1 flex items-center justify-center rounded-full bg-rose-500 text-white text-[9px] leading-none">
-                {updateCount}
-              </span>
-            )}
-          </button>
-          {diff && updateCount === 0 && !diffPanel && (
-            <span
-              className={`text-[10px] ${
-                diff.missing.length > 0
-                  ? "text-amber-600/90"
-                  : "text-emerald-600/80"
-              }`}
-            >
-              {diff.missing.length > 0
-                ? `${diff.missing.length} 个模型未配价`
-                : "已是最新 ✓"}
-            </span>
-          )}
-        </div>
-
-        {/* 差异面板：展开时显示可勾选的新增/变动项 */}
-        {diffPanel && diff && (
-          <div className="mt-2 rounded-lg bg-slate-900/5 border border-slate-900/10 p-2.5">
-            <div className="flex items-center justify-between mb-1.5">
-              <div className="text-[11px] font-medium text-slate-900/85">
-                价格更新
-                <span className="ml-1.5 px-1 py-0 rounded text-[8px] font-medium bg-slate-900/10 text-slate-700/60">
-                  内置参考表{diff.version ? ` v${diff.version}` : ""}
+          </BtnPrimary>
+        }
+        subtitle={
+          <>
+            <PillGroup className="mt-0">
+              {(["cny", "usd"] as Currency[]).map((c) => (
+                <PillButton
+                  key={c}
+                  active={currency === c}
+                  onClick={() => { onCurrencyChange(c); setDraft({}); }}
+                >
+                  {c === "cny" ? "¥ 人民币" : "$ 美元"}
+                </PillButton>
+              ))}
+            </PillGroup>
+            <p className="text-[10px] text-slate-500 mt-1.5">
+              单位：$/百万 token。人民币按汇率
+              <span className="num"> {fxRate} </span>
+              自动折算。
+            </p>
+            <div className="mt-2 flex items-center justify-between">
+              <BtnSecondary onClick={runDiff} className="relative">
+                检查价格更新
+                {updateCount > 0 && (
+                  <span className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-1 flex items-center justify-center rounded-full bg-rose-500 text-white text-[9px] leading-none">
+                    {updateCount}
+                  </span>
+                )}
+              </BtnSecondary>
+              {diff && updateCount === 0 && !diffPanel && (
+                <span className={`text-[10px] ${diff.missing.length > 0 ? "text-amber-600" : "text-emerald-600"}`}>
+                  {diff.missing.length > 0 ? `${diff.missing.length} 个模型未配价` : "已是最新 ✓"}
                 </span>
-              </div>
+              )}
             </div>
-            <p className="text-[9px] text-slate-700/50 mb-2 leading-relaxed">
-              参考价取自内置参考表（定价数据源自 cc-switch
-              开源项目的成本定价模块，离线对比不联网）。带 ≈ 标记的是变体名匹配的基础模型参考价（如
-              gpt-5.6-sol ≈ gpt-5），应用前请确认。勾选后点「应用选中」写入美元价（人民币按汇率自动折算）；新增项默认勾选，变动项默认不勾（保护你的自定义）。价格三项依次为
-              输入/输出/缓存（每百万 token）。
+          </>
+        }
+      />
+
+      <PageBody className="page-stack">
+        {error && <AlertBanner>{error}</AlertBanner>}
+
+        {diffPanel && diff && (
+          <SectionCard title={`价格更新 · 内置参考表${diff.version ? ` v${diff.version}` : ""}`}>
+            <p className="text-[9px] text-slate-500 mb-2 leading-relaxed">
+              参考价离线对比不联网。带 ≈ 标记的是变体名匹配的基础模型参考价，应用前请确认。
             </p>
             {/* 无价格模型警示：实际在用但两边都没价格，花费按 0 计 */}
             {diff.missing.length > 0 && (
@@ -452,55 +423,33 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
               )}
             </div>
             <div className="flex items-center justify-between mt-2">
-              <button
-                onClick={() => setDiffPanel(false)}
-                className="text-[10px] text-slate-700/50 hover:text-slate-900/70 transition-colors"
-              >
-                收起
-              </button>
-              <button
-                onClick={handleApplyUpdates}
-                disabled={applying || selected.size === 0}
-                className="text-[10px] px-2 py-0.5 rounded-md bg-sky-500 text-white hover:bg-sky-600 disabled:opacity-40 transition-colors"
-              >
-                {applying
-                  ? "应用中…"
-                  : `应用选中${selected.size > 0 ? ` (${selected.size})` : ""}`}
-              </button>
+              <BtnSecondary onClick={() => setDiffPanel(false)}>收起</BtnSecondary>
+              <BtnPrimary onClick={handleApplyUpdates} disabled={applying || selected.size === 0}>
+                {applying ? "应用中…" : `应用选中${selected.size > 0 ? ` (${selected.size})` : ""}`}
+              </BtnPrimary>
             </div>
+          </SectionCard>
+        )}
+
+        {modelIds.map((id) => (
+          <ModelPriceRow
+            key={id}
+            id={id}
+            price={pricing.usd[id] ?? ZERO_PRICE}
+            dIn={draft[`${id}|input`]}
+            dOut={draft[`${id}|output`]}
+            dCache={draft[`${id}|cache_read`]}
+            onDraftChange={handleDraftChange}
+            onCommit={commitDraft}
+          />
+        ))}
+        {modelIds.length === 0 && (
+          <div className="text-center text-xs text-slate-500 py-8">
+            暂无模型数据。请确认 ZCode 已产生使用记录。
           </div>
         )}
-      </div>
-
-      {error && (
-        <div className="mx-3 mt-2 px-2.5 py-1.5 rounded-lg bg-red-500/15 text-red-700 text-xs">
-          {error}
-        </div>
-      )}
-
-      {/* 模型列表 */}
-      <div className="px-3.5 py-2.5">
-        <div className="space-y-2">
-          {modelIds.map((id) => (
-            <ModelPriceRow
-              key={id}
-              id={id}
-              price={pricing.usd[id] ?? ZERO_PRICE}
-              dIn={draft[`${id}|input`]}
-              dOut={draft[`${id}|output`]}
-              dCache={draft[`${id}|cache_read`]}
-              onDraftChange={handleDraftChange}
-              onCommit={commitDraft}
-            />
-          ))}
-          {modelIds.length === 0 && (
-            <div className="text-center text-xs text-slate-700/50 py-8">
-              暂无模型数据。请确认 ZCode 已产生使用记录。
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
+      </PageBody>
+    </PageShell>
   );
 }
 
@@ -529,7 +478,7 @@ const ModelPriceRow = memo(function ModelPriceRow({
     cache_read: dCache,
   };
   return (
-    <div className="rounded-lg bg-slate-900/5 border border-slate-900/10 p-2.5">
+    <div className="card-base rounded-2xl p-3">
       <div className="text-xs font-medium text-slate-900/90 mb-2">{id}</div>
       <div className="grid grid-cols-3 gap-1.5">
         {FIELDS.map((f) => {

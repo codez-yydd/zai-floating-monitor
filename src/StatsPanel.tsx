@@ -15,6 +15,7 @@ import {
   AGENT_VISIBILITY_OPTIONS,
   type AgentVisibility,
 } from "./agentVisibility";
+import { ThemeToggle } from "./layout";
 
 interface Props {
   currency: Currency;
@@ -143,10 +144,10 @@ export function StatsPanel({
   return (
     <div className="flex flex-col h-full">
       {/* 顶部 */}
-      <div className="px-3.5 pt-3 pb-2.5 border-b border-slate-900/10">
+      <div className="px-3 pt-2.5 pb-2 border-b border-slate-900/8">
         {/* Windows 无边框窗口拖动 */}
         <div
-          className={`flex items-center justify-between mb-2.5 ${
+          className={`flex items-center justify-between mb-2 ${
             isWindows ? "cursor-default" : ""
           }`}
           onMouseDown={
@@ -159,38 +160,42 @@ export function StatsPanel({
               : undefined
           }
         >
-          <h1 className="text-[13px] font-semibold text-slate-900/90 select-none">
-            ZCode Token
-          </h1>
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-1.5 select-none">
+            <span className="text-sky-600">
+              <BrandIcon brand="zai" className="h-4 w-4" />
+            </span>
+            <h1 className="text-[13px] font-bold text-slate-900/90 tracking-tight">
+              ZCode Token
+            </h1>
+          </div>
+          <div className="flex items-center gap-0.5">
             <button
               onClick={onGoCompare}
-              className="text-xs text-slate-700/40 hover:text-slate-900/70 transition-colors"
+              className="toolbar-btn"
               title="周额度对比"
             >
               📊
             </button>
             <button
               onClick={onGoReport}
-              className="text-xs text-slate-700/40 hover:text-slate-900/70 transition-colors"
+              className="toolbar-btn"
               title="用量报告"
             >
               📄
             </button>
             <button
               onClick={onGoSync}
-              className={`text-xs transition-colors ${
-                syncEnabled
-                  ? "text-emerald-600 hover:text-emerald-700"
-                  : "text-slate-700/40 hover:text-slate-900/70"
+              className={`toolbar-btn ${
+                syncEnabled ? "text-emerald-600!" : ""
               }`}
               title={syncEnabled ? "设备同步" : "配置设备同步"}
             >
               ⇅
             </button>
+            <ThemeToggle />
             <button
               onClick={onGoSettings}
-              className="text-xs text-slate-700/40 hover:text-slate-900/70 transition-colors"
+              className="toolbar-btn"
               title="设置"
             >
               ⚙
@@ -202,11 +207,7 @@ export function StatsPanel({
                   setPinned(next);
                   setPin(next).catch(() => setPinned(!next));
                 }}
-                className={`text-xs transition-colors ${
-                  pinned
-                    ? "text-sky-600 hover:text-sky-700"
-                    : "text-slate-700/40 hover:text-slate-900/70"
-                }`}
+                className={`toolbar-btn ${pinned ? "text-sky-600!" : ""}`}
                 title={pinned ? "取消常驻" : "常驻置顶"}
               >
                 📌
@@ -215,7 +216,7 @@ export function StatsPanel({
             <button
               onClick={refresh}
               disabled={refreshing}
-              className="text-slate-700/50 hover:text-slate-900/80 text-xs transition-colors"
+              className={`toolbar-btn ${refreshing ? "opacity-40" : ""}`}
               title="刷新"
             >
               ↻
@@ -254,30 +255,29 @@ export function StatsPanel({
           </div>
         )}
         <div
-          className={`${syncEnabled ? "mt-1.5" : "mt-2"} min-w-0 overflow-x-auto rounded-lg bg-slate-900/5`}
+          className={`${syncEnabled ? "mt-1.5" : "mt-2"} min-w-0 overflow-x-auto`}
           aria-label="统计来源"
         >
-          <div className="flex w-max min-w-full gap-0.5 p-0.5">
+          <div className="flex w-max min-w-full gap-1 p-0.5 rounded-xl bg-slate-900/4">
             {visibleTabs.map((item) => {
               const t = item.id;
+              const activeColors: Record<string, string> = {
+                cursor: "bg-violet-500/12 text-violet-700 shadow-sm",
+                claude: "bg-orange-500/12 text-orange-700 shadow-sm",
+                codex: "bg-emerald-500/12 text-emerald-700 shadow-sm",
+                zai: "bg-sky-500/12 text-sky-700 shadow-sm",
+                summary: "bg-sky-500/15 text-sky-700 shadow-sm",
+              };
               return (
                 <button
                   key={t}
                   onClick={() => setTab(t)}
                   type="button"
                   aria-pressed={tab === t}
-                  className={`flex shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-md px-2 py-1 text-[10px] font-medium transition-colors ${
+                  className={`flex shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-lg px-2.5 py-1 text-[10px] font-medium transition-all duration-150 ${
                     tab === t
-                      ? t === "cursor"
-                        ? "bg-surface text-violet-700 shadow-sm"
-                        : t === "claude"
-                          ? "bg-surface text-orange-700 shadow-sm"
-                          : t === "codex"
-                            ? "bg-surface text-emerald-700 shadow-sm"
-                            : t === "zai"
-                              ? "bg-surface text-sky-700 shadow-sm"
-                              : "bg-surface text-slate-900 shadow-sm"
-                      : "text-slate-700/50 hover:text-slate-900/70"
+                      ? activeColors[t] ?? "bg-surface text-slate-900 shadow-sm"
+                      : "text-slate-600/60 hover:text-slate-800 hover:bg-slate-900/4"
                   }`}
                 >
                   {item.brand && (
@@ -357,7 +357,7 @@ export function StatsPanel({
       )}
 
       {/* 底部 */}
-      <div className="px-3.5 py-2 border-t border-slate-900/10 flex items-center justify-between text-[10px] text-slate-700/50">
+      <div className="px-3 py-1.5 border-t border-slate-900/8 flex items-center justify-between text-[10px] text-slate-600/50">
         <span className="num">
           {lastUpdate
             ? new Date(lastUpdate).toLocaleTimeString("zh-CN", {
@@ -368,7 +368,7 @@ export function StatsPanel({
         </span>
         <button
           onClick={onGoPricing}
-          className="hover:text-sky-600 transition-colors"
+          className="hover:text-sky-600 transition-colors font-medium"
         >
           价格设置
         </button>

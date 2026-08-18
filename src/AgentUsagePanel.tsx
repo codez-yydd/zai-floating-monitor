@@ -10,6 +10,14 @@ import {
   remainingGradient,
   remainingTextColor,
 } from "./widgets";
+import {
+  HeroMetric,
+  MetricPair,
+  SectionCard,
+  SortToggle,
+  EmptyState,
+  LoadingState,
+} from "./layout";
 
 /** 通用快照形状：Codex / Claude 的快照结构一致（stats/trend 同构 +
  *  同款五字段速率限制），TS 结构化类型直接兼容。 */
@@ -29,10 +37,12 @@ export interface AgentUsageSnapshot {
 export interface AgentPanelTheme {
   /** 模型排行行底条 */
   rowBar: string;
-  /** 排序按钮选中态 */
+  /** 排序按钮选中态（保留兼容，SortToggle 用 accent） */
   sortSelected: string;
   /** 套餐徽标 */
   badge: string;
+  /** 英雄卡 accent */
+  accent: "sky" | "emerald" | "orange" | "violet";
 }
 
 /** 无数据空态文案（未安装对应 CLI 时展示） */
@@ -129,30 +139,21 @@ export function AgentUsagePanel({
 
   // 加载中 & 无数据
   if (loading && !snapshot) {
-    return (
-      <div className="flex-1 flex items-center justify-center text-xs text-slate-700/40">
-        加载{empty.title.replace("未检测到 ", "")}用量…
-      </div>
-    );
+    return <LoadingState text={`加载${empty.title.replace("未检测到 ", "")}用量…`} />;
   }
 
   // 未安装 / 无会话目录 / 其他错误且无数据
   if (!snapshot) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center px-6 text-center gap-2">
-        <div className="text-2xl opacity-40">{empty.icon}</div>
-        <div className="text-xs text-slate-700/60 font-medium">
-          {empty.title}
-        </div>
-        <div className="text-[10px] text-slate-700/40 leading-relaxed whitespace-pre-line">
-          {empty.hint}
-        </div>
-        {error && (
-          <div className="text-[10px] text-red-600/70 mt-1 leading-relaxed">
-            {error}
-          </div>
-        )}
-      </div>
+      <EmptyState
+        title={empty.title}
+        hint={empty.hint}
+        action={
+          error ? (
+            <div className="text-[10px] text-red-600/70 mt-1">{error}</div>
+          ) : undefined
+        }
+      />
     );
   }
 
@@ -184,62 +185,42 @@ export function AgentUsagePanel({
   const hasRateRow = rate && (rate.primary_pct != null || rate.secondary_pct != null);
 
   return (
-    <div className="flex-1 overflow-y-auto px-3.5 py-3 space-y-3">
-      {/* 速率限制：5 小时窗口 + 周窗口（额度来自订阅账号，不随时间范围变化） */}
+    <div className="flex-1 overflow-y-auto px-3 py-2.5 page-stack">
+      {/* 速率限制 */}
       {hasRateRow && rate && (
-        <div className="rounded-lg bg-surface/25 border border-surface/30 px-2.5 py-2 space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] uppercase tracking-wide text-slate-700/55">
-              额度
-            </span>
-            {rate.plan_type && (
-              <span
-                className={`shrink-0 px-1.5 py-0.5 rounded text-[9px] font-medium capitalize ${theme.badge}`}
-              >
+        <SectionCard
+          title="额度"
+          action={
+            rate.plan_type ? (
+              <span className={`shrink-0 px-1.5 py-0.5 rounded text-[9px] font-medium capitalize ${theme.badge}`}>
                 {rate.plan_type}
               </span>
+            ) : undefined
+          }
+        >
+          <div className="space-y-2">
+            {rate.primary_pct != null && (
+              <AgentQuotaRow label="5小时" usedPct={rate.primary_pct} resetAt={rate.primary_reset_at} now={now} />
+            )}
+            {rate.secondary_pct != null && (
+              <AgentQuotaRow label="本周" usedPct={rate.secondary_pct} resetAt={rate.secondary_reset_at} now={now} />
             )}
           </div>
-          {rate.primary_pct != null && (
-            <AgentQuotaRow
-              label="5小时"
-              usedPct={rate.primary_pct}
-              resetAt={rate.primary_reset_at}
-              now={now}
-            />
-          )}
-          {rate.secondary_pct != null && (
-            <AgentQuotaRow
-              label="本周"
-              usedPct={rate.secondary_pct}
-              resetAt={rate.secondary_reset_at}
-              now={now}
-            />
-          )}
-        </div>
+        </SectionCard>
       )}
 
-      {/* 总览：花费为主，token 次之（Z.ai 页同款） */}
-      <div className="flex items-end justify-between">
-        <div>
-          <div className="text-[10px] uppercase tracking-wide text-slate-700/55">
-            总花费
-          </div>
-          <div className="num text-[26px] font-bold text-slate-900 leading-none mt-0.5">
-            {formatCost(totalCost, currency)}
-          </div>
-        </div>
-        <div className="text-right">
-          <div className="text-[10px] uppercase tracking-wide text-slate-700/55">
-            总 Token
-          </div>
-          <div className="num text-[15px] font-semibold text-slate-900/70 leading-none mt-1">
-            {formatTokens(stats.overall.total_tokens)}
-          </div>
-        </div>
-      </div>
+      <HeroMetric
+        label="总花费"
+        value={formatCost(totalCost, currency)}
+        accent={theme.accent}
+        footer={
+          <MetricPair
+            left={{ label: "总 Token", value: formatTokens(stats.overall.total_tokens) }}
+            right={{ label: "缓存率", value: formatPct(cacheRate) }}
+          />
+        }
+      />
 
-      {/* 趋势图（粒度跟随所选时间范围） */}
       {snapshot.trend.length > 0 && (
         <TrendChart
           points={snapshot.trend}
@@ -250,154 +231,63 @@ export function AgentUsagePanel({
         />
       )}
 
-      {/* 三个指标 */}
       <div className="grid grid-cols-3 gap-1.5">
         <Metric label="请求" value={String(stats.overall.requests)} />
-        <Metric
-          label="缓存率"
-          value={formatPct(cacheRate)}
-          accent="text-emerald-600"
-        />
+        <Metric label="缓存率" value={formatPct(cacheRate)} accent="text-emerald-600" />
         <Metric label="输出" value={formatTokens(stats.overall.output_tokens)} />
       </div>
 
-      {/* 明细条 */}
-      <div className="space-y-1.5 pt-1">
-        <DetailRow
-          label="输入"
-          value={formatTokens(stats.overall.input_tokens)}
-          pct={
-            stats.overall.total_tokens > 0
-              ? stats.overall.input_tokens / stats.overall.total_tokens
-              : 0
-          }
-          color="bg-sky-500"
-        />
-        <DetailRow
-          label="缓存"
-          value={formatTokens(stats.overall.cache_read_tokens)}
-          pct={cacheRate}
-          color="bg-emerald-500"
-        />
-        <DetailRow
-          label="输出"
-          value={formatTokens(stats.overall.output_tokens)}
-          pct={
-            stats.overall.total_tokens > 0
-              ? stats.overall.output_tokens / stats.overall.total_tokens
-              : 0
-          }
-          color="bg-violet-500"
-        />
-        {stats.overall.reasoning_tokens > 0 && (
-          <DetailRow
-            label="推理"
-            value={formatTokens(stats.overall.reasoning_tokens)}
-            pct={
-              stats.overall.total_tokens > 0
-                ? stats.overall.reasoning_tokens / stats.overall.total_tokens
-                : 0
-            }
-            color="bg-amber-500"
-          />
-        )}
-      </div>
+      <SectionCard title="Token 构成">
+        <div className="space-y-1.5">
+          <DetailRow label="输入" value={formatTokens(stats.overall.input_tokens)} pct={stats.overall.total_tokens > 0 ? stats.overall.input_tokens / stats.overall.total_tokens : 0} color="bg-sky-500" />
+          <DetailRow label="缓存" value={formatTokens(stats.overall.cache_read_tokens)} pct={cacheRate} color="bg-emerald-500" />
+          <DetailRow label="输出" value={formatTokens(stats.overall.output_tokens)} pct={stats.overall.total_tokens > 0 ? stats.overall.output_tokens / stats.overall.total_tokens : 0} color="bg-violet-500" />
+          {stats.overall.reasoning_tokens > 0 && (
+            <DetailRow label="推理" value={formatTokens(stats.overall.reasoning_tokens)} pct={stats.overall.total_tokens > 0 ? stats.overall.reasoning_tokens / stats.overall.total_tokens : 0} color="bg-amber-500" />
+          )}
+        </div>
+      </SectionCard>
 
-      {/* 按模型排行（花费按价格表前端自算，与 Z.ai 页同款判断） */}
       {stats.by_model.length > 0 && (
-        <div>
-          <div className="flex items-center justify-between mb-1.5 mt-1">
-            <span className="text-[10px] uppercase tracking-wide text-slate-700/55">
-              按模型
-            </span>
-            <div className="flex gap-0.5 text-[10px]">
-              {(["cost", "token", "requests"] as const).map((s) => (
-                <button
-                  key={s}
-                  onClick={() => setSortBy(s)}
-                  className={`px-1.5 py-0.5 rounded transition-colors ${
-                    sortBy === s
-                      ? theme.sortSelected
-                      : "text-slate-700/45 hover:text-slate-900/70"
-                  }`}
-                >
-                  {s === "cost" ? "花费" : s === "token" ? "Token" : "请求"}
-                </button>
-              ))}
-            </div>
-          </div>
+        <SectionCard
+          title="模型用量"
+          action={
+            <SortToggle
+              options={[
+                { key: "cost", label: "花费" },
+                { key: "token", label: "Token" },
+                { key: "requests", label: "请求" },
+              ]}
+              value={sortBy}
+              onChange={setSortBy}
+              accent={theme.accent}
+            />
+          }
+        >
           <div className="space-y-1">
             {(() => {
               const rows = stats.by_model.map((m) => {
-                // 配价判断与货币无关（只存美元价）；人民币花费 = 美元 × 汇率折算
                 const price = pricing.usd[m.model_id];
-                const hasPrice = Boolean(
-                  price && (price.input > 0 || price.output > 0)
-                );
-                const costVal = modelCost(
-                  m.model_id,
-                  m.input_tokens,
-                  m.output_tokens,
-                  m.cache_read_tokens,
-                  pricing,
-                  currency,
-                  fxRate
-                );
-                return {
-                  m,
-                  hasPrice,
-                  costVal,
-                  sortVal:
-                    sortBy === "cost"
-                      ? costVal
-                      : sortBy === "token"
-                        ? m.total_tokens
-                        : m.requests,
-                };
+                const hasPrice = Boolean(price && (price.input > 0 || price.output > 0));
+                const costVal = modelCost(m.model_id, m.input_tokens, m.output_tokens, m.cache_read_tokens, pricing, currency, fxRate);
+                return { m, hasPrice, costVal, sortVal: sortBy === "cost" ? costVal : sortBy === "token" ? m.total_tokens : m.requests };
               });
               rows.sort((a, b) => b.sortVal - a.sortVal);
               const maxVal = rows.length ? rows[0].sortVal : 0;
-
               return rows.map(({ m, hasPrice, costVal, sortVal }) => {
-                const pct =
-                  maxVal > 0 ? Math.max(sortVal / maxVal, 0.02) : 0;
+                const pct = maxVal > 0 ? Math.max(sortVal / maxVal, 0.02) : 0;
                 return (
-                  <div
-                    key={m.provider_id + m.model_id}
-                    className="relative rounded-lg hover:bg-slate-900/5 transition-colors py-1.5 px-2 -mx-2 overflow-hidden"
-                  >
-                    <div
-                      className={`absolute inset-y-0 left-0 rounded-lg pointer-events-none ${theme.rowBar}`}
-                      style={{ width: `${pct * 100}%` }}
-                    />
-                    <div className="relative flex items-center justify-between text-xs">
-                      <div className="flex items-center gap-1.5 min-w-0">
-                        <span className="font-medium text-slate-900/90 truncate">
-                          {m.model_id}
-                        </span>
-                        {!hasPrice && (
-                          <span
-                            className="text-[10px] text-amber-600/90"
-                            title="未配置价格"
-                          >
-                            ⚠
-                          </span>
-                        )}
+                  <div key={m.provider_id + m.model_id} className="relative rounded-lg hover:bg-slate-900/4 transition-colors py-1.5 px-1.5 overflow-hidden">
+                    <div className={`absolute inset-y-0 left-0 rounded-lg pointer-events-none ${theme.rowBar}`} style={{ width: `${pct * 100}%` }} />
+                    <div className="relative flex items-center justify-between text-xs min-w-0">
+                      <div className="flex items-center gap-1 min-w-0 flex-1">
+                        <span className="font-medium text-slate-900/90 truncate text-[11px]">{m.model_id}</span>
+                        {!hasPrice && <span className="text-[10px] text-amber-600/90 shrink-0" title="未配置价格">⚠</span>}
                       </div>
-                      <div className="flex items-center gap-2 text-slate-700/60 num shrink-0">
-                        <span>{m.requests}</span>
-                        <span className="text-slate-700/25">·</span>
+                      <div className="flex items-center gap-1 text-slate-600/70 num shrink-0 text-[10px]">
                         <span>{formatTokens(m.total_tokens)}</span>
-                        <span
-                          className={`w-12 text-right ${
-                            hasPrice
-                              ? "text-slate-900/90"
-                              : "text-slate-700/35"
-                          }`}
-                        >
-                          {hasPrice
-                            ? formatCost(costVal, currency)
-                            : "—"}
+                        <span className={`min-w-[2.5rem] text-right font-medium ${hasPrice ? "text-slate-900/90" : "text-slate-500/50"}`}>
+                          {hasPrice ? formatCost(costVal, currency) : "—"}
                         </span>
                       </div>
                     </div>
@@ -406,7 +296,7 @@ export function AgentUsagePanel({
               });
             })()}
           </div>
-        </div>
+        </SectionCard>
       )}
     </div>
   );

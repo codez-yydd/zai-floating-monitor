@@ -23,14 +23,19 @@ import {
 } from "@tauri-apps/plugin-autostart";
 import {
   applyPanelAlpha,
-  applyTheme,
   loadPanelAlpha,
-  loadTheme,
   persistPanelAlpha,
-  persistTheme,
 } from "./appearance";
-import type { Theme } from "./appearance";
 import { BrandIcon } from "./BrandIcon";
+import {
+  PageShell,
+  PageHeader,
+  PageBody,
+  SettingsCard,
+  BtnPrimary,
+  BtnSecondary,
+  AlertBanner,
+} from "./layout";
 import {
   AGENT_VISIBILITY_OPTIONS,
   type AgentId,
@@ -51,7 +56,7 @@ function fmtFxTime(ms: number): string {
 }
 
 /**
- * 设置页：外观（主题/面板透明度）+ 从价格设置页搬来的非价格配置
+ * 设置页：面板透明度 + 从价格设置页搬来的非价格配置
  * （开机自启 / Coding Plan 额度监控 / Cursor 统计 / 全局快捷键）。
  * 单列滚动，改完即存（无整页保存按钮）。
  */
@@ -65,8 +70,7 @@ export function SettingsPanel({
   // 若仍可保存会把空 token 等默认值写回后端覆盖真实配置
   const [loaded, setLoaded] = useState(false);
 
-  // ===== 外观：主题与面板透明度（localStorage 持久化，改完即时生效）=====
-  const [theme, setTheme] = useState<Theme>(() => loadTheme());
+  // ===== 外观：面板透明度（localStorage 持久化，改完即时生效）=====
   const [alpha, setAlpha] = useState<number>(() => loadPanelAlpha());
   // ===== 开机自启 =====
   const [autostartEnabled, setAutostartEnabled] = useState(false);
@@ -271,62 +275,14 @@ export function SettingsPanel({
   };
 
   return (
-    // 整页单一滚动，与价格设置页同款骨架
-    <div className="h-full overflow-y-auto">
-      {/* 顶部 */}
-      <div className="px-3.5 py-2.5 border-b border-slate-900/10">
-        <div className="flex items-center justify-between">
-          <button
-            onClick={onBack}
-            className="text-xs text-slate-700/60 hover:text-sky-600 transition-colors"
-          >
-            ← 返回
-          </button>
-          <h1 className="text-[13px] font-semibold text-slate-900/90">设置</h1>
-          {/* 占位撑开右侧，保持标题居中 */}
-          <span className="text-xs w-8" />
-        </div>
-      </div>
+    <PageShell>
+      <PageHeader title="设置" onBack={onBack} />
 
-      {error && (
-        <div className="mx-3 mt-2 px-2.5 py-1.5 rounded-lg bg-red-500/15 text-red-700 text-xs">
-          {error}
-        </div>
-      )}
+      <PageBody className="page-stack">
+        {error && <AlertBanner>{error}</AlertBanner>}
 
-      <div className="px-3.5 py-2.5 space-y-2">
-        {/* ===== 外观 ===== */}
-        <div className="rounded-lg bg-slate-900/5 border border-slate-900/10 p-2.5">
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="text-[11px] font-medium text-slate-900/85">
-              外观
-            </span>
-          </div>
-          {/* 主题切换 */}
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] text-slate-700/55">主题</span>
-            <div className="flex gap-1">
-              {(["light", "dark"] as Theme[]).map((t) => (
-                <button
-                  key={t}
-                  onClick={() => {
-                    setTheme(t);
-                    applyTheme(t);
-                    persistTheme(t);
-                  }}
-                  className={`px-2 py-0.5 rounded-md text-[10px] transition-colors ${
-                    theme === t
-                      ? "bg-sky-500 text-white"
-                      : "bg-slate-900/5 text-slate-700/65 hover:bg-slate-900/10 hover:text-slate-900/80"
-                  }`}
-                >
-                  {t === "light" ? "☀ 亮色" : "🌙 暗色"}
-                </button>
-              ))}
-            </div>
-          </div>
-          {/* 面板透明度 */}
-          <div className="flex items-center gap-2 mt-2">
+        <SettingsCard title="面板透明度">
+          <div className="flex items-center gap-2">
             <span className="text-[10px] text-slate-700/55 shrink-0">
               透明度
             </span>
@@ -356,19 +312,16 @@ export function SettingsPanel({
               {Math.round(alpha * 100)}%
             </span>
           </div>
-          <p className="text-[9px] text-slate-700/45 mt-1.5 leading-relaxed">
+          <p className="text-[9px] text-slate-500 mt-1.5 leading-relaxed">
             调整面板背景透明度，值越低毛玻璃越透；暗色主题建议保持 60%
             以上，过低时文字可能不清晰
           </p>
-        </div>
+        </SettingsCard>
 
-        {/* ===== 开机自启 ===== */}
-        <div className="rounded-lg bg-slate-900/5 border border-slate-900/10 p-2.5">
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="text-[11px] font-medium text-slate-900/85">
-              开机自启
-            </span>
-            <label className="flex items-center gap-1 text-[10px] text-slate-700/60 cursor-pointer">
+        <SettingsCard
+          title="开机自启"
+          action={
+            <label className="flex items-center gap-1 text-[10px] text-slate-600 cursor-pointer">
               <input
                 type="checkbox"
                 checked={autostartEnabled}
@@ -378,32 +331,22 @@ export function SettingsPanel({
               />
               {savingAutostart ? "应用中…" : "启用"}
             </label>
-          </div>
-          <p className="text-[9px] text-slate-700/45 leading-relaxed">
+          }
+        >
+          <p className="text-[9px] text-slate-500 leading-relaxed">
             登录 Windows 或 macOS 后自动启动 ZBar，面板默认保持隐藏，可从托盘打开。
           </p>
           {!autostartLoaded && (
-            <p className="text-[9px] text-slate-700/45 mt-1">正在读取状态…</p>
+            <p className="text-[9px] text-slate-500 mt-1">正在读取状态…</p>
           )}
           {autostartError && (
             <p className="text-[9px] text-rose-600 mt-1 leading-relaxed break-all">
               {autostartError}
             </p>
           )}
-        </div>
+        </SettingsCard>
 
-        {/* ===== 统计展示来源 ===== */}
-        <div className="rounded-lg bg-slate-900/5 border border-slate-900/10 p-2.5">
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="text-[11px] font-medium text-slate-900/85">
-              统计展示来源
-            </span>
-            <span className="text-[9px] text-slate-700/45">即时生效</span>
-          </div>
-          <p className="text-[9px] text-slate-700/45 mb-2 leading-relaxed">
-            关闭后仅从统计标签和汇总中隐藏，不影响本地采集与设备同步。
-          </p>
-          <div className="space-y-1">
+        <SettingsCard title="统计展示来源" action={<span className="text-[9px] text-slate-500">即时生效</span>} hint="关闭后仅从统计标签和汇总中隐藏，不影响本地采集与设备同步。">
             {AGENT_VISIBILITY_OPTIONS.map((agent) => (
               <label
                 key={agent.id}
@@ -433,27 +376,16 @@ export function SettingsPanel({
                 />
               </label>
             ))}
-          </div>
-        </div>
+        </SettingsCard>
 
-        {/* ===== Coding Plan 额度查询配置 ===== */}
-        <div className="rounded-lg bg-slate-900/5 border border-slate-900/10 p-2.5">
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="text-[11px] font-medium text-slate-900/85">
-              Coding Plan 额度监控
-            </span>
-            <button
-              onClick={handleSaveQuota}
-              disabled={savingQuota || !loaded}
-              className="text-[10px] px-2 py-0.5 rounded-md bg-sky-500 text-white hover:bg-sky-600 disabled:opacity-40 transition-colors"
-            >
-              {savingQuota
-                ? "保存中…"
-                : quotaSavedFlash
-                  ? "已保存 ✓"
-                  : "保存"}
-            </button>
-          </div>
+        <SettingsCard
+          title="Coding Plan 额度监控"
+          action={
+            <BtnPrimary onClick={handleSaveQuota} disabled={savingQuota || !loaded}>
+              {savingQuota ? "保存中…" : quotaSavedFlash ? "已保存 ✓" : "保存"}
+            </BtnPrimary>
+          }
+        >
           {/* Token 输入 */}
           <label className="flex flex-col gap-0.5 text-[10px]">
             <span className="text-slate-700/55">API Token</span>
@@ -495,58 +427,40 @@ export function SettingsPanel({
               ))}
             </div>
           </div>
-          <p className="text-[9px] text-slate-700/45 mt-1.5 leading-relaxed">
+          <p className="text-[9px] text-slate-500 mt-1.5 leading-relaxed">
             Token 从智谱开放平台获取。国内用户选「国内」端点。
           </p>
-        </div>
+        </SettingsCard>
 
-        {/* ===== Cursor 用量配置 ===== */}
-        <div className="rounded-lg bg-slate-900/5 border border-slate-900/10 p-2.5">
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="text-[11px] font-medium text-slate-900/85">
-              Cursor 统计
-            </span>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={async () => {
-                  setCursorDebugging(true);
-                  setCursorDebugInfo(null);
-                  try {
-                    const info = await cursorDebug();
-                    setCursorDebugInfo(
-                      `来源: ${info.cookie_source}\nDB: ${info.db_found ? "已找到" : "未找到"}\nUserID: ${info.user_id}\nEvents HTTP: ${info.events_status}\n响应: ${info.events_body_excerpt}`
-                    );
-                  } catch (e) {
-                    setCursorDebugInfo(`诊断失败: ${e}`);
-                  } finally {
-                    setCursorDebugging(false);
-                  }
-                }}
-                disabled={cursorDebugging || !loaded}
-                className="text-[10px] px-2 py-0.5 rounded-md bg-sky-500/10 text-sky-700/80 hover:bg-sky-500/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-              >
+        <SettingsCard
+          title="Cursor 统计"
+          action={
+            <div className="flex items-center gap-1.5">
+              <BtnSecondary onClick={async () => {
+                setCursorDebugging(true);
+                setCursorDebugInfo(null);
+                try {
+                  const info = await cursorDebug();
+                  setCursorDebugInfo(
+                    `来源: ${info.cookie_source}\nDB: ${info.db_found ? "已找到" : "未找到"}\nUserID: ${info.user_id}\nEvents HTTP: ${info.events_status}\n响应: ${info.events_body_excerpt}`
+                  );
+                } catch (e) {
+                  setCursorDebugInfo(`诊断失败: ${e}`);
+                } finally {
+                  setCursorDebugging(false);
+                }
+              }} disabled={cursorDebugging || !loaded}>
                 {cursorDebugging ? "诊断中…" : "诊断"}
-              </button>
-              <button
-                onClick={handleTestCursor}
-                disabled={cursorTesting || !loaded}
-                className="text-[10px] px-2 py-0.5 rounded-md bg-sky-500/10 text-sky-700/80 hover:bg-sky-500/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-              >
+              </BtnSecondary>
+              <BtnSecondary onClick={handleTestCursor} disabled={cursorTesting || !loaded}>
                 {cursorTesting ? "测试中…" : "测试连接"}
-              </button>
-              <button
-                onClick={handleSaveCursor}
-                disabled={savingCursor || !loaded}
-                className="text-[10px] px-2 py-0.5 rounded-md bg-sky-500 text-white hover:bg-sky-600 disabled:opacity-40 transition-colors"
-              >
-                {savingCursor
-                  ? "保存中…"
-                  : cursorSavedFlash
-                    ? "已保存 ✓"
-                    : "保存"}
-              </button>
+              </BtnSecondary>
+              <BtnPrimary onClick={handleSaveCursor} disabled={savingCursor || !loaded}>
+                {savingCursor ? "保存中…" : cursorSavedFlash ? "已保存 ✓" : "保存"}
+              </BtnPrimary>
             </div>
-          </div>
+          }
+        >
 
           {/* Cookie 来源切换 */}
           <div className="flex items-center gap-2 mb-1.5">
@@ -700,67 +614,50 @@ export function SettingsPanel({
             </p>
           )}
           {cursorDebugInfo && (
-            <pre className="text-[8px] text-slate-700/60 mt-1.5 p-1.5 rounded bg-slate-900/5 overflow-x-auto whitespace-pre-wrap break-all max-h-32 overflow-y-auto font-mono">
+            <pre className="text-[8px] text-slate-600 mt-1.5 p-1.5 rounded-lg bg-slate-900/5 overflow-x-auto whitespace-pre-wrap break-all max-h-32 overflow-y-auto font-mono">
               {cursorDebugInfo}
             </pre>
           )}
-        </div>
+        </SettingsCard>
 
-        {/* ===== 全局快捷键 ===== */}
         {shortcutCfg && (
-          <div className="rounded-lg bg-slate-900/5 border border-slate-900/10 p-2.5">
-            <div className="flex items-center justify-between mb-1.5">
-              <span className="text-[11px] font-medium text-slate-900/85">
-                ⌨ 全局快捷键
-              </span>
+          <SettingsCard
+            title="全局快捷键"
+            action={
               <div className="flex items-center gap-2">
-                <label className="flex items-center gap-1 text-[10px] text-slate-700/60 cursor-pointer">
+                <label className="flex items-center gap-1 text-[10px] text-slate-600 cursor-pointer">
                   <input
                     type="checkbox"
                     checked={shortcutCfg.enabled}
                     onChange={(e) =>
-                      setShortcutCfg({
-                        ...shortcutCfg,
-                        enabled: e.target.checked,
-                      })
+                      setShortcutCfg({ ...shortcutCfg, enabled: e.target.checked })
                     }
                     className="accent-sky-500 w-3 h-3"
                   />
                   启用
                 </label>
-                <button
-                  onClick={handleSaveShortcut}
-                  disabled={savingShortcut || !loaded}
-                  className="text-[10px] px-2 py-0.5 rounded-md bg-sky-500 text-white hover:bg-sky-600 disabled:opacity-40 transition-colors"
-                >
-                  {savingShortcut
-                    ? "应用中…"
-                    : shortcutSavedFlash
-                      ? "已应用 ✓"
-                      : "应用"}
-                </button>
+                <BtnPrimary onClick={handleSaveShortcut} disabled={savingShortcut || !loaded}>
+                  {savingShortcut ? "应用中…" : shortcutSavedFlash ? "已应用 ✓" : "应用"}
+                </BtnPrimary>
               </div>
-            </div>
-            <p className="text-[9px] text-slate-700/45 mb-2 leading-relaxed">
-              唤起/隐藏面板。格式如 alt+shift+z（修饰键用 ctrl/alt/shift/cmd，主键用字母/数字）。
-            </p>
-            <div className="flex items-center rounded-md bg-surface/60 border border-slate-900/10 focus-within:border-sky-400/60 focus-within:ring-1 focus-within:ring-sky-400/40 transition-colors">
+            }
+            hint="唤起/隐藏面板。格式如 alt+shift+z（修饰键用 ctrl/alt/shift/cmd，主键用字母/数字）。"
+          >
+            <div className="input-group">
               <input
                 type="text"
                 value={shortcutDraft}
                 placeholder="alt+shift+z"
                 onChange={(e) => setShortcutDraft(e.target.value)}
-                className="num w-full px-2 py-1 text-left bg-transparent text-slate-900/90 placeholder:text-slate-700/35 focus:outline-none text-[11px]"
+                className="num"
               />
             </div>
             {shortcutError && (
-              <p className="text-[10px] text-rose-600 mt-1.5 leading-relaxed">
-                {shortcutError}
-              </p>
+              <p className="text-[10px] text-rose-600 mt-1.5 leading-relaxed">{shortcutError}</p>
             )}
-          </div>
+          </SettingsCard>
         )}
-      </div>
-    </div>
+      </PageBody>
+    </PageShell>
   );
 }

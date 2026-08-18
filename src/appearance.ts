@@ -36,6 +36,14 @@ export function persistTheme(t: Theme): void {
   }
 }
 
+/** 切换主题并返回新值（供快捷按钮调用） */
+export function toggleTheme(current: Theme): Theme {
+  const next: Theme = current === "dark" ? "light" : "dark";
+  applyTheme(next);
+  persistTheme(next);
+  return next;
+}
+
 /** 读取面板透明度：非数字或超出 [0.2, 1] 回退默认值 */
 export function loadPanelAlpha(): number {
   try {

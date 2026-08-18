@@ -39,6 +39,20 @@ import {
 import { BrandIcon, type BrandIconName } from "./BrandIcon";
 import { type AgentId, type AgentVisibility } from "./agentVisibility";
 import { TrendChart, remainingGradient } from "./widgets";
+import {
+  PageShell,
+  PageHeader,
+  PageBody,
+  PageFooter,
+  SectionCard,
+  PillGroup,
+  PillButton,
+  BtnPrimary,
+  BtnSecondary,
+  AlertBanner,
+  LoadingState,
+  SortToggle,
+} from "./layout";
 
 interface Props {
   onBack: () => void;
@@ -890,149 +904,73 @@ export function ReportPanel({
   };
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="px-3.5 py-2.5 border-b border-slate-900/10">
-        <div className="flex items-center justify-between">
-          <button
-            onClick={onBack}
-            className="text-xs text-slate-700/60 hover:text-sky-600 transition-colors"
-          >
-            ← 返回
-          </button>
-          <h1 className="text-[13px] font-semibold text-slate-900/90">
-            用量报告
-          </h1>
-          <button
-            onClick={load}
-            disabled={loading}
-            className="text-xs text-slate-700/50 hover:text-slate-900/80 disabled:opacity-40 transition-colors"
-            title="刷新报告"
-          >
-            ↻
-          </button>
-        </div>
-        <div className="flex gap-1 mt-2">
-          {(["daily", "weekly"] as ReportKind[]).map((item) => (
-            <button
-              key={item}
-              onClick={() => setKind(item)}
-              className={
-                "px-2.5 py-1 rounded-md text-[10px] transition-colors " +
-                (kind === item
-                  ? "bg-sky-500 text-white"
-                  : "bg-slate-900/5 text-slate-700/65 hover:bg-slate-900/10")
-              }
-            >
-              {item === "daily" ? "今天" : "近 7 天"}
-            </button>
-          ))}
-          {syncEnabled && (
-            <select
-              value={deviceFilter}
-              onChange={(event) => setDeviceFilter(event.target.value)}
-              className="num ml-auto min-w-0 flex-1 px-1.5 py-1 rounded-md bg-slate-900/5 border border-slate-900/10 text-[10px] text-slate-900/80 focus:outline-none focus:border-sky-400/60"
-              title="筛选设备"
-            >
-              <option value="all">全部设备</option>
-              <option value="local">
-                本机
-                {syncConfig?.device_name
-                  ? "（" + syncConfig.device_name + "）"
-                  : ""}
-              </option>
-              {remoteDevices
-                .filter((device) => device.device_id !== syncConfig?.device_id)
-                .map((device) => (
-                  <option key={device.device_id} value={device.device_id}>
-                    {device.device_name}（{device.device_id.slice(0, 6)}）
-                  </option>
+    <PageShell>
+      <PageHeader
+        title="用量报告"
+        onBack={onBack}
+        right={<button onClick={load} disabled={loading} className="toolbar-btn" title="刷新报告">↻</button>}
+        subtitle={
+          <div className="flex gap-1 mt-0">
+            <PillGroup>
+              {(["daily", "weekly"] as ReportKind[]).map((item) => (
+                <PillButton key={item} active={kind === item} onClick={() => setKind(item)}>
+                  {item === "daily" ? "今天" : "近 7 天"}
+                </PillButton>
+              ))}
+            </PillGroup>
+            {syncEnabled && (
+              <select
+                value={deviceFilter}
+                onChange={(event) => setDeviceFilter(event.target.value)}
+                className="input-box num ml-auto min-w-0 flex-1 text-[10px] py-1"
+                title="筛选设备"
+              >
+                <option value="all">全部设备</option>
+                <option value="local">本机{syncConfig?.device_name ? `（${syncConfig.device_name}）` : ""}</option>
+                {remoteDevices.filter((device) => device.device_id !== syncConfig?.device_id).map((device) => (
+                  <option key={device.device_id} value={device.device_id}>{device.device_name}（{device.device_id.slice(0, 6)}）</option>
                 ))}
-            </select>
-          )}
-        </div>
-      </div>
+              </select>
+            )}
+          </div>
+        }
+      />
 
-      {error && (
-        <div className="mx-3 mt-2 px-2.5 py-1.5 rounded-lg bg-red-500/15 text-red-700 text-xs">
-          {error}
+      {(error || (report?.warnings.length ?? 0) > 0) && (
+        <div className="px-3 pt-2 space-y-1">
+          {error && <AlertBanner>{error}</AlertBanner>}
+          {report?.warnings.length ? (
+            <AlertBanner type="warning">{report.warnings.join("；")}</AlertBanner>
+          ) : null}
         </div>
       )}
-      {report?.warnings.length ? (
-        <div className="mx-3 mt-2 px-2.5 py-1.5 rounded-lg bg-amber-500/12 text-amber-800/80 text-[10px] leading-relaxed">
-          {report.warnings.join("；")}
-        </div>
-      ) : null}
 
-      <div className="flex-1 overflow-auto px-3.5 py-2.5">
+      <PageBody>
         {loading && !report ? (
-          <div className="text-xs text-slate-700/55 text-center py-10">
-            正在整理用量数据…
-          </div>
+          <LoadingState text="正在整理用量数据…" />
         ) : !report || report.agents.length === 0 ? (
-          <div className="rounded-xl bg-surface/25 border border-surface/35 px-3 py-8 text-center">
-            <div className="text-sm text-slate-900/75">当前范围暂无用量</div>
-            <div className="text-[10px] text-slate-700/45 leading-relaxed mt-1.5">
-              请确认 Agent 已开启，并在今天或近 7 天内产生过请求。
+          <SectionCard>
+            <div className="py-6 text-center">
+              <div className="text-sm text-slate-800/80">当前范围暂无用量</div>
+              <div className="text-[10px] text-slate-500 leading-relaxed mt-1.5">请确认 Agent 已开启，并在今天或近 7 天内产生过请求。</div>
             </div>
-          </div>
+          </SectionCard>
         ) : (
-          <div className="space-y-2.5">
+          <div className="page-stack">
             {loading && (
               <div className="text-[10px] text-sky-700/70">正在刷新最新数据…</div>
             )}
 
             <div className="grid grid-cols-2 gap-1.5">
-              <MetricCard
-                label="总花费"
-                value={formatCost(
-                  currency === "cny" ? totals.cost_cny : totals.cost_usd,
-                  currency
-                )}
-                hint={currency === "cny" ? "人民币折算" : "美元原价"}
-              />
-              <MetricCard
-                label="Token"
-                value={formatTokens(totals.total_tokens)}
-                hint="当前可见 Agent"
-              />
-              <MetricCard
-                label="请求"
-                value={totals.requests.toLocaleString()}
-                hint="调用次数"
-              />
-              <MetricCard
-                label="活跃 Agent"
-                value={String(report.agents.length)}
-                hint={
-                  report.agents.length === 1
-                    ? "本范围仅 1 个来源"
-                    : "本范围有用量的来源"
-                }
-              />
+              <MetricCard label="总花费" value={formatCost(currency === "cny" ? totals.cost_cny : totals.cost_usd, currency)} hint={currency === "cny" ? "人民币折算" : "美元原价"} />
+              <MetricCard label="Token" value={formatTokens(totals.total_tokens)} hint="当前可见 Agent" />
+              <MetricCard label="请求" value={totals.requests.toLocaleString()} hint="调用次数" />
+              <MetricCard label="活跃 Agent" value={String(report.agents.length)} hint={report.agents.length === 1 ? "本范围仅 1 个来源" : "本范围有用量的来源"} />
             </div>
 
-            <section className="rounded-xl bg-surface/25 border border-surface/35 px-2.5 py-2.5">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-[10px] font-medium text-slate-900/75">
-                  用量趋势
-                </span>
-                <div className="flex gap-0.5">
-                  {(["cost", "token"] as ReportMetric[]).map((item) => (
-                    <button
-                      key={item}
-                      onClick={() => setMetric(item)}
-                      className={
-                        "px-1.5 py-px rounded text-[9px] transition-colors " +
-                        (metric === item
-                          ? "bg-sky-500/80 text-white"
-                          : "text-slate-500 hover:text-slate-700")
-                      }
-                    >
-                      {item === "cost" ? "花费" : "Token"}
-                    </button>
-                  ))}
-                </div>
-              </div>
+            <SectionCard title="用量趋势" action={
+              <SortToggle options={[{ key: "cost", label: "花费" }, { key: "token", label: "Token" }]} value={metric} onChange={setMetric} accent="sky" />
+            }>
               {report.trend.length > 0 ? (
                 <TrendChart
                   points={report.trend}
@@ -1054,19 +992,13 @@ export function ReportPanel({
                   {note}
                 </div>
               ))}
-            </section>
+            </SectionCard>
 
-            <section className="rounded-xl bg-surface/25 border border-surface/35 px-2.5 py-2.5">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-[10px] font-medium text-slate-900/75">
-                  Agent 分布
-                </span>
-                <span className="text-[9px] text-slate-700/40">
-                  {(currency === "cny" ? totals.cost_cny : totals.cost_usd) > 0
-                    ? "按花费占比"
-                    : "未配价格，按 Token 占比"}
-                </span>
-              </div>
+            <SectionCard title="Agent 分布" action={
+              <span className="text-[9px] text-slate-500">
+                {(currency === "cny" ? totals.cost_cny : totals.cost_usd) > 0 ? "按花费占比" : "未配价格，按 Token 占比"}
+              </span>
+            }>
               <div className="space-y-1.5">
                 {report.agents.map((agent) => {
                   const totalMetric = report.agents.reduce(
@@ -1089,17 +1021,9 @@ export function ReportPanel({
                   );
                 })}
               </div>
-            </section>
+            </SectionCard>
 
-            <section className="rounded-xl bg-surface/25 border border-surface/35 px-2.5 py-2.5">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-[10px] font-medium text-slate-900/75">
-                  模型排行
-                </span>
-                <span className="text-[9px] text-slate-700/40">
-                  {topModels.length > 0 ? "按花费 / Token" : "暂无模型明细"}
-                </span>
-              </div>
+            <SectionCard title="模型排行">
               {topModels.length > 0 ? (
                 <div className="space-y-1.5">
                   {topModels.map((model, index) => (
@@ -1120,12 +1044,9 @@ export function ReportPanel({
                   当前 Agent 没有返回模型明细。
                 </div>
               )}
-            </section>
+            </SectionCard>
 
-            <section className="rounded-xl bg-surface/25 border border-surface/35 px-2.5 py-2.5">
-              <div className="text-[10px] font-medium text-slate-900/75 mb-2">
-                报告结论
-              </div>
+            <SectionCard title="报告结论">
               <div className="space-y-1.5 text-[10px] text-slate-700/65 leading-relaxed">
                 {topModels[0] && (
                   <div>
@@ -1158,55 +1079,34 @@ export function ReportPanel({
                   </div>
                 )}
               </div>
-            </section>
+            </SectionCard>
 
             {report.agentQuotas.length > 0 && (
               <QuotaSummary quotas={report.agentQuotas} />
             )}
 
             {showMarkdown && (
-              <section className="rounded-xl bg-surface/25 border border-surface/35 px-2.5 py-2.5">
-                <div className="text-[10px] font-medium text-slate-900/75 mb-1.5">
-                  Markdown 预览
-                </div>
-                <pre className="num text-[10px] leading-relaxed text-slate-900/75 whitespace-pre-wrap break-words">
+              <SectionCard title="Markdown 预览">
+                <pre className="num text-[10px] leading-relaxed text-slate-800/80 whitespace-pre-wrap break-words">
                   {markdown}
                 </pre>
-              </section>
+              </SectionCard>
             )}
           </div>
         )}
-      </div>
+      </PageBody>
 
-      <div className="px-3.5 py-2 border-t border-slate-900/10 flex items-center justify-between gap-2">
-        <span className="text-[10px] text-slate-700/45 truncate">
-          {doneFlash || filename}
-        </span>
+      <PageFooter>
+        <span className="text-slate-500 truncate">{doneFlash || filename}</span>
         <div className="flex gap-1.5 shrink-0">
-          <button
-            onClick={() => setShowMarkdown((visible) => !visible)}
-            disabled={!report || loading}
-            className="text-[10px] px-2 py-1 rounded-md bg-slate-900/5 text-slate-700/70 hover:bg-slate-900/10 disabled:opacity-40 transition-colors"
-          >
+          <BtnSecondary onClick={() => setShowMarkdown((visible) => !visible)} disabled={!report || loading}>
             {showMarkdown ? "收起预览" : "查看 Markdown"}
-          </button>
-          <button
-            onClick={handleCopy}
-            disabled={!report || loading}
-            className="text-[10px] px-2 py-1 rounded-md bg-slate-900/5 text-slate-700/75 hover:bg-slate-900/10 disabled:opacity-40 transition-colors"
-          >
-            复制
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={!report || loading}
-            className="text-[10px] px-2 py-1 rounded-md bg-sky-500 text-white hover:bg-sky-600 disabled:opacity-40 transition-colors"
-          >
-            保存
-          </button>
+          </BtnSecondary>
+          <BtnSecondary onClick={handleCopy} disabled={!report || loading}>复制</BtnSecondary>
+          <BtnPrimary onClick={handleSave} disabled={!report || loading}>保存</BtnPrimary>
         </div>
-      </div>
-    </div>
+      </PageFooter>
+    </PageShell>
   );
 }
 
@@ -1220,7 +1120,7 @@ function MetricCard({
   hint: string;
 }) {
   return (
-    <div className="rounded-lg bg-surface/25 border border-surface/35 px-2.5 py-2">
+    <div className="card-base rounded-xl px-2.5 py-2 text-center">
       <div className="text-[9px] text-slate-700/50">{label}</div>
       <div className="num text-[16px] font-semibold text-slate-900/85 mt-0.5">
         {value}
@@ -1347,15 +1247,7 @@ function ModelUsageRow({
 
 function QuotaSummary({ quotas }: { quotas: ReportQuota[] }) {
   return (
-    <section className="rounded-xl bg-surface/25 border border-surface/35 px-2.5 py-2.5">
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-[10px] font-medium text-slate-900/75">
-          Agent 额度快照
-        </span>
-        <span className="text-[9px] text-slate-700/40">
-          仅展示已开启且有额度数据的 Agent
-        </span>
-      </div>
+    <SectionCard title="Agent 额度快照" action={<span className="text-[9px] text-slate-500">已开启且有数据的 Agent</span>}>
       <div className="space-y-1.5">
         {quotas.map((quota) => {
           const resetWindow = quota.windows.find(
@@ -1400,7 +1292,7 @@ function QuotaSummary({ quotas }: { quotas: ReportQuota[] }) {
       <div className="text-[9px] text-slate-700/40 mt-1.5">
         Z.ai 额度来自历史快照；Codex、Claude、Cursor 为本机实时额度接口。
       </div>
-    </section>
+    </SectionCard>
   );
 }
 

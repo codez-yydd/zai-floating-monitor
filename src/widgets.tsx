@@ -86,11 +86,11 @@ export function Metric({
   accent?: string;
 }) {
   return (
-    <div className="rounded-lg bg-surface/25 border border-surface/30 py-2 text-center">
-      <div className="text-[10px] text-slate-700/55">{label}</div>
+    <div className="card-base rounded-xl py-2 text-center">
+      <div className="text-[9px] text-slate-500">{label}</div>
       <div
         className={`num text-[13px] font-semibold mt-0.5 ${
-          accent || "text-slate-900/80"
+          accent || "text-slate-900/85"
         }`}
       >
         {value}
@@ -198,24 +198,24 @@ export function TrendChart({
 
   return (
     <div
-      className={`rounded-xl bg-surface/30 border border-surface/35 px-3 pt-2.5 pb-2 ${
+      className={`card-base rounded-2xl px-3 pt-2.5 pb-2 ${
         fill ? "flex-1 min-h-0 flex flex-col" : ""
       }`}
     >
       {/* 标题行 */}
       <div className="flex items-center justify-between mb-2 shrink-0">
         <div className="flex items-center gap-1.5">
-          <span className="text-[10px] text-slate-600">
-            趋势
-          </span>
+          <div className="section-title">
+            <span>用量趋势</span>
+          </div>
           {deltaText && (
             <span
-              className={`text-[10px] num ${
+              className={`text-[9px] num px-1 py-px rounded ${
                 deltaText === "持平" || deltaText === "新增"
-                  ? "text-slate-700/50"
+                  ? "text-slate-500 bg-slate-900/5"
                   : deltaUp
-                    ? "text-rose-600/90"
-                    : "text-emerald-600/90"
+                    ? "text-rose-600 bg-rose-500/10"
+                    : "text-emerald-600 bg-emerald-500/10"
               }`}
               title={`最新${isHour ? "小时" : "日"} vs 上一${isHour ? "小时" : "日"}`}
             >
@@ -225,14 +225,14 @@ export function TrendChart({
         </div>
         {/* 花费/Token 切换 */}
         {showMetricToggle && onMetricChange && (
-          <div className="flex gap-0.5">
+          <div className="flex gap-0.5 p-0.5 rounded-lg bg-slate-900/4">
             {(["cost", "token"] as const).map((m) => (
               <button
                 key={m}
                 onClick={() => onMetricChange(m)}
-                className={`px-1.5 py-px rounded text-[9px] transition-colors ${
+                className={`px-2 py-0.5 rounded-md text-[9px] font-medium transition-all duration-150 ${
                   metric === m
-                    ? "bg-sky-500/80 text-white"
+                    ? "bg-sky-500 text-white shadow-sm"
                     : "text-slate-500 hover:text-slate-700"
                 }`}
               >
@@ -246,7 +246,7 @@ export function TrendChart({
       {/* 柱状图 */}
       <div
         className={`flex items-end ${barGap} relative ${
-          fill ? "flex-1 min-h-14" : "h-14"
+          fill ? "flex-1 min-h-14" : "h-16"
         }`}
       >
         {points.map((d, i) => {
@@ -263,8 +263,8 @@ export function TrendChart({
             >
               {/* tooltip */}
               {isHover && (
-                <div className="absolute bottom-full mb-1 left-1/2 -translate-x-1/2 z-10 whitespace-nowrap rounded-md bg-black/80 text-white px-1.5 py-1 text-[9px] leading-tight pointer-events-none">
-                  <div className="num">{d.label}</div>
+                <div className="absolute bottom-full mb-1 left-1/2 -translate-x-1/2 z-10 whitespace-nowrap rounded-lg bg-slate-900/90 text-white px-2 py-1.5 text-[9px] leading-tight pointer-events-none shadow-lg">
+                  <div className="num font-medium">{d.label}</div>
                   <div className="num">
                     {formatCost(
                       currency === "cny" ? d.cost_cny : d.cost_usd,
@@ -277,17 +277,16 @@ export function TrendChart({
                 </div>
               )}
               <div
-                className={`w-full rounded-t-sm transition-all duration-300 ${
+                className={`w-full rounded-t-md transition-all duration-300 ${
                   isLast
-                    ? "bg-sky-500/80"
+                    ? "bg-gradient-to-t from-sky-600 to-sky-400"
                     : isHover
-                      ? "bg-slate-700/70"
-                      : "bg-slate-700/35"
+                      ? "bg-gradient-to-t from-slate-600 to-slate-400"
+                      : "bg-gradient-to-t from-slate-500/70 to-slate-400/50"
                 }`}
                 style={{
                   height: `${Math.max(h, v > 0 ? 4 : 0)}%`,
-                  // 柱子少时限制最大宽度，避免单根过粗
-                  maxWidth: n <= 7 ? "14px" : undefined,
+                  maxWidth: n <= 7 ? "16px" : undefined,
                 }}
               />
             </div>

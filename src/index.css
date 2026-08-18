@@ -67,6 +67,260 @@ body,
   font-variant-numeric: tabular-nums;
 }
 
+/* ============================================================
+ * 卡片系统：参考 DeepSeek Monitor 的层次化卡片布局
+ * ============================================================ */
+
+/* 主指标英雄卡片（合计花费） */
+.card-hero {
+  background: linear-gradient(
+    135deg,
+    rgba(14, 165, 233, 0.14) 0%,
+    rgba(56, 189, 248, 0.08) 50%,
+    rgba(255, 255, 255, 0.06) 100%
+  );
+  border: 1px solid rgba(14, 165, 233, 0.18);
+  box-shadow:
+    0 2px 12px rgba(14, 165, 233, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+
+.dark .card-hero {
+  background: linear-gradient(
+    135deg,
+    rgba(14, 165, 233, 0.18) 0%,
+    rgba(56, 189, 248, 0.1) 50%,
+    rgba(15, 23, 42, 0.4) 100%
+  );
+  border-color: rgba(56, 189, 248, 0.22);
+  box-shadow:
+    0 2px 12px rgba(14, 165, 233, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+/* 通用内容卡片 */
+.card-base {
+  background: rgba(255, 255, 255, 0.42);
+  border: 1px solid rgba(15, 23, 42, 0.07);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.04);
+}
+
+.dark .card-base {
+  background: rgba(100, 116, 139, 0.18);
+  border-color: rgba(226, 232, 240, 0.1);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+}
+
+/* 区块标题 */
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(51, 65, 85, 0.85);
+  letter-spacing: 0.01em;
+}
+
+.dark .section-title {
+  color: rgba(226, 232, 240, 0.88);
+}
+
+/* 顶部工具栏圆形按钮 */
+.toolbar-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1;
+  color: rgba(51, 65, 85, 0.45);
+  transition: all 0.15s ease;
+}
+
+.toolbar-btn:hover {
+  color: rgba(15, 23, 42, 0.75);
+  background: rgba(15, 23, 42, 0.06);
+}
+
+.toolbar-btn:active {
+  transform: scale(0.94);
+}
+
+.dark .toolbar-btn {
+  color: rgba(226, 232, 240, 0.45);
+}
+
+.dark .toolbar-btn:hover {
+  color: rgba(226, 232, 240, 0.85);
+  background: rgba(226, 232, 240, 0.08);
+}
+
+/* ============================================================
+ * 品牌色英雄卡变体
+ * ============================================================ */
+.hero-sky {
+  background: linear-gradient(135deg, rgba(14,165,233,0.13) 0%, rgba(56,189,248,0.07) 60%, rgba(255,255,255,0.04) 100%);
+  border: 1px solid rgba(14,165,233,0.16);
+  box-shadow: 0 2px 10px rgba(14,165,233,0.07), inset 0 1px 0 rgba(255,255,255,0.45);
+}
+.hero-emerald {
+  background: linear-gradient(135deg, rgba(16,185,129,0.13) 0%, rgba(52,211,153,0.07) 60%, rgba(255,255,255,0.04) 100%);
+  border: 1px solid rgba(16,185,129,0.16);
+  box-shadow: 0 2px 10px rgba(16,185,129,0.07), inset 0 1px 0 rgba(255,255,255,0.45);
+}
+.hero-orange {
+  background: linear-gradient(135deg, rgba(234,88,12,0.12) 0%, rgba(251,146,60,0.07) 60%, rgba(255,255,255,0.04) 100%);
+  border: 1px solid rgba(234,88,12,0.15);
+  box-shadow: 0 2px 10px rgba(234,88,12,0.06), inset 0 1px 0 rgba(255,255,255,0.45);
+}
+.hero-violet {
+  background: linear-gradient(135deg, rgba(139,92,246,0.13) 0%, rgba(167,139,250,0.07) 60%, rgba(255,255,255,0.04) 100%);
+  border: 1px solid rgba(139,92,246,0.16);
+  box-shadow: 0 2px 10px rgba(139,92,246,0.07), inset 0 1px 0 rgba(255,255,255,0.45);
+}
+.dark .hero-sky {
+  background: linear-gradient(135deg, rgba(14,165,233,0.16) 0%, rgba(56,189,248,0.09) 60%, rgba(15,23,42,0.35) 100%);
+  border-color: rgba(56,189,248,0.2);
+}
+.dark .hero-emerald {
+  background: linear-gradient(135deg, rgba(16,185,129,0.16) 0%, rgba(52,211,153,0.09) 60%, rgba(15,23,42,0.35) 100%);
+  border-color: rgba(52,211,153,0.2);
+}
+.dark .hero-orange {
+  background: linear-gradient(135deg, rgba(234,88,12,0.15) 0%, rgba(251,146,60,0.09) 60%, rgba(15,23,42,0.35) 100%);
+  border-color: rgba(251,146,60,0.2);
+}
+.dark .hero-violet {
+  background: linear-gradient(135deg, rgba(139,92,246,0.16) 0%, rgba(167,139,250,0.09) 60%, rgba(15,23,42,0.35) 100%);
+  border-color: rgba(167,139,250,0.2);
+}
+
+/* ============================================================
+ * 按钮系统
+ * ============================================================ */
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.25rem 0.625rem;
+  border-radius: 0.5rem;
+  font-size: 10px;
+  font-weight: 500;
+  background: #0ea5e9;
+  color: #fff;
+  transition: all 0.15s ease;
+  border: none;
+  cursor: pointer;
+}
+.btn-primary:hover { background: #0284c7; }
+.btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.25rem 0.625rem;
+  border-radius: 0.5rem;
+  font-size: 10px;
+  font-weight: 500;
+  background: rgba(15,23,42,0.05);
+  color: rgba(51,65,85,0.75);
+  transition: all 0.15s ease;
+  border: none;
+  cursor: pointer;
+}
+.btn-secondary:hover { background: rgba(15,23,42,0.09); color: rgba(15,23,42,0.85); }
+.btn-secondary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.375rem;
+  font-size: 11px;
+  color: rgba(51,65,85,0.55);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.btn-ghost:hover { color: #0ea5e9; background: rgba(14,165,233,0.06); }
+
+.dark .btn-secondary {
+  background: rgba(226,232,240,0.08);
+  color: rgba(226,232,240,0.75);
+}
+.dark .btn-secondary:hover {
+  background: rgba(226,232,240,0.12);
+  color: rgba(226,232,240,0.9);
+}
+.dark .btn-ghost { color: rgba(226,232,240,0.55); }
+.dark .btn-ghost:hover { color: #38bdf8; background: rgba(56,189,248,0.08); }
+
+/* ============================================================
+ * 表单输入
+ * ============================================================ */
+.input-box {
+  width: 100%;
+  padding: 0.375rem 0.5rem;
+  border-radius: 0.5rem;
+  font-size: 11px;
+  background: rgba(255,255,255,0.5);
+  border: 1px solid rgba(15,23,42,0.1);
+  color: rgba(15,23,42,0.9);
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.input-box:focus {
+  border-color: rgba(14,165,233,0.5);
+  box-shadow: 0 0 0 2px rgba(14,165,233,0.12);
+}
+.input-box::placeholder { color: rgba(51,65,85,0.35); }
+
+.dark .input-box {
+  background: rgba(15,23,42,0.4);
+  border-color: rgba(226,232,240,0.12);
+  color: rgba(226,232,240,0.9);
+}
+.dark .input-box:focus {
+  border-color: rgba(56,189,248,0.5);
+  box-shadow: 0 0 0 2px rgba(56,189,248,0.12);
+}
+
+/* 输入框组合容器（带前缀/后缀按钮） */
+.input-group {
+  display: flex;
+  align-items: center;
+  border-radius: 0.5rem;
+  background: rgba(255,255,255,0.5);
+  border: 1px solid rgba(15,23,42,0.1);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.input-group:focus-within {
+  border-color: rgba(14,165,233,0.5);
+  box-shadow: 0 0 0 2px rgba(14,165,233,0.12);
+}
+.input-group input {
+  flex: 1;
+  padding: 0.375rem 0.5rem;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-size: 11px;
+  color: rgba(15,23,42,0.9);
+}
+.dark .input-group {
+  background: rgba(15,23,42,0.4);
+  border-color: rgba(226,232,240,0.12);
+}
+
+/* 内容区间距 */
+.page-stack { display: flex; flex-direction: column; gap: 0.625rem; }
+
 /* 滚动条 */
 ::-webkit-scrollbar {
   width: 5px;

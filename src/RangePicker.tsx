@@ -22,7 +22,7 @@ export function RangePicker({ preset, custom, onChange }: Props) {
 
   return (
     <div className="space-y-2">
-      <div className="flex gap-1">
+      <div className="flex gap-1 p-0.5 rounded-xl bg-slate-900/4">
         {PRESETS.map((p) => (
           <button
             key={p.value}
@@ -30,10 +30,10 @@ export function RangePicker({ preset, custom, onChange }: Props) {
               onChange(p.value, custom);
               setShowCustom(p.value === "custom");
             }}
-            className={`px-2 py-0.5 rounded-md text-[11px] transition-colors ${
+            className={`flex-1 px-1.5 py-1 rounded-lg text-[10px] font-medium transition-all duration-150 ${
               preset === p.value
-                ? "bg-sky-500 text-white"
-                : "bg-slate-900/5 text-slate-700/65 hover:bg-slate-900/10 hover:text-slate-900/80"
+                ? "bg-sky-500 text-white shadow-sm"
+                : "text-slate-600/70 hover:text-slate-800 hover:bg-slate-900/5"
             }`}
           >
             {p.label}

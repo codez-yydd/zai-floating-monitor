@@ -20,6 +20,15 @@ import {
   setSyncConfig,
   syncNow,
 } from "./api";
+import {
+  PageShell,
+  PageHeader,
+  PageBody,
+  SettingsCard,
+  BtnPrimary,
+  AlertBanner,
+  LoadingState,
+} from "./layout";
 
 interface Props {
   onBack: () => void;
@@ -273,50 +282,18 @@ export function SyncPanel({ onBack }: Props) {
     }
   };
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-full text-xs text-slate-700/55">
-        加载中…
-      </div>
-    );
-  }
+  if (loading) return <LoadingState text="加载同步配置…" />;
 
   const connected = config?.enabled && config.device_token;
 
   return (
-    <div className="flex flex-col h-full">
-      {/* 顶部 */}
-      <div className="px-3.5 py-2.5 border-b border-slate-900/10">
-        <div className="flex items-center justify-between mb-1">
-          <button
-            onClick={onBack}
-            className="text-xs text-slate-700/60 hover:text-sky-600 transition-colors"
-          >
-            ← 返回
-          </button>
-          <h1 className="text-[13px] font-semibold text-slate-900/90">
-            设备同步
-          </h1>
-          <span className="w-8" />
-        </div>
-      </div>
-
-      <div className="flex-1 overflow-y-auto px-3.5 py-2.5 space-y-2.5">
-        {error && (
-          <div className="px-2.5 py-1.5 rounded-lg bg-red-500/15 text-red-700 text-xs">
-            {error}
-          </div>
-        )}
+    <PageShell>
+      <PageHeader title="设备同步" onBack={onBack} />
+      <PageBody className="page-stack">
+        {error && <AlertBanner>{error}</AlertBanner>}
 
         {!connected ? (
-          /* ===== 未连接：注册表单 ===== */
-          <div className="rounded-lg bg-slate-900/5 border border-slate-900/10 p-2.5 space-y-2">
-            <p className="text-[11px] font-medium text-slate-900/85">
-              连接到同步服务器
-            </p>
-            <p className="text-[10px] text-slate-700/50 leading-relaxed">
-              先用 Docker 部署 zbar-sync 服务，从启动日志复制 Master Token。
-            </p>
+          <SettingsCard title="连接到同步服务器" hint="先用 Docker 部署 zbar-sync 服务，从启动日志复制 Master Token。">
 
             <label className="flex flex-col gap-0.5 text-[10px]">
               <span className="text-slate-700/55">服务器地址</span>
@@ -371,35 +348,19 @@ export function SyncPanel({ onBack }: Props) {
               </p>
             )}
 
-            <button
+            <BtnPrimary
               onClick={handleRegister}
-              disabled={
-                registering ||
-                !regForm.server_url.trim() ||
-                !regForm.master_token.trim() ||
-                !regForm.device_name.trim()
-              }
-              className="w-full text-[11px] py-1.5 rounded-md bg-sky-500 text-white hover:bg-sky-600 disabled:opacity-40 transition-colors"
+              disabled={registering || !regForm.server_url.trim() || !regForm.master_token.trim() || !regForm.device_name.trim()}
+              className="w-full mt-2"
             >
               {registering ? "连接中…" : "连接并注册"}
-            </button>
-          </div>
+            </BtnPrimary>
+          </SettingsCard>
         ) : (
-          /* ===== 已连接：同步状态 + 数据管理 ===== */
           <>
-            {/* 连接状态 */}
-            <div className="rounded-lg bg-slate-900/5 border border-slate-900/10 p-2.5">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-1.5">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                  <span className="text-[11px] font-medium text-slate-900/85">
-                    {config!.device_name}
-                  </span>
-                </div>
-                <span className="text-[9px] text-slate-700/45 font-mono">
-                  {config!.device_id.slice(0, 8)}
-                </span>
-              </div>
+            <SettingsCard title={config!.device_name} action={
+              <span className="text-[9px] text-slate-500 font-mono">{config!.device_id.slice(0, 8)}</span>
+            }>
               <div className="mt-1.5 grid grid-cols-2 gap-1.5 text-[10px]">
                 <div className="text-slate-700/55">
                   服务器
@@ -487,29 +448,20 @@ export function SyncPanel({ onBack }: Props) {
                   </button>
                 </div>
               </div>
-            </div>
+            </SettingsCard>
 
-            {/* 数据管理 */}
-            <div className="rounded-lg bg-slate-900/5 border border-slate-900/10 p-2.5">
-              <div className="flex items-center justify-between mb-1.5">
-                <span className="text-[11px] font-medium text-slate-900/85">
-                  数据管理
-                </span>
-                {cleanupStatus && (
-                  <span className="text-[10px] text-slate-700/50">
-                    共 {cleanupStatus.total_records} 条
-                  </span>
-                )}
-              </div>
-
+            <SettingsCard
+              title="数据管理"
+              action={cleanupStatus ? <span className="text-[10px] text-slate-500">共 {cleanupStatus.total_records} 条</span> : undefined}
+            >
               <label className="flex flex-col gap-0.5 text-[10px] mb-2">
-                <span className="text-slate-700/55">Master Token（操作清理用）</span>
+                <span className="text-slate-600">Master Token（操作清理用）</span>
                 <input
                   type="password"
                   value={masterInput}
                   placeholder="粘贴 Master Token"
                   onChange={(e) => setMasterInput(e.target.value)}
-                  className="px-1.5 py-1 rounded-md bg-slate-900/5 border border-slate-900/10 text-[11px] text-slate-900/90 placeholder:text-slate-700/35 focus:outline-none focus:border-sky-400/60"
+                  className="input-box"
                 />
               </label>
 
@@ -635,10 +587,10 @@ export function SyncPanel({ onBack }: Props) {
                   重置
                 </button>
               </div>
-            </div>
+            </SettingsCard>
           </>
         )}
-      </div>
+      </PageBody>
 
       {/* 确认弹层 */}
       {confirmAction && (
@@ -679,7 +631,7 @@ export function SyncPanel({ onBack }: Props) {
           }
         />
       )}
-    </div>
+    </PageShell>
   );
 }
 

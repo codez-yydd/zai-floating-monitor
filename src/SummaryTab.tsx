@@ -19,6 +19,14 @@ import {
 import { useDataCache } from "./DataCache";
 import { useEffect, useState } from "react";
 import type { AgentId, AgentVisibility } from "./agentVisibility";
+import { BrandIcon, type BrandIconName } from "./BrandIcon";
+import {
+  HeroMetric,
+  MetricPair,
+  SectionCard,
+  SortToggle,
+  StatusBadge,
+} from "./layout";
 
 interface Props {
   stats: Stats | null;
@@ -47,16 +55,98 @@ interface AgentSummary {
   name: string;
   /** 占比条 / 圆点颜色（hex，避免 Tailwind 动态类名失效） */
   color: string;
+  /** 卡片浅色背景 tint */
+  tintBg: string;
   nameClass: string;
   badge?: string | null;
   badgeClass: string;
   cost: number;
   tokens: number;
+  /** 缓存命中率（仅 ZCode 有值） */
+  cacheHitPct?: number | null;
   metrics: { label: string; usedPct: number; resetAt?: number | null }[];
   empty?: string;
   /** 套餐级重置时间（Cursor 计费周期结束），显示在标题行 */
   cycleResetAt?: number | null;
   cycleResetDate?: string | null;
+}
+
+/** Agent 花费卡片：品牌图标 + Token 大数字 + 花费进度条 */
+function AgentCostCard({
+  agent,
+  currency,
+  costPct,
+}: {
+  agent: AgentSummary;
+  currency: Currency;
+  costPct: number;
+}) {
+  const brandMap: Record<AgentId, BrandIconName | null> = {
+    zai: "zai",
+    codex: "codex",
+    claude: "claude",
+    cursor: "cursor",
+  };
+  const brand = brandMap[agent.id];
+
+  return (
+    <div
+      className="rounded-xl px-2.5 py-2 border shrink-0"
+      style={{
+        background: agent.tintBg,
+        borderColor: `${agent.color}22`,
+      }}
+    >
+      <div className="flex items-start gap-2">
+        {/* 左侧：图标 + 名称 + Token */}
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1.5 mb-1">
+            {brand && (
+              <span style={{ color: agent.color }}>
+                <BrandIcon brand={brand} className="h-3.5 w-3.5 shrink-0" />
+              </span>
+            )}
+            <span className={`text-[11px] font-semibold ${agent.nameClass}`}>
+              {agent.name}
+            </span>
+            {agent.badge && (
+              <span
+                className={`shrink-0 px-1 py-px rounded text-[8px] font-medium ${agent.badgeClass}`}
+              >
+                {agent.badge}
+              </span>
+            )}
+          </div>
+          <div className="num text-[15px] font-bold text-slate-900 leading-none">
+            {formatTokens(agent.tokens)}
+          </div>
+          {agent.cacheHitPct != null && agent.cacheHitPct > 0 && (
+            <div
+              className="text-[9px] font-medium mt-0.5"
+              style={{ color: agent.color }}
+            >
+              Cache hit {Math.round(agent.cacheHitPct)}%
+            </div>
+          )}
+        </div>
+        {/* 右侧：花费 + 占比条 */}
+        <div className="w-[72px] shrink-0 pt-0.5">
+          <div className="num text-[12px] font-semibold text-slate-800 text-right mb-1">
+            {formatCost(agent.cost, currency)}
+          </div>
+          <div className="h-1.5 rounded-full bg-slate-900/8 overflow-hidden">
+            <div
+              className="h-full rounded-full transition-all duration-500"
+              style={{
+                width: `${Math.max(costPct * 100, agent.cost > 0 ? 4 : 0)}%`,
+                background: `linear-gradient(90deg, ${agent.color}cc, ${agent.color})`,
+              }}
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 /** 花费占比条：用 gradient 硬切色段，避免 flex/width 舍入露出底色 */
@@ -412,17 +502,25 @@ export function SummaryTab({
       : "数据获取失败"
     : "暂无数据";
 
+  // ZCode 缓存命中率
+  const zaiCacheHitPct =
+    stats && stats.overall.input_tokens > 0
+      ? (stats.overall.cache_read_tokens / stats.overall.input_tokens) * 100
+      : null;
+
   // 按 agent 组装。新增来源时在此追加，总览占比条 / 花费表 / 额度列表会一起跟上。
   const allAgents: AgentSummary[] = [
     {
       id: "zai",
       name: "ZCode",
       color: "#0ea5e9",
+      tintBg: "rgba(14, 165, 233, 0.07)",
       nameClass: "text-sky-700",
       badge: levelLabel,
       badgeClass: "bg-sky-500/12 text-sky-700",
       cost: zaiCost,
       tokens: zaiTokens,
+      cacheHitPct: zaiCacheHitPct,
       metrics: zcodeMetrics,
       empty: zcodeEmpty,
     },
@@ -430,6 +528,7 @@ export function SummaryTab({
       id: "codex",
       name: "Codex",
       color: "#10a37f",
+      tintBg: "rgba(16, 163, 127, 0.07)",
       nameClass: "text-emerald-700",
       badge: codexRate?.plan_type ?? null,
       badgeClass: "bg-emerald-500/12 text-emerald-700",
@@ -442,6 +541,7 @@ export function SummaryTab({
       id: "claude",
       name: "Claude",
       color: "#d97757",
+      tintBg: "rgba(217, 119, 87, 0.07)",
       nameClass: "text-orange-700",
       badge: claudeRate?.plan_type ?? null,
       badgeClass: "bg-orange-500/12 text-orange-700 capitalize",
@@ -454,6 +554,7 @@ export function SummaryTab({
       id: "cursor",
       name: "Cursor",
       color: "#8b5cf6",
+      tintBg: "rgba(139, 92, 246, 0.07)",
       nameClass: "text-violet-700",
       badge: cursor?.membership_type ?? null,
       badgeClass: "bg-violet-500/12 text-violet-700 capitalize",
@@ -573,104 +674,70 @@ export function SummaryTab({
     : 0;
 
   return (
-    <div className="flex-1 min-h-0 overflow-y-auto px-3.5 pt-3 pb-2 flex flex-col gap-2.5">
-      {/* 总览：数字 → 一条占比 → 来源表 */}
-      <div className="rounded-xl bg-surface/30 border border-surface/35 px-3 py-2.5 shrink-0">
-        <div className="flex items-end justify-between gap-3">
-          <div>
-            <div className="text-[10px] text-slate-500">合计花费</div>
-            <div className="num text-[26px] font-bold text-slate-900 leading-none mt-1">
-              {formatCost(totalCost, currency)}
-            </div>
-          </div>
-          <div className="text-right">
-            <div className="text-[10px] text-slate-500">合计 Token</div>
-            <div className="num text-[16px] font-semibold text-slate-800 leading-none mt-1">
-              {formatTokens(totalTokens)}
-            </div>
-          </div>
-        </div>
+    <div className="flex-1 min-h-0 overflow-y-auto px-3 py-2.5 page-stack">
+      <HeroMetric
+        label="合计花费"
+        value={formatCost(totalCost, currency)}
+        accent="sky"
+        badge={<StatusBadge color="emerald">{agents.length} 来源</StatusBadge>}
+        footer={
+          <MetricPair
+            left={{ label: "合计 Token", value: formatTokens(totalTokens) }}
+            right={{ label: "花费分布", value: <CompositionBar agents={agents} /> }}
+          />
+        }
+      />
 
-        <div className="mt-2.5">
-          <CompositionBar agents={agents} />
-        </div>
-
-        <div className="mt-2.5 grid grid-cols-[1fr_auto_auto] gap-x-3 gap-y-1 items-center">
+      {agents.length > 0 && (
+        <div className="flex flex-col gap-1.5 shrink-0">
           {agents.map((a) => (
-            <div key={a.id} className="contents">
-              <div className="flex items-center gap-1.5 min-w-0">
-                <span
-                  className="w-1.5 h-1.5 rounded-full shrink-0"
-                  style={{ background: a.color }}
-                />
-                <span
-                  className={`text-[10px] font-medium truncate ${a.nameClass}`}
-                >
-                  {a.name}
-                </span>
-              </div>
-              <span className="num text-[11px] font-semibold text-slate-800 text-right">
-                {formatCost(a.cost, currency)}
-              </span>
-              <span className="num text-[11px] text-slate-500 text-right">
-                {formatTokens(a.tokens)}
-              </span>
-            </div>
+            <AgentCostCard
+              key={a.id}
+              agent={a}
+              currency={currency}
+              costPct={totalCost > 0 ? a.cost / totalCost : 0}
+            />
           ))}
         </div>
-      </div>
+      )}
 
-      {/* 额度：每个 agent 一块，纵向排列，方便以后继续加 */}
-      <div className="rounded-xl bg-surface/30 border border-surface/35 shrink-0 divide-y divide-slate-900/8">
-        {agents.map((a) => (
-          <div key={a.id} className="px-3 py-2">
-            <div className="flex items-center justify-between gap-1 mb-1.5">
-              <div className="flex items-center gap-1.5 min-w-0">
-                <span
-                  className="w-1.5 h-1.5 rounded-full shrink-0"
-                  style={{ background: a.color }}
-                />
-                <span className="text-[10px] font-medium text-slate-700 truncate">
-                  {a.name}
-                </span>
-                {a.badge && (
-                  <span
-                    className={`shrink-0 px-1 py-px rounded text-[8px] font-medium ${a.badgeClass}`}
-                  >
-                    {a.badge}
-                  </span>
+      {agents.some((a) => a.metrics.length > 0 || a.empty) && (
+        <SectionCard title="额度监控">
+          <div className="divide-y divide-slate-900/6 -mx-1">
+            {agents.map((a) => (
+              <div key={a.id} className="px-1 py-2 first:pt-0 last:pb-0">
+                <div className="flex items-center justify-between gap-1 mb-1.5">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="w-2 h-2 rounded-full shrink-0" style={{ background: a.color }} />
+                    <span className="text-[10px] font-semibold text-slate-700 truncate">{a.name}</span>
+                    {a.badge && (
+                      <span className={`shrink-0 px-1 py-px rounded text-[8px] font-medium ${a.badgeClass}`}>{a.badge}</span>
+                    )}
+                  </div>
+                  {a.cycleResetAt != null && a.cycleResetAt > now ? (
+                    <span className="num text-[8px] text-slate-400 shrink-0 whitespace-nowrap">
+                      ↻ {formatCountdown(a.cycleResetAt - now, true)}
+                    </span>
+                  ) : a.cycleResetDate ? (
+                    <span className="num text-[8px] text-slate-400 shrink-0 whitespace-nowrap">重置 {a.cycleResetDate}</span>
+                  ) : null}
+                </div>
+                {a.metrics.length > 0 ? (
+                  <div className="space-y-1.5">
+                    {a.metrics.map((m) => (
+                      <QuotaMiniRow key={m.label} label={m.label} usedPct={m.usedPct} resetAt={m.resetAt} now={now} />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-[10px] text-slate-500">{a.empty}</div>
                 )}
               </div>
-              {a.cycleResetAt != null && a.cycleResetAt > now ? (
-                <span className="num text-[8px] text-slate-400 shrink-0 whitespace-nowrap">
-                  ↻ {formatCountdown(a.cycleResetAt - now, true)}
-                </span>
-              ) : a.cycleResetDate ? (
-                <span className="num text-[8px] text-slate-400 shrink-0 whitespace-nowrap">
-                  重置 {a.cycleResetDate}
-                </span>
-              ) : null}
-            </div>
-            {a.metrics.length > 0 ? (
-              <div className="space-y-1.5">
-                {a.metrics.map((m) => (
-                  <QuotaMiniRow
-                    key={m.label}
-                    label={m.label}
-                    usedPct={m.usedPct}
-                    resetAt={m.resetAt}
-                    now={now}
-                  />
-                ))}
-              </div>
-            ) : (
-              <div className="text-[10px] text-slate-500">{a.empty}</div>
-            )}
+            ))}
           </div>
-        ))}
-      </div>
+        </SectionCard>
+      )}
 
-      {/* 合并趋势图：下方有模型排行时不再撑满，把空间让给列表 */}
+      {/* 合并趋势图 */}
       {mergedTrend.length > 0 && (
         <TrendChart
           points={mergedTrend}
@@ -682,30 +749,24 @@ export function SummaryTab({
         />
       )}
 
-      {/* 按模型：高度封顶，超出在列表内滚动，避免把面板撑高 */}
+      {/* 按模型排行 */}
       {sortedModels.length > 0 && (
-        <div className="shrink-0">
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="text-[10px] uppercase tracking-wide text-slate-700/55">
-              按模型
-            </span>
-            <div className="flex gap-0.5 text-[10px]">
-              {(["cost", "token", "requests"] as const).map((s) => (
-                <button
-                  key={s}
-                  onClick={() => setSortBy(s)}
-                  className={`px-1.5 py-0.5 rounded transition-colors ${
-                    sortBy === s
-                      ? "bg-slate-900/10 text-slate-800"
-                      : "text-slate-700/45 hover:text-slate-900/70"
-                  }`}
-                >
-                  {s === "cost" ? "花费" : s === "token" ? "Token" : "请求"}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="max-h-40 overflow-y-auto overflow-x-hidden overscroll-contain">
+        <SectionCard
+          title="模型用量"
+          action={
+            <SortToggle
+              options={[
+                { key: "cost", label: "花费" },
+                { key: "token", label: "Token" },
+                { key: "requests", label: "请求" },
+              ]}
+              value={sortBy}
+              onChange={setSortBy}
+              accent="sky"
+            />
+          }
+        >
+          <div className="max-h-36 overflow-y-auto overflow-x-hidden overscroll-contain space-y-1">
             {sortedModels.map((m) => {
               const sortVal =
                 sortBy === "cost"
@@ -718,7 +779,7 @@ export function SummaryTab({
               return (
                 <div
                   key={m.key}
-                  className="relative rounded-lg hover:bg-slate-900/5 transition-colors py-1.5 overflow-hidden min-w-0"
+                  className="relative rounded-lg hover:bg-slate-900/4 transition-colors py-1.5 px-1.5 overflow-hidden min-w-0"
                 >
                   <div
                     className={`absolute inset-y-0 left-0 ${m.barBg} rounded-lg pointer-events-none`}
@@ -732,7 +793,7 @@ export function SummaryTab({
                         title={m.source}
                       />
                       <span
-                        className="font-medium text-slate-900/90 truncate"
+                        className="font-medium text-slate-900/90 truncate text-[11px]"
                         title={`${m.source} · ${m.name}`}
                       >
                         {m.name}
@@ -746,15 +807,13 @@ export function SummaryTab({
                         </span>
                       )}
                     </div>
-                    <div className="flex items-center gap-1.5 text-slate-700/60 num shrink-0 whitespace-nowrap">
-                      <span>{m.requests}</span>
-                      <span className="text-slate-700/25">·</span>
+                    <div className="flex items-center gap-1 text-slate-600/70 num shrink-0 whitespace-nowrap text-[10px]">
                       <span>{formatTokens(m.tokens)}</span>
                       <span
-                        className={`min-w-[2.75rem] text-right ${
+                        className={`min-w-[2.5rem] text-right font-medium ${
                           m.hasPrice
                             ? "text-slate-900/90"
-                            : "text-slate-700/35"
+                            : "text-slate-500/50"
                         }`}
                       >
                         {m.hasPrice ? formatCost(m.cost, currency) : "—"}
@@ -765,7 +824,7 @@ export function SummaryTab({
               );
             })}
           </div>
-        </div>
+        </SectionCard>
       )}
     </div>
   );

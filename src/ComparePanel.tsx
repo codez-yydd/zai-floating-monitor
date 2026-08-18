@@ -21,6 +21,14 @@ import {
 import { formatTokens } from "./format";
 import { remainingGradient, remainingTextColor } from "./widgets";
 import { BrandIcon, type BrandIconName } from "./BrandIcon";
+import {
+  PageShell,
+  PageHeader,
+  PageBody,
+  SectionCard,
+  EmptyState,
+  AlertBanner,
+} from "./layout";
 
 interface Props {
   onBack: () => void;
@@ -254,76 +262,41 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
   }, [load]);
 
   return (
-    <div className="flex flex-col h-full">
-      {/* 顶部 */}
-      <div className="px-3.5 pt-3 pb-2.5 border-b border-slate-900/10">
-        <div className="flex items-center justify-between mb-2">
-          <button
-            onClick={onBack}
-            className="text-xs text-slate-700/50 hover:text-slate-900/80 transition-colors"
-          >
-            ← 返回
-          </button>
-          <h1 className="text-[13px] font-semibold text-slate-900/90">
-            周额度对比
-          </h1>
-          <button
-            onClick={load}
-            disabled={loading}
-            className="text-slate-700/50 hover:text-slate-900/80 text-xs transition-colors"
-            title="刷新"
-          >
-            ↻
-          </button>
-        </div>
-        {/* 设备筛选器 */}
-        {syncEnabled && (
-          <div className="flex items-center gap-1.5">
-            <span className="text-[10px] text-slate-700/45 shrink-0">设备</span>
-            <select
-              value={deviceFilter}
-              onChange={(e) => setDeviceFilter(e.target.value)}
-              className="num flex-1 px-1.5 py-0.5 rounded-md bg-slate-900/5 border border-slate-900/10 text-[10px] text-slate-900/80 focus:outline-none focus:border-sky-400/60"
-            >
-              <option value="all">全部（汇总）</option>
-              <option value="local">
-                本机{syncConfig?.device_name ? `（${syncConfig.device_name}）` : ""}
-              </option>
-              {remoteDevices
-                .filter((d) => d.device_id !== syncConfig?.device_id)
-                .map((d) => (
-                  <option key={d.device_id} value={d.device_id}>
-                    {d.device_name}（{d.device_id.slice(0, 6)}）
-                  </option>
+    <PageShell>
+      <PageHeader
+        title="周额度对比"
+        onBack={onBack}
+        right={
+          <button onClick={load} disabled={loading} className="toolbar-btn" title="刷新">↻</button>
+        }
+        subtitle={
+          syncEnabled ? (
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] text-slate-500 shrink-0">设备</span>
+              <select
+                value={deviceFilter}
+                onChange={(e) => setDeviceFilter(e.target.value)}
+                className="input-box flex-1 text-[10px] py-1"
+              >
+                <option value="all">全部（汇总）</option>
+                <option value="local">本机{syncConfig?.device_name ? `（${syncConfig.device_name}）` : ""}</option>
+                {remoteDevices.filter((d) => d.device_id !== syncConfig?.device_id).map((d) => (
+                  <option key={d.device_id} value={d.device_id}>{d.device_name}（{d.device_id.slice(0, 6)}）</option>
                 ))}
-            </select>
-          </div>
-        )}
-      </div>
+              </select>
+            </div>
+          ) : undefined
+        }
+      />
 
-      {error && (
-        <div className="mx-3 mt-2 px-2.5 py-1.5 rounded-lg bg-red-500/15 text-red-700 text-xs">
-          {error}
-        </div>
-      )}
+      {error && <div className="px-3 pt-2"><AlertBanner>{error}</AlertBanner></div>}
+
       {periods.length === 0 && !loading && !error && (
-        <div className="flex-1 flex items-center justify-center px-6">
-          <div className="text-center">
-            <div className="text-2xl mb-2 opacity-40">📊</div>
-            <div className="text-xs text-slate-700/60 mb-1">
-              暂无周额度历史数据
-            </div>
-            <div className="text-[10px] text-slate-700/40 leading-relaxed">
-              应用开启后会自动采样周额度
-              <br />
-              请保持运行以积累数据
-            </div>
-          </div>
-        </div>
+        <EmptyState title="暂无周额度历史数据" hint={"应用开启后会自动采样周额度\n请保持运行以积累数据"} />
       )}
 
       {periods.length > 0 && (
-        <div className="flex-1 overflow-y-auto px-3.5 py-3 space-y-3">
+        <PageBody className="page-stack">
           {/* 周额度百分比柱状图 */}
           <PeriodChart
             periods={periods}
@@ -340,11 +313,7 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
             />
           )}
 
-          {/* 全部周期列表 */}
-          <div>
-            <div className="text-[10px] uppercase tracking-wide text-slate-700/55 mb-1.5 mt-1">
-              全部周期
-            </div>
+          <SectionCard title="全部周期">
             <div className="space-y-0.5">
               {periods
                 .slice()
@@ -382,19 +351,14 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
                   );
                 })}
             </div>
-          </div>
-        </div>
+          </SectionCard>
+        </PageBody>
       )}
 
-      {/* 底部说明 */}
-      <div className="px-3.5 py-2 border-t border-slate-900/10 text-[9px] text-slate-700/40 leading-relaxed">
-        周百分比是智谱账户级额度（含所有设备/工具）；
-        <br />
-        Token 统计当前筛选范围内设置中开启的 Agent；二者不是同一计量单位。
-        <br />
-        Cursor 目前只采集本机，远端设备筛选不会包含 Cursor 数据。
+      <div className="px-3 py-1.5 border-t border-slate-900/8 text-[9px] text-slate-500 leading-relaxed shrink-0">
+        周百分比是智谱账户级额度（含所有设备/工具）；Token 统计当前筛选范围内开启的 Agent。
       </div>
-    </div>
+    </PageShell>
   );
 }
 
@@ -412,12 +376,8 @@ function PeriodChart({
   const barGap = n > 20 ? "gap-px" : n > 10 ? "gap-0.5" : "gap-1";
 
   return (
-    <div className="rounded-lg bg-surface/25 border border-surface/30 px-2.5 py-2">
-      <div className="flex items-center justify-between mb-1.5">
-        <span className="text-[10px] uppercase tracking-wide text-slate-700/55">
-          周额度结束用量趋势
-        </span>
-      </div>
+    <div className="card-base rounded-2xl px-2.5 py-2">
+      <div className="section-title mb-2">周额度结束用量趋势</div>
       <div className={`flex items-end ${barGap} h-16`}>
         {periods.map((p, i) => {
           const h = p.pct_end; // 0-100，避免峰值把历史周期夸大
@@ -480,7 +440,7 @@ function PeriodDetail({
   })).filter((item) => (item.bucket?.total_tokens ?? 0) > 0);
 
   return (
-    <div className="rounded-lg bg-surface/30 border border-surface/40 px-3 py-2.5 space-y-2">
+    <SectionCard>
       {/* 标题行 */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-1.5">
@@ -557,7 +517,7 @@ function PeriodDetail({
           />
         </div>
       </div>
-    </div>
+    </SectionCard>
   );
 }
 

@@ -22,6 +22,7 @@ export function ClaudePanel(props: Props) {
         rowBar: "bg-orange-500/10",
         sortSelected: "bg-orange-500/20 text-orange-700",
         badge: "bg-orange-500/15 text-orange-700",
+        accent: "orange",
       }}
       empty={{
         icon: "🤖",

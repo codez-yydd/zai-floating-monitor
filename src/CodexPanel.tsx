@@ -22,6 +22,7 @@ export function CodexPanel(props: Props) {
         rowBar: "bg-emerald-500/10",
         sortSelected: "bg-emerald-500/20 text-emerald-700",
         badge: "bg-emerald-500/15 text-emerald-700",
+        accent: "emerald",
       }}
       empty={{
         icon: "⌨️",
