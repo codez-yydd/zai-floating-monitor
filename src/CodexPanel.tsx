@@ -1,5 +1,6 @@
 import type { CodexSnapshot, Currency, PricingConfig, TrendBucket } from "./types";
 import { AgentUsagePanel } from "./AgentUsagePanel";
+import { useI18n } from "./i18n";
 
 interface Props {
   snapshot: CodexSnapshot | null;
@@ -15,6 +16,7 @@ interface Props {
 
 /** Codex 用量面板：通用 AgentUsagePanel 的 OpenAI 品牌皮肤（emerald）。 */
 export function CodexPanel(props: Props) {
+  const { t } = useI18n();
   return (
     <AgentUsagePanel
       {...props}
@@ -25,9 +27,10 @@ export function CodexPanel(props: Props) {
         accent: "emerald",
       }}
       empty={{
+        name: "Codex",
         icon: "⌨️",
-        title: "未检测到 Codex",
-        hint: "请安装并使用 OpenAI Codex CLI 产生本地会话记录\n（~/.codex/sessions）后再查看",
+        title: t("stats.codexNotFound"),
+        hint: t("stats.codexNotFoundHint"),
       }}
       cacheRateMode="included"
     />

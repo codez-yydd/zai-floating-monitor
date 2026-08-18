@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { useI18n } from "./i18n";
+import { dateLocale } from "./i18n/locale";
 
 interface DatePickerProps {
   /** 受控值，"YYYY-MM-DD" */
@@ -9,8 +11,6 @@ interface DatePickerProps {
   /** 可选上限 "YYYY-MM-DD" */
   max?: string;
 }
-
-const WEEK_HEADERS = ["日", "一", "二", "三", "四", "五", "六"];
 
 // 网格尺寸钉死为常量，避免 Tailwind 任意值宽度 / absolute shrink-to-fit
 // 在不同环境下推断不一致，导致日历被父容器掐窄、日期挤成一团。
@@ -32,9 +32,9 @@ function parseYMD(s: string): Date | null {
 }
 
 /**
- * 轻量中文日期选择器：替代原生 <input type="date">。
+ * 轻量日期选择器：替代原生 <input type="date">。
  * 原生控件的弹出日历跟随系统 locale（此 WebView 下为英文）且样式不可控，
- * 这里自建以保证全中文 + 与毛玻璃面板一致的视觉。
+ * 这里自建以保证文案跟随 UI 语言 + 与毛玻璃面板一致的视觉。
  */
 export function DatePicker({
   value,
@@ -42,6 +42,9 @@ export function DatePicker({
   min,
   max,
 }: DatePickerProps) {
+  const { locale, t } = useI18n();
+  // 星期表头：跟随 UI 语言（词典内空格分隔存储）
+  const weekHeaders = t("date.weekdays").split(" ");
   const [open, setOpen] = useState(false);
   const [view, setView] = useState(() => {
     const d = parseYMD(value) ?? new Date();
@@ -178,7 +181,10 @@ export function DatePicker({
               </svg>
             </button>
             <span className="num text-xs font-semibold text-slate-800 select-none">
-              {view.year}年{view.month + 1}月
+              {new Intl.DateTimeFormat(dateLocale(locale), {
+                year: "numeric",
+                month: "long",
+              }).format(new Date(view.year, view.month, 1))}
             </span>
             <button
               type="button"
@@ -204,7 +210,7 @@ export function DatePicker({
             className="grid mb-1"
             style={{ gridTemplateColumns: GRID_COLS }}
           >
-            {WEEK_HEADERS.map((w) => (
+            {weekHeaders.map((w) => (
               <div
                 key={w}
                 className="h-6 grid place-items-center text-[10px] font-medium text-slate-400 select-none"

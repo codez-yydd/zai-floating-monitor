@@ -29,24 +29,26 @@ import {
   AlertBanner,
   LoadingState,
 } from "./layout";
+import { useI18n, type TFn } from "./i18n";
 
 interface Props {
   onBack: () => void;
 }
 
-/** 相对当前时间的友好描述 */
-function timeAgo(ms: number): string {
-  if (!ms) return "从未";
+/** 相对当前时间的友好描述（文案走词典） */
+function timeAgo(t: TFn, ms: number): string {
+  if (!ms) return t("sync.never");
   const diff = Date.now() - ms;
   const min = Math.floor(diff / 60000);
-  if (min < 1) return "刚刚";
-  if (min < 60) return `${min} 分钟前`;
+  if (min < 1) return t("sync.justNow");
+  if (min < 60) return t("sync.minAgo", { n: min });
   const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr} 小时前`;
-  return `${Math.floor(hr / 24)} 天前`;
+  if (hr < 24) return t("sync.hourAgo", { n: hr });
+  return t("sync.dayAgo", { n: Math.floor(hr / 24) });
 }
 
 export function SyncPanel({ onBack }: Props) {
+  const { t } = useI18n();
   const [config, setConfig] = useState<SyncConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -113,6 +115,7 @@ export function SyncPanel({ onBack }: Props) {
         setLoading(false);
       }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleRegister = async () => {
@@ -146,7 +149,7 @@ export function SyncPanel({ onBack }: Props) {
     setError(null);
     try {
       const outcome = await syncNow();
-      setSyncFlash(`已上传 ${outcome.uploaded} 条`);
+      setSyncFlash(t("sync.uploaded", { count: outcome.uploaded }));
       setTimeout(() => setSyncFlash(null), 2000);
       const cfg = await getSyncConfig();
       await refresh(cfg);
@@ -174,7 +177,7 @@ export function SyncPanel({ onBack }: Props) {
     days?: number
   ) => {
     if (!masterInput.trim()) {
-      setError("请先填写 Master Token（从服务器日志获取）");
+      setError(t("sync.needMaster"));
       return;
     }
     setBusy(true);
@@ -188,8 +191,11 @@ export function SyncPanel({ onBack }: Props) {
       );
       const msg =
         res.devices_deleted != null
-          ? `已删除 ${res.records_deleted} 条记录、${res.devices_deleted} 个设备`
-          : `已删除 ${res.records_deleted} 条记录`;
+          ? t("sync.deletedBoth", {
+              records: res.records_deleted,
+              devices: res.devices_deleted,
+            })
+          : t("sync.deleted", { count: res.records_deleted });
       setSyncFlash(msg);
       setTimeout(() => setSyncFlash(null), 2500);
       setConfirmAction(null);
@@ -205,7 +211,7 @@ export function SyncPanel({ onBack }: Props) {
 
   const handleMerge = async (sourceId: string, targetId: string) => {
     if (!masterInput.trim()) {
-      setError("请先填写 Master Token（从服务器日志获取）");
+      setError(t("sync.needMaster"));
       return;
     }
     setBusy(true);
@@ -214,8 +220,8 @@ export function SyncPanel({ onBack }: Props) {
       const res = await mergeDevices(masterInput.trim(), sourceId, targetId);
       const tName =
         cleanupStatus?.devices.find((d) => d.device_id === targetId)
-          ?.device_name ?? "目标设备";
-      setSyncFlash(`已合并 ${res.records_moved} 条记录到「${tName}」`);
+          ?.device_name ?? t("sync.targetDevice");
+      setSyncFlash(t("sync.merged", { count: res.records_moved, name: tName }));
       setTimeout(() => setSyncFlash(null), 2500);
       setMergeSource(null);
       const cfg = await getSyncConfig();
@@ -229,7 +235,7 @@ export function SyncPanel({ onBack }: Props) {
 
   const handleRename = async (deviceId: string, newName: string) => {
     if (!masterInput.trim()) {
-      setError("请先填写 Master Token（从服务器日志获取）");
+      setError(t("sync.needMaster"));
       return;
     }
     setBusy(true);
@@ -237,7 +243,7 @@ export function SyncPanel({ onBack }: Props) {
     try {
       const res = await renameDevice(masterInput.trim(), deviceId, newName);
       if (res.updated === 0) {
-        setError("设备不存在或已被删除");
+        setError(t("sync.deviceMissing"));
         setRenameTarget(null);
         const cfg = await getSyncConfig();
         await refresh(cfg);
@@ -251,7 +257,7 @@ export function SyncPanel({ onBack }: Props) {
         const latest = await getSyncConfig();
         await setSyncConfig({ ...latest, device_name: newName });
       }
-      setSyncFlash(`已改名为「${newName}」`);
+      setSyncFlash(t("sync.renamed", { name: newName }));
       setTimeout(() => setSyncFlash(null), 2500);
       setRenameTarget(null);
       const cfg = await getSyncConfig();
@@ -265,7 +271,7 @@ export function SyncPanel({ onBack }: Props) {
 
   const handleAutoCleanup = async (enabled: boolean, days: number) => {
     if (!masterInput.trim()) {
-      setError("配置自动清理需要 Master Token");
+      setError(t("sync.needMasterAuto"));
       return;
     }
     setBusy(true);
@@ -282,21 +288,21 @@ export function SyncPanel({ onBack }: Props) {
     }
   };
 
-  if (loading) return <LoadingState text="加载同步配置…" />;
+  if (loading) return <LoadingState text={t("sync.loading")} />;
 
   const connected = config?.enabled && config.device_token;
 
   return (
     <PageShell>
-      <PageHeader title="设备同步" onBack={onBack} />
+      <PageHeader title={t("sync.title")} onBack={onBack} />
       <PageBody className="page-stack">
         {error && <AlertBanner>{error}</AlertBanner>}
 
         {!connected ? (
-          <SettingsCard title="连接到同步服务器" hint="先用 Docker 部署 zbar-sync 服务，从启动日志复制 Master Token。">
+          <SettingsCard title={t("sync.connectTitle")} hint={t("sync.connectHint")}>
 
             <label className="flex flex-col gap-0.5 text-[10px]">
-              <span className="text-slate-700/55">服务器地址</span>
+              <span className="text-slate-700/55">{t("sync.serverUrl")}</span>
               <input
                 type="text"
                 value={regForm.server_url}
@@ -309,12 +315,12 @@ export function SyncPanel({ onBack }: Props) {
             </label>
 
             <label className="flex flex-col gap-0.5 text-[10px]">
-              <span className="text-slate-700/55">准入凭证 (Master Token)</span>
+              <span className="text-slate-700/55">{t("sync.masterLabel")}</span>
               <div className="flex items-center rounded-md bg-slate-900/5 border border-slate-900/10 focus-within:border-sky-400/60">
                 <input
                   type={showMaster ? "text" : "password"}
                   value={regForm.master_token}
-                  placeholder="docker logs 中的 MASTER_TOKEN"
+                  placeholder={t("sync.masterPh")}
                   onChange={(e) =>
                     setRegForm((f) => ({ ...f, master_token: e.target.value }))
                   }
@@ -330,11 +336,11 @@ export function SyncPanel({ onBack }: Props) {
             </label>
 
             <label className="flex flex-col gap-0.5 text-[10px]">
-              <span className="text-slate-700/55">设备名称</span>
+              <span className="text-slate-700/55">{t("sync.deviceName")}</span>
               <input
                 type="text"
                 value={regForm.device_name}
-                placeholder="如：work / home"
+                placeholder={t("sync.namePh")}
                 onChange={(e) =>
                   setRegForm((f) => ({ ...f, device_name: e.target.value }))
                 }
@@ -344,7 +350,7 @@ export function SyncPanel({ onBack }: Props) {
 
             {regForm.server_url.startsWith("http://") && (
               <p className="text-[9px] text-amber-600/80 leading-relaxed">
-                ⚠️ HTTP 明文传输，建议内网使用或配置 HTTPS 反向代理。
+                {t("sync.httpWarn")}
               </p>
             )}
 
@@ -353,7 +359,7 @@ export function SyncPanel({ onBack }: Props) {
               disabled={registering || !regForm.server_url.trim() || !regForm.master_token.trim() || !regForm.device_name.trim()}
               className="w-full mt-2"
             >
-              {registering ? "连接中…" : "连接并注册"}
+              {registering ? t("sync.connecting") : t("sync.connect")}
             </BtnPrimary>
           </SettingsCard>
         ) : (
@@ -363,23 +369,25 @@ export function SyncPanel({ onBack }: Props) {
             }>
               <div className="mt-1.5 grid grid-cols-2 gap-1.5 text-[10px]">
                 <div className="text-slate-700/55">
-                  服务器
+                  {t("sync.server")}
                   <div className="text-slate-900/80 truncate">
                     {config!.server_url}
                   </div>
                 </div>
                 <div className="text-slate-700/55">
-                  上次同步
+                  {t("sync.lastSync")}
                   <div className="text-slate-900/80">
-                    {timeAgo(config!.last_sync_at)}
+                    {timeAgo(t, config!.last_sync_at)}
                   </div>
                 </div>
                 <div className="text-slate-700/55">
-                  待上传
-                  <div className="text-slate-900/80">{pending} 条</div>
+                  {t("sync.pending")}
+                  <div className="text-slate-900/80">
+                    {t("sync.recordsCount", { count: pending })}
+                  </div>
                 </div>
                 <div className="text-slate-700/55">
-                  已传游标
+                  {t("sync.uploadCursor")}
                   <div className="text-slate-900/80">
                     #{config!.last_uploaded_rowid}
                   </div>
@@ -389,7 +397,7 @@ export function SyncPanel({ onBack }: Props) {
               {/* 同步模式 */}
               <div className="mt-2.5 pt-2 border-t border-slate-900/10">
                 <div className="flex items-center justify-between">
-                  <span className="text-[10px] text-slate-700/55">同步模式</span>
+                  <span className="text-[10px] text-slate-700/55">{t("sync.mode")}</span>
                   <div className="flex gap-1">
                     {(["manual", "auto"] as SyncMode[]).map((m) => (
                       <button
@@ -401,14 +409,14 @@ export function SyncPanel({ onBack }: Props) {
                             : "bg-slate-900/5 text-slate-700/65 hover:bg-slate-900/10"
                         }`}
                       >
-                        {m === "manual" ? "手动" : "自动"}
+                        {m === "manual" ? t("sync.manual") : t("sync.auto")}
                       </button>
                     ))}
                   </div>
                 </div>
                 {modeDraft === "auto" && (
                   <label className="flex items-center justify-between mt-1.5 text-[10px]">
-                    <span className="text-slate-700/55">间隔（秒）</span>
+                    <span className="text-slate-700/55">{t("sync.interval")}</span>
                     <input
                       type="number"
                       min={10}
@@ -429,37 +437,37 @@ export function SyncPanel({ onBack }: Props) {
                     className="flex-1 text-[11px] py-1 rounded-md bg-sky-500 text-white hover:bg-sky-600 disabled:opacity-40 transition-colors"
                   >
                     {syncing
-                      ? "同步中…"
+                      ? t("sync.syncing")
                       : syncFlash
                         ? syncFlash
-                        : "立即同步"}
+                        : t("sync.syncNow")}
                   </button>
                   <button
                     onClick={handleSaveMode}
                     className="text-[11px] px-2.5 py-1 rounded-md bg-slate-900/5 text-slate-700/70 hover:bg-slate-900/10 transition-colors"
                   >
-                    保存模式
+                    {t("sync.saveMode")}
                   </button>
                   <button
                     onClick={handleDisconnect}
                     className="text-[11px] px-2.5 py-1 rounded-md bg-slate-900/5 text-slate-700/70 hover:bg-red-500/15 hover:text-red-700 transition-colors"
                   >
-                    断开
+                    {t("sync.disconnect")}
                   </button>
                 </div>
               </div>
             </SettingsCard>
 
             <SettingsCard
-              title="数据管理"
-              action={cleanupStatus ? <span className="text-[10px] text-slate-500">共 {cleanupStatus.total_records} 条</span> : undefined}
+              title={t("sync.dataMgmt")}
+              action={cleanupStatus ? <span className="text-[10px] text-slate-500">{t("sync.totalRecords", { count: cleanupStatus.total_records })}</span> : undefined}
             >
               <label className="flex flex-col gap-0.5 text-[10px] mb-2">
-                <span className="text-slate-600">Master Token（操作清理用）</span>
+                <span className="text-slate-600">{t("sync.masterForCleanup")}</span>
                 <input
                   type="password"
                   value={masterInput}
-                  placeholder="粘贴 Master Token"
+                  placeholder={t("sync.pasteMasterPh")}
                   onChange={(e) => setMasterInput(e.target.value)}
                   className="input-box"
                 />
@@ -468,7 +476,7 @@ export function SyncPanel({ onBack }: Props) {
               {/* 自动清理配置 */}
               <div className="flex items-center justify-between mb-1.5 py-1 border-t border-slate-900/10">
                 <span className="text-[10px] text-slate-700/55">
-                  自动清理
+                  {t("sync.autoCleanup")}
                 </span>
                 <button
                   onClick={() =>
@@ -484,12 +492,12 @@ export function SyncPanel({ onBack }: Props) {
                       : "bg-slate-900/10 text-slate-700/65"
                   }`}
                 >
-                  {cleanupStatus?.auto_config.auto_enabled ? "已开启" : "已关闭"}
+                  {cleanupStatus?.auto_config.auto_enabled ? t("sync.on") : t("sync.off")}
                 </button>
               </div>
               {cleanupStatus?.auto_config.auto_enabled && (
                 <label className="flex items-center justify-between mb-2 text-[10px]">
-                  <span className="text-slate-700/55">保留天数</span>
+                  <span className="text-slate-700/55">{t("sync.keepDays")}</span>
                   <input
                     type="number"
                     min={1}
@@ -520,18 +528,18 @@ export function SyncPanel({ onBack }: Props) {
                           {d.device_id.slice(0, 6)}
                         </span>
                         {d.device_id === config!.device_id && (
-                          <span className="ml-1 text-sky-600/70">本机</span>
+                          <span className="ml-1 text-sky-600/70">{t("sync.localBadge")}</span>
                         )}
                       </span>
                       <span className="flex items-center gap-1.5 shrink-0">
                         <span className="text-slate-700/45">
-                          {d.record_count ?? 0} 条
+                          {t("sync.recordsCount", { count: d.record_count ?? 0 })}
                         </span>
                         <button
                           onClick={() => setRenameTarget(d)}
                           disabled={busy}
                           className="text-slate-700/40 hover:text-sky-600 transition-colors"
-                          title="改名"
+                          title={t("sync.rename")}
                         >
                           ✎
                         </button>
@@ -541,9 +549,9 @@ export function SyncPanel({ onBack }: Props) {
                               onClick={() => setMergeSource(d)}
                               disabled={busy}
                               className="text-slate-700/50 hover:text-sky-600 transition-colors"
-                              title="合并到其他设备"
+                              title={t("sync.mergeInto")}
                             >
-                              合并
+                              {t("sync.merge")}
                             </button>
                             <button
                               onClick={() =>
@@ -551,7 +559,7 @@ export function SyncPanel({ onBack }: Props) {
                               }
                               disabled={busy}
                               className="text-slate-700/40 hover:text-red-600 transition-colors"
-                              title="删除此设备数据"
+                              title={t("sync.deleteDeviceData")}
                             >
                               ✕
                             </button>
@@ -570,21 +578,21 @@ export function SyncPanel({ onBack }: Props) {
                   disabled={busy}
                   className="flex-1 text-[10px] py-1 rounded-md bg-slate-900/5 text-slate-700/65 hover:bg-amber-500/15 hover:text-amber-700 transition-colors"
                 >
-                  按时间清理
+                  {t("sync.cleanByTime")}
                 </button>
                 <button
                   onClick={() => setConfirmAction("all")}
                   disabled={busy}
                   className="flex-1 text-[10px] py-1 rounded-md bg-slate-900/5 text-slate-700/65 hover:bg-red-500/15 hover:text-red-700 transition-colors"
                 >
-                  全部清空
+                  {t("sync.clearAll")}
                 </button>
                 <button
                   onClick={() => setConfirmAction("reset")}
                   disabled={busy}
                   className="flex-1 text-[10px] py-1 rounded-md bg-slate-900/5 text-slate-700/65 hover:bg-red-500/15 hover:text-red-700 transition-colors"
                 >
-                  重置
+                  {t("sync.reset")}
                 </button>
               </div>
             </SettingsCard>
@@ -649,6 +657,7 @@ function MergeDialog({
   onCancel: () => void;
   onConfirm: (targetId: string) => void;
 }) {
+  const { t } = useI18n();
   // 候选目标 = 除来源外的全部设备。默认选最新注册的那个（通常是该设备当前正在用的
   // 实例），而不是本机：合并到本机会让历史数据在本机"全部汇总"视图中不可见（本机
   // 读本地库、远端查询又排除本机），故只在用户明确选择本机时才走这条路径。
@@ -664,11 +673,14 @@ function MergeDialog({
     <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/30 rounded-2xl">
       <div className="mx-4 w-full rounded-lg bg-elevated border border-slate-900/10 p-3 shadow-xl">
         <div className="text-[12px] font-semibold text-slate-900 mb-1">
-          合并设备
+          {t("sync.mergeTitle")}
         </div>
         <p className="text-[10px] text-slate-700/65 leading-relaxed mb-2">
-          将「{source.device_name}（{source.device_id.slice(0, 6)}）」的{" "}
-          {source.record_count ?? 0} 条记录合并到：
+          {t("sync.mergeDesc", {
+            name: source.device_name,
+            id: source.device_id.slice(0, 6),
+            count: source.record_count ?? 0,
+          })}
         </p>
         <select
           value={target}
@@ -677,20 +689,21 @@ function MergeDialog({
         >
           {candidates.map((d) => (
             <option key={d.device_id} value={d.device_id}>
-              {d.device_name}（{d.device_id.slice(0, 6)}）
-              {d.device_id === localDeviceId ? " · 本机" : ""}
+              {t("common.deviceOption", {
+                name: d.device_name,
+                id: d.device_id.slice(0, 6),
+              })}
+              {d.device_id === localDeviceId ? ` · ${t("sync.localBadge")}` : ""}
             </option>
           ))}
         </select>
         {targetIsLocal ? (
           <p className="text-[10px] text-amber-700/80 leading-relaxed mb-2">
-            合并到本机后，被合并的历史数据在本机"全部汇总"视图中可能不可见。建议改
-            合并到该设备当前正在用的实例。
+            {t("sync.mergeLocalWarn")}
           </p>
         ) : (
           <p className="text-[10px] text-amber-700/80 leading-relaxed mb-2">
-            来源设备的记录会转移到目标设备，来源设备将被删除，不可恢复。若来源设备仍
-            在某台机器上同步，请到那台机器"断开"并重新注册。
+            {t("sync.mergeWarn")}
           </p>
         )}
         <div className="flex gap-1.5">
@@ -698,14 +711,14 @@ function MergeDialog({
             onClick={onCancel}
             className="flex-1 text-[11px] py-1 rounded-md bg-slate-900/5 text-slate-700/70 hover:bg-slate-900/10 transition-colors"
           >
-            取消
+            {t("common.cancel")}
           </button>
           <button
             disabled={!target}
             onClick={() => onConfirm(target)}
             className="flex-1 text-[11px] py-1 rounded-md bg-sky-500 text-white hover:bg-sky-600 transition-colors disabled:opacity-40"
           >
-            确认合并
+            {t("sync.mergeConfirm")}
           </button>
         </div>
       </div>
@@ -723,6 +736,7 @@ function RenameDialog({
   onCancel: () => void;
   onConfirm: (newName: string) => void;
 }) {
+  const { t } = useI18n();
   const [name, setName] = useState(device.device_name);
   const trimmed = name.trim();
   const valid = trimmed.length > 0 && trimmed.length <= 32;
@@ -731,10 +745,13 @@ function RenameDialog({
     <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/30 rounded-2xl">
       <div className="mx-4 w-full rounded-lg bg-elevated border border-slate-900/10 p-3 shadow-xl">
         <div className="text-[12px] font-semibold text-slate-900 mb-1">
-          设备改名
+          {t("sync.renameTitle")}
         </div>
         <p className="text-[10px] text-slate-700/65 leading-relaxed mb-2">
-          修改「{device.device_name}（{device.device_id.slice(0, 6)}）」的名称。
+          {t("sync.renameDesc", {
+            name: device.device_name,
+            id: device.device_id.slice(0, 6),
+          })}
         </p>
         <input
           type="text"
@@ -755,14 +772,14 @@ function RenameDialog({
             onClick={onCancel}
             className="flex-1 text-[11px] py-1 rounded-md bg-slate-900/5 text-slate-700/70 hover:bg-slate-900/10 transition-colors"
           >
-            取消
+            {t("common.cancel")}
           </button>
           <button
             disabled={!valid}
             onClick={() => onConfirm(trimmed)}
             className="flex-1 text-[11px] py-1 rounded-md bg-sky-500 text-white hover:bg-sky-600 transition-colors disabled:opacity-40"
           >
-            确认
+            {t("common.confirm")}
           </button>
         </div>
       </div>
@@ -784,26 +801,27 @@ function ConfirmDialog({
     days?: number
   ) => void;
 }) {
+  const { t } = useI18n();
   const [type, arg] = [action.split(":")[0], action.split(":")[1]];
   const [days, setDays] = useState(30);
 
   const title =
     type === "device"
-      ? "删除设备数据"
+      ? t("sync.confirmTitleDevice")
       : type === "before"
-        ? "按时间清理"
+        ? t("sync.cleanByTime")
         : type === "all"
-          ? "全部清空"
-          : "重置服务器";
+          ? t("sync.clearAll")
+          : t("sync.confirmTitleReset");
 
   const desc =
     type === "device"
-      ? `将删除该设备的全部明细，不可恢复。`
+      ? t("sync.confirmDescDevice")
       : type === "before"
-        ? `将删除 ${days} 天前的所有数据，趋势图历史范围会缩短。不可恢复。`
+        ? t("sync.confirmDescBefore", { days })
         : type === "all"
-          ? "将清空所有用量数据（保留设备注册），不可恢复。"
-          : "将清空所有数据并删除所有设备，回到初始状态。不可恢复。";
+          ? t("sync.confirmDescAll")
+          : t("sync.confirmDescReset");
 
   return (
     <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/30 rounded-2xl">
@@ -816,7 +834,7 @@ function ConfirmDialog({
         </p>
         {type === "before" && (
           <label className="flex items-center justify-between text-[10px] mb-2">
-            <span className="text-slate-700/55">保留天数</span>
+            <span className="text-slate-700/55">{t("sync.keepDays")}</span>
             <input
               type="number"
               min={1}
@@ -833,7 +851,7 @@ function ConfirmDialog({
             onClick={onCancel}
             className="flex-1 text-[11px] py-1 rounded-md bg-slate-900/5 text-slate-700/70 hover:bg-slate-900/10 transition-colors"
           >
-            取消
+            {t("common.cancel")}
           </button>
           <button
             onClick={() =>
@@ -845,7 +863,7 @@ function ConfirmDialog({
             }
             className="flex-1 text-[11px] py-1 rounded-md bg-red-500 text-white hover:bg-red-600 transition-colors"
           >
-            确认删除
+            {t("sync.confirmDelete")}
           </button>
         </div>
       </div>

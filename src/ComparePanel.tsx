@@ -29,6 +29,7 @@ import {
   EmptyState,
   AlertBanner,
 } from "./layout";
+import { useI18n } from "./i18n";
 
 interface Props {
   onBack: () => void;
@@ -47,6 +48,7 @@ const AGENT_META: Record<
 };
 
 export function ComparePanel({ onBack, agentVisibility }: Props) {
+  const { t } = useI18n();
   const [periods, setPeriods] = useState<WeeklyPeriod[]>([]);
   const [tokens, setTokens] = useState<WeeklyTokenBucket[]>([]);
   const [tokensByAgent, setTokensByAgent] = useState<
@@ -118,12 +120,14 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
         historyTasks.push(
           remoteSnapshots(historyFromMs, nowMs, snapshotOpts)
             .then((history) => (remoteHistory = history))
-            .catch((e) => {
-              // 汇总模式保留本机数据降级展示；具体设备筛选则明确提示失败。
-              if (deviceFilter !== "all") {
-                throw new Error(`远端额度历史获取失败：${String(e)}`);
-              }
-            })
+              .catch((e) => {
+                // 汇总模式保留本机数据降级展示；具体设备筛选则明确提示失败。
+                if (deviceFilter !== "all") {
+                  throw new Error(
+                    t("compare.remoteHistoryFailed", { msg: String(e) })
+                  );
+                }
+              })
         );
       }
       await Promise.all(historyTasks);
@@ -249,7 +253,7 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
       // 只有最新请求才允许结束 loading，避免旧请求把新请求的加载态清掉
       if (reqId === loadReqId.current) setLoading(false);
     }
-  }, [agentVisibility, deviceFilter, syncConfig, syncEnabled]);
+  }, [agentVisibility, deviceFilter, syncConfig, syncEnabled, t]);
 
   useEffect(() => {
     load();
@@ -264,24 +268,33 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
   return (
     <PageShell>
       <PageHeader
-        title="周额度对比"
+        title={t("compare.title")}
         onBack={onBack}
         right={
-          <button onClick={load} disabled={loading} className="toolbar-btn" title="刷新">↻</button>
+          <button onClick={load} disabled={loading} className="toolbar-btn" title={t("common.refresh")}>↻</button>
         }
         subtitle={
           syncEnabled ? (
             <div className="flex items-center gap-1.5">
-              <span className="text-[10px] text-slate-500 shrink-0">设备</span>
+              <span className="text-[10px] text-slate-500 shrink-0">{t("compare.device")}</span>
               <select
                 value={deviceFilter}
                 onChange={(e) => setDeviceFilter(e.target.value)}
                 className="input-box flex-1 text-[10px] py-1"
               >
-                <option value="all">全部（汇总）</option>
-                <option value="local">本机{syncConfig?.device_name ? `（${syncConfig.device_name}）` : ""}</option>
+                <option value="all">{t("compare.all")}</option>
+                <option value="local">
+                  {syncConfig?.device_name
+                    ? t("stats.deviceLocalName", { name: syncConfig.device_name })
+                    : t("stats.deviceLocal")}
+                </option>
                 {remoteDevices.filter((d) => d.device_id !== syncConfig?.device_id).map((d) => (
-                  <option key={d.device_id} value={d.device_id}>{d.device_name}（{d.device_id.slice(0, 6)}）</option>
+                  <option key={d.device_id} value={d.device_id}>
+                    {t("common.deviceOption", {
+                      name: d.device_name,
+                      id: d.device_id.slice(0, 6),
+                    })}
+                  </option>
                 ))}
               </select>
             </div>
@@ -292,7 +305,7 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
       {error && <div className="px-3 pt-2"><AlertBanner>{error}</AlertBanner></div>}
 
       {periods.length === 0 && !loading && !error && (
-        <EmptyState title="暂无周额度历史数据" hint={"应用开启后会自动采样周额度\n请保持运行以积累数据"} />
+        <EmptyState title={t("compare.emptyTitle")} hint={t("compare.emptyHint")} />
       )}
 
       {periods.length > 0 && (
@@ -313,7 +326,7 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
             />
           )}
 
-          <SectionCard title="全部周期">
+          <SectionCard title={t("compare.allPeriods")}>
             <div className="space-y-0.5">
               {periods
                 .slice()
@@ -338,7 +351,7 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
                         </span>
                         {p.is_current && (
                           <span className="px-1 py-0 rounded text-[9px] font-semibold bg-sky-500/15 text-sky-700">
-                            本周
+                            {t("compare.thisWeek")}
                           </span>
                         )}
                       </div>
@@ -356,7 +369,7 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
       )}
 
       <div className="px-3 py-1.5 border-t border-slate-900/8 text-[9px] text-slate-500 leading-relaxed shrink-0">
-        周百分比是智谱账户级额度（含所有设备/工具）；Token 统计当前筛选范围内开启的 Agent。
+        {t("compare.footer")}
       </div>
     </PageShell>
   );
@@ -372,12 +385,13 @@ function PeriodChart({
   selectedIdx: number | null;
   onSelect: (i: number) => void;
 }) {
+  const { t } = useI18n();
   const n = periods.length;
   const barGap = n > 20 ? "gap-px" : n > 10 ? "gap-0.5" : "gap-1";
 
   return (
     <div className="card-base rounded-2xl px-2.5 py-2">
-      <div className="section-title mb-2">周额度结束用量趋势</div>
+      <div className="section-title mb-2">{t("compare.chartTitle")}</div>
       <div className={`flex items-end ${barGap} h-16`}>
         {periods.map((p, i) => {
           const h = p.pct_end; // 0-100，避免峰值把历史周期夸大
@@ -388,7 +402,11 @@ function PeriodChart({
               key={p.reset_at}
               onClick={() => onSelect(i)}
               className="flex-1 h-full flex items-end justify-center min-w-0 group"
-              title={`${dateLabel(p.reset_at)}: 结束 ${p.pct_end}% · 峰值 ${p.pct_peak}%`}
+              title={t("compare.barTitle", {
+                date: dateLabel(p.reset_at),
+                end: p.pct_end,
+                peak: p.pct_peak,
+              })}
             >
               <div
                 className={`w-full rounded-t-sm transition-all duration-300 ${
@@ -430,6 +448,7 @@ function PeriodDetail({
   token?: WeeklyTokenBucket;
   tokensByAgent: Partial<Record<AgentId, WeeklyTokenBucket[]>>;
 }) {
+  const { t } = useI18n();
   const totalTokens = token?.total_tokens ?? 0;
   const sampleLow = period.sample_count < 10;
   const breakdown = COMPARE_AGENTS.map((agent) => ({
@@ -446,28 +465,30 @@ function PeriodDetail({
         <div className="flex items-center gap-1.5">
           <span className="text-[11px] font-semibold text-slate-900/90">
             {dateLabel(period.reset_at)}
-            {period.is_current ? " ~ 进行中" : ` ~ ${dateLabel(period.end_at)}`}
+            {period.is_current
+              ? ` ${t("compare.ongoing")}`
+              : ` ~ ${dateLabel(period.end_at)}`}
           </span>
         </div>
         <span
           className="text-[11px] num font-semibold"
           style={{ color: remainingTextColor(100 - period.pct_end) }}
         >
-          已用 {period.pct_end}%
+          {t("compare.used", { pct: period.pct_end })}
         </span>
       </div>
 
       {/* token 统计 */}
       <div className="rounded-md bg-surface/25 py-1.5 px-2">
         <div className="text-[9px] text-slate-700/55">
-          所有开启 Agent Token
+          {t("compare.tokensOfAgents")}
         </div>
         <div className="num text-[13px] font-semibold text-slate-900/85 mt-0.5">
           {formatTokens(totalTokens)}
         </div>
         {token && (
           <div className="text-[9px] num text-slate-700/45 mt-0.5">
-            {token.requests} 次请求
+            {t("compare.requestsCount", { count: token.requests })}
           </div>
         )}
         {breakdown.length > 0 && (
@@ -492,7 +513,7 @@ function PeriodDetail({
         )}
         {totalTokens === 0 && (
           <div className="text-[9px] text-slate-700/40 mt-1">
-            当前周期没有开启 Agent 用量
+            {t("compare.noUsage")}
           </div>
         )}
       </div>
@@ -501,10 +522,15 @@ function PeriodDetail({
       <div>
         <div className="flex items-center justify-between text-[10px] mb-0.5">
           <span className="text-slate-700/55">
-            起 {period.pct_start}% → 止 {period.pct_end}% · 峰值 {period.pct_peak}%
+            {t("compare.peakLine", {
+              start: period.pct_start,
+              end: period.pct_end,
+              peak: period.pct_peak,
+            })}
           </span>
           <span className={`num ${sampleLow ? "text-amber-600/80" : "text-slate-700/45"}`}>
-            采样 {period.sample_count} 条{sampleLow ? " · 不足" : ""}
+            {t("compare.samples", { count: period.sample_count })}
+            {sampleLow ? t("compare.samplesLow") : ""}
           </span>
         </div>
         <div className="h-1.5 rounded-full bg-slate-900/8 overflow-hidden">

@@ -1,17 +1,36 @@
 /** 统计页的 Agent 展示偏好，仅影响界面展示，不影响本地采集和同步。 */
+import type { MessageKey } from "./i18n";
+
 export type AgentId = "zai" | "codex" | "claude" | "cursor";
 
 export type AgentVisibility = Record<AgentId, boolean>;
 
+// 模式 A：label 是品牌名不进词典；description 存词典键，渲染时查（跟随 UI 语言）
 export const AGENT_VISIBILITY_OPTIONS: ReadonlyArray<{
   id: AgentId;
   label: string;
-  description: string;
+  descriptionKey: MessageKey;
 }> = [
-  { id: "zai", label: "Z.ai", description: "ZCode 用量与 Coding Plan 额度" },
-  { id: "codex", label: "Codex", description: "OpenAI Codex CLI 用量与额度" },
-  { id: "claude", label: "Claude", description: "Claude Code 用量与订阅额度" },
-  { id: "cursor", label: "Cursor", description: "Cursor 编辑器用量与套餐额度" },
+  {
+    id: "zai",
+    label: "Z.ai",
+    descriptionKey: "settings.agentZaiDesc",
+  },
+  {
+    id: "codex",
+    label: "Codex",
+    descriptionKey: "settings.agentCodexDesc",
+  },
+  {
+    id: "claude",
+    label: "Claude",
+    descriptionKey: "settings.agentClaudeDesc",
+  },
+  {
+    id: "cursor",
+    label: "Cursor",
+    descriptionKey: "settings.agentCursorDesc",
+  },
 ];
 
 const STORAGE_KEY = "zbar-agent-visibility";

@@ -53,6 +53,8 @@ import {
   LoadingState,
   SortToggle,
 } from "./layout";
+import { useI18n, type MessageKey, type TFn } from "./i18n";
+import { dateLocale, type Locale } from "./i18n/locale";
 
 interface Props {
   onBack: () => void;
@@ -95,7 +97,8 @@ interface ReportAgent {
 }
 
 interface ReportQuotaWindow {
-  label: string;
+  /** 词典键：渲染 / 导出 Markdown 时查（跟随 UI 语言） */
+  labelKey: MessageKey;
   usedPct: number;
   resetAt: number | null;
 }
@@ -422,11 +425,12 @@ function selectedCost(
   return currency === "cny" ? item.cost_cny : item.cost_usd;
 }
 
-function quotaResetText(resetAt: number | null, now: number): string {
-  if (!resetAt) return "重置时间未知";
+/** 重置倒计时描述（文案走词典，模式 B：由调用方传 t） */
+function quotaResetText(t: TFn, resetAt: number | null, now: number): string {
+  if (!resetAt) return t("report.resetUnknown");
   const hours = Math.max(0, Math.ceil((resetAt - now) / 3_600_000));
-  if (hours >= 24) return "约 " + Math.ceil(hours / 24) + " 天后重置";
-  return "约 " + hours + " 小时后重置";
+  if (hours >= 24) return t("report.resetDays", { n: Math.ceil(hours / 24) });
+  return t("report.resetHours", { n: hours });
 }
 
 function formatQuotaPct(value: number): string {
@@ -439,18 +443,18 @@ function makeZaiQuota(snapshots: QuotaSnapshot[]): ReportQuota | null {
   const latest = snapshots[snapshots.length - 1];
   const windows: ReportQuotaWindow[] = [
     {
-      label: "周额度当前",
+      labelKey: "report.q.weeklyCurrent",
       usedPct: latest.weekly_pct,
       resetAt: latest.weekly_reset,
     },
-    { label: "5h 当前", usedPct: latest.hour5_pct, resetAt: null },
+    { labelKey: "report.q.hour5Current", usedPct: latest.hour5_pct, resetAt: null },
     {
-      label: "周额度峰值",
+      labelKey: "report.q.weeklyPeak",
       usedPct: Math.max(...snapshots.map((snapshot) => snapshot.weekly_pct)),
       resetAt: latest.weekly_reset,
     },
     {
-      label: "5h 峰值",
+      labelKey: "report.q.hour5Peak",
       usedPct: Math.max(...snapshots.map((snapshot) => snapshot.hour5_pct)),
       resetAt: null,
     },
@@ -460,7 +464,7 @@ function makeZaiQuota(snapshots: QuotaSnapshot[]): ReportQuota | null {
     latest.mcp_used != null ||
     latest.mcp_pct > 0
   ) {
-    windows.push({ label: "MCP", usedPct: latest.mcp_pct, resetAt: null });
+    windows.push({ labelKey: "report.q.mcp", usedPct: latest.mcp_pct, resetAt: null });
   }
   return {
     id: "zai",
@@ -485,14 +489,14 @@ function makeRateLimitQuota(
   const windows: ReportQuotaWindow[] = [];
   if (rateLimits.primary_pct != null) {
     windows.push({
-      label: "5h",
+      labelKey: "report.q.hour5",
       usedPct: rateLimits.primary_pct,
       resetAt: rateLimits.primary_reset_at,
     });
   }
   if (rateLimits.secondary_pct != null) {
     windows.push({
-      label: "本周",
+      labelKey: "report.q.weekly",
       usedPct: rateLimits.secondary_pct,
       resetAt: rateLimits.secondary_reset_at,
     });
@@ -512,14 +516,14 @@ function makeCursorQuota(snapshot: CursorSnapshot): ReportQuota | null {
   const plan = snapshot.plan;
   if (plan) {
     if (plan.auto_pct != null) {
-      windows.push({ label: "Auto", usedPct: plan.auto_pct, resetAt: null });
+      windows.push({ labelKey: "report.q.auto", usedPct: plan.auto_pct, resetAt: null });
     }
     if (plan.api_pct != null) {
-      windows.push({ label: "API", usedPct: plan.api_pct, resetAt: null });
+      windows.push({ labelKey: "report.q.api", usedPct: plan.api_pct, resetAt: null });
     }
     if (windows.length === 0 && plan.total_pct != null) {
       windows.push({
-        label: "套餐",
+        labelKey: "report.q.plan",
         usedPct: plan.total_pct,
         resetAt: null,
       });
@@ -532,7 +536,7 @@ function makeCursorQuota(snapshot: CursorSnapshot): ReportQuota | null {
     onDemand.limit_cents > 0
   ) {
     windows.push({
-      label: "按需",
+      labelKey: "report.q.onDemand",
       usedPct: (onDemand.used_cents / onDemand.limit_cents) * 100,
       resetAt: null,
     });
@@ -553,6 +557,7 @@ export function ReportPanel({
   currency,
   agentVisibility,
 }: Props) {
+  const { locale, t } = useI18n();
   const [kind, setKind] = useState<ReportKind>("daily");
   const [metric, setMetric] = useState<ReportMetric>("cost");
   const [report, setReport] = useState<ReportData | null>(null);
@@ -590,10 +595,7 @@ export function ReportPanel({
       syncEnabled &&
       deviceFilter !== "local" &&
       !!syncConfig?.device_token;
-    const safe = async <T,>(
-      _label: string,
-      task: () => Promise<T>
-    ): Promise<T | null> => {
+    const safe = async <T,>(task: () => Promise<T>): Promise<T | null> => {
       try {
         return await task();
       } catch {
@@ -607,7 +609,7 @@ export function ReportPanel({
 
     const localZaiPromise: Promise<ReportSource | null> =
       agentVisibility.zai && wantLocal
-        ? safe("本机 Z.ai", async () => {
+        ? safe(async () => {
             const [stats, trend] = await Promise.all([
               fetchStats(fromMs, toMs),
               fetchTrend(fromMs, toMs, bucket),
@@ -617,7 +619,7 @@ export function ReportPanel({
         : Promise.resolve(null);
     const localCodexPromise: Promise<LoadedSource | null> =
       agentVisibility.codex && wantLocal
-        ? safe("本机 Codex", async () => {
+        ? safe(async () => {
             const snapshot: CodexSnapshot = await fetchCodexUsage(
               fromMs,
               toMs,
@@ -631,7 +633,7 @@ export function ReportPanel({
         : Promise.resolve(null);
     const localClaudePromise: Promise<LoadedSource | null> =
       agentVisibility.claude && wantLocal
-        ? safe("本机 Claude", async () => {
+        ? safe(async () => {
             const snapshot: ClaudeSnapshot = await fetchClaudeUsage(
               fromMs,
               toMs,
@@ -645,7 +647,7 @@ export function ReportPanel({
         : Promise.resolve(null);
     const localCursorPromise: Promise<CursorSnapshot | null> =
       agentVisibility.cursor && wantLocal
-        ? safe("本机 Cursor", () => fetchCursorUsage(fromMs, toMs))
+        ? safe(() => fetchCursorUsage(fromMs, toMs))
         : Promise.resolve(null);
 
     const remoteOptions = (source: string) =>
@@ -654,19 +656,19 @@ export function ReportPanel({
         : { devices: deviceFilter, source };
     const remoteZaiPromise: Promise<RemoteUsage | null> =
       agentVisibility.zai && wantRemote
-        ? safe("远端 Z.ai", () =>
+        ? safe(() =>
             remoteUsage(fromMs, toMs, bucket, remoteOptions("zcode"))
           )
         : Promise.resolve(null);
     const remoteCodexPromise: Promise<RemoteUsage | null> =
       agentVisibility.codex && wantRemote
-        ? safe("远端 Codex", () =>
+        ? safe(() =>
             remoteUsage(fromMs, toMs, bucket, remoteOptions("codex"))
           )
         : Promise.resolve(null);
     const remoteClaudePromise: Promise<RemoteUsage | null> =
       agentVisibility.claude && wantRemote
-        ? safe("远端 Claude", () =>
+        ? safe(() =>
             remoteUsage(fromMs, toMs, bucket, remoteOptions("claude"))
           )
         : Promise.resolve(null);
@@ -677,7 +679,7 @@ export function ReportPanel({
       )
       .catch(() => 7.2);
     const localQuotaPromise: Promise<QuotaSnapshot[] | null> = wantLocal
-      ? safe("本机额度", async () =>
+      ? safe(async () =>
           (await getQuotaHistory()).filter(
             (snapshot) => snapshot.ts >= fromMs && snapshot.ts <= toMs
           )
@@ -685,7 +687,7 @@ export function ReportPanel({
       : Promise.resolve([]);
     const remoteQuotaPromise: Promise<RemoteSnapshot[] | null> =
       wantRemote && syncConfig
-        ? safe("远端额度", () =>
+        ? safe(() =>
             remoteSnapshots(fromMs, toMs, {
               excludeDevice:
                 deviceFilter === "all" ? syncConfig.device_id : undefined,
@@ -775,7 +777,7 @@ export function ReportPanel({
           : agents;
       const notes: string[] = [];
       if (kind === "daily" && cursorAgent) {
-        notes.push("Cursor 官方明细按日返回，日报小时趋势未混入 Cursor，Agent 汇总仍包含它。");
+        notes.push(t("report.noteCursorDaily"));
       }
 
       const mergedQuotaSnapshots = mergeQuotaSnapshots(
@@ -822,6 +824,7 @@ export function ReportPanel({
     pricing,
     syncConfig,
     syncEnabled,
+    t,
   ]);
 
   useEffect(() => {
@@ -878,14 +881,16 @@ export function ReportPanel({
     }, report.trend[0]);
   }, [currency, metric, report]);
 
-  const markdown = buildMarkdown(kind, report, currency);
+  const markdown = buildMarkdown(kind, report, currency, t, locale);
   const filename =
-    (kind === "daily" ? "日报-" : "周报-") + localDateStr(Date.now()) + ".md";
+    (kind === "daily" ? t("report.file.daily") : t("report.file.weekly")) +
+    localDateStr(Date.now()) +
+    ".md";
 
   const handleCopy = async () => {
     try {
       await writeText(markdown);
-      setDoneFlash("已复制到剪贴板 ✓");
+      setDoneFlash(t("report.copied"));
       setTimeout(() => setDoneFlash(null), 1800);
     } catch (e) {
       setError(shortError(e));
@@ -896,7 +901,7 @@ export function ReportPanel({
     setError(null);
     try {
       await saveReport(markdown, filename);
-      setDoneFlash("已保存并在文件夹打开 ✓");
+      setDoneFlash(t("report.savedOpened"));
       setTimeout(() => setDoneFlash(null), 1800);
     } catch (e) {
       setError(shortError(e));
@@ -906,15 +911,15 @@ export function ReportPanel({
   return (
     <PageShell>
       <PageHeader
-        title="用量报告"
+        title={t("report.title")}
         onBack={onBack}
-        right={<button onClick={load} disabled={loading} className="toolbar-btn" title="刷新报告">↻</button>}
+        right={<button onClick={load} disabled={loading} className="toolbar-btn" title={t("report.refresh")}>↻</button>}
         subtitle={
           <div className="flex gap-1 mt-0">
             <PillGroup>
               {(["daily", "weekly"] as ReportKind[]).map((item) => (
                 <PillButton key={item} active={kind === item} onClick={() => setKind(item)}>
-                  {item === "daily" ? "今天" : "近 7 天"}
+                  {item === "daily" ? t("report.today") : t("report.last7")}
                 </PillButton>
               ))}
             </PillGroup>
@@ -923,12 +928,21 @@ export function ReportPanel({
                 value={deviceFilter}
                 onChange={(event) => setDeviceFilter(event.target.value)}
                 className="input-box num ml-auto min-w-0 flex-1 text-[10px] py-1"
-                title="筛选设备"
+                title={t("stats.deviceFilter")}
               >
-                <option value="all">全部设备</option>
-                <option value="local">本机{syncConfig?.device_name ? `（${syncConfig.device_name}）` : ""}</option>
+                <option value="all">{t("report.allDevices")}</option>
+                <option value="local">
+                  {syncConfig?.device_name
+                    ? t("stats.deviceLocalName", { name: syncConfig.device_name })
+                    : t("stats.deviceLocal")}
+                </option>
                 {remoteDevices.filter((device) => device.device_id !== syncConfig?.device_id).map((device) => (
-                  <option key={device.device_id} value={device.device_id}>{device.device_name}（{device.device_id.slice(0, 6)}）</option>
+                  <option key={device.device_id} value={device.device_id}>
+                    {t("common.deviceOption", {
+                      name: device.device_name,
+                      id: device.device_id.slice(0, 6),
+                    })}
+                  </option>
                 ))}
               </select>
             )}
@@ -940,36 +954,38 @@ export function ReportPanel({
         <div className="px-3 pt-2 space-y-1">
           {error && <AlertBanner>{error}</AlertBanner>}
           {report?.warnings.length ? (
-            <AlertBanner type="warning">{report.warnings.join("；")}</AlertBanner>
+            <AlertBanner type="warning">
+              {report.warnings.join(locale === "zh" ? "；" : "; ")}
+            </AlertBanner>
           ) : null}
         </div>
       )}
 
       <PageBody>
         {loading && !report ? (
-          <LoadingState text="正在整理用量数据…" />
+          <LoadingState text={t("report.loading")} />
         ) : !report || report.agents.length === 0 ? (
           <SectionCard>
             <div className="py-6 text-center">
-              <div className="text-sm text-slate-800/80">当前范围暂无用量</div>
-              <div className="text-[10px] text-slate-500 leading-relaxed mt-1.5">请确认 Agent 已开启，并在今天或近 7 天内产生过请求。</div>
+              <div className="text-sm text-slate-800/80">{t("report.emptyTitle")}</div>
+              <div className="text-[10px] text-slate-500 leading-relaxed mt-1.5">{t("report.emptyHint")}</div>
             </div>
           </SectionCard>
         ) : (
           <div className="page-stack">
             {loading && (
-              <div className="text-[10px] text-sky-700/70">正在刷新最新数据…</div>
+              <div className="text-[10px] text-sky-700/70">{t("report.refreshing")}</div>
             )}
 
             <div className="grid grid-cols-2 gap-1.5">
-              <MetricCard label="总花费" value={formatCost(currency === "cny" ? totals.cost_cny : totals.cost_usd, currency)} hint={currency === "cny" ? "人民币折算" : "美元原价"} />
-              <MetricCard label="Token" value={formatTokens(totals.total_tokens)} hint="当前可见 Agent" />
-              <MetricCard label="请求" value={totals.requests.toLocaleString()} hint="调用次数" />
-              <MetricCard label="活跃 Agent" value={String(report.agents.length)} hint={report.agents.length === 1 ? "本范围仅 1 个来源" : "本范围有用量的来源"} />
+              <MetricCard label={t("common.totalCost")} value={formatCost(currency === "cny" ? totals.cost_cny : totals.cost_usd, currency)} hint={currency === "cny" ? t("report.cnyHint") : t("report.usdHint")} />
+              <MetricCard label="Token" value={formatTokens(totals.total_tokens)} hint={t("report.tokenHint")} />
+              <MetricCard label={t("common.requests")} value={totals.requests.toLocaleString()} hint={t("report.requestsHint")} />
+              <MetricCard label={t("report.activeAgents")} value={String(report.agents.length)} hint={report.agents.length === 1 ? t("report.agentsHintOne") : t("report.agentsHint")} />
             </div>
 
-            <SectionCard title="用量趋势" action={
-              <SortToggle options={[{ key: "cost", label: "花费" }, { key: "token", label: "Token" }]} value={metric} onChange={setMetric} accent="sky" />
+            <SectionCard title={t("common.usageTrend")} action={
+              <SortToggle options={[{ key: "cost", label: t("common.cost") }, { key: "token", label: "Token" }]} value={metric} onChange={setMetric} accent="sky" />
             }>
               {report.trend.length > 0 ? (
                 <TrendChart
@@ -981,7 +997,7 @@ export function ReportPanel({
                 />
               ) : (
                 <div className="text-[10px] text-slate-700/45 py-5 text-center">
-                  当前来源没有可绘制的趋势数据
+                  {t("report.noTrend")}
                 </div>
               )}
               {report.notes.map((note) => (
@@ -994,9 +1010,9 @@ export function ReportPanel({
               ))}
             </SectionCard>
 
-            <SectionCard title="Agent 分布" action={
+            <SectionCard title={t("report.agentDist")} action={
               <span className="text-[9px] text-slate-500">
-                {(currency === "cny" ? totals.cost_cny : totals.cost_usd) > 0 ? "按花费占比" : "未配价格，按 Token 占比"}
+                {(currency === "cny" ? totals.cost_cny : totals.cost_usd) > 0 ? t("report.byCost") : t("report.byToken")}
               </span>
             }>
               <div className="space-y-1.5">
@@ -1023,7 +1039,7 @@ export function ReportPanel({
               </div>
             </SectionCard>
 
-            <SectionCard title="模型排行">
+            <SectionCard title={t("report.modelRank")}>
               {topModels.length > 0 ? (
                 <div className="space-y-1.5">
                   {topModels.map((model, index) => (
@@ -1041,41 +1057,45 @@ export function ReportPanel({
                 </div>
               ) : (
                 <div className="text-[10px] text-slate-700/45 py-2">
-                  当前 Agent 没有返回模型明细。
+                  {t("report.noModels")}
                 </div>
               )}
             </SectionCard>
 
-            <SectionCard title="报告结论">
+            <SectionCard title={t("report.conclusion")}>
               <div className="space-y-1.5 text-[10px] text-slate-700/65 leading-relaxed">
                 {topModels[0] && (
                   <div>
-                    <span className="text-slate-900/80">主力模型：</span>
-                    {topModels[0].model_id}（{AGENT_META[topModels[0].agentId].label}
-                    ），{formatTokens(topModels[0].total_tokens)} Token。
+                    <span className="text-slate-900/80">{t("report.mainModel")}</span>
+                    {t("report.mainModelLine", {
+                      model: topModels[0].model_id,
+                      agent: AGENT_META[topModels[0].agentId].label,
+                      tokens: formatTokens(topModels[0].total_tokens),
+                    })}
                   </div>
                 )}
                 {topTrend && (
                   <div>
-                    <span className="text-slate-900/80">峰值时段：</span>
-                    {topTrend.label}，{" "}
-                    {metric === "token"
-                      ? formatTokens(topTrend.total_tokens) + " Token"
-                      : formatCost(
-                          selectedCost(topTrend, currency),
-                          currency
-                        )}
-                    。
+                    <span className="text-slate-900/80">{t("report.peakWindow")}</span>
+                    {t("report.peakWindowLine", {
+                      label: topTrend.label,
+                      value:
+                        metric === "token"
+                          ? formatTokens(topTrend.total_tokens) + " Token"
+                          : formatCost(selectedCost(topTrend, currency), currency),
+                    })}
                   </div>
                 )}
                 {unpricedTokens > 0 && (
                   <div className="text-amber-700/80">
-                    有 {formatTokens(unpricedTokens)} Token 未配置价格，花费统计会偏低；可到价格设置补充模型价格。
+                    {t("report.unpricedWarn", {
+                      tokens: formatTokens(unpricedTokens),
+                    })}
                   </div>
                 )}
                 {unpricedTokens === 0 && topModels.length > 0 && (
                   <div className="text-emerald-700/75">
-                    当前用量的模型均已配置价格，花费统计可用于横向比较。
+                    {t("report.allPriced")}
                   </div>
                 )}
               </div>
@@ -1086,7 +1106,7 @@ export function ReportPanel({
             )}
 
             {showMarkdown && (
-              <SectionCard title="Markdown 预览">
+              <SectionCard title={t("report.markdownPreview")}>
                 <pre className="num text-[10px] leading-relaxed text-slate-800/80 whitespace-pre-wrap break-words">
                   {markdown}
                 </pre>
@@ -1100,10 +1120,10 @@ export function ReportPanel({
         <span className="text-slate-500 truncate">{doneFlash || filename}</span>
         <div className="flex gap-1.5 shrink-0">
           <BtnSecondary onClick={() => setShowMarkdown((visible) => !visible)} disabled={!report || loading}>
-            {showMarkdown ? "收起预览" : "查看 Markdown"}
+            {showMarkdown ? t("report.hideMarkdown") : t("report.viewMarkdown")}
           </BtnSecondary>
-          <BtnSecondary onClick={handleCopy} disabled={!report || loading}>复制</BtnSecondary>
-          <BtnPrimary onClick={handleSave} disabled={!report || loading}>保存</BtnPrimary>
+          <BtnSecondary onClick={handleCopy} disabled={!report || loading}>{t("report.copy")}</BtnSecondary>
+          <BtnPrimary onClick={handleSave} disabled={!report || loading}>{t("common.save")}</BtnPrimary>
         </div>
       </PageFooter>
     </PageShell>
@@ -1139,6 +1159,7 @@ function AgentUsageRow({
   currency: Currency;
   share: number;
 }) {
+  const { t } = useI18n();
   return (
     <div className="rounded-lg bg-surface/20 px-2 py-1.5">
       <div className="flex items-center gap-1.5">
@@ -1168,7 +1189,7 @@ function AgentUsageRow({
       </div>
       <div className="flex items-center justify-between text-[9px] text-slate-700/45 mt-1">
         <span className="num">{formatTokens(agent.total_tokens)} Token</span>
-        <span className="num">{agent.requests.toLocaleString()} 次请求</span>
+        <span className="num">{t("compare.requestsCount", { count: agent.requests.toLocaleString() })}</span>
       </div>
     </div>
   );
@@ -1246,8 +1267,9 @@ function ModelUsageRow({
 }
 
 function QuotaSummary({ quotas }: { quotas: ReportQuota[] }) {
+  const { t } = useI18n();
   return (
-    <SectionCard title="Agent 额度快照" action={<span className="text-[9px] text-slate-500">已开启且有数据的 Agent</span>}>
+    <SectionCard title={t("report.quotaSnapshot")} action={<span className="text-[9px] text-slate-500">{t("report.quotaScope")}</span>}>
       <div className="space-y-1.5">
         {quotas.map((quota) => {
           const resetWindow = quota.windows.find(
@@ -1261,28 +1283,28 @@ function QuotaSummary({ quotas }: { quotas: ReportQuota[] }) {
               <div className="flex items-center gap-1.5 mb-1.5">
                 <BrandIcon
                   brand={quota.brand}
-                  className="h-3.5 w-3.5"
+                  className="h-3.5 w-3.5 shrink-0"
                   style={{ color: quota.color }}
                 />
                 <span className="text-[10px] font-medium text-slate-900/80">
                   {quota.label}
                 </span>
                 <span className="text-[9px] text-slate-700/40 ml-auto">
-                  {quota.accountLevel ? "账户级" : "本机实时"}
+                  {quota.accountLevel ? t("report.accountLevel") : t("report.localRealtime")}
                 </span>
               </div>
               <div className="grid grid-cols-2 gap-1.5">
                 {quota.windows.map((window) => (
                   <QuotaBar
-                    key={window.label}
-                    label={window.label}
+                    key={window.labelKey}
+                    label={t(window.labelKey)}
                     value={window.usedPct}
                   />
                 ))}
               </div>
               {resetWindow && (
                 <div className="text-[9px] text-slate-700/40 mt-1.5">
-                  {quotaResetText(resetWindow.resetAt, Date.now())}
+                  {quotaResetText(t, resetWindow.resetAt, Date.now())}
                 </div>
               )}
             </div>
@@ -1290,7 +1312,7 @@ function QuotaSummary({ quotas }: { quotas: ReportQuota[] }) {
         })}
       </div>
       <div className="text-[9px] text-slate-700/40 mt-1.5">
-        Z.ai 额度来自历史快照；Codex、Claude、Cursor 为本机实时额度接口。
+        {t("report.quotaSourceNote")}
       </div>
     </SectionCard>
   );
@@ -1317,15 +1339,20 @@ function QuotaBar({ label, value }: { label: string; value: number }) {
   );
 }
 
+/** 生成报告 Markdown 全文（模式 B：接收 t / locale，报告语言跟随 UI 语言） */
 function buildMarkdown(
   kind: ReportKind,
   report: ReportData | null,
-  currency: Currency
+  currency: Currency,
+  t: TFn,
+  locale: Locale
 ): string {
   const now = Date.now();
-  const title = kind === "daily" ? "日报" : "周报";
+  const title = kind === "daily" ? t("report.md.daily") : t("report.md.weekly");
   if (!report || report.agents.length === 0) {
-    return "📊 ZBar 用量" + title + " · " + localDateStr(now) + "\n\n（暂无数据）";
+    return (
+      "📊 ZBar " + title + " · " + localDateStr(now) + "\n\n" + t("report.md.noData")
+    );
   }
 
   const range =
@@ -1351,46 +1378,40 @@ function buildMarkdown(
       return costDiff !== 0 ? costDiff : b.total_tokens - a.total_tokens;
     });
   const lines: string[] = [];
-  lines.push("📊 ZBar 用量" + title + " · " + range);
+  lines.push("📊 ZBar " + title + " · " + range);
   lines.push("");
   lines.push(
-    "总花费 " +
-      formatCost(totalCost, currency) +
-      "｜Token " +
-      formatTokens(totalTokens) +
-      "｜请求 " +
-      totalRequests.toLocaleString() +
-      " 次"
+    t("report.md.summaryLine", {
+      cost: formatCost(totalCost, currency),
+      tokens: formatTokens(totalTokens),
+      requests: totalRequests.toLocaleString(),
+    })
   );
   lines.push("");
-  lines.push("Agent 分布");
+  lines.push(t("report.agentDist"));
   for (const agent of report.agents) {
     lines.push(
       "- " +
-        agent.label +
-        "：" +
-        formatCost(selectedCost(agent, currency), currency) +
-        "｜" +
-        formatTokens(agent.total_tokens) +
-        " Token｜" +
-        agent.requests.toLocaleString() +
-        " 次请求"
+        t("report.md.agentLine", {
+          label: agent.label,
+          cost: formatCost(selectedCost(agent, currency), currency),
+          tokens: formatTokens(agent.total_tokens),
+          requests: agent.requests.toLocaleString(),
+        })
     );
   }
   if (models.length > 0) {
     lines.push("");
-    lines.push("模型 TOP5");
+    lines.push(t("report.md.top5"));
     for (const model of models.slice(0, 5)) {
       lines.push(
         "- " +
-          AGENT_META[model.agentId].label +
-          " / " +
-          model.model_id +
-          "：" +
-          formatCost(selectedCost(model, currency), currency) +
-          "｜" +
-          formatTokens(model.total_tokens) +
-          " Token"
+          t("report.md.modelLine", {
+            agent: AGENT_META[model.agentId].label,
+            model: model.model_id,
+            cost: formatCost(selectedCost(model, currency), currency),
+            tokens: formatTokens(model.total_tokens),
+          })
       );
     }
   }
@@ -1400,46 +1421,53 @@ function buildMarkdown(
     );
     lines.push("");
     lines.push(
-      "Token 峰值：" +
-        peak.label +
-        "，" +
-        formatTokens(peak.total_tokens) +
-        " Token"
+      t("report.md.tokenPeak", {
+        label: peak.label,
+        tokens: formatTokens(peak.total_tokens),
+      })
     );
   }
   if (report.agentQuotas.length > 0) {
     lines.push("");
-    lines.push("额度快照");
+    lines.push(t("report.md.quotaSnapshot"));
     for (const quota of report.agentQuotas) {
       const windows = quota.windows
-        .map((window) => window.label + " " + formatQuotaPct(window.usedPct) + "%")
-        .join("｜");
+        .map((window) => t(window.labelKey) + " " + formatQuotaPct(window.usedPct) + "%")
+        .join(locale === "zh" ? "｜" : " | ");
       const resetWindow = quota.windows.find(
         (window) => window.resetAt != null
       );
       const reset = resetWindow
-        ? "｜" + quotaResetText(resetWindow.resetAt, now)
+        ? t("report.md.quotaReset", {
+            text: quotaResetText(t, resetWindow.resetAt, now),
+          })
         : "";
       lines.push(
         "- " +
-          quota.label +
-          "（" +
-          (quota.accountLevel ? "账户级" : "本机实时") +
-          "）：「" +
-          windows +
-          "」" +
+          t("report.md.quotaLine", {
+            label: quota.label,
+            scope: quota.accountLevel
+              ? t("report.accountLevel")
+              : t("report.localRealtime"),
+            windows,
+          }) +
           reset
       );
     }
   }
   if (report.warnings.length > 0 || report.notes.length > 0) {
     lines.push("");
-    lines.push("说明");
+    lines.push(t("report.md.notes"));
     for (const note of [...report.notes, ...report.warnings]) {
       lines.push("- " + note);
     }
   }
   lines.push("");
-  lines.push("> 由 ZBar 自动生成 · " + new Date(now).toLocaleString("zh-CN"));
+  lines.push(
+    "> " +
+      t("report.md.footer", {
+        date: new Date(now).toLocaleString(dateLocale(locale)),
+      })
+  );
   return lines.join("\n");
 }

@@ -9,7 +9,7 @@ import type {
   Stats,
   TrendPoint,
 } from "./types";
-import { formatCost, formatCountdown, formatTokens } from "./format";
+import { formatCost, formatCountdownCore, formatTokens } from "./format";
 import { modelCost } from "./merge";
 import {
   ProgressBar,
@@ -19,6 +19,7 @@ import {
 } from "./widgets";
 import { useDataCache } from "./DataCache";
 import { useEffect, useState } from "react";
+import { useI18n } from "./i18n";
 import type { AgentId, AgentVisibility } from "./agentVisibility";
 import { BrandIcon, type BrandIconName } from "./BrandIcon";
 import {
@@ -111,6 +112,7 @@ function AgentCostCard({
   currency: Currency;
   costPct: number;
 }) {
+  const { t } = useI18n();
   const brandMap: Record<AgentId, BrandIconName | null> = {
     zai: "zai",
     codex: "codex",
@@ -155,7 +157,7 @@ function AgentCostCard({
               className="text-[9px] font-medium mt-0.5"
               style={{ color: agent.color }}
             >
-              缓存命中 {Math.round(agent.cacheHitPct)}%
+              {t("common.cacheHit", { pct: `${Math.round(agent.cacheHitPct)}%` })}
             </div>
           )}
         </div>
@@ -332,6 +334,7 @@ function QuotaMiniRow({
   resetAt?: number | null;
   now: number;
 }) {
+  const { t } = useI18n();
   const remain = Math.max(0, 100 - usedPct);
   const showReset = resetAt != null && resetAt > now;
   return (
@@ -339,13 +342,13 @@ function QuotaMiniRow({
       <div className="flex items-center gap-1 mb-0.5">
         <span className="text-[9px] text-slate-500 w-7 shrink-0">{label}</span>
         <span className="num text-[8px] text-slate-400 flex-1 text-right truncate min-w-0">
-          {showReset ? `↻ ${formatCountdown(resetAt - now, true)}` : ""}
+          {showReset ? `↻ ${formatCountdownCore(resetAt - now)}` : ""}
         </span>
         <span
           className="num text-[9px] font-medium w-12 text-right shrink-0 whitespace-nowrap"
           style={{ color: remainingTextColor(remain) }}
         >
-          剩 {Math.round(remain)}%
+          {t("common.remaining", { pct: Math.round(remain) })}
         </span>
       </div>
       <ProgressBar
@@ -376,6 +379,7 @@ export function SummaryTab({
   pricing,
   agentVisibility,
 }: Props) {
+  const { t } = useI18n();
   const [trendMetric, setTrendMetric] = useState<"cost" | "token">("cost");
   const [sortBy, setSortBy] = useState<"cost" | "token" | "requests">("cost");
   const [now, setNow] = useState(Date.now());
@@ -426,11 +430,12 @@ export function SummaryTab({
   // used_cents/limit_cents 是套餐标价口径，不能代表 Auto 额度。
   const plan = cursor?.plan;
 
+  // 注意：正则匹配 Rust 后端返回的中文错误串（如「未配置 Token」），仅做布尔分支，不能翻译
   const zcodeEmpty = quotaError
     ? /未配置|Token/i.test(quotaError)
-      ? "未配置 Token"
-      : "额度获取失败"
-    : "加载中…";
+      ? t("summary.noToken")
+      : t("summary.quotaFailed")
+    : t("common.loading");
 
   const zcodeMetrics = [
     ...(hour5 != null
@@ -445,7 +450,7 @@ export function SummaryTab({
     ...(weekly != null
       ? [
           {
-            label: "本周",
+            label: t("common.weekly"),
             usedPct: weekly.percentage,
             resetAt: weekly.nextResetTime,
           },
@@ -487,7 +492,7 @@ export function SummaryTab({
           ...(codexRate.secondary_pct != null
             ? [
                 {
-                  label: "本周",
+                  label: t("common.weekly"),
                   usedPct: codexRate.secondary_pct,
                   resetAt: codexRate.secondary_reset_at,
                 },
@@ -495,11 +500,12 @@ export function SummaryTab({
             : []),
         ]
       : [];
+  // 注意：正则匹配 Rust 后端返回的中文错误串（未找到/未安装/会话目录），仅做布尔分支，不能翻译
   const codexEmpty = codexError
     ? /未找到|未安装|会话目录/i.test(codexError)
-      ? "未检测到 Codex"
-      : "数据获取失败"
-    : "暂无数据";
+      ? t("stats.codexNotFound")
+      : t("summary.loadFailed")
+    : t("summary.noData");
 
   // Claude 额度：仅订阅登录机器上有实时值（中转模式 rate_limits 为 null → 空 metrics 走文案）
   const claudeMetrics =
@@ -518,7 +524,7 @@ export function SummaryTab({
           ...(claudeRate.secondary_pct != null
             ? [
                 {
-                  label: "本周",
+                  label: t("common.weekly"),
                   usedPct: claudeRate.secondary_pct,
                   resetAt: claudeRate.secondary_reset_at,
                 },
@@ -526,11 +532,12 @@ export function SummaryTab({
             : []),
         ]
       : [];
+  // 注意：正则匹配 Rust 后端返回的中文错误串（未找到/未安装/会话目录），仅做布尔分支，不能翻译
   const claudeEmpty = claudeError
     ? /未找到|未安装|会话目录/i.test(claudeError)
-      ? "未检测到 Claude Code"
-      : "数据获取失败"
-    : "暂无数据";
+      ? t("stats.claudeNotFound")
+      : t("summary.loadFailed")
+    : t("summary.noData");
 
   // 各 Agent 缓存命中率（口径与各详情页一致）
   const zaiCacheHitPct = cacheHitPctIncluded(stats?.overall);
@@ -594,7 +601,7 @@ export function SummaryTab({
       tokens: cursorTokens,
       cacheHitPct: cursorCacheHitPct,
       metrics: cursorMetrics,
-      empty: cursor?.logged_in ? "暂无额度数据" : "未登录",
+      empty: cursor?.logged_in ? t("summary.noQuotaData") : t("summary.notLoggedIn"),
       cycleResetAt: cycleEndMs(cursor?.billing_cycle_end),
       cycleResetDate: cursor?.billing_cycle_end
         ? cursor.billing_cycle_end.slice(0, 10)
@@ -709,14 +716,18 @@ export function SummaryTab({
   return (
     <div className="flex-1 min-h-0 overflow-y-auto px-3 py-2.5 page-stack">
       <HeroMetric
-        label="合计花费"
+        label={t("summary.totalCost")}
         value={formatCost(totalCost, currency)}
         accent="sky"
-        badge={<StatusBadge color="emerald">{agents.length} 来源</StatusBadge>}
+        badge={
+          <StatusBadge color="emerald">
+            {t("summary.sources", { count: agents.length })}
+          </StatusBadge>
+        }
         footer={
           <MetricPair
-            left={{ label: "合计 Token", value: formatTokens(totalTokens) }}
-            right={{ label: "花费分布", value: <CompositionBar agents={agents} /> }}
+            left={{ label: t("summary.totalTokens"), value: formatTokens(totalTokens) }}
+            right={{ label: t("summary.costDist"), value: <CompositionBar agents={agents} /> }}
           />
         }
       />
@@ -735,7 +746,7 @@ export function SummaryTab({
       )}
 
       {agents.some((a) => a.metrics.length > 0 || a.empty) && (
-        <SectionCard title="额度监控">
+        <SectionCard title={t("summary.quotaMonitor")}>
           <div className="divide-y divide-slate-900/6 -mx-1">
             {agents.map((a) => (
               <div key={a.id} className="px-1 py-2 first:pt-0 last:pb-0">
@@ -749,10 +760,12 @@ export function SummaryTab({
                   </div>
                   {a.cycleResetAt != null && a.cycleResetAt > now ? (
                     <span className="num text-[8px] text-slate-400 shrink-0 whitespace-nowrap">
-                      ↻ {formatCountdown(a.cycleResetAt - now, true)}
+                      ↻ {formatCountdownCore(a.cycleResetAt - now)}
                     </span>
                   ) : a.cycleResetDate ? (
-                    <span className="num text-[8px] text-slate-400 shrink-0 whitespace-nowrap">重置 {a.cycleResetDate}</span>
+                    <span className="num text-[8px] text-slate-400 shrink-0 whitespace-nowrap">
+                      {t("summary.resetDate", { date: a.cycleResetDate })}
+                    </span>
                   ) : null}
                 </div>
                 {a.metrics.length > 0 ? (
@@ -785,13 +798,13 @@ export function SummaryTab({
       {/* 按模型排行 */}
       {sortedModels.length > 0 && (
         <SectionCard
-          title="模型用量"
+          title={t("common.modelUsage")}
           action={
             <SortToggle
               options={[
-                { key: "cost", label: "花费" },
+                { key: "cost", label: t("common.cost") },
                 { key: "token", label: "Token" },
-                { key: "requests", label: "请求" },
+                { key: "requests", label: t("common.requests") },
               ]}
               value={sortBy}
               onChange={setSortBy}
@@ -834,7 +847,7 @@ export function SummaryTab({
                       {!m.hasPrice && (
                         <span
                           className="text-[10px] text-amber-600/90 shrink-0"
-                          title="未配置价格"
+                          title={t("common.noPrice")}
                         >
                           ⚠
                         </span>

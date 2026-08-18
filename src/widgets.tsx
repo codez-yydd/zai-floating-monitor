@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { Currency, TrendPoint } from "./types";
 import { formatCost, formatTokens } from "./format";
+import { useI18n } from "./i18n";
 
 // ============================================================
 // 额度剩余渐变色：所有额度进度条统一按「剩余百分比」着色。
@@ -147,6 +148,8 @@ export function TrendChart({
   /** 撑满父级剩余高度（汇总页用，避免柱图下方大块留白） */
   fill?: boolean;
 }) {
+  const { t } = useI18n();
+
   // 取每根柱子的数值
   const values = points.map((d) =>
     metric === "cost"
@@ -171,18 +174,22 @@ export function TrendChart({
       : prev.cost_usd
     : 0;
   let deltaText: string | null = null;
+  // deltaKind：flat/new 用词典文案（灰底），pct 为涨跌百分比（红/绿底）
+  let deltaKind: "flat" | "new" | "pct" = "pct";
   let deltaUp = false;
   if (last && prev) {
     if (prevCost > 0) {
       const pct = ((lastCost - prevCost) / prevCost) * 100;
       if (Math.abs(pct) < 0.5) {
-        deltaText = "持平";
+        deltaKind = "flat";
+        deltaText = t("common.trendFlat");
       } else {
         deltaUp = pct > 0;
         deltaText = `${deltaUp ? "↑" : "↓"}${Math.abs(pct).toFixed(0)}%`;
       }
     } else if (lastCost > 0) {
-      deltaText = "新增";
+      deltaKind = "new";
+      deltaText = t("common.trendNew");
     }
   }
 
@@ -206,18 +213,18 @@ export function TrendChart({
       <div className="flex items-center justify-between mb-2 shrink-0">
         <div className="flex items-center gap-1.5">
           <div className="section-title">
-            <span>用量趋势</span>
+            <span>{t("common.usageTrend")}</span>
           </div>
           {deltaText && (
             <span
               className={`text-[9px] num px-1 py-px rounded ${
-                deltaText === "持平" || deltaText === "新增"
+                deltaKind !== "pct"
                   ? "text-slate-500 bg-slate-900/5"
                   : deltaUp
                     ? "text-rose-600 bg-rose-500/10"
                     : "text-emerald-600 bg-emerald-500/10"
               }`}
-              title={`最新${isHour ? "小时" : "日"} vs 上一${isHour ? "小时" : "日"}`}
+              title={isHour ? t("common.trendVsHour") : t("common.trendVsDay")}
             >
               {deltaText}
             </span>
@@ -236,7 +243,7 @@ export function TrendChart({
                     : "text-slate-500 hover:text-slate-700"
                 }`}
               >
-                {m === "cost" ? "花费" : "Token"}
+                {m === "cost" ? t("common.cost") : "Token"}
               </button>
             ))}
           </div>

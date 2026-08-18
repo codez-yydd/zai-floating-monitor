@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Currency, PricingConfig, Stats, TrendBucket, TrendPoint } from "./types";
-import { formatCost, formatCountdown, formatPct, formatTokens } from "./format";
+import { formatCost, formatCountdownCore, formatPct, formatTokens } from "./format";
 import { modelCost } from "./merge";
 import {
   DetailRow,
@@ -18,6 +18,7 @@ import {
   EmptyState,
   LoadingState,
 } from "./layout";
+import { useI18n } from "./i18n";
 
 /** 通用快照形状：Codex / Claude 的快照结构一致（stats/trend 同构 +
  *  同款五字段速率限制），TS 结构化类型直接兼容。 */
@@ -45,8 +46,10 @@ export interface AgentPanelTheme {
   accent: "sky" | "emerald" | "orange" | "violet";
 }
 
-/** 无数据空态文案（未安装对应 CLI 时展示） */
+/** 无数据空态文案（未安装对应 CLI 时展示）。
+ *  title/hint 由品牌皮肤组件查词典传入；name 为品牌名（不进词典，加载文案插值用）。 */
 export interface AgentEmptyState {
+  name: string;
   icon: string;
   title: string;
   hint: string;
@@ -83,6 +86,7 @@ function AgentQuotaRow({
   resetAt: number | null;
   now: number;
 }) {
+  const { t } = useI18n();
   const remain = Math.max(0, 100 - usedPct);
   const showReset = resetAt != null && resetAt > now;
   return (
@@ -92,7 +96,7 @@ function AgentQuotaRow({
           {label}
           {showReset && (
             <span className="ml-1 text-[8px] text-slate-400 num">
-              ↻ {formatCountdown(resetAt - now, true)}
+              ↻ {formatCountdownCore(resetAt - now)}
             </span>
           )}
         </span>
@@ -100,7 +104,7 @@ function AgentQuotaRow({
           className="num text-[10px] font-semibold shrink-0 whitespace-nowrap"
           style={{ color: remainingTextColor(remain) }}
         >
-          剩 {Math.round(remain)}%
+          {t("common.remaining", { pct: Math.round(remain) })}
         </span>
       </div>
       <ProgressBar
@@ -127,6 +131,7 @@ export function AgentUsagePanel({
   empty,
   cacheRateMode,
 }: Props) {
+  const { t } = useI18n();
   const [trendMetric, setTrendMetric] = useState<"cost" | "token">("cost");
   const [sortBy, setSortBy] = useState<"cost" | "token" | "requests">("cost");
 
@@ -139,7 +144,9 @@ export function AgentUsagePanel({
 
   // 加载中 & 无数据
   if (loading && !snapshot) {
-    return <LoadingState text={`加载${empty.title.replace("未检测到 ", "")}用量…`} />;
+    return (
+      <LoadingState text={t("common.loadingUsage", { name: empty.name })} />
+    );
   }
 
   // 未安装 / 无会话目录 / 其他错误且无数据
@@ -189,7 +196,7 @@ export function AgentUsagePanel({
       {/* 速率限制 */}
       {hasRateRow && rate && (
         <SectionCard
-          title="额度"
+          title={t("stats.rateLimits")}
           action={
             rate.plan_type ? (
               <span className={`shrink-0 px-1.5 py-0.5 rounded text-[9px] font-medium capitalize ${theme.badge}`}>
@@ -200,23 +207,23 @@ export function AgentUsagePanel({
         >
           <div className="space-y-2">
             {rate.primary_pct != null && (
-              <AgentQuotaRow label="5小时" usedPct={rate.primary_pct} resetAt={rate.primary_reset_at} now={now} />
+              <AgentQuotaRow label={t("common.hour5")} usedPct={rate.primary_pct} resetAt={rate.primary_reset_at} now={now} />
             )}
             {rate.secondary_pct != null && (
-              <AgentQuotaRow label="本周" usedPct={rate.secondary_pct} resetAt={rate.secondary_reset_at} now={now} />
+              <AgentQuotaRow label={t("common.weekly")} usedPct={rate.secondary_pct} resetAt={rate.secondary_reset_at} now={now} />
             )}
           </div>
         </SectionCard>
       )}
 
       <HeroMetric
-        label="总花费"
+        label={t("common.totalCost")}
         value={formatCost(totalCost, currency)}
         accent={theme.accent}
         footer={
           <MetricPair
-            left={{ label: "总 Token", value: formatTokens(stats.overall.total_tokens) }}
-            right={{ label: "缓存率", value: formatPct(cacheRate) }}
+            left={{ label: t("common.totalTokens"), value: formatTokens(stats.overall.total_tokens) }}
+            right={{ label: t("common.cacheRate"), value: formatPct(cacheRate) }}
           />
         }
       />
@@ -232,31 +239,31 @@ export function AgentUsagePanel({
       )}
 
       <div className="grid grid-cols-3 gap-1.5">
-        <Metric label="请求" value={String(stats.overall.requests)} />
-        <Metric label="缓存率" value={formatPct(cacheRate)} accent="text-emerald-600" />
-        <Metric label="输出" value={formatTokens(stats.overall.output_tokens)} />
+        <Metric label={t("common.requests")} value={String(stats.overall.requests)} />
+        <Metric label={t("common.cacheRate")} value={formatPct(cacheRate)} accent="text-emerald-600" />
+        <Metric label={t("common.output")} value={formatTokens(stats.overall.output_tokens)} />
       </div>
 
-      <SectionCard title="Token 构成">
+      <SectionCard title={t("common.tokenComposition")}>
         <div className="space-y-1.5">
-          <DetailRow label="输入" value={formatTokens(stats.overall.input_tokens)} pct={stats.overall.total_tokens > 0 ? stats.overall.input_tokens / stats.overall.total_tokens : 0} color="bg-sky-500" />
-          <DetailRow label="缓存" value={formatTokens(stats.overall.cache_read_tokens)} pct={cacheRate} color="bg-emerald-500" />
-          <DetailRow label="输出" value={formatTokens(stats.overall.output_tokens)} pct={stats.overall.total_tokens > 0 ? stats.overall.output_tokens / stats.overall.total_tokens : 0} color="bg-violet-500" />
+          <DetailRow label={t("common.input")} value={formatTokens(stats.overall.input_tokens)} pct={stats.overall.total_tokens > 0 ? stats.overall.input_tokens / stats.overall.total_tokens : 0} color="bg-sky-500" />
+          <DetailRow label={t("common.cache")} value={formatTokens(stats.overall.cache_read_tokens)} pct={cacheRate} color="bg-emerald-500" />
+          <DetailRow label={t("common.output")} value={formatTokens(stats.overall.output_tokens)} pct={stats.overall.total_tokens > 0 ? stats.overall.output_tokens / stats.overall.total_tokens : 0} color="bg-violet-500" />
           {stats.overall.reasoning_tokens > 0 && (
-            <DetailRow label="推理" value={formatTokens(stats.overall.reasoning_tokens)} pct={stats.overall.total_tokens > 0 ? stats.overall.reasoning_tokens / stats.overall.total_tokens : 0} color="bg-amber-500" />
+            <DetailRow label={t("common.reasoning")} value={formatTokens(stats.overall.reasoning_tokens)} pct={stats.overall.total_tokens > 0 ? stats.overall.reasoning_tokens / stats.overall.total_tokens : 0} color="bg-amber-500" />
           )}
         </div>
       </SectionCard>
 
       {stats.by_model.length > 0 && (
         <SectionCard
-          title="模型用量"
+          title={t("common.modelUsage")}
           action={
             <SortToggle
               options={[
-                { key: "cost", label: "花费" },
+                { key: "cost", label: t("common.cost") },
                 { key: "token", label: "Token" },
-                { key: "requests", label: "请求" },
+                { key: "requests", label: t("common.requests") },
               ]}
               value={sortBy}
               onChange={setSortBy}
@@ -282,7 +289,7 @@ export function AgentUsagePanel({
                     <div className="relative flex items-center justify-between text-xs min-w-0">
                       <div className="flex items-center gap-1 min-w-0 flex-1">
                         <span className="font-medium text-slate-900/90 truncate text-[11px]">{m.model_id}</span>
-                        {!hasPrice && <span className="text-[10px] text-amber-600/90 shrink-0" title="未配置价格">⚠</span>}
+                        {!hasPrice && <span className="text-[10px] text-amber-600/90 shrink-0" title={t("common.noPrice")}>⚠</span>}
                       </div>
                       <div className="flex items-center gap-1 text-slate-600/70 num shrink-0 text-[10px]">
                         <span>{formatTokens(m.total_tokens)}</span>

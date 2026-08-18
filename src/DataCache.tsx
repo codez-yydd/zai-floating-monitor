@@ -48,6 +48,7 @@ import {
   remoteTrendToLocal,
 } from "./merge";
 import { loadCache, saveCache } from "./cache";
+import { useI18n } from "./i18n";
 
 /**
  * 全局数据缓存层（v2：按范围缓存 + 后台定时刷新 + 展示只读）。
@@ -248,6 +249,14 @@ interface ProviderProps {
 }
 
 export function DataProvider({ pricing, children }: ProviderProps) {
+  // ===== i18n：t 走 ref 镜像读取，避免把 t 列进刷新回调依赖导致
+  //      语言切换重建全部定时器 / 触发全范围刷新 =====
+  const { t } = useI18n();
+  const tRef = useRef(t);
+  useEffect(() => {
+    tRef.current = t;
+  }, [t]);
+
   // ===== 查询参数（持久化，冷启动恢复上次视图，与上次缓存匹配）=====
   const [preset, setPreset] = useState<RangePreset>(
     () => loadCache<RangePreset>("zbar-preset") ?? "today"
@@ -603,7 +612,7 @@ export function DataProvider({ pricing, children }: ProviderProps) {
                 // 有数据（含仅远端）即清错误；完全无数据时透出本地错误
                 error: snapshot
                   ? null
-                  : localError ?? `未获取到 ${label} 数据`,
+                  : localError ?? tRef.current("stats.noDataFor", { name: label }),
                 refreshing: false,
                 ts: Date.now(),
               },
@@ -971,6 +980,6 @@ export function DataProvider({ pricing, children }: ProviderProps) {
 /** 读取全局数据缓存。必须在 <DataProvider> 内使用。 */
 export function useDataCache(): DataCacheValue {
   const v = useContext(Ctx);
-  if (!v) throw new Error("useDataCache 必须在 DataProvider 内使用");
+  if (!v) throw new Error("useDataCache must be used within a DataProvider");
   return v;
 }

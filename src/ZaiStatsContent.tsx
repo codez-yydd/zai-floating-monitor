@@ -16,6 +16,7 @@ import {
   SortToggle,
   StatusBadge,
 } from "./layout";
+import { useI18n } from "./i18n";
 
 interface Props {
   stats: Stats | null;
@@ -34,6 +35,7 @@ export function ZaiStatsContent({
   currency,
   trendBucket,
 }: Props) {
+  const { t } = useI18n();
   const [trendMetric, setTrendMetric] = useState<"cost" | "token">("cost");
   const [sortBy, setSortBy] = useState<"cost" | "token" | "requests">("cost");
 
@@ -52,20 +54,20 @@ export function ZaiStatsContent({
   return (
     <div className="flex-1 overflow-y-auto px-3 py-2.5 page-stack">
       <HeroMetric
-        label="总花费"
+        label={t("common.totalCost")}
         value={formatCost(totalCost, currency)}
         accent="sky"
         badge={
           cacheRate > 0 ? (
             <StatusBadge color="emerald">
-              缓存命中 {formatPct(cacheRate)}
+              {t("common.cacheHit", { pct: formatPct(cacheRate) })}
             </StatusBadge>
           ) : undefined
         }
         footer={
           <MetricPair
-            left={{ label: "总 Token", value: formatTokens(stats.overall.total_tokens) }}
-            right={{ label: "请求次数", value: String(stats.overall.requests) }}
+            left={{ label: t("common.totalTokens"), value: formatTokens(stats.overall.total_tokens) }}
+            right={{ label: t("common.requestCount"), value: String(stats.overall.requests) }}
           />
         }
       />
@@ -81,34 +83,34 @@ export function ZaiStatsContent({
       )}
 
       <div className="grid grid-cols-3 gap-1.5">
-        <Metric label="请求" value={String(stats.overall.requests)} />
-        <Metric label="缓存率" value={formatPct(cacheRate)} accent="text-emerald-600" />
-        <Metric label="输出" value={formatTokens(stats.overall.output_tokens)} />
+        <Metric label={t("common.requests")} value={String(stats.overall.requests)} />
+        <Metric label={t("common.cacheRate")} value={formatPct(cacheRate)} accent="text-emerald-600" />
+        <Metric label={t("common.output")} value={formatTokens(stats.overall.output_tokens)} />
       </div>
 
-      <SectionCard title="Token 构成">
+      <SectionCard title={t("common.tokenComposition")}>
         <div className="space-y-1.5">
           <DetailRow
-            label="输入"
+            label={t("common.input")}
             value={formatTokens(stats.overall.input_tokens)}
             pct={stats.overall.total_tokens > 0 ? stats.overall.input_tokens / stats.overall.total_tokens : 0}
             color="bg-sky-500"
           />
           <DetailRow
-            label="缓存"
+            label={t("common.cache")}
             value={formatTokens(stats.overall.cache_read_tokens)}
             pct={cacheRate}
             color="bg-emerald-500"
           />
           <DetailRow
-            label="输出"
+            label={t("common.output")}
             value={formatTokens(stats.overall.output_tokens)}
             pct={stats.overall.total_tokens > 0 ? stats.overall.output_tokens / stats.overall.total_tokens : 0}
             color="bg-violet-500"
           />
           {stats.overall.reasoning_tokens > 0 && (
             <DetailRow
-              label="推理"
+              label={t("common.reasoning")}
               value={formatTokens(stats.overall.reasoning_tokens)}
               pct={stats.overall.total_tokens > 0 ? stats.overall.reasoning_tokens / stats.overall.total_tokens : 0}
               color="bg-amber-500"
@@ -119,13 +121,13 @@ export function ZaiStatsContent({
 
       {stats.by_model.length > 0 && (
         <SectionCard
-          title="模型用量"
+          title={t("common.modelUsage")}
           action={
             <SortToggle
               options={[
-                { key: "cost", label: "花费" },
+                { key: "cost", label: t("common.cost") },
                 { key: "token", label: "Token" },
-                { key: "requests", label: "请求" },
+                { key: "requests", label: t("common.requests") },
               ]}
               value={sortBy}
               onChange={setSortBy}
@@ -159,6 +161,7 @@ function ModelRankList({
   currency: Currency;
   sortBy: "cost" | "token" | "requests";
 }) {
+  const { t } = useI18n();
   const costById = new Map<string, number>();
   perModelCost?.forEach((x) => {
     costById.set(x.model_id, (costById.get(x.model_id) ?? 0) + x.cost);
@@ -194,7 +197,7 @@ function ModelRankList({
             <div className="relative flex items-center justify-between text-xs min-w-0">
               <div className="flex items-center gap-1 min-w-0 flex-1">
                 <span className="font-medium text-slate-900/90 truncate text-[11px]">{m.model_id}</span>
-                {!hasPrice && <span className="text-[10px] text-amber-600/90 shrink-0" title="未配置价格">⚠</span>}
+                {!hasPrice && <span className="text-[10px] text-amber-600/90 shrink-0" title={t("common.noPrice")}>⚠</span>}
               </div>
               <div className="flex items-center gap-1 text-slate-600/70 num shrink-0 text-[10px]">
                 <span>{formatTokens(m.total_tokens)}</span>

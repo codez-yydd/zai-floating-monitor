@@ -5,6 +5,7 @@ import {
   toggleTheme as flipTheme,
   type Theme,
 } from "./appearance";
+import { useI18n } from "./i18n";
 
 /* ============================================================
  * 全站统一布局组件 — 所有子页面共用同一套视觉语言
@@ -13,14 +14,15 @@ import {
 /** 主题快捷切换（主界面 / 子页面顶栏一键切换亮暗色） */
 export function ThemeToggle({ className = "toolbar-btn" }: { className?: string }) {
   const [theme, setTheme] = useState<Theme>(() => loadTheme());
+  const { t } = useI18n();
 
   return (
     <button
       type="button"
       onClick={() => setTheme((t) => flipTheme(t))}
       className={`${className} ${theme === "dark" ? "text-amber-500!" : ""}`}
-      title={theme === "dark" ? "切换为亮色" : "切换为暗色"}
-      aria-label={theme === "dark" ? "切换为亮色" : "切换为暗色"}
+      title={theme === "dark" ? t("layout.themeLight") : t("layout.themeDark")}
+      aria-label={theme === "dark" ? t("layout.themeLight") : t("layout.themeDark")}
     >
       {theme === "dark" ? (
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-3.5 w-3.5" aria-hidden>
@@ -32,6 +34,24 @@ export function ThemeToggle({ className = "toolbar-btn" }: { className?: string 
           <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
         </svg>
       )}
+    </button>
+  );
+}
+
+/** 语言快捷切换（主界面 / 子页面顶栏一键切换中英文）。
+ *  与设置页的语言胶囊读写同一 Context，切换后全站即时同步。 */
+export function LanguageToggle({ className = "toolbar-btn" }: { className?: string }) {
+  const { locale, setLocale, t } = useI18n();
+
+  return (
+    <button
+      type="button"
+      onClick={() => setLocale(locale === "zh" ? "en" : "zh")}
+      className={`${className} text-[10px]! font-semibold tracking-wide`}
+      title={t("common.switchLanguage")}
+      aria-label={t("common.switchLanguage")}
+    >
+      {locale === "zh" ? "EN" : t("layout.langGlyph")}
     </button>
   );
 }
@@ -53,12 +73,13 @@ export function PageHeader({
   right?: ReactNode;
   subtitle?: ReactNode;
 }) {
+  const { t } = useI18n();
   return (
     <div className="px-3 pt-2.5 pb-2 border-b border-slate-900/8 shrink-0">
       <div className="flex items-center justify-between">
         {onBack ? (
           <button onClick={onBack} className="btn-ghost text-[11px] px-1 -ml-1">
-            ← 返回
+            {t("layout.back")}
           </button>
         ) : (
           <span className="w-10" />
@@ -68,6 +89,7 @@ export function PageHeader({
         </h1>
         <div className="min-w-[2.5rem] flex justify-end items-center gap-0.5">
           <ThemeToggle />
+          <LanguageToggle />
           {right}
         </div>
       </div>
@@ -369,11 +391,12 @@ export function EmptyState({
   );
 }
 
-/** 加载占位 */
-export function LoadingState({ text = "加载中…" }: { text?: string }) {
+/** 加载占位（text 缺省取词典「加载中…」） */
+export function LoadingState({ text }: { text?: string }) {
+  const { t } = useI18n();
   return (
     <div className="flex-1 flex items-center justify-center text-xs text-slate-500 py-10">
-      {text}
+      {text ?? t("common.loading")}
     </div>
   );
 }

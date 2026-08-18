@@ -27,6 +27,7 @@ import {
   AlertBanner,
   LoadingState,
 } from "./layout";
+import { useI18n, type MessageKey } from "./i18n";
 
 interface Props {
   currency: Currency;
@@ -34,10 +35,11 @@ interface Props {
   onBack: () => void;
 }
 
-const FIELDS: { key: keyof ModelPrice; label: string }[] = [
-  { key: "input", label: "输入" },
-  { key: "output", label: "输出" },
-  { key: "cache_read", label: "缓存" },
+// 模式 A：字段标签存词典键，渲染时查（ModelPriceRow 内 useI18n）
+const FIELDS: { key: keyof ModelPrice; labelKey: MessageKey }[] = [
+  { key: "input", labelKey: "common.input" },
+  { key: "output", labelKey: "common.output" },
+  { key: "cache_read", labelKey: "common.cache" },
 ];
 
 /// 价格数字显示格式化：6 位有效数字，去掉浮点乘法尾巴（0.39999999999999 → 0.4）
@@ -63,6 +65,7 @@ function scaleCny(p: ModelPrice, rate: number): ModelPrice {
 const ZERO_PRICE: ModelPrice = { input: 0, output: 0, cache_read: 0 };
 
 export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
+  const { t } = useI18n();
   const [pricing, setPricing] = useState<PricingConfig | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [saving, setSaving] = useState(false);
@@ -257,17 +260,17 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
   );
 
   if (!pricing) {
-    return <LoadingState text="加载价格配置…" />;
+    return <LoadingState text={t("pricing.loading")} />;
   }
 
   return (
     <PageShell>
       <PageHeader
-        title="价格设置"
+        title={t("pricing.title")}
         onBack={onBack}
         right={
           <BtnPrimary onClick={handleSave} disabled={saving}>
-            {saving ? "保存中…" : savedFlash ? "已保存 ✓" : "保存"}
+            {saving ? t("common.saving") : savedFlash ? t("common.saved") : t("common.save")}
           </BtnPrimary>
         }
         subtitle={
@@ -279,18 +282,16 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
                   active={currency === c}
                   onClick={() => { onCurrencyChange(c); setDraft({}); }}
                 >
-                  {c === "cny" ? "¥ 人民币" : "$ 美元"}
+                  {c === "cny" ? t("pricing.cny") : t("pricing.usd")}
                 </PillButton>
               ))}
             </PillGroup>
             <p className="text-[10px] text-slate-500 mt-1.5">
-              单位：$/百万 token。人民币按汇率
-              <span className="num"> {fxRate} </span>
-              自动折算。
+              {t("pricing.unitHint", { rate: fxRate })}
             </p>
             <div className="mt-2 flex items-center justify-between">
               <BtnSecondary onClick={runDiff} className="relative">
-                检查价格更新
+                {t("pricing.checkUpdates")}
                 {updateCount > 0 && (
                   <span className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-1 flex items-center justify-center rounded-full bg-rose-500 text-white text-[9px] leading-none">
                     {updateCount}
@@ -299,7 +300,9 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
               </BtnSecondary>
               {diff && updateCount === 0 && !diffPanel && (
                 <span className={`text-[10px] ${diff.missing.length > 0 ? "text-amber-600" : "text-emerald-600"}`}>
-                  {diff.missing.length > 0 ? `${diff.missing.length} 个模型未配价` : "已是最新 ✓"}
+                  {diff.missing.length > 0
+                    ? t("pricing.missingCount", { count: diff.missing.length })
+                    : t("pricing.upToDate")}
                 </span>
               )}
             </div>
@@ -311,15 +314,19 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
         {error && <AlertBanner>{error}</AlertBanner>}
 
         {diffPanel && diff && (
-          <SectionCard title={`价格更新 · 内置参考表${diff.version ? ` v${diff.version}` : ""}`}>
+          <SectionCard
+            title={
+              t("pricing.diffTitle") + (diff.version ? ` v${diff.version}` : "")
+            }
+          >
             <p className="text-[9px] text-slate-500 mb-2 leading-relaxed">
-              参考价离线对比不联网。带 ≈ 标记的是变体名匹配的基础模型参考价，应用前请确认。
+              {t("pricing.diffHint")}
             </p>
             {/* 无价格模型警示：实际在用但两边都没价格，花费按 0 计 */}
             {diff.missing.length > 0 && (
               <div className="mb-2 rounded-md bg-amber-500/10 border border-amber-500/20 px-2 py-1.5">
                 <div className="text-[9px] text-amber-700/90 font-medium">
-                  以下 {diff.missing.length} 个模型实际在用但未配置价格（花费按 0 计）：
+                  {t("pricing.missingWarn", { count: diff.missing.length })}
                 </div>
                 <ul className="mt-0.5 max-h-16 overflow-y-auto space-y-0.5">
                   {diff.missing.map((m) => (
@@ -329,7 +336,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
                   ))}
                 </ul>
                 <div className="text-[8px] text-slate-700/40 mt-0.5">
-                  请在下方模型列表中手动补价
+                  {t("pricing.addPriceBelow")}
                 </div>
               </div>
             )}
@@ -351,14 +358,14 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
                     <div className="min-w-0 flex-1">
                       <div className="flex items-baseline gap-1.5">
                         <span className="shrink-0 px-1 rounded bg-emerald-500/15 text-emerald-700 text-[8px] font-medium">
-                          新增
+                          {t("pricing.badgeNew")}
                         </span>
                         <span className="font-medium text-slate-900/85 text-[10px] break-words">
                           {i.model_id}
                         </span>
                         {i.reference_id && (
                           <span
-                            title={`参考价取自基础模型 ${i.reference_id}（同系变体），应用前请确认价格`}
+                            title={t("pricing.refFrom", { model: i.reference_id })}
                             className="shrink-0 px-1 rounded bg-amber-500/15 text-amber-700 text-[8px] font-medium"
                           >
                             ≈ {i.reference_id}
@@ -393,16 +400,18 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
                     <div className="min-w-0 flex-1">
                       <div className="flex items-baseline gap-1.5">
                         <span className="shrink-0 px-1 rounded bg-amber-500/15 text-amber-700 text-[8px] font-medium">
-                          变动
+                          {t("pricing.badgeChanged")}
                         </span>
                         <span className="font-medium text-slate-900/85 text-[10px] break-words">
                           {i.model_id}
                         </span>
                       </div>
                       <div className="mt-0.5 text-[10px] num leading-relaxed">
-                        <span className="text-slate-700/40 text-[9px]">旧 </span>
+                        <span className="text-slate-700/40 text-[9px]">
+                          {t("pricing.old")}{" "}
+                        </span>
                         <span className="text-slate-700/55 whitespace-nowrap">
-                          {u ? `$ ${fmtTriplet(u)}` : "未配价"}
+                          {u ? `$ ${fmtTriplet(u)}` : t("pricing.unpriced")}
                         </span>
                         <span className="text-slate-700/35 mx-1">→</span>
                         <span className="text-sky-600/90 font-medium whitespace-nowrap">
@@ -418,14 +427,20 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
               })}
               {diff.new_models.length === 0 && diff.changed.length === 0 && (
                 <div className="text-[10px] text-slate-700/50 text-center py-2">
-                  无差异，价格已是最新
+                  {t("pricing.noDiff")}
                 </div>
               )}
             </div>
             <div className="flex items-center justify-between mt-2">
-              <BtnSecondary onClick={() => setDiffPanel(false)}>收起</BtnSecondary>
+              <BtnSecondary onClick={() => setDiffPanel(false)}>
+                {t("pricing.collapse")}
+              </BtnSecondary>
               <BtnPrimary onClick={handleApplyUpdates} disabled={applying || selected.size === 0}>
-                {applying ? "应用中…" : `应用选中${selected.size > 0 ? ` (${selected.size})` : ""}`}
+                {applying
+                  ? t("pricing.applying")
+                  : selected.size > 0
+                    ? t("pricing.applySelectedCount", { count: selected.size })
+                    : t("pricing.applySelected")}
               </BtnPrimary>
             </div>
           </SectionCard>
@@ -445,7 +460,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
         ))}
         {modelIds.length === 0 && (
           <div className="text-center text-xs text-slate-500 py-8">
-            暂无模型数据。请确认 ZCode 已产生使用记录。
+            {t("pricing.noModels")}
           </div>
         )}
       </PageBody>
@@ -472,6 +487,7 @@ const ModelPriceRow = memo(function ModelPriceRow({
   onDraftChange: (id: string, key: keyof ModelPrice, v: string) => void;
   onCommit: (id: string, key: keyof ModelPrice) => void;
 }) {
+  const { t } = useI18n();
   const drafts: Record<keyof ModelPrice, string | undefined> = {
     input: dIn,
     output: dOut,
@@ -491,7 +507,7 @@ const ModelPriceRow = memo(function ModelPriceRow({
                 : "";
           return (
             <label key={f.key} className="flex flex-col gap-0.5 text-[10px]">
-              <span className="text-slate-700/55">{f.label}</span>
+              <span className="text-slate-700/55">{t(f.labelKey)}</span>
               <div className="flex items-center rounded-md bg-surface/60 border border-slate-900/10 focus-within:border-sky-400/60 focus-within:ring-1 focus-within:ring-sky-400/40 transition-colors">
                 <span className="text-slate-700/50 pl-1.5">$</span>
                 <input

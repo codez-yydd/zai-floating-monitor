@@ -12,6 +12,7 @@ import {
   remainingGradient,
   remainingTextColor,
 } from "./widgets";
+import { useI18n } from "./i18n";
 
 interface Props {
   snapshot: CursorSnapshot | null;
@@ -37,6 +38,7 @@ function PlanQuotaRow({
   hint?: string;
   usedPct: number;
 }) {
+  const { t } = useI18n();
   const remain = Math.max(0, 100 - usedPct);
   return (
     <div>
@@ -51,7 +53,7 @@ function PlanQuotaRow({
           className="num text-[10px] font-semibold shrink-0 whitespace-nowrap"
           style={{ color: remainingTextColor(remain) }}
         >
-          剩 {Math.round(remain)}%
+          {t("common.remaining", { pct: Math.round(remain) })}
         </span>
       </div>
       <ProgressBar
@@ -70,6 +72,7 @@ export function CursorPanel({
   currency,
   fxRate,
 }: Props) {
+  const { t } = useI18n();
   const [trendMetric, setTrendMetric] = useState<"cost" | "token">("cost");
   const [sortBy, setSortBy] = useState<"cost" | "token" | "requests">("cost");
 
@@ -77,7 +80,7 @@ export function CursorPanel({
   if (loading && !snapshot) {
     return (
       <div className="flex-1 flex items-center justify-center text-xs text-slate-700/40">
-        加载 Cursor 用量…
+        {t("common.loadingUsage", { name: "Cursor" })}
       </div>
     );
   }
@@ -88,10 +91,10 @@ export function CursorPanel({
       <div className="flex-1 flex flex-col items-center justify-center px-6 text-center gap-2">
         <div className="text-2xl opacity-40">🖱️</div>
         <div className="text-xs text-slate-700/60 font-medium">
-          未检测到 Cursor 登录
+          {t("cursor.notLoggedIn")}
         </div>
         <div className="text-[10px] text-slate-700/40 leading-relaxed">
-          请在 Cursor 应用中登录，或在「⚙ 价格设置」中手动粘贴 Cookie
+          {t("cursor.loginHint")}
         </div>
         {error && (
           <div className="text-[10px] text-red-600/70 mt-1 leading-relaxed">
@@ -136,9 +139,9 @@ export function CursorPanel({
       {/* 账户信息 */}
       <div className="flex items-center justify-between text-[10px]">
         <div className="min-w-0">
-          <span className="text-slate-700/55">账户 </span>
+          <span className="text-slate-700/55">{t("cursor.account")} </span>
           <span className="text-slate-900/80 font-medium truncate">
-            {snapshot.account_email || snapshot.account_name || "未知"}
+            {snapshot.account_email || snapshot.account_name || t("cursor.unknown")}
           </span>
         </div>
         {snapshot.membership_type && (
@@ -168,8 +171,8 @@ export function CursorPanel({
             </>
           ) : (
             <>
-              <div className="text-[10px] text-slate-600">套餐额度</div>
-              <div className="text-[10px] text-slate-700/40">暂无额度数据</div>
+              <div className="text-[10px] text-slate-600">{t("cursor.planQuota")}</div>
+              <div className="text-[10px] text-slate-700/40">{t("cursor.noQuotaData")}</div>
             </>
           )}
         </div>
@@ -180,7 +183,7 @@ export function CursorPanel({
         <div className="rounded-lg bg-surface/25 border border-surface/30 px-2.5 py-2 space-y-1.5">
           <div className="flex items-center justify-between">
             <span className="text-[10px] uppercase tracking-wide text-slate-700/55">
-              按需用量
+              {t("cursor.onDemand")}
             </span>
             <span className="num text-[10px] text-slate-700/60">
               {odUsedUsd != null
@@ -215,12 +218,12 @@ export function CursorPanel({
         <div className="flex items-center justify-between text-[10px] text-slate-700/50">
           <span>
             {snapshot.billing_cycle_start
-              ? `周期 ${snapshot.billing_cycle_start.slice(0, 10)}`
+              ? t("cursor.cycle", { date: snapshot.billing_cycle_start.slice(0, 10) })
               : ""}
           </span>
           {snapshot.billing_cycle_end && (
             <span>
-              重置 {snapshot.billing_cycle_end.slice(0, 10)}
+              {t("cursor.resetDate", { date: snapshot.billing_cycle_end.slice(0, 10) })}
             </span>
           )}
         </div>
@@ -232,9 +235,9 @@ export function CursorPanel({
           <div className="flex items-end justify-between">
             <div>
               <div className="text-[10px] uppercase tracking-wide text-slate-700/55">
-                Token 花费
+                {t("cursor.tokenSpend")}
                 <span className="ml-1 text-[8px] text-sky-600/50 normal-case">
-                  所选时间范围
+                  {t("cursor.selectedRange")}
                 </span>
               </div>
               <div className="num text-[26px] font-bold text-slate-900 leading-none mt-0.5">
@@ -243,7 +246,7 @@ export function CursorPanel({
             </div>
             <div className="text-right">
               <div className="text-[10px] uppercase tracking-wide text-slate-700/55">
-                总 Token
+                {t("common.totalTokens")}
               </div>
               <div className="num text-[15px] font-semibold text-slate-900/70 leading-none mt-1">
                 {formatTokens(events.total_tokens)}
@@ -264,9 +267,9 @@ export function CursorPanel({
 
           {/* 三个指标 */}
           <div className="grid grid-cols-3 gap-1.5">
-            <Metric label="请求" value={String(events.requests)} />
+            <Metric label={t("common.requests")} value={String(events.requests)} />
             <Metric
-              label="缓存率"
+              label={t("common.cacheRate")}
               value={
                 events.input_tokens + events.cache_read_tokens > 0
                   ? formatPct(
@@ -277,7 +280,7 @@ export function CursorPanel({
               }
               accent="text-emerald-600"
             />
-            <Metric label="输出" value={formatTokens(events.output_tokens)} />
+            <Metric label={t("common.output")} value={formatTokens(events.output_tokens)} />
           </div>
 
           {/* 按模型排行 */}
@@ -285,7 +288,7 @@ export function CursorPanel({
             <div>
               <div className="flex items-center justify-between mb-1.5 mt-1">
                 <span className="text-[10px] uppercase tracking-wide text-slate-700/55">
-                  按模型
+                  {t("cursor.byModel")}
                 </span>
                 <div className="flex gap-0.5 text-[10px]">
                   {(["cost", "token", "requests"] as const).map((s) => (
@@ -298,7 +301,7 @@ export function CursorPanel({
                           : "text-slate-700/45 hover:text-slate-900/70"
                       }`}
                     >
-                      {s === "cost" ? "花费" : s === "token" ? "Token" : "请求"}
+                      {s === "cost" ? t("common.cost") : s === "token" ? "Token" : t("common.requests")}
                     </button>
                   ))}
                 </div>
@@ -360,8 +363,8 @@ export function CursorPanel({
       {!events && (
         <div className="rounded-lg bg-surface/25 border border-surface/30 px-3 py-6 text-center text-[10px] text-slate-700/40">
           {snapshot.events_error
-            ? `Token 明细拉取失败：${snapshot.events_error}`
-            : "所选时间范围内暂无 Token 使用明细"}
+            ? t("cursor.eventsFailed", { msg: snapshot.events_error })
+            : t("cursor.noEvents")}
         </div>
       )}
     </div>

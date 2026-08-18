@@ -32,6 +32,8 @@ import {
   PageHeader,
   PageBody,
   SettingsCard,
+  PillGroup,
+  PillButton,
   BtnPrimary,
   BtnSecondary,
   AlertBanner,
@@ -41,6 +43,7 @@ import {
   type AgentId,
   type AgentVisibility,
 } from "./agentVisibility";
+import { useI18n } from "./i18n";
 
 interface Props {
   onBack: () => void;
@@ -65,6 +68,7 @@ export function SettingsPanel({
   agentVisibility,
   onAgentVisibilityChange,
 }: Props) {
+  const { locale, t, setLocale } = useI18n();
   const [error, setError] = useState<string | null>(null);
   // 配置加载成功后才允许保存/测试/应用：加载失败时组件停在默认值，
   // 若仍可保存会把空 token 等默认值写回后端覆盖真实配置
@@ -148,8 +152,11 @@ export function SettingsPanel({
   useEffect(() => {
     isAutostartEnabled()
       .then(setAutostartEnabled)
-      .catch((e) => setAutostartError(`读取开机自启状态失败：${String(e)}`))
+      .catch((e) =>
+        setAutostartError(t("settings.autostartReadFail", { msg: String(e) }))
+      )
       .finally(() => setAutostartLoaded(true));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleSaveQuota = async () => {
@@ -197,12 +204,14 @@ export function SettingsPanel({
       const [email, name, membership] = await testCursorAuth();
       if (email) {
         setCursorTestResult(
-          `✓ 已连接：${email}${membership ? `（${membership}）` : ""}`
+          membership
+            ? t("settings.connectedEmailPlan", { email, plan: membership })
+            : t("settings.connectedEmail", { email })
         );
       } else if (name) {
-        setCursorTestResult(`✓ 已连接：${name}`);
+        setCursorTestResult(t("settings.connectedName", { name }));
       } else {
-        setCursorTestResult("✓ 认证成功");
+        setCursorTestResult(t("settings.authOk"));
       }
     } catch (e) {
       setCursorTestResult(`✗ ${String(e)}`);
@@ -226,7 +235,9 @@ export function SettingsPanel({
         fx_rate_fetched_at: Date.now(),
         fx_rate_source: source,
       }));
-      setFxUpdateResult(`✓ ${rate.toFixed(2)}（${source}）`);
+      setFxUpdateResult(
+        `✓ ${rate.toFixed(2)}${locale === "zh" ? "（" : " ("}${source}${locale === "zh" ? "）" : ")"}`
+      );
     } catch (e) {
       // 失败保留旧汇率值，只提示错误
       setFxUpdateResult(`✗ ${String(e)}`);
@@ -267,7 +278,9 @@ export function SettingsPanel({
       setAutostartEnabled(enabled);
     } catch (e) {
       setAutostartError(
-        `${enabled ? "开启" : "关闭"}开机自启失败：${String(e)}`
+        enabled
+          ? t("settings.autostartFailOn", { msg: String(e) })
+          : t("settings.autostartFailOff", { msg: String(e) })
       );
     } finally {
       setSavingAutostart(false);
@@ -276,15 +289,15 @@ export function SettingsPanel({
 
   return (
     <PageShell>
-      <PageHeader title="设置" onBack={onBack} />
+      <PageHeader title={t("settings.title")} onBack={onBack} />
 
       <PageBody className="page-stack">
         {error && <AlertBanner>{error}</AlertBanner>}
 
-        <SettingsCard title="面板透明度">
+        <SettingsCard title={t("settings.panelOpacity")}>
           <div className="flex items-center gap-2">
             <span className="text-[10px] text-slate-700/55 shrink-0">
-              透明度
+              {t("settings.opacity")}
             </span>
             <input
               type="range"
@@ -313,13 +326,30 @@ export function SettingsPanel({
             </span>
           </div>
           <p className="text-[9px] text-slate-500 mt-1.5 leading-relaxed">
-            调整面板背景透明度，值越低毛玻璃越透；暗色主题建议保持 60%
-            以上，过低时文字可能不清晰
+            {t("settings.opacityHint")}
           </p>
         </SettingsCard>
 
+        {/* 语言：与顶栏 LanguageToggle 读写同一 Context，切换后全站即时同步 */}
+        <SettingsCard title={t("settings.language")}>
+          <PillGroup>
+            <PillButton
+              active={locale === "zh"}
+              onClick={() => setLocale("zh")}
+            >
+              {t("settings.langZh")}
+            </PillButton>
+            <PillButton
+              active={locale === "en"}
+              onClick={() => setLocale("en")}
+            >
+              {t("settings.langEn")}
+            </PillButton>
+          </PillGroup>
+        </SettingsCard>
+
         <SettingsCard
-          title="开机自启"
+          title={t("settings.autostart")}
           action={
             <label className="flex items-center gap-1 text-[10px] text-slate-600 cursor-pointer">
               <input
@@ -329,15 +359,15 @@ export function SettingsPanel({
                 disabled={!autostartLoaded || savingAutostart}
                 className="accent-sky-500 h-3 w-3 disabled:opacity-40"
               />
-              {savingAutostart ? "应用中…" : "启用"}
+              {savingAutostart ? t("settings.applying") : t("settings.enable")}
             </label>
           }
         >
           <p className="text-[9px] text-slate-500 leading-relaxed">
-            登录 Windows 或 macOS 后自动启动 ZBar，面板默认保持隐藏，可从托盘打开。
+            {t("settings.autostartHint")}
           </p>
           {!autostartLoaded && (
-            <p className="text-[9px] text-slate-500 mt-1">正在读取状态…</p>
+            <p className="text-[9px] text-slate-500 mt-1">{t("settings.readingState")}</p>
           )}
           {autostartError && (
             <p className="text-[9px] text-rose-600 mt-1 leading-relaxed break-all">
@@ -346,7 +376,7 @@ export function SettingsPanel({
           )}
         </SettingsCard>
 
-        <SettingsCard title="统计展示来源" action={<span className="text-[9px] text-slate-500">即时生效</span>} hint="关闭后仅从统计标签和汇总中隐藏，不影响本地采集与设备同步。">
+        <SettingsCard title={t("settings.sources")} action={<span className="text-[9px] text-slate-500">{t("settings.instant")}</span>} hint={t("settings.sourcesHint")}>
             {AGENT_VISIBILITY_OPTIONS.map((agent) => (
               <label
                 key={agent.id}
@@ -362,7 +392,7 @@ export function SettingsPanel({
                       {agent.label}
                     </span>
                     <span className="block text-[9px] text-slate-700/45 truncate">
-                      {agent.description}
+                      {t(agent.descriptionKey)}
                     </span>
                   </span>
                 </span>
@@ -379,10 +409,10 @@ export function SettingsPanel({
         </SettingsCard>
 
         <SettingsCard
-          title="Coding Plan 额度监控"
+          title={t("quota.title")}
           action={
             <BtnPrimary onClick={handleSaveQuota} disabled={savingQuota || !loaded}>
-              {savingQuota ? "保存中…" : quotaSavedFlash ? "已保存 ✓" : "保存"}
+              {savingQuota ? t("common.saving") : quotaSavedFlash ? t("common.saved") : t("common.save")}
             </BtnPrimary>
           }
         >
@@ -393,14 +423,14 @@ export function SettingsPanel({
               <input
                 type={showToken ? "text" : "password"}
                 value={tokenDraft}
-                placeholder="粘贴 Coding Plan API Token"
+                placeholder={t("settings.tokenPh")}
                 onChange={(e) => setTokenDraft(e.target.value)}
                 className="num w-full px-1.5 py-1 text-left bg-transparent text-slate-900/90 placeholder:text-slate-700/35 focus:outline-none text-[11px]"
               />
               <button
                 onClick={() => setShowToken((v) => !v)}
                 className="px-1.5 text-slate-700/40 hover:text-slate-900/70 transition-colors text-[10px] shrink-0"
-                title={showToken ? "隐藏" : "显示"}
+                title={showToken ? t("common.hide") : t("common.show")}
               >
                 {showToken ? "🙈" : "👁"}
               </button>
@@ -408,7 +438,7 @@ export function SettingsPanel({
           </label>
           {/* 端点切换 */}
           <div className="flex items-center justify-between mt-2">
-            <span className="text-[10px] text-slate-700/55">端点</span>
+            <span className="text-[10px] text-slate-700/55">{t("settings.endpoint")}</span>
             <div className="flex gap-1">
               {(["cn", "global"] as QuotaEndpoint[]).map((ep) => (
                 <button
@@ -422,18 +452,18 @@ export function SettingsPanel({
                       : "bg-slate-900/5 text-slate-700/65 hover:bg-slate-900/10"
                   }`}
                 >
-                  {ep === "cn" ? "🇨🇳 国内" : "🌐 国际"}
+                  {ep === "cn" ? t("settings.endpointCn") : t("settings.endpointGlobal")}
                 </button>
               ))}
             </div>
           </div>
           <p className="text-[9px] text-slate-500 mt-1.5 leading-relaxed">
-            Token 从智谱开放平台获取。国内用户选「国内」端点。
+            {t("settings.endpointHint")}
           </p>
         </SettingsCard>
 
         <SettingsCard
-          title="Cursor 统计"
+          title={t("settings.cursorStats")}
           action={
             <div className="flex items-center gap-1.5">
               <BtnSecondary onClick={async () => {
@@ -442,21 +472,21 @@ export function SettingsPanel({
                 try {
                   const info = await cursorDebug();
                   setCursorDebugInfo(
-                    `来源: ${info.cookie_source}\nDB: ${info.db_found ? "已找到" : "未找到"}\nUserID: ${info.user_id}\nEvents HTTP: ${info.events_status}\n响应: ${info.events_body_excerpt}`
+                    `${t("settings.debugSource")}: ${info.cookie_source}\nDB: ${info.db_found ? t("settings.debugDbFound") : t("settings.debugDbMissing")}\nUserID: ${info.user_id}\nEvents HTTP: ${info.events_status}\n${t("settings.debugResponse")}: ${info.events_body_excerpt}`
                   );
                 } catch (e) {
-                  setCursorDebugInfo(`诊断失败: ${e}`);
+                  setCursorDebugInfo(t("settings.debugFailed", { msg: String(e) }));
                 } finally {
                   setCursorDebugging(false);
                 }
               }} disabled={cursorDebugging || !loaded}>
-                {cursorDebugging ? "诊断中…" : "诊断"}
+                {cursorDebugging ? t("settings.debugging") : t("settings.debug")}
               </BtnSecondary>
               <BtnSecondary onClick={handleTestCursor} disabled={cursorTesting || !loaded}>
-                {cursorTesting ? "测试中…" : "测试连接"}
+                {cursorTesting ? t("settings.testing") : t("settings.test")}
               </BtnSecondary>
               <BtnPrimary onClick={handleSaveCursor} disabled={savingCursor || !loaded}>
-                {savingCursor ? "保存中…" : cursorSavedFlash ? "已保存 ✓" : "保存"}
+                {savingCursor ? t("common.saving") : cursorSavedFlash ? t("common.saved") : t("common.save")}
               </BtnPrimary>
             </div>
           }
@@ -465,7 +495,7 @@ export function SettingsPanel({
           {/* Cookie 来源切换 */}
           <div className="flex items-center gap-2 mb-1.5">
             <span className="text-[10px] text-slate-700/60 w-12 shrink-0">
-              认证
+              {t("settings.auth")}
             </span>
             <div className="flex gap-1">
               {(["auto", "manual"] as const).map((src) => (
@@ -480,7 +510,7 @@ export function SettingsPanel({
                       : "text-slate-700/45 hover:text-slate-900/70"
                   }`}
                 >
-                  {src === "auto" ? "自动（读 Cursor 应用）" : "手动 Cookie"}
+                  {src === "auto" ? t("settings.authAuto") : t("settings.authManual")}
                 </button>
               ))}
             </div>
@@ -497,7 +527,7 @@ export function SettingsPanel({
                   cookie_header: e.target.value,
                 })
               }
-              placeholder="粘贴 cursor.com 请求的 Cookie 头"
+              placeholder={t("settings.cookiePh")}
               className="w-full px-2 py-1 rounded-md bg-surface/60 border border-slate-900/10 text-[10px] text-slate-900/80 focus:outline-none focus:border-sky-400/60 mb-1.5"
             />
           )}
@@ -518,7 +548,7 @@ export function SettingsPanel({
                 readOnly={cursorCfg.fx_rate_auto}
                 title={
                   cursorCfg.fx_rate_auto
-                    ? "自动更新中，取消勾选可手动输入"
+                    ? t("settings.fxAutoNote")
                     : undefined
                 }
                 onChange={(e) => setFxDraft(e.target.value)}
@@ -540,14 +570,14 @@ export function SettingsPanel({
               />
               <span className="text-[9px] text-slate-700/45 truncate">
                 {cursorCfg.fx_rate_fetched_at
-                  ? `${cursorCfg.fx_rate_source ?? "未知来源"} · ${fmtFxTime(cursorCfg.fx_rate_fetched_at)}`
-                  : "尚未联网获取"}
+                  ? `${cursorCfg.fx_rate_source ?? t("settings.fxUnknownSource")} · ${fmtFxTime(cursorCfg.fx_rate_fetched_at)}`
+                  : t("settings.fxNever")}
               </span>
             </div>
             <div className="flex items-center gap-2 mt-1">
               <label
                 className="flex items-center gap-1 text-[9px] text-slate-700/55 cursor-pointer"
-                title="后台每天自动联网刷新一次汇率"
+                title={t("settings.fxDailyTitle")}
               >
                 <input
                   type="checkbox"
@@ -565,15 +595,15 @@ export function SettingsPanel({
                   }}
                   className="accent-sky-500 w-3 h-3"
                 />
-                每日自动更新汇率
+                {t("settings.fxDaily")}
               </label>
               <button
                 onClick={() => handleFetchFxRate()}
                 disabled={fxUpdating || !loaded}
-                title="立即联网获取最新汇率（多个免费数据源自动容错）"
+                title={t("settings.updateNowTitle")}
                 className="text-[9px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-700/80 hover:bg-sky-500/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {fxUpdating ? "更新中…" : "立即更新"}
+                {fxUpdating ? t("settings.updating") : t("settings.updateNow")}
               </button>
               {fxUpdateResult && (
                 <span
@@ -589,11 +619,11 @@ export function SettingsPanel({
             </div>
             {cursorCfg.fx_rate_auto && (
               <p className="text-[8px] text-slate-700/40 mt-0.5">
-                自动更新中，取消勾选可手动输入
+                {t("settings.fxAutoNote")}
               </p>
             )}
             <p className="text-[8px] text-slate-700/40 mt-0.5">
-              模型价格只存美元，人民币花费按此汇率自动折算（价格设置页的 ¥ 视图同源）。
+              {t("settings.fxNote")}
             </p>
           </div>
 
@@ -610,7 +640,7 @@ export function SettingsPanel({
           )}
           {cursorCfg.cookie_source === "auto" && (
             <p className="text-[9px] text-slate-700/45 mt-1 leading-relaxed">
-              自动读取 Cursor 应用的本地登录凭据。请确保 Cursor 已安装并登录。
+              {t("settings.cursorAutoHint")}
             </p>
           )}
           {cursorDebugInfo && (
@@ -622,7 +652,7 @@ export function SettingsPanel({
 
         {shortcutCfg && (
           <SettingsCard
-            title="全局快捷键"
+            title={t("settings.shortcut")}
             action={
               <div className="flex items-center gap-2">
                 <label className="flex items-center gap-1 text-[10px] text-slate-600 cursor-pointer">
@@ -634,14 +664,14 @@ export function SettingsPanel({
                     }
                     className="accent-sky-500 w-3 h-3"
                   />
-                  启用
+                  {t("settings.enable")}
                 </label>
                 <BtnPrimary onClick={handleSaveShortcut} disabled={savingShortcut || !loaded}>
-                  {savingShortcut ? "应用中…" : shortcutSavedFlash ? "已应用 ✓" : "应用"}
+                  {savingShortcut ? t("settings.applying") : shortcutSavedFlash ? t("settings.applied") : t("settings.apply")}
                 </BtnPrimary>
               </div>
             }
-            hint="唤起/隐藏面板。格式如 alt+shift+z（修饰键用 ctrl/alt/shift/cmd，主键用字母/数字）。"
+            hint={t("settings.shortcutHint")}
           >
             <div className="input-group">
               <input

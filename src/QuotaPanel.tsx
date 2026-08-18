@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { useDataCache } from "./DataCache";
-import { formatCountdown } from "./format";
+import { formatCountdownCore } from "./format";
 import { remainingGradient, remainingTextColor } from "./widgets";
+import { useI18n } from "./i18n";
 
 interface Props {
   /** 点击「去设置」回调 */
@@ -19,6 +20,7 @@ export function QuotaPanel({ onGoSettings }: Props) {
   // 额度数据由全局 DataProvider 统一预加载 + 30s 定时刷新，
   // 此组件仅负责展示（纯展示层），不再自己请求。
   const { quota, quotaError, todayDelta, refreshQuota } = useDataCache();
+  const { t } = useI18n();
   const [now, setNow] = useState(Date.now());
 
   // 每秒更新倒计时显示
@@ -28,33 +30,32 @@ export function QuotaPanel({ onGoSettings }: Props) {
   }, []);
 
   // 未配置 token 的错误 → 显示引导
+  // 注意：正则匹配 Rust 后端返回的中文错误串（如「未配置 Token」），仅做布尔分支，不能翻译
   if (quotaError && /未配置|Token/i.test(quotaError)) {
     return (
       <div className="mx-3.5 mb-1 rounded-lg bg-sky-500/10 border border-sky-500/20 px-2.5 py-1.5">
         <div className="flex items-center justify-between">
-          <span className="text-[11px] text-sky-700/80">
-            Coding Plan 额度监控
-          </span>
+          <span className="text-[11px] text-sky-700/80">{t("quota.title")}</span>
           <button
             onClick={onGoSettings}
             className="text-[10px] text-sky-600 hover:text-sky-700 transition-colors"
           >
-            去配置 →
+            {t("quota.goConfig")}
           </button>
         </div>
         <p className="text-[10px] text-slate-700/50 mt-0.5">
-          填写 API Token 后显示用量进度
+          {t("quota.configHint")}
         </p>
       </div>
     );
   }
 
-  // 其他错误 → 简短提示
+  // 其他错误 → 简短提示（Rust 错误串中文原样透传，仅前缀标签走词典）
   if (quotaError || !quota) {
     return (
       <div className="mx-3.5 mb-1 rounded-lg bg-amber-500/10 border border-amber-500/20 px-2.5 py-1.5">
         <span className="text-[10px] text-amber-700/80">
-          {quotaError ? `额度查询失败：${quotaError}` : "加载中…"}
+          {quotaError ? t("quota.failed", { msg: quotaError }) : t("common.loading")}
         </span>
       </div>
     );
@@ -77,7 +78,7 @@ export function QuotaPanel({ onGoSettings }: Props) {
         <button
           onClick={refreshQuota}
           className="text-slate-700/40 hover:text-slate-900/70 text-[11px] transition-colors"
-          title="刷新额度"
+          title={t("quota.refresh")}
         >
           ↻
         </button>
@@ -86,7 +87,7 @@ export function QuotaPanel({ onGoSettings }: Props) {
       {/* 5小时窗口 */}
       {quota.hour5 && (
         <QuotaBar
-          label="5小时"
+          label={t("common.hour5")}
           usedPct={quota.hour5.percentage}
           resetAt={quota.hour5.nextResetTime}
           now={now}
@@ -96,7 +97,7 @@ export function QuotaPanel({ onGoSettings }: Props) {
       {/* 每周 */}
       {quota.weekly && (
         <QuotaBar
-          label="本周"
+          label={t("common.weekly")}
           usedPct={quota.weekly.percentage}
           resetAt={quota.weekly.nextResetTime}
           now={now}
@@ -137,6 +138,7 @@ function QuotaBar({
   /** 今日增量：[增量百分比, 采样数]。仅 weekly 传入 */
   delta?: [number, number] | null;
 }) {
+  const { t } = useI18n();
   const used = Math.min(Math.max(usedPct, 0), 100);
   const remaining = 100 - used;
 
@@ -150,7 +152,7 @@ function QuotaBar({
         <span className="text-slate-700/60">{label}</span>
         {resetAt && resetAt > now ? (
           <span className="num text-slate-700/40 text-right pr-1 whitespace-nowrap">
-            ↻ {formatCountdown(resetAt - now)}
+            ↻ {t("common.refreshIn", { time: formatCountdownCore(resetAt - now) })}
           </span>
         ) : (
           <span />
@@ -159,7 +161,7 @@ function QuotaBar({
           className="num font-semibold text-right"
           style={{ color: remainingTextColor(remaining) }}
         >
-          剩 {Math.round(remaining)}%
+          {t("common.remaining", { pct: Math.round(remaining) })}
         </span>
       </div>
       <div className="h-1.5 rounded-full bg-slate-900/8 overflow-hidden">
@@ -174,7 +176,9 @@ function QuotaBar({
       {/* 今日增量 */}
       {hasDelta && (
         <div className="text-[9px] mt-0.5">
-          <span className="num text-slate-700/50">↑今日 {deltaPct}%</span>
+          <span className="num text-slate-700/50">
+            {t("quota.todayDelta", { pct: deltaPct })}
+          </span>
         </div>
       )}
     </div>
@@ -199,6 +203,7 @@ function McpBar({
   total?: number;
   className?: string;
 }) {
+  const { t } = useI18n();
   const used = Math.min(Math.max(usedPct, 0), 100);
   const remaining = 100 - used;
 
@@ -212,7 +217,7 @@ function McpBar({
         <span className="text-slate-700/60">MCP</span>
         {resetAt && resetAt > now ? (
           <span className="num text-slate-700/40 text-right pr-1 whitespace-nowrap">
-            ↻ {formatCountdown(resetAt - now)}
+            ↻ {t("common.refreshIn", { time: formatCountdownCore(resetAt - now) })}
           </span>
         ) : (
           <span />
@@ -221,7 +226,7 @@ function McpBar({
           className="num font-semibold text-right"
           style={{ color: remainingTextColor(remaining) }}
         >
-          剩 {Math.round(remaining)}%
+          {t("common.remaining", { pct: Math.round(remaining) })}
         </span>
       </div>
       <div className="h-1.5 rounded-full bg-slate-900/8 overflow-hidden">

@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { RangePreset } from "./types";
 import { dateStr, rangeToMs } from "./format";
 import { DatePicker } from "./DatePicker";
+import { useI18n, type MessageKey } from "./i18n";
 
 interface Props {
   preset: RangePreset;
@@ -9,16 +10,18 @@ interface Props {
   onChange: (preset: RangePreset, custom: { from: string; to: string }) => void;
 }
 
-const PRESETS: { value: RangePreset; label: string }[] = [
-  { value: "today", label: "今日" },
-  { value: "1d", label: "24h" },
-  { value: "7d", label: "7天" },
-  { value: "30d", label: "30天" },
-  { value: "custom", label: "自定义" },
+// 模式 A：常量表存词典键，渲染时查（label 跟随 UI 语言）
+const PRESETS: { value: RangePreset; labelKey: MessageKey }[] = [
+  { value: "today", labelKey: "range.today" },
+  { value: "1d", labelKey: "range.24h" },
+  { value: "7d", labelKey: "range.7d" },
+  { value: "30d", labelKey: "range.30d" },
+  { value: "custom", labelKey: "range.custom" },
 ];
 
 export function RangePicker({ preset, custom, onChange }: Props) {
   const [showCustom, setShowCustom] = useState(preset === "custom");
+  const { t } = useI18n();
 
   return (
     <div className="space-y-2">
@@ -36,7 +39,7 @@ export function RangePicker({ preset, custom, onChange }: Props) {
                 : "text-slate-600/70 hover:text-slate-800 hover:bg-slate-900/5"
             }`}
           >
-            {p.label}
+            {t(p.labelKey)}
           </button>
         ))}
       </div>

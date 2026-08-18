@@ -1,0 +1,58 @@
+/**
+ * 统计域词典：统计面板（标签/工具栏/设备筛选）、Coding Plan 额度面板、
+ * 各 Agent 用量面板（Codex / Claude / Cursor）的文案。
+ */
+
+export const stats = {
+  // ===== 统计面板顶栏 =====
+  "stats.tab.summary": "汇总",
+  "stats.compare": "周额度对比",
+  "stats.report": "用量报告",
+  "stats.syncOn": "设备同步",
+  "stats.syncOff": "配置设备同步",
+  "stats.settings": "设置",
+  "stats.pin": "常驻置顶",
+  "stats.unpin": "取消常驻",
+  "stats.priceSettings": "价格设置",
+  "stats.sourcesAria": "统计来源",
+
+  // ===== 设备筛选 =====
+  "stats.deviceFilter": "筛选设备",
+  "stats.deviceAll": "全部",
+  "stats.deviceLocal": "本机",
+  "stats.deviceLocalName": "本机（{name}）",
+
+  // ===== Coding Plan 额度面板 =====
+  "quota.title": "Coding Plan 额度监控",
+  "quota.goConfig": "去配置 →",
+  "quota.configHint": "填写 API Token 后显示用量进度",
+  "quota.failed": "额度查询失败：{msg}",
+  "quota.refresh": "刷新额度",
+  "quota.todayDelta": "↑今日 {pct}%",
+
+  // ===== Agent 用量面板（Codex / Claude / Cursor 共用结构）=====
+  "stats.rateLimits": "额度",
+  "stats.noDataFor": "未获取到 {name} 数据",
+  "stats.codexNotFound": "未检测到 Codex",
+  "stats.codexNotFoundHint":
+    "请安装并使用 OpenAI Codex CLI 产生本地会话记录\n（~/.codex/sessions）后再查看",
+  "stats.claudeNotFound": "未检测到 Claude Code",
+  "stats.claudeNotFoundHint":
+    "请安装并使用 Anthropic Claude Code 产生本地会话记录\n（~/.claude/projects）后再查看",
+
+  // ===== Cursor 面板 =====
+  "cursor.notLoggedIn": "未检测到 Cursor 登录",
+  "cursor.loginHint": "请在 Cursor 应用中登录，或在「设置 → Cursor 统计」中手动粘贴 Cookie",
+  "cursor.account": "账户",
+  "cursor.unknown": "未知",
+  "cursor.planQuota": "套餐额度",
+  "cursor.noQuotaData": "暂无额度数据",
+  "cursor.onDemand": "按需用量",
+  "cursor.cycle": "周期 {date}",
+  "cursor.resetDate": "重置 {date}",
+  "cursor.tokenSpend": "Token 花费",
+  "cursor.selectedRange": "所选时间范围",
+  "cursor.byModel": "按模型",
+  "cursor.eventsFailed": "Token 明细拉取失败：{msg}",
+  "cursor.noEvents": "所选时间范围内暂无 Token 使用明细",
+};

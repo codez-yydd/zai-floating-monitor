@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Currency, PricingConfig, StatsTab } from "./types";
 import { fetchPin, setPin } from "./api";
@@ -15,7 +15,9 @@ import {
   AGENT_VISIBILITY_OPTIONS,
   type AgentVisibility,
 } from "./agentVisibility";
-import { ThemeToggle } from "./layout";
+import { LanguageToggle, ThemeToggle } from "./layout";
+import { useI18n } from "./i18n";
+import { dateLocale } from "./i18n/locale";
 
 interface Props {
   currency: Currency;
@@ -27,19 +29,6 @@ interface Props {
   onGoReport: () => void;
   onGoSettings: () => void;
 }
-
-const STAT_TABS: ReadonlyArray<{
-  id: StatsTab;
-  label: string;
-  brand?: BrandIconName;
-}> = [
-  { id: "summary", label: "汇总" },
-  ...AGENT_VISIBILITY_OPTIONS.map((agent) => ({
-    id: agent.id,
-    label: agent.label,
-    brand: agent.id,
-  })),
-];
 
 function loadStatsTab(agentVisibility: AgentVisibility): StatsTab {
   try {
@@ -77,6 +66,7 @@ export function StatsPanel({
   onGoSettings,
 }: Props) {
   const cache = useDataCache();
+  const { locale, t } = useI18n();
   const {
     preset,
     custom,
@@ -115,7 +105,22 @@ export function StatsPanel({
     }
   }, [agentVisibility, tab]);
 
-  const visibleTabs = STAT_TABS.filter((item) =>
+  // 模式 C：「汇总」标签走词典（其余是品牌名），语言切换时随 t 重建
+  const statTabs = useMemo<
+    ReadonlyArray<{ id: StatsTab; label: string; brand?: BrandIconName }>
+  >(
+    () => [
+      { id: "summary", label: t("stats.tab.summary") },
+      ...AGENT_VISIBILITY_OPTIONS.map((agent) => ({
+        id: agent.id,
+        label: agent.label,
+        brand: agent.id as BrandIconName,
+      })),
+    ],
+    [t]
+  );
+
+  const visibleTabs = statTabs.filter((item) =>
     item.id === "summary" ? true : agentVisibility[item.id]
   );
 
@@ -172,14 +177,14 @@ export function StatsPanel({
             <button
               onClick={onGoCompare}
               className="toolbar-btn"
-              title="周额度对比"
+              title={t("stats.compare")}
             >
               📊
             </button>
             <button
               onClick={onGoReport}
               className="toolbar-btn"
-              title="用量报告"
+              title={t("stats.report")}
             >
               📄
             </button>
@@ -188,15 +193,16 @@ export function StatsPanel({
               className={`toolbar-btn ${
                 syncEnabled ? "text-emerald-600!" : ""
               }`}
-              title={syncEnabled ? "设备同步" : "配置设备同步"}
+              title={syncEnabled ? t("stats.syncOn") : t("stats.syncOff")}
             >
               ⇅
             </button>
             <ThemeToggle />
+            <LanguageToggle />
             <button
               onClick={onGoSettings}
               className="toolbar-btn"
-              title="设置"
+              title={t("stats.settings")}
             >
               ⚙
             </button>
@@ -208,7 +214,7 @@ export function StatsPanel({
                   setPin(next).catch(() => setPinned(!next));
                 }}
                 className={`toolbar-btn ${pinned ? "text-sky-600!" : ""}`}
-                title={pinned ? "取消常驻" : "常驻置顶"}
+                title={pinned ? t("stats.unpin") : t("stats.pin")}
               >
                 📌
               </button>
@@ -217,7 +223,7 @@ export function StatsPanel({
               onClick={refresh}
               disabled={refreshing}
               className={`toolbar-btn ${refreshing ? "opacity-40" : ""}`}
-              title="刷新"
+              title={t("common.refresh")}
             >
               ↻
             </button>
@@ -237,18 +243,23 @@ export function StatsPanel({
             <select
               value={deviceFilter}
               onChange={(e) => setDeviceFilter(e.target.value)}
-              title="筛选设备"
+              title={t("stats.deviceFilter")}
               className="num w-[4.75rem] shrink-0 px-1 py-1 rounded-md bg-slate-900/5 border border-slate-900/10 text-[10px] text-slate-900/80 focus:outline-none focus:border-sky-400/60"
             >
-              <option value="all">全部</option>
+              <option value="all">{t("stats.deviceAll")}</option>
               <option value="local">
-                本机{syncConfig?.device_name ? `（${syncConfig.device_name}）` : ""}
+                {syncConfig?.device_name
+                  ? t("stats.deviceLocalName", { name: syncConfig.device_name })
+                  : t("stats.deviceLocal")}
               </option>
               {remoteDevices
                 .filter((d) => d.device_id !== syncConfig?.device_id)
                 .map((d) => (
                   <option key={d.device_id} value={d.device_id}>
-                    {d.device_name}（{d.device_id.slice(0, 6)}）
+                    {t("common.deviceOption", {
+                      name: d.device_name,
+                      id: d.device_id.slice(0, 6),
+                    })}
                   </option>
                 ))}
             </select>
@@ -256,7 +267,7 @@ export function StatsPanel({
         )}
         <div
           className={`${syncEnabled ? "mt-1.5" : "mt-2"} min-w-0 overflow-x-auto`}
-          aria-label="统计来源"
+          aria-label={t("stats.sourcesAria")}
         >
           <div className="flex w-max min-w-full gap-1 p-0.5 rounded-xl bg-slate-900/4">
             {visibleTabs.map((item) => {
@@ -360,7 +371,7 @@ export function StatsPanel({
       <div className="px-3 py-1.5 border-t border-slate-900/8 flex items-center justify-between text-[10px] text-slate-600/50">
         <span className="num">
           {lastUpdate
-            ? new Date(lastUpdate).toLocaleTimeString("zh-CN", {
+            ? new Date(lastUpdate).toLocaleTimeString(dateLocale(locale), {
                 hour: "2-digit",
                 minute: "2-digit",
               })
@@ -370,7 +381,7 @@ export function StatsPanel({
           onClick={onGoPricing}
           className="hover:text-sky-600 transition-colors font-medium"
         >
-          价格设置
+          {t("stats.priceSettings")}
         </button>
       </div>
     </div>

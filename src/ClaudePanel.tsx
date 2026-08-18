@@ -1,5 +1,6 @@
 import type { ClaudeSnapshot, Currency, PricingConfig, TrendBucket } from "./types";
 import { AgentUsagePanel } from "./AgentUsagePanel";
+import { useI18n } from "./i18n";
 
 interface Props {
   snapshot: ClaudeSnapshot | null;
@@ -15,6 +16,7 @@ interface Props {
 
 /** Claude 用量面板：通用 AgentUsagePanel 的 Anthropic 品牌皮肤（orange）。 */
 export function ClaudePanel(props: Props) {
+  const { t } = useI18n();
   return (
     <AgentUsagePanel
       {...props}
@@ -25,9 +27,10 @@ export function ClaudePanel(props: Props) {
         accent: "orange",
       }}
       empty={{
+        name: "Claude",
         icon: "🤖",
-        title: "未检测到 Claude Code",
-        hint: "请安装并使用 Anthropic Claude Code 产生本地会话记录\n（~/.claude/projects）后再查看",
+        title: t("stats.claudeNotFound"),
+        hint: t("stats.claudeNotFoundHint"),
       }}
       cacheRateMode="separate"
     />
