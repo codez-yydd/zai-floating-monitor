@@ -4,6 +4,7 @@ import type {
   CostResult,
   CursorSnapshot,
   Currency,
+  OverallStat,
   PricingConfig,
   Stats,
   TrendPoint,
@@ -49,6 +50,35 @@ const LEVEL_LABEL: Record<string, string> = {
   ultra: "Ultra",
 };
 
+/** 缓存命中率：input 含 cache_read 口径（ZCode / Codex） */
+function cacheHitPctIncluded(
+  overall: Pick<OverallStat, "input_tokens" | "cache_read_tokens"> | null | undefined
+): number | null {
+  if (!overall || overall.input_tokens <= 0) return null;
+  return (overall.cache_read_tokens / overall.input_tokens) * 100;
+}
+
+/** 缓存命中率：Anthropic separate 口径（Claude） */
+function cacheHitPctSeparate(overall: OverallStat | null | undefined): number | null {
+  if (!overall) return null;
+  const inputSideTotal =
+    overall.input_tokens +
+    overall.cache_read_tokens +
+    overall.cache_write_tokens;
+  if (inputSideTotal <= 0) return null;
+  return (overall.cache_read_tokens / inputSideTotal) * 100;
+}
+
+/** 缓存命中率：Cursor events 口径 */
+function cacheHitPctCursor(
+  events: { input_tokens: number; cache_read_tokens: number } | null | undefined
+): number | null {
+  if (!events) return null;
+  const total = events.input_tokens + events.cache_read_tokens;
+  if (total <= 0) return null;
+  return (events.cache_read_tokens / total) * 100;
+}
+
 /** 单个 agent 在汇总页的展示单元。以后加新 agent 往数组里追加一项即可。 */
 interface AgentSummary {
   id: AgentId;
@@ -62,7 +92,7 @@ interface AgentSummary {
   badgeClass: string;
   cost: number;
   tokens: number;
-  /** 缓存命中率（仅 ZCode 有值） */
+  /** 缓存命中率（有 cache_read 数据时展示） */
   cacheHitPct?: number | null;
   metrics: { label: string; usedPct: number; resetAt?: number | null }[];
   empty?: string;
@@ -502,11 +532,11 @@ export function SummaryTab({
       : "数据获取失败"
     : "暂无数据";
 
-  // ZCode 缓存命中率
-  const zaiCacheHitPct =
-    stats && stats.overall.input_tokens > 0
-      ? (stats.overall.cache_read_tokens / stats.overall.input_tokens) * 100
-      : null;
+  // 各 Agent 缓存命中率（口径与各详情页一致）
+  const zaiCacheHitPct = cacheHitPctIncluded(stats?.overall);
+  const codexCacheHitPct = cacheHitPctIncluded(codex?.stats.overall);
+  const claudeCacheHitPct = cacheHitPctSeparate(claude?.stats.overall);
+  const cursorCacheHitPct = cacheHitPctCursor(cursorEvents);
 
   // 按 agent 组装。新增来源时在此追加，总览占比条 / 花费表 / 额度列表会一起跟上。
   const allAgents: AgentSummary[] = [
@@ -534,6 +564,7 @@ export function SummaryTab({
       badgeClass: "bg-emerald-500/12 text-emerald-700",
       cost: codexCostRaw,
       tokens: codexTokens,
+      cacheHitPct: codexCacheHitPct,
       metrics: codexMetrics,
       empty: codexEmpty,
     },
@@ -547,6 +578,7 @@ export function SummaryTab({
       badgeClass: "bg-orange-500/12 text-orange-700 capitalize",
       cost: claudeCostRaw,
       tokens: claudeTokens,
+      cacheHitPct: claudeCacheHitPct,
       metrics: claudeMetrics,
       empty: claudeEmpty,
     },
@@ -560,6 +592,7 @@ export function SummaryTab({
       badgeClass: "bg-violet-500/12 text-violet-700 capitalize",
       cost: cursorCost,
       tokens: cursorTokens,
+      cacheHitPct: cursorCacheHitPct,
       metrics: cursorMetrics,
       empty: cursor?.logged_in ? "暂无额度数据" : "未登录",
       cycleResetAt: cycleEndMs(cursor?.billing_cycle_end),
