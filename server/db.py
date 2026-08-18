@@ -10,6 +10,7 @@
   旧库首次启动自动迁移（见 _migrate_usage_records），老数据无损。
 """
 
+import math
 import sqlite3
 import threading
 import time
@@ -77,9 +78,39 @@ CREATE TABLE IF NOT EXISTS quota_snapshots (
 )
 """
 
+# Agent 额度快照按窗口拆行保存，查询时再组装回客户端使用的 snapshot 形状。
+# plan_type 为空时统一保存为空字符串；快照身份不含 plan_type，避免套餐标签
+# 变化后同一来源/时间/窗口产生重复采样。
+SCHEMA_AGENT_QUOTA_SNAPSHOTS = """
+CREATE TABLE IF NOT EXISTS agent_quota_snapshots (
+    device_id   TEXT    NOT NULL,
+    source      TEXT    NOT NULL,
+    ts          INTEGER NOT NULL,
+    plan_type   TEXT    NOT NULL DEFAULT '',
+    window_key  TEXT    NOT NULL,
+    used_pct    REAL    NOT NULL DEFAULT 0,
+    reset_at    INTEGER,
+    PRIMARY KEY (device_id, source, ts, window_key)
+)
+"""
+
 INDEX_STARTED = "CREATE INDEX IF NOT EXISTS idx_started ON usage_records(started_at)"
 INDEX_DEVICE_STARTED = "CREATE INDEX IF NOT EXISTS idx_device_started ON usage_records(device_id, started_at)"
 INDEX_SNAPSHOT_TS = "CREATE INDEX IF NOT EXISTS idx_snapshot_ts ON quota_snapshots(ts)"
+INDEX_AGENT_QUOTA_SNAPSHOT_TS = (
+    "CREATE INDEX IF NOT EXISTS idx_agent_quota_snapshot_ts "
+    "ON agent_quota_snapshots(ts)"
+)
+INDEX_AGENT_QUOTA_SNAPSHOT_SOURCE_TS = (
+    "CREATE INDEX IF NOT EXISTS idx_agent_quota_snapshot_source_ts "
+    "ON agent_quota_snapshots(source, ts)"
+)
+
+AGENT_QUOTA_WINDOWS = {
+    "codex": {"hour5", "weekly"},
+    "claude": {"hour5", "weekly"},
+    "cursor": {"cursor_auto", "cursor_api"},
+}
 
 SCHEMA_CONFIG = """
 CREATE TABLE IF NOT EXISTS config (
@@ -92,9 +123,12 @@ ALL_SCHEMA = [
     SCHEMA_DEVICES,
     SCHEMA_USAGE_RECORDS,
     SCHEMA_QUOTA_SNAPSHOTS,
+    SCHEMA_AGENT_QUOTA_SNAPSHOTS,
     INDEX_STARTED,
     INDEX_DEVICE_STARTED,
     INDEX_SNAPSHOT_TS,
+    INDEX_AGENT_QUOTA_SNAPSHOT_TS,
+    INDEX_AGENT_QUOTA_SNAPSHOT_SOURCE_TS,
     SCHEMA_CONFIG,
 ]
 
@@ -655,6 +689,174 @@ def query_snapshots(from_ms, to_ms, device_ids):
         conn.close()
 
 
+def insert_agent_quota_snapshots(device_id, snapshots, uploaded_at):
+    """批量插入 Agent 额度快照，并按窗口行幂等去重。
+
+    客户端上传的是一个 snapshot 对象数组，每个对象包含多个 windows；
+    服务端将其展平存储。uploaded_at 为兼容现有同步写入接口保留，当前表
+    不需要记录上传时间。
+    """
+    if not snapshots:
+        return 0
+
+    rows = []
+    for snapshot in snapshots:
+        if not isinstance(snapshot, dict):
+            continue
+        source = str(snapshot.get("source") or "").strip()
+        if source not in AGENT_QUOTA_WINDOWS:
+            continue
+        try:
+            ts = int(snapshot.get("ts"))
+        except (TypeError, ValueError):
+            continue
+        plan_type = str(snapshot.get("plan_type") or "").strip()[:64]
+        windows = snapshot.get("windows") or []
+        if not isinstance(windows, (list, tuple)):
+            continue
+
+        for window in windows[:16]:
+            if not isinstance(window, dict):
+                continue
+            window_key = str(window.get("key") or "").strip()
+            if window_key not in AGENT_QUOTA_WINDOWS[source]:
+                continue
+            try:
+                used_pct = float(window.get("used_pct", 0))
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(used_pct) or not 0 <= used_pct <= 100:
+                continue
+
+            reset_at = window.get("reset_at")
+            if reset_at is not None:
+                try:
+                    reset_at = int(reset_at)
+                except (TypeError, ValueError):
+                    reset_at = None
+            rows.append(
+                (
+                    device_id,
+                    source,
+                    ts,
+                    plan_type,
+                    window_key,
+                    used_pct,
+                    reset_at,
+                )
+            )
+
+    if not rows:
+        return 0
+
+    with _db_lock:
+        conn = get_conn()
+        try:
+            cur = conn.cursor()
+            accepted = 0
+            for row in rows:
+                # 使用 INSERT OR IGNORE + UPDATE，兼容旧版 SQLite（部分宝塔
+                # Python 运行时自带的 SQLite 低于 3.24，不支持 UPSERT 的
+                # ON CONFLICT ... DO UPDATE 语法）。
+                cur.execute(
+                    """
+                    INSERT OR IGNORE INTO agent_quota_snapshots
+                        (device_id, source, ts, plan_type, window_key,
+                         used_pct, reset_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    row,
+                )
+                if cur.rowcount:
+                    accepted += 1
+                    continue
+
+                updated = cur.execute(
+                    """
+                    UPDATE agent_quota_snapshots
+                    SET plan_type = ?, used_pct = ?, reset_at = ?
+                    WHERE device_id = ? AND source = ? AND ts = ?
+                      AND window_key = ? AND used_pct < ?
+                    """,
+                    (
+                        row[3],
+                        row[5],
+                        row[6],
+                        row[0],
+                        row[1],
+                        row[2],
+                        row[4],
+                        row[5],
+                    ),
+                )
+                accepted += updated.rowcount
+            conn.commit()
+            return accepted
+        finally:
+            conn.close()
+
+
+def max_agent_quota_snapshot_ts_of(device_id):
+    """查询某设备已上传 Agent 快照的最大时间戳；无数据返回 0。"""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(ts), 0) FROM agent_quota_snapshots "
+            "WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()
+        return row[0] if row else 0
+    finally:
+        conn.close()
+
+
+def query_agent_quota_snapshots(from_ms, to_ms, device_ids, source=None):
+    """查询 Agent 额度快照，并组装为客户端可直接解析的 snapshot 形状。
+
+    返回的每个对象包含 device_id、source、ts、plan_type 和 windows；
+    device_ids 为空表示查询全部设备，source 为空表示查询全部来源。
+    """
+    dev_frag, dev_params = _build_device_filter(device_ids)
+    src_frag, src_params = _build_source_filter(source)
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT device_id, source, ts, plan_type, window_key,
+                   used_pct, reset_at
+            FROM agent_quota_snapshots
+            WHERE ts >= ? AND ts < ? {dev_frag} {src_frag}
+            ORDER BY ts ASC, device_id ASC, source ASC,
+                     plan_type ASC, window_key ASC
+            """,
+            [from_ms, to_ms] + dev_params + src_params,
+        ).fetchall()
+    finally:
+        conn.close()
+
+    grouped = {}
+    for row in rows:
+        key = (row["device_id"], row["source"], row["ts"], row["plan_type"])
+        snapshot = grouped.get(key)
+        if snapshot is None:
+            snapshot = {
+                "device_id": row["device_id"],
+                "source": row["source"],
+                "ts": row["ts"],
+                "plan_type": row["plan_type"] or None,
+                "windows": [],
+            }
+            grouped[key] = snapshot
+        snapshot["windows"].append(
+            {
+                "key": row["window_key"],
+                "used_pct": row["used_pct"],
+                "reset_at": row["reset_at"],
+            }
+        )
+    return list(grouped.values())
+
+
 def query_period_detail(periods, device_ids, source=None):
     """按一组周期 [start, end) 返回远端各周期内的逐条用量明细。
     供客户端用本地 peak 配置折算消耗（服务端无 peak 配置）。
@@ -736,7 +938,7 @@ def total_records():
 
 
 def delete_before(cutoff_ms):
-    """按时间清理：删除 started_at < cutoff_ms 的明细 + ts < cutoff 的快照，返回删除条数。"""
+    """按时间清理明细、Z.ai 快照和 Agent 快照，返回删除的明细条数。"""
     with _db_lock:
         conn = get_conn()
         try:
@@ -746,6 +948,9 @@ def delete_before(cutoff_ms):
             conn.execute(
                 "DELETE FROM quota_snapshots WHERE ts < ?", (cutoff_ms,)
             )
+            conn.execute(
+                "DELETE FROM agent_quota_snapshots WHERE ts < ?", (cutoff_ms,)
+            )
             conn.commit()
             return n
         finally:
@@ -753,7 +958,7 @@ def delete_before(cutoff_ms):
 
 
 def delete_device_records(device_id):
-    """按设备清理：删除指定设备的全部明细 + 快照，返回删除条数。"""
+    """按设备清理：删除指定设备的明细、Z.ai 快照和 Agent 快照。"""
     with _db_lock:
         conn = get_conn()
         try:
@@ -763,6 +968,9 @@ def delete_device_records(device_id):
             conn.execute(
                 "DELETE FROM quota_snapshots WHERE device_id = ?", (device_id,)
             )
+            conn.execute(
+                "DELETE FROM agent_quota_snapshots WHERE device_id = ?", (device_id,)
+            )
             conn.commit()
             return cur.rowcount
         finally:
@@ -770,12 +978,13 @@ def delete_device_records(device_id):
 
 
 def delete_all_usage():
-    """全部清空：清 usage_records + quota_snapshots，保留设备注册。返回删除条数。"""
+    """全部清空三类用量数据，保留设备注册；返回删除的明细条数。"""
     with _db_lock:
         conn = get_conn()
         try:
             cur = conn.execute("DELETE FROM usage_records")
             conn.execute("DELETE FROM quota_snapshots")
+            conn.execute("DELETE FROM agent_quota_snapshots")
             conn.commit()
             return cur.rowcount
         finally:
@@ -783,12 +992,13 @@ def delete_all_usage():
 
 
 def reset_all():
-    """reset：连设备一起清，回到初始状态。返回 (usage_deleted, devices_deleted)。"""
+    """reset：清空三类用量数据并删除设备，返回 (usage_deleted, devices_deleted)。"""
     with _db_lock:
         conn = get_conn()
         try:
             u = conn.execute("DELETE FROM usage_records").rowcount
             conn.execute("DELETE FROM quota_snapshots")
+            conn.execute("DELETE FROM agent_quota_snapshots")
             d = conn.execute("DELETE FROM devices").rowcount
             conn.commit()
             return u, d
@@ -797,7 +1007,7 @@ def reset_all():
 
 
 def revoke_device(device_id):
-    """撤销设备：同时删 devices 表记录、明细和快照。返回 (devices_deleted, usage_deleted)。"""
+    """撤销设备：同时删除设备、明细、Z.ai 快照和 Agent 快照。"""
     with _db_lock:
         conn = get_conn()
         try:
@@ -806,6 +1016,9 @@ def revoke_device(device_id):
             ).rowcount
             conn.execute(
                 "DELETE FROM quota_snapshots WHERE device_id = ?", (device_id,)
+            )
+            conn.execute(
+                "DELETE FROM agent_quota_snapshots WHERE device_id = ?", (device_id,)
             )
             d = conn.execute(
                 "DELETE FROM devices WHERE device_id = ?", (device_id,)
@@ -832,8 +1045,9 @@ def merge_devices(source_id, target_id):
     组合按序分配编号——所有来源混在同一个编号序列里即可保证唯一，无需按来源
     分段。sqlite rowid 上限是 2^63，偏移量取 20 亿（即便每秒一条用量也要
     ~63 年才会长到），个人监控工具绝无可能撞上。额度快照主键是
-    (device_id, ts)，先丢弃来源中与 target 同 ts 的条目再迁移。整个操作在
-    一个事务内完成。
+    (device_id, ts)，先丢弃来源中与 target 同 ts 的条目再迁移。Agent 额度
+    快照按完整主键 INSERT OR IGNORE 合并，冲突时保留 target 已有值。整个
+    操作在一个事务内完成。
 
     返回 (records_moved, snapshots_moved)。source/target 不存在时抛 ValueError。
     """
@@ -886,7 +1100,60 @@ def merge_devices(source_id, target_id):
             )
             snapshots_moved = snap.rowcount
 
-            # 3) 删除来源设备记录
+            # 3) Agent 额度快照：按完整窗口主键迁移，冲突时保留较高用量。
+            # 不使用 INSERT ... SELECT ... ON CONFLICT，兼容旧版 SQLite。
+            agent_rows = conn.execute(
+                """
+                SELECT source, ts, plan_type, window_key, used_pct, reset_at
+                FROM agent_quota_snapshots
+                WHERE device_id = ?
+                """,
+                (source_id,),
+            ).fetchall()
+            for row in agent_rows:
+                values = (
+                    target_id,
+                    row["source"],
+                    row["ts"],
+                    row["plan_type"],
+                    row["window_key"],
+                    row["used_pct"],
+                    row["reset_at"],
+                )
+                inserted = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO agent_quota_snapshots
+                        (device_id, source, ts, plan_type, window_key,
+                         used_pct, reset_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    values,
+                ).rowcount
+                if not inserted:
+                    conn.execute(
+                        """
+                        UPDATE agent_quota_snapshots
+                        SET plan_type = ?, used_pct = ?, reset_at = ?
+                        WHERE device_id = ? AND source = ? AND ts = ?
+                          AND window_key = ? AND used_pct < ?
+                        """,
+                        (
+                            values[3],
+                            values[5],
+                            values[6],
+                            values[0],
+                            values[1],
+                            values[2],
+                            values[4],
+                            values[5],
+                        ),
+                    )
+            conn.execute(
+                "DELETE FROM agent_quota_snapshots WHERE device_id = ?",
+                (source_id,),
+            )
+
+            # 4) 删除来源设备记录
             conn.execute(
                 "DELETE FROM devices WHERE device_id = ?", (source_id,)
             )

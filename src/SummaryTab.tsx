@@ -1,4 +1,5 @@
 import type {
+  AgentQuotaDelta,
   ClaudeSnapshot,
   CodexSnapshot,
   CostResult,
@@ -95,7 +96,12 @@ interface AgentSummary {
   tokens: number;
   /** 缓存命中率（有 cache_read 数据时展示） */
   cacheHitPct?: number | null;
-  metrics: { label: string; usedPct: number; resetAt?: number | null }[];
+  metrics: {
+    label: string;
+    usedPct: number;
+    resetAt?: number | null;
+    delta?: AgentQuotaDelta;
+  }[];
   empty?: string;
   /** 套餐级重置时间（Cursor 计费周期结束），显示在标题行 */
   cycleResetAt?: number | null;
@@ -328,11 +334,13 @@ function QuotaMiniRow({
   usedPct,
   resetAt,
   now,
+  delta,
 }: {
   label: string;
   usedPct: number;
   resetAt?: number | null;
   now: number;
+  delta?: AgentQuotaDelta;
 }) {
   const { t } = useI18n();
   const remain = Math.max(0, 100 - usedPct);
@@ -340,7 +348,7 @@ function QuotaMiniRow({
   return (
     <div>
       <div className="flex items-center gap-1 mb-0.5">
-        <span className="text-[9px] text-slate-500 w-7 shrink-0">{label}</span>
+        <span className="text-[9px] text-slate-500 w-10 shrink-0 whitespace-nowrap">{label}</span>
         <span className="num text-[8px] text-slate-400 flex-1 text-right truncate min-w-0">
           {showReset ? `↻ ${formatCountdownCore(resetAt - now)}` : ""}
         </span>
@@ -356,6 +364,11 @@ function QuotaMiniRow({
         height="h-1"
         gradient={remainingGradient(remain)}
       />
+      {delta && delta.samples >= 2 && delta.pct > 0 && (
+        <div className="text-[9px] mt-0.5 num text-slate-700/50">
+          {t("quota.todayDelta", { pct: Math.round(delta.pct) })}
+        </div>
+      )}
     </div>
   );
 }
@@ -390,13 +403,23 @@ export function SummaryTab({
   }, []);
 
   // ZCode 额度（与范围无关，读全局缓存，与 QuotaPanel 同源）
-  const { quota, quotaError, codexError, claudeError } = useDataCache();
+  const {
+    quota,
+    quotaError,
+    todayDelta,
+    codexError,
+    claudeError,
+    agentQuotaDeltas,
+  } = useDataCache();
   const hour5 = quota?.hour5 ?? null;
   const weekly = quota?.weekly ?? null;
   const mcp = quota?.mcp ?? null;
   const levelLabel = quota?.level
     ? LEVEL_LABEL[quota.level] || quota.level
     : null;
+  const zcodeWeeklyDelta: AgentQuotaDelta | undefined = todayDelta
+    ? { pct: todayDelta[0], samples: todayDelta[1] }
+    : undefined;
 
   // z.ai 花费 & token
   const zaiCost =
@@ -441,7 +464,7 @@ export function SummaryTab({
     ...(hour5 != null
       ? [
           {
-            label: "5h",
+            label: t("common.hour5"),
             usedPct: hour5.percentage,
             resetAt: hour5.nextResetTime,
           },
@@ -453,6 +476,7 @@ export function SummaryTab({
             label: t("common.weekly"),
             usedPct: weekly.percentage,
             resetAt: weekly.nextResetTime,
+            delta: zcodeWeeklyDelta,
           },
         ]
       : []),
@@ -468,10 +492,10 @@ export function SummaryTab({
   ];
   const cursorMetrics = [
     ...(plan?.auto_pct != null
-      ? [{ label: "Auto", usedPct: plan.auto_pct }]
+      ? [{ label: "Auto", usedPct: plan.auto_pct, delta: agentQuotaDeltas.cursor?.cursor_auto }]
       : []),
     ...(plan?.api_pct != null
-      ? [{ label: "API", usedPct: plan.api_pct }]
+      ? [{ label: "API", usedPct: plan.api_pct, delta: agentQuotaDeltas.cursor?.cursor_api }]
       : []),
   ];
 
@@ -483,7 +507,7 @@ export function SummaryTab({
           ...(codexRate.primary_pct != null
             ? [
                 {
-                  label: "5h",
+                  label: t("common.hour5"),
                   usedPct: codexRate.primary_pct,
                   resetAt: codexRate.primary_reset_at,
                 },
@@ -495,6 +519,7 @@ export function SummaryTab({
                   label: t("common.weekly"),
                   usedPct: codexRate.secondary_pct,
                   resetAt: codexRate.secondary_reset_at,
+                  delta: agentQuotaDeltas.codex?.weekly,
                 },
               ]
             : []),
@@ -515,7 +540,7 @@ export function SummaryTab({
           ...(claudeRate.primary_pct != null
             ? [
                 {
-                  label: "5h",
+                  label: t("common.hour5"),
                   usedPct: claudeRate.primary_pct,
                   resetAt: claudeRate.primary_reset_at,
                 },
@@ -527,6 +552,7 @@ export function SummaryTab({
                   label: t("common.weekly"),
                   usedPct: claudeRate.secondary_pct,
                   resetAt: claudeRate.secondary_reset_at,
+                  delta: agentQuotaDeltas.claude?.weekly,
                 },
               ]
             : []),
@@ -771,7 +797,14 @@ export function SummaryTab({
                 {a.metrics.length > 0 ? (
                   <div className="space-y-1.5">
                     {a.metrics.map((m) => (
-                      <QuotaMiniRow key={m.label} label={m.label} usedPct={m.usedPct} resetAt={m.resetAt} now={now} />
+                      <QuotaMiniRow
+                        key={m.label}
+                        label={m.label}
+                        usedPct={m.usedPct}
+                        resetAt={m.resetAt}
+                        now={now}
+                        delta={m.delta}
+                      />
                     ))}
                   </div>
                 ) : (

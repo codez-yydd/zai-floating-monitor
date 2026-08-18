@@ -146,6 +146,8 @@ export interface SyncConfig {
   /** Claude 修订行已补传到的 updated_at 毫秒时间戳（流式终值修正） */
   last_uploaded_claude_rev_ts: number;
   last_uploaded_snapshot_ts: number;
+  /** Agent 额度快照已上传到的时间戳游标 */
+  last_uploaded_agent_quota_snapshot_ts: number;
   last_sync_at: number;
 }
 
@@ -280,6 +282,46 @@ export interface QuotaSnapshot {
   mcp_total: number | null;
 }
 
+// ===== Agent 额度快照（Codex / Claude / Cursor） =====
+
+export type AgentQuotaSource = "codex" | "claude" | "cursor";
+
+/** Agent 额度窗口键。hour5/weekly 用于 Codex / Claude，cursor_* 用于 Cursor。 */
+export type AgentQuotaWindowKey =
+  | "hour5"
+  | "weekly"
+  | "cursor_auto"
+  | "cursor_api";
+
+export interface AgentQuotaWindow {
+  key: AgentQuotaWindowKey;
+  used_pct: number;
+  reset_at: number | null;
+}
+
+/** Agent 实时额度采样（本地 JSONL 与同步协议共用）。 */
+export interface AgentQuotaSnapshot {
+  source: AgentQuotaSource;
+  ts: number;
+  plan_type: string | null;
+  windows: AgentQuotaWindow[];
+}
+
+/** 带来源设备的远端 Agent 额度采样。 */
+export interface RemoteAgentQuotaSnapshot extends AgentQuotaSnapshot {
+  device_id: string;
+}
+
+/** 某个来源/窗口的今日增量。 */
+export interface AgentQuotaDelta {
+  pct: number;
+  samples: number;
+}
+
+export type AgentQuotaDeltaMap = Partial<
+  Record<AgentQuotaSource, Partial<Record<AgentQuotaWindowKey, AgentQuotaDelta>>>
+>;
+
 /** 一个"智谱重置周期"的汇总 */
 export interface WeeklyPeriod {
   /** 周期开始（重置时间） */
@@ -407,6 +449,12 @@ export interface CursorEventsSummary {
   requests: number;
 }
 
+/** Cursor 根据今天 events 扣费换算出的额度增量（百分比）。 */
+export interface CursorTodayQuota {
+  auto_pct: number | null;
+  api_pct: number | null;
+}
+
 /** Cursor 每日明细（趋势图用） */
 export interface CursorDailyEntry {
   /** 日期标签 "08-13"（MM-DD） */
@@ -442,6 +490,7 @@ export interface CursorSnapshot {
   plan: CursorPlanInfo | null;
   on_demand: CursorOnDemandInfo | null;
   events: CursorEventsSummary | null;
+  today_quota?: CursorTodayQuota | null;
   daily: CursorDailyEntry[];
   by_model: CursorModelStat[];
 }
@@ -498,4 +547,3 @@ export interface ClaudeSnapshot {
   /** 订阅额度（未登录 claude.ai 订阅 / 第三方中转模式为 null） */
   rate_limits: ClaudeRateLimits | null;
 }
-

@@ -89,6 +89,7 @@ export function StatsPanel({
     syncConfig,
     remoteDevices,
     syncEnabled,
+    agentQuotaDeltas,
     lastUpdate,
     refreshing,
     refresh,
@@ -332,6 +333,7 @@ export function StatsPanel({
           fxRate={fxRate}
           trendBucket={trendBucket}
           pricing={pricing}
+          agentQuotaDelta={agentQuotaDeltas.codex?.weekly}
         />
       ) : tab === "claude" ? (
         <ClaudePanel
@@ -342,6 +344,7 @@ export function StatsPanel({
           fxRate={fxRate}
           trendBucket={trendBucket}
           pricing={pricing}
+          agentQuotaDelta={agentQuotaDeltas.claude?.weekly}
         />
       ) : tab === "cursor" ? (
         <CursorPanel
@@ -350,6 +353,8 @@ export function StatsPanel({
           error={cursorError}
           currency={currency}
           fxRate={fxRate}
+          autoQuotaDelta={agentQuotaDeltas.cursor?.cursor_auto}
+          apiQuotaDelta={agentQuotaDeltas.cursor?.cursor_api}
         />
       ) : (
         <SummaryTab

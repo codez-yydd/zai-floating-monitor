@@ -1,5 +1,12 @@
 import { useEffect, useState } from "react";
-import type { Currency, PricingConfig, Stats, TrendBucket, TrendPoint } from "./types";
+import type {
+  AgentQuotaDelta,
+  Currency,
+  PricingConfig,
+  Stats,
+  TrendBucket,
+  TrendPoint,
+} from "./types";
 import { formatCost, formatCountdownCore, formatPct, formatTokens } from "./format";
 import { modelCost } from "./merge";
 import {
@@ -71,6 +78,8 @@ interface Props {
    *  （Anthropic 口径：input 不含 cache_read/cache_creation，需用输入侧总量
    *  做分母，否则比率会远超 100%） */
   cacheRateMode: "included" | "separate";
+  /** 周额度今日增量；仅周窗口显示。 */
+  agentQuotaDelta?: AgentQuotaDelta;
 }
 
 /** 速率限制一行：标签 + 重置倒计时 + 剩余% 在上，剩余进度条在下
@@ -80,11 +89,13 @@ function AgentQuotaRow({
   usedPct,
   resetAt,
   now,
+  delta,
 }: {
   label: string;
   usedPct: number;
   resetAt: number | null;
   now: number;
+  delta?: AgentQuotaDelta;
 }) {
   const { t } = useI18n();
   const remain = Math.max(0, 100 - usedPct);
@@ -112,6 +123,11 @@ function AgentQuotaRow({
         height="h-1.5"
         gradient={remainingGradient(remain)}
       />
+      {delta && delta.samples >= 2 && delta.pct > 0 && (
+        <div className="text-[9px] mt-0.5 num text-slate-700/50">
+          {t("quota.todayDelta", { pct: Math.round(delta.pct) })}
+        </div>
+      )}
     </div>
   );
 }
@@ -130,6 +146,7 @@ export function AgentUsagePanel({
   theme,
   empty,
   cacheRateMode,
+  agentQuotaDelta,
 }: Props) {
   const { t } = useI18n();
   const [trendMetric, setTrendMetric] = useState<"cost" | "token">("cost");
@@ -210,7 +227,13 @@ export function AgentUsagePanel({
               <AgentQuotaRow label={t("common.hour5")} usedPct={rate.primary_pct} resetAt={rate.primary_reset_at} now={now} />
             )}
             {rate.secondary_pct != null && (
-              <AgentQuotaRow label={t("common.weekly")} usedPct={rate.secondary_pct} resetAt={rate.secondary_reset_at} now={now} />
+              <AgentQuotaRow
+                label={t("common.weekly")}
+                usedPct={rate.secondary_pct}
+                resetAt={rate.secondary_reset_at}
+                now={now}
+                delta={agentQuotaDelta}
+              />
             )}
           </div>
         </SectionCard>

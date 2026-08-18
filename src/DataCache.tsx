@@ -9,6 +9,7 @@ import {
 } from "react";
 import type { ReactNode } from "react";
 import type {
+  AgentQuotaDeltaMap,
   ClaudeSnapshot,
   CostResult,
   CodexSnapshot,
@@ -29,6 +30,7 @@ import {
   fetchCodexUsage,
   fetchCursorUsage,
   fetchQuota,
+  getAgentQuotaHistory,
   fetchStats,
   fetchTrend,
   getCursorConfig,
@@ -36,6 +38,7 @@ import {
   getTodayDelta,
   listRemoteDevices,
   remoteUsage,
+  remoteAgentQuotaSnapshots,
 } from "./api";
 import { resolveRange } from "./RangePicker";
 import { dateStr } from "./format";
@@ -49,6 +52,11 @@ import {
 } from "./merge";
 import { loadCache, saveCache } from "./cache";
 import { useI18n } from "./i18n";
+import {
+  calculateAgentQuotaDeltas,
+  mergeAgentQuotaSnapshots,
+  todayStartMs,
+} from "./agentQuota";
 
 /**
  * 全局数据缓存层（v2：按范围缓存 + 后台定时刷新 + 展示只读）。
@@ -220,6 +228,8 @@ export interface DataCacheValue {
   // ===== Quota 数据（与范围无关）=====
   quota: QuotaResult | null;
   todayDelta: [number, number] | null;
+  /** Codex / Claude / Cursor 今日额度增量，按来源和窗口索引。 */
+  agentQuotaDeltas: AgentQuotaDeltaMap;
   quotaError: string | null;
 
   // ===== 同步配置（启动时加载一次）=====
@@ -299,6 +309,7 @@ export function DataProvider({ pricing, children }: ProviderProps) {
   const [todayDelta, setTodayDelta] = useState<[number, number] | null>(
     () => loadCache<[number, number]>("zbar-today-delta")
   );
+  const [agentQuotaDeltas, setAgentQuotaDeltas] = useState<AgentQuotaDeltaMap>({});
   const [quotaError, setQuotaError] = useState<string | null>(null);
 
   // ===== 同步配置 =====
@@ -312,6 +323,19 @@ export function DataProvider({ pricing, children }: ProviderProps) {
   const codexInflight = useRef<Set<string>>(new Set());
   const claudeInflight = useRef<Set<string>>(new Set());
   const quotaReqId = useRef(0);
+  const agentQuotaReqId = useRef(0);
+  const agentQuotaDeltaRefreshRef = useRef<() => void>(() => {});
+  const agentQuotaReloadTimer = useRef<number | null>(null);
+
+  // 各 Agent 的额度查询完成后立即重读历史，避免网络较慢时首轮 3 秒读取
+  // 先于快照写入，用户要等到下一轮 30 秒定时器才看到今日增量。
+  const scheduleAgentQuotaReload = useCallback(() => {
+    if (agentQuotaReloadTimer.current != null) return;
+    agentQuotaReloadTimer.current = window.setTimeout(() => {
+      agentQuotaReloadTimer.current = null;
+      agentQuotaDeltaRefreshRef.current();
+    }, 200);
+  }, []);
 
   // ===== refs：按需补刷 effect 读取最新缓存，避免闭包过期 / 反复触发 =====
   const zaiCacheRef = useRef(zaiCache);
@@ -503,8 +527,9 @@ export function DataProvider({ pricing, children }: ProviderProps) {
       })
       .finally(() => {
         cursorInflight.current.delete(key);
+        scheduleAgentQuotaReload();
       });
-  }, []);
+  }, [scheduleAgentQuotaReload]);
 
   /**
    * 刷新单个派生来源（Codex / Claude）范围。两者数据链路完全同构，仅数据源
@@ -637,9 +662,10 @@ export function DataProvider({ pricing, children }: ProviderProps) {
         );
       } finally {
         inflight.delete(key);
+        scheduleAgentQuotaReload();
       }
     },
-    [syncConfig, syncEnabled, pricing, fxRate]
+    [syncConfig, syncEnabled, pricing, fxRate, scheduleAgentQuotaReload]
   );
 
   const refreshCodexRange = useCallback(
@@ -708,6 +734,46 @@ export function DataProvider({ pricing, children }: ProviderProps) {
         setQuotaError(String(e));
       });
   }, []);
+
+  /** 读取并合并今日 Agent 额度快照，供详情页与汇总页共用。 */
+  const loadAgentQuotaDeltas = useCallback(() => {
+    const reqId = ++agentQuotaReqId.current;
+    const from = todayStartMs();
+    const to = Date.now() + 1;
+    const localPromise = getAgentQuotaHistory(from, to);
+    const wantRemote = syncEnabled && deviceFilter !== "local" && !!syncConfig;
+    const remotePromise = wantRemote
+      ? remoteAgentQuotaSnapshots(from, to, deviceFilter === "all"
+          ? { excludeDevice: syncConfig!.device_id }
+          : { devices: deviceFilter })
+      : Promise.resolve([]);
+
+    Promise.all([
+      localPromise,
+      remotePromise.catch(() => []),
+    ])
+      .then(([local, remote]) => {
+        if (reqId !== agentQuotaReqId.current) return;
+        const localSelected = deviceFilter === "local" || deviceFilter === "all"
+          ? local
+          : [];
+        const merged = mergeAgentQuotaSnapshots(localSelected, remote);
+        setAgentQuotaDeltas(calculateAgentQuotaDeltas(merged, from, to));
+      })
+      .catch(() => {
+        if (reqId === agentQuotaReqId.current) setAgentQuotaDeltas({});
+      });
+  }, [deviceFilter, syncConfig, syncEnabled]);
+
+  // 刷新函数定义在数据源刷新函数之后，因此用 ref 让前面的完成回调
+  // 能调用到最新的设备筛选与同步配置。
+  agentQuotaDeltaRefreshRef.current = loadAgentQuotaDeltas;
+
+  // 设备或同步身份切换时立即作废上一轮结果，避免新筛选器短暂显示旧设备的增量。
+  useEffect(() => {
+    agentQuotaReqId.current += 1;
+    setAgentQuotaDeltas({});
+  }, [deviceFilter, syncConfig?.device_id, syncEnabled]);
 
   // 初次加载：同步配置 + 设备列表（仅一次）
   useEffect(() => {
@@ -803,6 +869,16 @@ export function DataProvider({ pricing, children }: ProviderProps) {
       clearInterval(timer);
     };
   }, [loadQuota]);
+
+  // Agent 额度快照在各数据源首刷后读取，后续与额度查询同频刷新。
+  useEffect(() => {
+    const first = setTimeout(loadAgentQuotaDeltas, 3_000);
+    const timer = setInterval(loadAgentQuotaDeltas, 30_000);
+    return () => {
+      clearTimeout(first);
+      clearInterval(timer);
+    };
+  }, [loadAgentQuotaDeltas]);
 
   // ===== 按需补刷：切到无缓存/过期范围，或配置就绪后补一次。
   //      预设范围通常已被后台任务刷新 → 命中新鲜缓存 → 不请求、秒显。
@@ -900,7 +976,9 @@ export function DataProvider({ pricing, children }: ProviderProps) {
     refreshCodexRange(deviceFilter, zKey, f, t, trendBucket);
     refreshClaudeRange(deviceFilter, zKey, f, t, trendBucket);
     refreshCursorRange(rangeKey(preset, custom), f, t);
-  }, [preset, custom, deviceFilter, trendBucket, refreshZaiRange, refreshCodexRange, refreshClaudeRange, refreshCursorRange]);
+    // 额度采样由上述后台命令写入，稍后读取以覆盖本次手动刷新产生的快照。
+    window.setTimeout(loadAgentQuotaDeltas, 1_000);
+  }, [preset, custom, deviceFilter, trendBucket, refreshZaiRange, refreshCodexRange, refreshClaudeRange, refreshCursorRange, loadAgentQuotaDeltas]);
 
   const refreshQuota = useCallback(() => loadQuota(), [loadQuota]);
 
@@ -942,6 +1020,7 @@ export function DataProvider({ pricing, children }: ProviderProps) {
       fxRate,
       quota,
       todayDelta,
+      agentQuotaDeltas,
       quotaError,
       syncConfig,
       remoteDevices,
@@ -963,6 +1042,7 @@ export function DataProvider({ pricing, children }: ProviderProps) {
       fxRate,
       quota,
       todayDelta,
+      agentQuotaDeltas,
       quotaError,
       syncConfig,
       remoteDevices,

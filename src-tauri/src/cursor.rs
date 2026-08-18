@@ -16,8 +16,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-// TimeZone trait 提供 timestamp_millis_opt 方法
-use chrono::TimeZone;
+use chrono::{Local, TimeZone};
 
 use crate::pricing::config_dir;
 
@@ -334,6 +333,8 @@ struct UsageEvent {
     timestamp: Option<i64>,
     #[serde(default, deserialize_with = "opt_string")]
     model: Option<String>,
+    #[serde(default, deserialize_with = "opt_string")]
+    kind: Option<String>,
     #[serde(default)]
     token_usage: Option<EventTokenUsage>,
     /// 套餐实际扣费（美分）
@@ -877,6 +878,16 @@ pub struct CursorPlanInfo {
     pub api_pct: Option<f64>,
 }
 
+/// Cursor 今天事件用量换算出的额度增量（百分比）。
+///
+/// Cursor 的 usage-summary 百分比可能长时间保持不变，但 events 接口会先
+/// 更新实际扣费。这里仅用于今日增量历史，进度条仍使用 plan.auto_pct/api_pct。
+#[derive(Debug, Clone, Serialize)]
+pub struct CursorTodayQuota {
+    pub auto_pct: Option<f64>,
+    pub api_pct: Option<f64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CursorOnDemandInfo {
     pub enabled: Option<bool>,
@@ -901,8 +912,76 @@ pub struct CursorSnapshot {
     pub plan: Option<CursorPlanInfo>,
     pub on_demand: Option<CursorOnDemandInfo>,
     pub events: Option<CursorEventsSummary>,
+    pub today_quota: Option<CursorTodayQuota>,
     pub daily: Vec<CursorDailyEntry>,
     pub by_model: Vec<CursorModelStat>,
+}
+
+fn local_day_start_ms() -> i64 {
+    let now = Local::now();
+    now.date_naive()
+        .and_hms_opt(0, 0, 0)
+        .and_then(|naive| Local.from_local_datetime(&naive).single())
+        .map(|value| value.timestamp_millis())
+        .unwrap_or_else(|| now.timestamp_millis())
+}
+
+fn cursor_event_bucket(kind: Option<&str>) -> Option<&'static str> {
+    let kind = kind?.to_ascii_uppercase();
+    if kind.contains("INCLUDED") {
+        Some("auto")
+    } else if kind.contains("ON_DEMAND") || kind.contains("API") {
+        Some("api")
+    } else {
+        None
+    }
+}
+
+fn daily_pct_from_cents(
+    daily_cents: f64,
+    cycle_used_cents: Option<i64>,
+    cycle_used_pct: Option<f64>,
+) -> Option<f64> {
+    if daily_cents <= 0.0 {
+        return None;
+    }
+    let used_cents = cycle_used_cents? as f64;
+    let used_pct = cycle_used_pct?;
+    if used_cents <= 0.0 || used_pct <= 0.0 {
+        return None;
+    }
+    let cycle_limit_cents = used_cents * 100.0 / used_pct;
+    if cycle_limit_cents <= 0.0 {
+        return None;
+    }
+    Some((daily_cents / cycle_limit_cents * 100.0).clamp(0.0, 100.0))
+}
+
+fn calculate_today_quota(events: &[UsageEvent], plan: &CursorPlanInfo) -> CursorTodayQuota {
+    let day_start = local_day_start_ms();
+    let now = Local::now().timestamp_millis();
+    let mut auto_cents = 0.0;
+    let mut api_cents = 0.0;
+    for event in events {
+        let Some(ts) = event.timestamp else {
+            continue;
+        };
+        if ts < day_start || ts > now {
+            continue;
+        }
+        let Some(cents) = event.charged_cents.filter(|value| *value > 0.0) else {
+            continue;
+        };
+        match cursor_event_bucket(event.kind.as_deref()) {
+            Some("auto") => auto_cents += cents,
+            Some("api") => api_cents += cents,
+            _ => {}
+        }
+    }
+    CursorTodayQuota {
+        auto_pct: daily_pct_from_cents(auto_cents, plan.used_cents, plan.auto_pct),
+        api_pct: daily_pct_from_cents(api_cents, plan.used_cents, plan.api_pct),
+    }
 }
 
 /// 拉取 Cursor 完整用量快照（套餐 + events 明细）
@@ -914,9 +993,32 @@ pub fn fetch_cursor_snapshot(from_ms: i64, to_ms: i64) -> Result<CursorSnapshot,
     let summary = fetch_usage_summary(&cookie)?;
     let auth = fetch_auth_me(&cookie).unwrap_or_default();
 
+    let plan = summary
+        .individual_usage
+        .as_ref()
+        .and_then(|iu| iu.plan.as_ref())
+        .map(|p| CursorPlanInfo {
+            enabled: p.enabled,
+            used_cents: p.used,
+            limit_cents: p.limit,
+            remaining_cents: p.remaining,
+            total_pct: p.total_percent_used,
+            auto_pct: p.auto_percent_used,
+            api_pct: p.api_percent_used,
+        });
+
     // events 可能较慢 / 失败，不阻断套餐展示，但透传错误信息
     let mut events_error: Option<String> = None;
-    let (events_summary, daily, by_model) = match fetch_events_cached(&cookie, from_ms, to_ms) {
+    let range_events = fetch_events_cached(&cookie, from_ms, to_ms);
+    let today_events = if from_ms <= local_day_start_ms() {
+        range_events.as_ref().ok().cloned()
+    } else {
+        fetch_events_cached(&cookie, local_day_start_ms(), to_ms).ok()
+    };
+    let today_quota = today_events
+        .as_deref()
+        .and_then(|events| plan.as_ref().map(|quota| calculate_today_quota(events, quota)));
+    let (events_summary, daily, by_model) = match range_events {
         Ok(events) => {
             if events.is_empty() {
                 (None, Vec::new(), Vec::new())
@@ -931,16 +1033,6 @@ pub fn fetch_cursor_snapshot(from_ms: i64, to_ms: i64) -> Result<CursorSnapshot,
             (None, Vec::new(), Vec::new())
         }
     };
-
-    let plan = summary.individual_usage.as_ref().and_then(|iu| iu.plan.as_ref()).map(|p| CursorPlanInfo {
-        enabled: p.enabled,
-        used_cents: p.used,
-        limit_cents: p.limit,
-        remaining_cents: p.remaining,
-        total_pct: p.total_percent_used,
-        auto_pct: p.auto_percent_used,
-        api_pct: p.api_percent_used,
-    });
 
     let on_demand = summary.individual_usage.as_ref().and_then(|iu| iu.on_demand.as_ref()).map(|od| {
         CursorOnDemandInfo {
@@ -963,6 +1055,7 @@ pub fn fetch_cursor_snapshot(from_ms: i64, to_ms: i64) -> Result<CursorSnapshot,
         plan,
         on_demand,
         events: events_summary,
+        today_quota,
         daily,
         by_model,
     })
@@ -1116,4 +1209,63 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
     }
     let truncated: String = s.chars().take(max_chars).collect();
     format!("{truncated}...(truncated, total {len} bytes)", len = s.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_kind_maps_to_cursor_quota_window() {
+        assert_eq!(
+            cursor_event_bucket(Some("USAGE_EVENT_KIND_INCLUDED_IN_PRO")),
+            Some("auto")
+        );
+        assert_eq!(
+            cursor_event_bucket(Some("USAGE_EVENT_KIND_ON_DEMAND")),
+            Some("api")
+        );
+        assert_eq!(cursor_event_bucket(Some("OTHER_EVENT")), None);
+    }
+
+    #[test]
+    fn today_quota_uses_positive_events_and_plan_denominator() {
+        let now = Local::now().timestamp_millis();
+        let events = vec![
+            UsageEvent {
+                timestamp: Some(now),
+                model: None,
+                kind: Some("USAGE_EVENT_KIND_INCLUDED_IN_PRO".into()),
+                token_usage: None,
+                charged_cents: Some(412.414),
+            },
+            UsageEvent {
+                timestamp: Some(now),
+                model: None,
+                kind: Some("USAGE_EVENT_KIND_ON_DEMAND".into()),
+                token_usage: None,
+                charged_cents: Some(10.0),
+            },
+            UsageEvent {
+                timestamp: Some(now),
+                model: None,
+                kind: Some("OTHER_EVENT".into()),
+                token_usage: None,
+                charged_cents: Some(999.0),
+            },
+        ];
+        let plan = CursorPlanInfo {
+            enabled: Some(true),
+            used_cents: Some(1192),
+            limit_cents: Some(30000),
+            remaining_cents: Some(28808),
+            total_pct: Some(3.9733333333333336),
+            auto_pct: Some(3.9733333333333336),
+            api_pct: Some(2.0),
+        };
+
+        let quota = calculate_today_quota(&events, &plan);
+        assert!((quota.auto_pct.unwrap_or_default() - 1.3747).abs() < 0.01);
+        assert!((quota.api_pct.unwrap_or_default() - 0.0168).abs() < 0.01);
+    }
 }

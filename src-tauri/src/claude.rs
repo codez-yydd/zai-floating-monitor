@@ -907,14 +907,22 @@ static LIVE_LIMITS_CACHE: OnceLock<Mutex<Option<(std::time::Instant, Result<Opti
 /// （Claude Code CLI 内部同款端点，需 claude.ai 订阅 OAuth 登录；需带
 /// anthropic-beta: oauth-2025-04-20 头。第三方中转/API Key 模式无凭据，
 /// 返回 Err 由调用方降级为不展示额度块）。
+#[allow(dead_code)]
 pub fn fetch_live_rate_limits() -> Result<Option<ClaudeRateLimits>, String> {
+    fetch_live_rate_limits_with_freshness().map(|(limits, _)| limits)
+}
+
+/// 拉取实时额度并标记本次结果是否来自新的 HTTP 请求。
+/// 缓存命中仍可用于当前进度展示，但不应作为新的历史采样。
+pub fn fetch_live_rate_limits_with_freshness(
+) -> Result<(Option<ClaudeRateLimits>, bool), String> {
     let cache = LIVE_LIMITS_CACHE.get_or_init(|| Mutex::new(None));
     {
         let guard = cache.lock().unwrap_or_else(|p| p.into_inner());
         if let Some((at, val)) = guard.as_ref() {
             let ttl = if val.is_ok() { 60 } else { 15 };
             if at.elapsed() < std::time::Duration::from_secs(ttl) {
-                return val.clone();
+                return val.clone().map(|limits| (limits, false));
             }
         }
     }
@@ -922,7 +930,7 @@ pub fn fetch_live_rate_limits() -> Result<Option<ClaudeRateLimits>, String> {
     let result = fetch_live_rate_limits_uncached();
     *cache.lock().unwrap_or_else(|p| p.into_inner()) =
         Some((std::time::Instant::now(), result.clone()));
-    result
+    result.map(|limits| (limits, true))
 }
 
 fn fetch_live_rate_limits_uncached() -> Result<Option<ClaudeRateLimits>, String> {

@@ -31,6 +31,22 @@ MASTER_TOKEN = None
 CLEANUP_CONFIG_KEY = "cleanup_config"
 
 
+def _agent_quota_storage_available():
+    """判断当前加载的 db.py 是否完整支持 Agent 额度快照。
+
+    宝塔更新文件时可能短暂只替换其中一个模块。兼容模式下继续提供
+    原有同步服务，避免新版 app.py 调用旧版 db.py 直接抛 AttributeError。
+    """
+    return all(
+        callable(getattr(db, name, None))
+        for name in (
+            "insert_agent_quota_snapshots",
+            "max_agent_quota_snapshot_ts_of",
+            "query_agent_quota_snapshots",
+        )
+    ) and isinstance(getattr(db, "AGENT_QUOTA_WINDOWS", None), dict)
+
+
 # ===== 鉴权辅助 =====
 
 def get_master_token():
@@ -96,12 +112,14 @@ def register():
 def sync():
     """增量上传明细 + 额度快照。
 
-    body 字段（snapshots 可选，向后兼容旧客户端）：
+    body 字段（两类 snapshots 均可选，向后兼容旧客户端）：
     - records: 用量明细数组（每条可带 source='zcode'|'codex'，缺省 zcode；
       客户端保证每批 records 属同一来源，zcode 与 codex 各自独立分批上传）
     - last_rowid: 本批记录游标（按本批来源的 rowid 序列计数）
-    - snapshots: 额度快照数组（可选）
-    - last_snapshot_ts: 快照游标（可选）
+    - snapshots: Z.ai 额度快照数组（可选）
+    - last_snapshot_ts: Z.ai 快照游标（可选）
+    - agent_quota_snapshots: Codex / Claude / Cursor 额度快照数组（可选）
+    - last_agent_quota_snapshot_ts: Agent 快照游标（可选）
     """
     err, device_id = require_device_token()
     if err:
@@ -110,6 +128,7 @@ def sync():
     data = request.get_json(force=True)
     records = data.get("records", [])
     snapshots = data.get("snapshots", [])
+    agent_quota_snapshots = data.get("agent_quota_snapshots", [])
 
     now = db.now_ms()
 
@@ -137,16 +156,34 @@ def sync():
         last_ts = data.get("last_snapshot_ts")
         max_snapshot_ts = last_ts if last_ts is not None else db.max_snapshot_ts_of(device_id)
 
+    # Agent 额度快照（可选；新客户端使用，旧客户端不会传此字段）
+    accepted_agent_quota_snapshots = 0
+    max_agent_quota_snapshot_ts = None
+    if agent_quota_snapshots and _agent_quota_storage_available():
+        accepted_agent_quota_snapshots = db.insert_agent_quota_snapshots(
+            device_id, agent_quota_snapshots, now
+        )
+        last_agent_ts = data.get("last_agent_quota_snapshot_ts")
+        max_agent_quota_snapshot_ts = (
+            last_agent_ts
+            if last_agent_ts is not None
+            else db.max_agent_quota_snapshot_ts_of(device_id)
+        )
+
     return jsonify({
         "accepted": accepted,
         "max_rowid": max_rowid,
         "accepted_snapshots": accepted_snaps,
         "max_snapshot_ts": max_snapshot_ts,
-        # 服务端协议版本：2 = 支持多来源（usage_records.source 列 + 主键含 source）。
+        "accepted_agent_quota_snapshots": accepted_agent_quota_snapshots,
+        "max_agent_quota_snapshot_ts": max_agent_quota_snapshot_ts,
+        # 服务端协议版本：3 = 支持 Agent 额度快照同步；若当前加载的是
+        # 旧版 db.py，则降级为 2，客户端会保留本地 Agent 快照游标并稍后补传。
+        # proto 2 的多来源 usage_records.source 行为。
         # 客户端据此探测——旧版服务端（无 source 列）会把 codex 记录按
         # (device_id, local_rowid) 撞键静默丢弃，客户端发现 proto < 2 时
         # 不会推进 codex 游标，升级服务端后自动恢复，数据不丢。
-        "proto": 2,
+        "proto": 3 if _agent_quota_storage_available() else 2,
     })
 
 
@@ -235,6 +272,41 @@ def snapshots():
 
     snaps = db.query_snapshots(from_ms, to_ms, filter_ids)
     return jsonify({"snapshots": snaps})
+
+
+@app.get("/agent-quota-snapshots")
+def agent_quota_snapshots():
+    """查询 Codex / Claude / Cursor 额度快照（带 device_id）。
+
+    返回的 snapshots 保持客户端 AgentQuotaSnapshot 形状，并在顶层增加
+    device_id；支持来源、设备集合和时间范围筛选。
+    """
+    err, _ = require_device_token()
+    if err:
+        return err
+
+    # 与旧版 db.py 配合时返回空结果，不能因为新增查询接口让原有服务报 500。
+    if not _agent_quota_storage_available():
+        return jsonify({"snapshots": []})
+
+    from_ms = int(request.args.get("from_ms", "0"))
+    to_ms = int(request.args.get("to_ms", str(db.now_ms())))
+    source = (request.args.get("source") or "").strip()
+
+    if source and source not in db.AGENT_QUOTA_WINDOWS:
+        return jsonify({"snapshots": []})
+
+    all_devices = db.list_devices()
+    all_ids = [d["device_id"] for d in all_devices]
+    filter_ids, has_filter_param = _resolve_device_filter(request.args, all_ids)
+
+    if has_filter_param and not filter_ids:
+        return jsonify({"snapshots": []})
+
+    snapshots = db.query_agent_quota_snapshots(
+        from_ms, to_ms, filter_ids, source=source or None
+    )
+    return jsonify({"snapshots": snapshots})
 
 
 @app.post("/period_detail")

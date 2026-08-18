@@ -1,5 +1,6 @@
 #![allow(linker_messages)]
 
+mod agent_quota_history;
 mod claude;
 mod codex;
 mod cursor;
@@ -12,6 +13,7 @@ mod sync;
 
 use pricing::{load_pricing, save_pricing, ModelPrice, PricingConfig};
 use quota::{load_quota, save_quota, QuotaConfig, QuotaResult};
+use chrono::TimeZone;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use tauri::{
@@ -359,10 +361,29 @@ async fn get_today_delta() -> Result<(u32, u32), String> {
         .map_err(|e| format!("今日增量任务失败: {e}"))?
 }
 
+/// 读取 Codex / Claude / Cursor 的 Agent 额度快照历史。
+#[derive(Debug, Deserialize)]
+struct AgentQuotaHistoryRequest {
+    from_ms: i64,
+    to_ms: i64,
+}
+
+#[tauri::command]
+async fn get_agent_quota_history(
+    req: AgentQuotaHistoryRequest,
+) -> Result<Vec<agent_quota_history::AgentQuotaSnapshot>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        agent_quota_history::load_range(req.from_ms, req.to_ms)
+    })
+    .await
+    .map_err(|e| format!("读取 Agent 额度快照任务失败: {e}"))?
+}
+
 /// 清空额度快照历史（设置页"清理历史"用）。
 #[tauri::command]
 fn clear_quota_history() -> Result<(), String> {
-    quota_history::clear_history()
+    quota_history::clear_history()?;
+    agent_quota_history::clear_history()
 }
 
 /// 对比页"实际 token"列（本地部分）：对一组周期 [reset_at, end_at)
@@ -435,7 +456,43 @@ struct CursorUsageRequest {
 #[tauri::command]
 async fn get_cursor_usage(req: CursorUsageRequest) -> Result<cursor::CursorSnapshot, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        cursor::fetch_cursor_snapshot(req.from_ms, req.to_ms)
+        let result = cursor::fetch_cursor_snapshot(req.from_ms, req.to_ms);
+        if let Ok(snapshot) = &result {
+            let has_today_quota = snapshot
+                .today_quota
+                .as_ref()
+                .map(|quota| quota.auto_pct.is_some() || quota.api_pct.is_some())
+                .unwrap_or(false);
+            if has_today_quota {
+                append_cursor_today_quota_snapshot(snapshot);
+            } else {
+                let mut windows = Vec::new();
+                if let Some(plan) = &snapshot.plan {
+                    if let Some(used_pct) = plan.auto_pct {
+                        windows.push(agent_quota_history::AgentQuotaWindow {
+                            key: "cursor_auto".into(),
+                            used_pct,
+                            reset_at: snapshot
+                                .billing_cycle_end
+                                .as_deref()
+                                .and_then(parse_iso_ts_ms),
+                        });
+                    }
+                    if let Some(used_pct) = plan.api_pct {
+                        windows.push(agent_quota_history::AgentQuotaWindow {
+                            key: "cursor_api".into(),
+                            used_pct,
+                            reset_at: snapshot
+                                .billing_cycle_end
+                                .as_deref()
+                                .and_then(parse_iso_ts_ms),
+                        });
+                    }
+                }
+                append_agent_quota_snapshot("cursor", snapshot.membership_type.clone(), windows);
+            }
+        }
+        result
     })
     .await
     .map_err(|e| format!("Cursor 后台任务失败: {e}"))?
@@ -507,15 +564,43 @@ struct CodexSnapshot {
 async fn get_codex_usage(req: CodexUsageRequest) -> Result<CodexSnapshot, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let stats = codex::query_stats(req.from_ms, req.to_ms)?;
+        if let Ok(added) = codex::backfill_today_rate_limit_history() {
+            if added > 0 {
+                eprintln!("[zbar-codex] 已补齐今日 {added} 条额度快照");
+            }
+        }
         let buckets = codex::query_trend(req.from_ms, req.to_ms, &req.bucket)?;
         let pricing = load_pricing().unwrap_or_default();
 
         // 额度：优先实时接口（wham/usage，参照 CodexBar，60s 缓存），
         // 失败（未登录/网络不通/接口变更）静默降级到本地快照（已滤过期窗口）
-        let rate_limits = match codex::fetch_live_rate_limits() {
-            Ok(live) => live.or_else(|| codex::latest_rate_limits().ok().flatten()),
+        let live_rate_limits = codex::fetch_live_rate_limits_with_freshness();
+        let rate_limits = match &live_rate_limits {
+            Ok((live, _)) => live
+                .clone()
+                .or_else(|| codex::latest_rate_limits().ok().flatten()),
             Err(_) => codex::latest_rate_limits().ok().flatten(),
         };
+        // 只有实时接口成功返回的值才写入历史；本地 rate_limits_state 是旧快照，
+        // 网络失败时不能重复采样，避免把陈旧数据伪装成今日用量。
+        if let Ok((Some(live), true)) = live_rate_limits {
+            let mut windows = Vec::new();
+            if let Some(used_pct) = live.primary_pct {
+                windows.push(agent_quota_history::AgentQuotaWindow {
+                    key: "hour5".into(),
+                    used_pct,
+                    reset_at: live.primary_reset_at,
+                });
+            }
+            if let Some(used_pct) = live.secondary_pct {
+                windows.push(agent_quota_history::AgentQuotaWindow {
+                    key: "weekly".into(),
+                    used_pct,
+                    reset_at: live.secondary_reset_at,
+                });
+            }
+            append_agent_quota_snapshot("codex", live.plan_type.clone(), windows);
+        }
 
         // 花费计算与 get_trend 完全同款：桶内按模型聚合后用 cost_for 求和。
         // 只存美元价：人民币花费 = 美元花费 × 当前汇率（实时折算）
@@ -586,7 +671,26 @@ async fn get_claude_usage(req: ClaudeUsageRequest) -> Result<ClaudeSnapshot, Str
         let buckets = claude::query_trend(req.from_ms, req.to_ms, &req.bucket)?;
         let pricing = load_pricing().unwrap_or_default();
 
-        let rate_limits = claude::fetch_live_rate_limits().ok().flatten();
+        let live_rate_limits = claude::fetch_live_rate_limits_with_freshness();
+        let rate_limits = live_rate_limits.clone().ok().and_then(|(live, _)| live);
+        if let Ok((Some(live), true)) = live_rate_limits {
+            let mut windows = Vec::new();
+            if let Some(used_pct) = live.primary_pct {
+                windows.push(agent_quota_history::AgentQuotaWindow {
+                    key: "hour5".into(),
+                    used_pct,
+                    reset_at: live.primary_reset_at,
+                });
+            }
+            if let Some(used_pct) = live.secondary_pct {
+                windows.push(agent_quota_history::AgentQuotaWindow {
+                    key: "weekly".into(),
+                    used_pct,
+                    reset_at: live.secondary_reset_at,
+                });
+            }
+            append_agent_quota_snapshot("claude", live.plan_type.clone(), windows);
+        }
 
         // 花费计算与 get_trend 完全同款：桶内按模型聚合后用 cost_for 求和。
         // 只存美元价：人民币花费 = 美元花费 × 当前汇率（实时折算）
@@ -625,6 +729,125 @@ async fn get_claude_debug() -> Result<claude::ClaudeDebugInfo, String> {
     tauri::async_runtime::spawn_blocking(claude::debug_info)
         .await
         .map_err(|e| format!("Claude 诊断任务失败: {e}"))?
+}
+
+fn append_agent_quota_snapshot(
+    source: &str,
+    plan_type: Option<String>,
+    windows: Vec<agent_quota_history::AgentQuotaWindow>,
+) {
+    append_agent_quota_snapshot_at(
+        source,
+        plan_type,
+        chrono::Local::now().timestamp_millis(),
+        windows,
+    );
+}
+
+fn append_agent_quota_snapshot_at(
+    source: &str,
+    plan_type: Option<String>,
+    ts: i64,
+    windows: Vec<agent_quota_history::AgentQuotaWindow>,
+) {
+    agent_quota_history::append_snapshot(&agent_quota_history::AgentQuotaSnapshot {
+        source: source.to_string(),
+        ts,
+        plan_type,
+        windows,
+    });
+}
+
+/// 将 Cursor events 的今日扣费换算成 Auto / API 的今日百分比增量。
+/// 旧历史里保存的是 provider 当前周期百分比，因此首次切换到 events 口径时
+/// 先写入一个当天基线，再写入“基线 + 今日扣费”，避免丢掉已有采样或重复累计。
+fn append_cursor_today_quota_snapshot(snapshot: &cursor::CursorSnapshot) {
+    let Some(today) = snapshot.today_quota.as_ref() else {
+        return;
+    };
+    let Some(plan) = snapshot.plan.as_ref() else {
+        return;
+    };
+    let now = chrono::Local::now().timestamp_millis();
+    let day_start = chrono::Local::now()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .and_then(|naive| chrono::Local.from_local_datetime(&naive).single())
+        .map(|value| value.timestamp_millis())
+        .unwrap_or(now);
+    let reset_at = snapshot
+        .billing_cycle_end
+        .as_deref()
+        .and_then(parse_iso_ts_ms);
+    let existing = agent_quota_history::load_range(day_start, now.saturating_add(1))
+        .unwrap_or_default();
+
+    let mut baseline_windows = Vec::new();
+    let mut current_windows = Vec::new();
+    for (key, daily_pct, current_pct) in [
+        ("cursor_auto", today.auto_pct, plan.auto_pct),
+        ("cursor_api", today.api_pct, plan.api_pct),
+    ] {
+        let Some(daily_pct) = daily_pct.filter(|pct| pct.is_finite() && *pct > 0.0) else {
+            continue;
+        };
+        let baseline = existing
+            .iter()
+            .filter(|snapshot| snapshot.source == "cursor")
+            .flat_map(|item| {
+                item.windows
+                    .iter()
+                    .filter(move |window| window.key == key && window.reset_at == reset_at)
+                    .map(|window| window.used_pct)
+            })
+            .filter(|pct| pct.is_finite())
+            .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or_else(|| (current_pct.unwrap_or(daily_pct) - daily_pct).max(0.0));
+        baseline_windows.push(agent_quota_history::AgentQuotaWindow {
+            key: key.to_string(),
+            used_pct: baseline,
+            reset_at,
+        });
+        current_windows.push(agent_quota_history::AgentQuotaWindow {
+            key: key.to_string(),
+            used_pct: (baseline + daily_pct).clamp(0.0, 100.0),
+            reset_at,
+        });
+    }
+
+    if current_windows.is_empty() {
+        return;
+    }
+
+    let has_baseline = existing.iter().any(|item| {
+        item.source == "cursor"
+            && item.ts / 1000 == day_start / 1000
+            && item.windows.iter().any(|window| {
+                baseline_windows.iter().any(|baseline| {
+                    baseline.key == window.key && baseline.reset_at == window.reset_at
+                })
+            })
+    });
+    if !has_baseline {
+        append_agent_quota_snapshot_at(
+            "cursor",
+            snapshot.membership_type.clone(),
+            day_start,
+            baseline_windows,
+        );
+    }
+    append_agent_quota_snapshot_at(
+        "cursor",
+        snapshot.membership_type.clone(),
+        now,
+        current_windows,
+    );
+}
+
+fn parse_iso_ts_ms(value: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|dt| dt.timestamp_millis())
 }
 
 /// 对比页：单个周期的 token 聚合结果。
@@ -764,8 +987,9 @@ fn set_pin(enabled: bool, app: AppHandle) -> Result<(), String> {
 
 use sync::{
     AutoCleanupServerRequest, CleanupServerRequest, CleanupStatus, DeviceInfo,
-    MergeDevicesRequest, RemoteSnapshot, RemoteSnapshotRequest, RemoteUsage,
-    RemoteUsageRequest, RenameDeviceRequest, SyncConfig, SyncOutcome,
+    MergeDevicesRequest, RemoteAgentQuotaSnapshot, RemoteAgentQuotaSnapshotRequest,
+    RemoteSnapshot, RemoteSnapshotRequest, RemoteUsage, RemoteUsageRequest,
+    RenameDeviceRequest, SyncConfig, SyncOutcome,
 };
 
 /// 读取同步配置
@@ -823,6 +1047,16 @@ async fn remote_snapshots(req: RemoteSnapshotRequest) -> Result<Vec<RemoteSnapsh
     tauri::async_runtime::spawn_blocking(move || sync::fetch_remote_snapshots(req))
         .await
         .map_err(|e| format!("远端快照任务失败: {e}"))?
+}
+
+/// 拉取远端 Agent 额度快照，供今日增量计算按设备筛选。
+#[tauri::command]
+async fn remote_agent_quota_snapshots(
+    req: RemoteAgentQuotaSnapshotRequest,
+) -> Result<Vec<RemoteAgentQuotaSnapshot>, String> {
+    tauri::async_runtime::spawn_blocking(move || sync::fetch_remote_agent_quota_snapshots(req))
+        .await
+        .map_err(|e| format!("远端 Agent 额度快照任务失败: {e}"))?
 }
 
 /// 拉取设备列表
@@ -1407,6 +1641,7 @@ pub fn run() {
             disconnect_device,
             remote_usage,
             remote_snapshots,
+            remote_agent_quota_snapshots,
             list_remote_devices,
             get_cleanup_status,
             cleanup_server,
@@ -1420,6 +1655,7 @@ pub fn run() {
             get_weekly_compare,
             get_weekly_compare_for_snapshots,
             get_today_delta,
+            get_agent_quota_history,
             clear_quota_history,
             get_compare_tokens,
             get_compare_tokens_for_agent,

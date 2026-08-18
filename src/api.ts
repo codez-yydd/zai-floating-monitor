@@ -15,12 +15,14 @@ import type {
   PricingConfig,
   PricingDiff,
   ApplyPriceItem,
+  AgentQuotaSnapshot,
   QuotaConfig,
   QuotaResult,
   QuotaSnapshot,
   RegisterRequest,
   RenameResult,
   RemoteSnapshot,
+  RemoteAgentQuotaSnapshot,
   RemoteUsage,
   ShortcutConfig,
   Stats,
@@ -183,6 +185,37 @@ export async function remoteSnapshots(
     req: {
       from_ms: fromMs,
       to_ms: toMs,
+      exclude_device: options.excludeDevice ?? "",
+      devices: options.devices ?? "",
+    },
+  });
+}
+
+/** 读取本地 Codex / Claude / Cursor 额度快照。 */
+export async function getAgentQuotaHistory(
+  fromMs: number,
+  toMs: number
+): Promise<AgentQuotaSnapshot[]> {
+  return invoke<AgentQuotaSnapshot[]>("get_agent_quota_history", {
+    req: { from_ms: fromMs, to_ms: toMs },
+  });
+}
+
+/** 拉取远端 Codex / Claude / Cursor 额度快照（带 device_id）。 */
+export async function remoteAgentQuotaSnapshots(
+  fromMs: number,
+  toMs: number,
+  options: {
+    source?: string;
+    excludeDevice?: string;
+    devices?: string;
+  } = {}
+): Promise<RemoteAgentQuotaSnapshot[]> {
+  return invoke<RemoteAgentQuotaSnapshot[]>("remote_agent_quota_snapshots", {
+    req: {
+      from_ms: fromMs,
+      to_ms: toMs,
+      source: options.source ?? "",
       exclude_device: options.excludeDevice ?? "",
       devices: options.devices ?? "",
     },
@@ -394,4 +427,3 @@ export async function fetchClaudeUsage(
     req: { from_ms: fromMs, to_ms: toMs, bucket },
   });
 }
-

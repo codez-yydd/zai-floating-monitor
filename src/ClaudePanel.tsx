@@ -1,4 +1,10 @@
-import type { ClaudeSnapshot, Currency, PricingConfig, TrendBucket } from "./types";
+import type {
+  AgentQuotaDelta,
+  ClaudeSnapshot,
+  Currency,
+  PricingConfig,
+  TrendBucket,
+} from "./types";
 import { AgentUsagePanel } from "./AgentUsagePanel";
 import { useI18n } from "./i18n";
 
@@ -12,6 +18,7 @@ interface Props {
   trendBucket: TrendBucket;
   /** 按模型折算花费用（与 Z.ai 页同款前端自算） */
   pricing: PricingConfig;
+  agentQuotaDelta?: AgentQuotaDelta;
 }
 
 /** Claude 用量面板：通用 AgentUsagePanel 的 Anthropic 品牌皮肤（orange）。 */

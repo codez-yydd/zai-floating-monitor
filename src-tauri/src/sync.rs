@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use crate::agent_quota_history::{self, AgentQuotaSnapshot};
 use crate::db::{self, default_source, UsageRow};
 use crate::pricing::config_dir;
 
@@ -71,6 +72,9 @@ pub struct SyncConfig {
     /// 已上传到的快照 ts 游标（额度快照）。
     #[serde(default)]
     pub last_uploaded_snapshot_ts: i64,
+    /// 已上传到的 Agent 额度快照 ts 游标。
+    #[serde(default)]
+    pub last_uploaded_agent_quota_snapshot_ts: i64,
     /// 上次成功同步的毫秒时间戳。
     #[serde(default)]
     pub last_sync_at: i64,
@@ -97,6 +101,7 @@ impl Default for SyncConfig {
             last_uploaded_codex_model_rev_ts: 0,
             last_uploaded_codex_model_rev_id: 0,
             last_uploaded_snapshot_ts: 0,
+            last_uploaded_agent_quota_snapshot_ts: 0,
             last_sync_at: 0,
         }
     }
@@ -148,7 +153,11 @@ struct SyncResponse {
     accepted_snapshots: usize,
     #[serde(default)]
     max_snapshot_ts: Option<i64>,
-    /// 服务端协议版本：2 = 支持多来源（usage_records 含 source 列）。
+    #[serde(default)]
+    accepted_agent_quota_snapshots: usize,
+    #[serde(default)]
+    max_agent_quota_snapshot_ts: Option<i64>,
+    /// 服务端协议版本：2 = 支持多来源，3 = 支持 Agent 额度快照。
     /// 旧服务端不返回 → 0。codex 上传前据此探测，防止旧服务端按
     /// (device_id, local_rowid) 撞键静默丢弃记录后游标仍推进。
     #[serde(default)]
@@ -164,6 +173,11 @@ struct SyncPayload {
     snapshots: Vec<crate::quota_history::QuotaSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_snapshot_ts: Option<i64>,
+    /// Codex / Claude / Cursor 额度快照（可选；旧服务端会忽略）。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    agent_quota_snapshots: Vec<AgentQuotaSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_agent_quota_snapshot_ts: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -363,6 +377,16 @@ pub fn upload_incremental() -> Result<SyncOutcome, String> {
         .collect::<Vec<_>>();
     let snap_max_ts = pending_snaps.iter().map(|s| s.ts).max();
     let mut snapshot_cursor_advanced = false;
+    let mut pending_agent_quota_snapshots = agent_quota_history::load_all()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|snapshot| snapshot.ts > cfg.last_uploaded_agent_quota_snapshot_ts)
+        .collect::<Vec<_>>();
+    let agent_quota_snapshot_max_ts = pending_agent_quota_snapshots
+        .iter()
+        .map(|snapshot| snapshot.ts)
+        .max();
+    let mut agent_quota_snapshot_cursor_advanced = false;
 
     // ===== 阶段一：zcode 明细（records 固定 source="zcode"）=====
     let mut since = cfg.last_uploaded_rowid;
@@ -374,7 +398,7 @@ pub fn upload_incremental() -> Result<SyncOutcome, String> {
         let records = db::query_since(since, BATCH)?;
         // 明细耗尽，且还有未发的快照 → 发一个空 records 的批次把快照送出
         let records_empty = records.is_empty();
-        if records_empty && pending_snaps.is_empty() {
+        if records_empty && pending_snaps.is_empty() && pending_agent_quota_snapshots.is_empty() {
             break;
         }
         if records_empty && !first_batch {
@@ -391,12 +415,24 @@ pub fn upload_incremental() -> Result<SyncOutcome, String> {
             Vec::new()
         };
         let last_snapshot_ts = if first_batch { snap_max_ts } else { None };
+        let agent_quota_snapshots_to_send = if first_batch {
+            std::mem::take(&mut pending_agent_quota_snapshots)
+        } else {
+            Vec::new()
+        };
+        let last_agent_quota_snapshot_ts = if first_batch {
+            agent_quota_snapshot_max_ts
+        } else {
+            None
+        };
 
         let payload = SyncPayload {
             records,
             last_rowid: Some(batch_max),
             snapshots: snaps_to_send,
             last_snapshot_ts,
+            agent_quota_snapshots: agent_quota_snapshots_to_send,
+            last_agent_quota_snapshot_ts,
         };
         let resp: SyncResponse = ureq::post(&format!("{base}/sync"))
             .set("Authorization", &format!("Bearer {token}"))
@@ -407,6 +443,7 @@ pub fn upload_incremental() -> Result<SyncOutcome, String> {
             .map_err(|e| format!("解析上传响应失败: {e}"))?;
 
         total_uploaded += resp.accepted;
+        total_uploaded += resp.accepted_agent_quota_snapshots;
         // 快照游标：取服务端返回值（新服务端）或本批最大 ts（旧服务端不回填）。
         if first_batch {
             if let Some(ts) = resp.max_snapshot_ts {
@@ -415,6 +452,22 @@ pub fn upload_incremental() -> Result<SyncOutcome, String> {
                 cfg.last_uploaded_snapshot_ts = ts;
             }
             snapshot_cursor_advanced = true;
+        }
+        // Agent 额度快照只有 proto >= 3 的服务端真正接收；旧服务端会忽略
+        // 新字段，此时保留本地游标，升级服务端后自动补传。
+        if first_batch && agent_quota_snapshot_max_ts.is_some() {
+            if resp.proto >= 3 {
+                if let Some(ts) = resp.max_agent_quota_snapshot_ts {
+                    cfg.last_uploaded_agent_quota_snapshot_ts = ts;
+                } else if let Some(ts) = agent_quota_snapshot_max_ts {
+                    cfg.last_uploaded_agent_quota_snapshot_ts = ts;
+                }
+                agent_quota_snapshot_cursor_advanced = true;
+            } else {
+                eprintln!(
+                    "[zbar-sync] 服务端版本过旧（不支持 Agent 额度快照），本地快照暂不推进上传游标"
+                );
+            }
         }
         // 游标必须推进到本批最大 rowid（无论服务端是否接受，本地都已处理过这些记录）。
         // 取 max 防止服务端返回的旧游标回退。
@@ -446,6 +499,7 @@ pub fn upload_incremental() -> Result<SyncOutcome, String> {
     }
 
     let _ = snapshot_cursor_advanced; // 标记已用，避免未读警告
+    let _ = agent_quota_snapshot_cursor_advanced;
     let now = chrono::Local::now().timestamp_millis();
     cfg.last_uploaded_rowid = since;
     cfg.last_sync_at = now;
@@ -513,6 +567,8 @@ fn upload_derived_source_incremental(
             last_rowid: None,
             snapshots: Vec::new(),
             last_snapshot_ts: None,
+            agent_quota_snapshots: Vec::new(),
+            last_agent_quota_snapshot_ts: None,
         })
         .map_err(map_http_err("探测服务端协议"))?
         .into_json()
@@ -542,6 +598,8 @@ fn upload_derived_source_incremental(
             last_rowid: Some(batch_max),
             snapshots: Vec::new(),
             last_snapshot_ts: None,
+            agent_quota_snapshots: Vec::new(),
+            last_agent_quota_snapshot_ts: None,
         };
         let resp: SyncResponse = ureq::post(&format!("{base}/sync"))
             .set("Authorization", &format!("Bearer {token}"))
@@ -584,6 +642,8 @@ fn upload_derived_source_incremental(
                     last_rowid: None,
                     snapshots: Vec::new(),
                     last_snapshot_ts: None,
+                    agent_quota_snapshots: Vec::new(),
+                    last_agent_quota_snapshot_ts: None,
                 })
                 .map_err(map_http_err("上传 Codex 模型修订"))?
                 .into_json()
@@ -620,6 +680,8 @@ fn upload_derived_source_incremental(
                     last_rowid: None,
                     snapshots: Vec::new(),
                     last_snapshot_ts: None,
+                    agent_quota_snapshots: Vec::new(),
+                    last_agent_quota_snapshot_ts: None,
                 })
                 .map_err(map_http_err("上传 Claude 修订数据"))?
                 .into_json()
@@ -850,6 +912,66 @@ pub fn fetch_remote_snapshots(req: RemoteSnapshotRequest) -> Result<Vec<RemoteSn
         .map_err(map_http_err("查询远端快照"))?
         .into_json()
         .map_err(|e| format!("解析远端快照失败: {e}"))?;
+    Ok(resp.snapshots)
+}
+
+/// 远端单条 Agent 额度快照（带 device_id，供今日增量计算按设备筛选）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteAgentQuotaSnapshot {
+    #[serde(flatten)]
+    pub snapshot: AgentQuotaSnapshot,
+    #[serde(default)]
+    pub device_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentQuotaSnapshotsResponse {
+    #[serde(default)]
+    snapshots: Vec<RemoteAgentQuotaSnapshot>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct RemoteAgentQuotaSnapshotRequest {
+    pub from_ms: i64,
+    pub to_ms: i64,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub exclude_device: String,
+    #[serde(default)]
+    pub devices: String,
+}
+
+/// 拉取远端 Codex / Claude / Cursor 额度快照。
+pub fn fetch_remote_agent_quota_snapshots(
+    req: RemoteAgentQuotaSnapshotRequest,
+) -> Result<Vec<RemoteAgentQuotaSnapshot>, String> {
+    let cfg = load_sync_config()?;
+    if !cfg.enabled || cfg.device_token.is_empty() {
+        return Ok(Vec::new());
+    }
+    let base = &cfg.server_url;
+    let token = &cfg.device_token;
+    let mut url = format!(
+        "{base}/agent-quota-snapshots?from_ms={}&to_ms={}",
+        req.from_ms, req.to_ms
+    );
+    if !req.source.is_empty() {
+        url.push_str(&format!("&source={}", req.source));
+    }
+    if !req.devices.is_empty() {
+        url.push_str(&format!("&devices={}", req.devices));
+    } else if !req.exclude_device.is_empty() {
+        url.push_str(&format!("&exclude_device={}", req.exclude_device));
+    }
+
+    let resp: AgentQuotaSnapshotsResponse = ureq::get(&url)
+        .set("Authorization", &format!("Bearer {token}"))
+        .timeout(Duration::from_secs(10))
+        .call()
+        .map_err(map_http_err("查询远端 Agent 额度快照"))?
+        .into_json()
+        .map_err(|e| format!("解析远端 Agent 额度快照失败: {e}"))?;
     Ok(resp.snapshots)
 }
 

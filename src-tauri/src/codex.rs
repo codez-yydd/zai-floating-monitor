@@ -22,6 +22,9 @@ use std::io::{BufRead, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use chrono::{Datelike, Local, TimeZone};
+
+use crate::agent_quota_history;
 use crate::db;
 use crate::pricing::config_dir;
 
@@ -213,6 +216,9 @@ struct RateWindowPayload {
     used_percent: Option<f64>,
     #[serde(default)]
     resets_at: Option<i64>,
+    /// 窗口时长（分钟）。Plus 账号的 primary 也可能是周窗口，不能只按字段名归类。
+    #[serde(default)]
+    window_minutes: Option<i64>,
 }
 
 /// turn_context 事件 payload（token_count 靠它归因模型）
@@ -279,21 +285,62 @@ pub struct CodexRateLimits {
 
 /// 事件内 rate_limits → 查询结构（resets_at 秒 → 毫秒）
 fn to_rate_limits(r: &RateLimitsPayload) -> CodexRateLimits {
-    let conv = |w: &Option<RateWindowPayload>| -> (Option<f64>, Option<i64>) {
-        match w {
-            Some(win) => (win.used_percent, win.resets_at.map(|s| s * 1000)),
-            None => (None, None),
+    let mut hour5 = (None, None);
+    let mut weekly = (None, None);
+    for (fallback_key, window) in [("hour5", &r.primary), ("weekly", &r.secondary)] {
+        let Some(window) = window.as_ref() else {
+            continue;
+        };
+        let key = classify_rate_window(window, fallback_key);
+        let value = (window.used_percent, window.resets_at.map(|s| s * 1000));
+        if key == "weekly" {
+            weekly = value;
+        } else {
+            hour5 = value;
         }
-    };
-    let (primary_pct, primary_reset_at) = conv(&r.primary);
-    let (secondary_pct, secondary_reset_at) = conv(&r.secondary);
+    }
     CodexRateLimits {
         plan_type: r.plan_type.clone(),
-        primary_pct,
-        primary_reset_at,
-        secondary_pct,
-        secondary_reset_at,
+        primary_pct: hour5.0,
+        primary_reset_at: hour5.1,
+        secondary_pct: weekly.0,
+        secondary_reset_at: weekly.1,
     }
+}
+
+/// 把 Codex CLI 的额度窗口归一到前端的 5h / 周两个稳定窗口键。
+/// `primary` 并不总是 5h，Plus 账号实测可能只有一个周窗口。
+fn classify_rate_window(window: &RateWindowPayload, fallback_key: &str) -> &'static str {
+    if window.window_minutes.unwrap_or(0) >= 2 * 24 * 60 {
+        "weekly"
+    } else if window.window_minutes.is_some() {
+        "hour5"
+    } else if fallback_key == "weekly" {
+        "weekly"
+    } else {
+        "hour5"
+    }
+}
+
+fn agent_windows_from_rate_limits(
+    limits: &RateLimitsPayload,
+) -> Vec<agent_quota_history::AgentQuotaWindow> {
+    let mut windows = Vec::new();
+    for (fallback_key, window) in [("hour5", &limits.primary), ("weekly", &limits.secondary)] {
+        let Some(window) = window.as_ref() else {
+            continue;
+        };
+        let Some(used_pct) = window.used_percent else {
+            continue;
+        };
+        let key = classify_rate_window(window, fallback_key);
+        windows.push(agent_quota_history::AgentQuotaWindow {
+            key: key.to_string(),
+            used_pct,
+            reset_at: window.resets_at.map(|s| s * 1000),
+        });
+    }
+    windows
 }
 
 /// ISO8601 时间戳（如 2026-06-22T12:41:14.214Z）→ 毫秒时间戳
@@ -336,6 +383,7 @@ fn import_lock() -> &'static Mutex<()> {
 /// 导入，前端 30s 一轮 × 4 个预设范围 × 多个命令会放大到十余次"锁 + 开库 +
 /// 递归扫目录"；会话文件是分钟级追加，5 秒节流足够实时且省掉重复扫描。
 static LAST_IMPORT_AT: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::new();
+static LAST_RATE_LIMIT_BACKFILL_DAY: OnceLock<Mutex<Option<i32>>> = OnceLock::new();
 
 fn last_import_at() -> &'static Mutex<Option<std::time::Instant>> {
     LAST_IMPORT_AT.get_or_init(|| Mutex::new(None))
@@ -461,6 +509,115 @@ pub fn import_incremental_force() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// 把今天 Codex CLI 会话中已经记录的有效额度快照补入 Agent 历史。
+///
+/// 额度历史功能可能在用户当天已经使用了一段时间后才启动；如果只从
+/// `wham/usage` 的首次实时采样开始，今日早先的真实使用会被误当成今日
+/// 起点。Codex CLI 自己会在每次 token_count 事件中记录 rate_limits，
+/// 这些是有效的提供方快照，不是网络失败时的旧回退值，因此可以安全补齐。
+/// 每个本地日期最多扫描一次，重复启动通过历史中的“来源 + 同秒”集合去重。
+pub fn backfill_today_rate_limit_history() -> Result<usize, String> {
+    let now = Local::now();
+    let day = now.date_naive();
+    let day_key = day.num_days_from_ce();
+    let backfill_day = LAST_RATE_LIMIT_BACKFILL_DAY.get_or_init(|| Mutex::new(None));
+    {
+        let guard = backfill_day
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *guard == Some(day_key) {
+            return Ok(0);
+        }
+    }
+
+    let Some(day_start) = day
+        .and_hms_opt(0, 0, 0)
+        .and_then(|naive| Local.from_local_datetime(&naive).single())
+        .map(|value| value.timestamp_millis())
+    else {
+        return Ok(0);
+    };
+    let day_dir = sessions_dir_path()
+        .join(format!("{:04}", day.year()))
+        .join(format!("{:02}", day.month()))
+        .join(format!("{:02}", day.day()));
+    if !day_dir.is_dir() {
+        return Ok(0);
+    }
+
+    let mut files = Vec::new();
+    collect_session_files(&day_dir, 0, &mut files);
+    files.sort();
+    if files.is_empty() {
+        return Ok(0);
+    }
+
+    let mut snapshots = Vec::new();
+    for path in files {
+        let Ok(file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        for line in std::io::BufReader::new(file).lines().flatten() {
+            let Ok(rollout) = serde_json::from_str::<RolloutLine>(&line) else {
+                continue;
+            };
+            if rollout.line_type.as_deref() != Some("event_msg") {
+                continue;
+            }
+            let Some(payload) = rollout.payload else {
+                continue;
+            };
+            let Ok(token_count) = serde_json::from_value::<TokenCountPayload>(payload) else {
+                continue;
+            };
+            if token_count.msg_type.as_deref() != Some("token_count") {
+                continue;
+            }
+            let Some(limits) = token_count.rate_limits.as_ref() else {
+                continue;
+            };
+            let Some(ts) = rollout.timestamp.as_deref().and_then(parse_ts_ms) else {
+                continue;
+            };
+            if ts < day_start || ts > now.timestamp_millis() {
+                continue;
+            }
+            let windows = agent_windows_from_rate_limits(limits);
+            if windows.is_empty() {
+                continue;
+            }
+            snapshots.push(agent_quota_history::AgentQuotaSnapshot {
+                source: "codex".to_string(),
+                ts,
+                plan_type: limits.plan_type.clone(),
+                windows,
+            });
+        }
+    }
+    snapshots.sort_by_key(|snapshot| snapshot.ts);
+
+    let mut existing_seconds: HashSet<i64> = agent_quota_history::load_all()?
+        .into_iter()
+        .filter(|snapshot| snapshot.source == "codex")
+        .map(|snapshot| snapshot.ts / 1000)
+        .collect();
+    let mut added = 0usize;
+    for snapshot in snapshots {
+        let second = snapshot.ts / 1000;
+        if !existing_seconds.insert(second) {
+            continue;
+        }
+        agent_quota_history::append_snapshot(&snapshot);
+        added += 1;
+    }
+
+    let mut guard = backfill_day
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some(day_key);
+    Ok(added)
 }
 
 /// 解析单个 rollout 文件的增量部分。known = 上次记录的 (offset, size)。
@@ -1316,6 +1473,18 @@ mod proxy_tests {
             "socks5://127.0.0.1:1080"
         );
     }
+
+    #[test]
+    fn primary_week_window_is_classified_as_weekly() {
+        let payload: RateLimitsPayload = serde_json::from_str(
+            r#"{"plan_type":"plus","primary":{"used_percent":26.0,"window_minutes":10080,"resets_at":1787364605}}"#,
+        )
+        .expect("额度窗口解析失败");
+        let limits = to_rate_limits(&payload);
+        assert_eq!(limits.primary_pct, None);
+        assert_eq!(limits.secondary_pct, Some(26.0));
+        assert_eq!(limits.secondary_reset_at, Some(1_787_364_605_000));
+    }
 }
 
 /// 实时额度结果缓存（额度与查询范围无关；前端 30s 一轮 × 4 个预设范围
@@ -1327,13 +1496,21 @@ static LIVE_LIMITS_CACHE: OnceLock<Mutex<Option<(std::time::Instant, Option<Code
 /// （Codex CLI 内部使用的同一端点，需 ChatGPT 订阅登录；API 中转模式
 /// 的用量不走该接口，但只要本机登录过订阅账号即可查询账号额度）。
 /// 失败返回 Err，调用方降级到本地快照。60 秒内复用上次结果。
+#[allow(dead_code)]
 pub fn fetch_live_rate_limits() -> Result<Option<CodexRateLimits>, String> {
+    fetch_live_rate_limits_with_freshness().map(|(limits, _)| limits)
+}
+
+/// 拉取实时额度并标记本次结果是否来自新的 HTTP 请求。
+/// 缓存命中仍可用于当前进度展示，但不应作为新的历史采样。
+pub fn fetch_live_rate_limits_with_freshness(
+) -> Result<(Option<CodexRateLimits>, bool), String> {
     let cache = LIVE_LIMITS_CACHE.get_or_init(|| Mutex::new(None));
     {
         let guard = cache.lock().unwrap_or_else(|p| p.into_inner());
         if let Some((at, val)) = guard.as_ref() {
             if at.elapsed() < std::time::Duration::from_secs(60) {
-                return Ok(val.clone());
+                return Ok((val.clone(), false));
             }
         }
     }
@@ -1393,7 +1570,7 @@ pub fn fetch_live_rate_limits() -> Result<Option<CodexRateLimits>, String> {
 
     *cache.lock().unwrap_or_else(|p| p.into_inner()) =
         Some((std::time::Instant::now(), result.clone()));
-    Ok(result)
+    Ok((result, true))
 }
 
 // ===== 诊断 =====

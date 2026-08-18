@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type {
+  AgentQuotaDelta,
   CursorSnapshot,
   Currency,
   TrendPoint,
@@ -21,6 +22,8 @@ interface Props {
   currency: Currency;
   /** USD→CNY 汇率（events 花费转 CNY 用） */
   fxRate: number;
+  autoQuotaDelta?: AgentQuotaDelta;
+  apiQuotaDelta?: AgentQuotaDelta;
 }
 
 /** 美分 → 美元 */
@@ -33,10 +36,12 @@ function PlanQuotaRow({
   label,
   hint,
   usedPct,
+  delta,
 }: {
   label: string;
   hint?: string;
   usedPct: number;
+  delta?: AgentQuotaDelta;
 }) {
   const { t } = useI18n();
   const remain = Math.max(0, 100 - usedPct);
@@ -61,6 +66,11 @@ function PlanQuotaRow({
         height="h-1.5"
         gradient={remainingGradient(remain)}
       />
+      {delta && delta.samples >= 2 && delta.pct > 0 && (
+        <div className="text-[9px] mt-0.5 num text-slate-700/50">
+          {t("quota.todayDelta", { pct: Math.round(delta.pct) })}
+        </div>
+      )}
     </div>
   );
 }
@@ -71,6 +81,8 @@ export function CursorPanel({
   error,
   currency,
   fxRate,
+  autoQuotaDelta,
+  apiQuotaDelta,
 }: Props) {
   const { t } = useI18n();
   const [trendMetric, setTrendMetric] = useState<"cost" | "token">("cost");
@@ -163,10 +175,10 @@ export function CursorPanel({
           {plan.auto_pct != null || plan.api_pct != null ? (
             <>
               {plan.auto_pct != null && (
-                <PlanQuotaRow label="Auto" usedPct={plan.auto_pct} />
+                <PlanQuotaRow label="Auto" usedPct={plan.auto_pct} delta={autoQuotaDelta} />
               )}
               {plan.api_pct != null && (
-                <PlanQuotaRow label="API" usedPct={plan.api_pct} />
+                <PlanQuotaRow label="API" usedPct={plan.api_pct} delta={apiQuotaDelta} />
               )}
             </>
           ) : (
