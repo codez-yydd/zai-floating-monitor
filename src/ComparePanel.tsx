@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
+  AgentQuotaDelta,
+  AgentQuotaDeltaMap,
   AgentQuotaSnapshot,
+  ClaudeSnapshot,
+  CodexSnapshot,
+  CursorSnapshot,
   DeviceInfo,
+  QuotaResult,
   QuotaSnapshot,
   RemoteSnapshot,
   RemoteAgentQuotaSnapshot,
@@ -39,6 +45,8 @@ import {
 } from "./layout";
 import { useI18n } from "./i18n";
 import { mergeAgentQuotaSnapshots } from "./agentQuota";
+import { loadCache, saveCache } from "./cache";
+import { useDataCache } from "./DataCache";
 
 interface Props {
   onBack: () => void;
@@ -56,8 +64,103 @@ const AGENT_META: Record<
   cursor: { label: "Cursor", brand: "cursor", color: "#7c3aed" },
 };
 
+const COMPARE_CACHE_KEY = "zbar-compare-cache-v1";
+
+interface CompareCacheEntry {
+  periods: WeeklyPeriod[];
+  tokens: WeeklyTokenBucket[];
+  tokensByAgent: Partial<Record<AgentId, WeeklyTokenBucket[]>>;
+  /** 只缓存最新额度快照，历史原始采样不落 localStorage。 */
+  zaiSnapshots: QuotaSnapshot[];
+  agentSnapshots: AgentQuotaSnapshot[];
+  ts: number;
+}
+
+type CompareCacheStore = Record<string, CompareCacheEntry>;
+
+function readCompareCache(scope: string): CompareCacheEntry | null {
+  const store = loadCache<CompareCacheStore>(COMPARE_CACHE_KEY);
+  const entry = store?.[scope];
+  if (
+    !entry ||
+    !Array.isArray(entry.periods) ||
+    !Array.isArray(entry.tokens) ||
+    !entry.tokensByAgent ||
+    !Array.isArray(entry.zaiSnapshots) ||
+    !Array.isArray(entry.agentSnapshots) ||
+    !Number.isFinite(entry.ts)
+  ) {
+    return null;
+  }
+  return entry;
+}
+
+function writeCompareCache(scope: string, entry: CompareCacheEntry): void {
+  const store = loadCache<CompareCacheStore>(COMPARE_CACHE_KEY) ?? {};
+  const next = { ...store, [scope]: entry };
+  const keys = Object.keys(next);
+  if (keys.length > 6) {
+    keys
+      .sort((a, b) => next[a].ts - next[b].ts)
+      .slice(0, keys.length - 6)
+      .forEach((key) => delete next[key]);
+  }
+  saveCache(COMPARE_CACHE_KEY, next);
+}
+
+function latestQuotaSnapshotsForCache(
+  zaiSnapshots: QuotaSnapshot[],
+  agentSnapshots: AgentQuotaSnapshot[]
+): Pick<CompareCacheEntry, "zaiSnapshots" | "agentSnapshots"> {
+  const sortedZai = [...zaiSnapshots].sort((a, b) => a.ts - b.ts);
+  const latestAgentBySource = new Map<
+    AgentQuotaSnapshot["source"],
+    Map<string, { snapshot: AgentQuotaSnapshot; window: AgentQuotaSnapshot["windows"][number] }>
+  >();
+  for (const snapshot of agentSnapshots) {
+    const source = snapshot.source;
+    const byWindow = latestAgentBySource.get(source) ?? new Map();
+    for (const window of snapshot.windows) {
+      const previous = byWindow.get(window.key);
+      if (!previous || snapshot.ts >= previous.snapshot.ts) {
+        byWindow.set(window.key, { snapshot, window });
+      }
+    }
+    latestAgentBySource.set(source, byWindow);
+  }
+
+  const cachedAgents: AgentQuotaSnapshot[] = [];
+  for (const [source, byWindow] of latestAgentBySource) {
+    const windows = [...byWindow.values()];
+    if (windows.length === 0) continue;
+    const latest = windows.reduce((a, b) =>
+      a.snapshot.ts >= b.snapshot.ts ? a : b
+    );
+    cachedAgents.push({
+      source,
+      ts: Math.max(...windows.map((item) => item.snapshot.ts)),
+      plan_type: latest.snapshot.plan_type,
+      windows: windows.map((item) => ({ ...item.window })),
+    });
+  }
+
+  return {
+    zaiSnapshots: sortedZai.length ? [sortedZai[sortedZai.length - 1]] : [],
+    agentSnapshots: cachedAgents,
+  };
+}
+
 export function ComparePanel({ onBack, agentVisibility }: Props) {
   const { t } = useI18n();
+  const {
+    deviceFilter: cachedDeviceFilter,
+    quota: liveZaiQuota,
+    todayDelta: liveZaiTodayDelta,
+    agentQuotaDeltas,
+    codex: liveCodex,
+    claude: liveClaude,
+    cursor: liveCursor,
+  } = useDataCache();
   const [periods, setPeriods] = useState<WeeklyPeriod[]>([]);
   const [zaiQuotaSnapshots, setZaiQuotaSnapshots] = useState<QuotaSnapshot[]>([]);
   const [agentQuotaSnapshots, setAgentQuotaSnapshots] = useState<AgentQuotaSnapshot[]>([]);
@@ -78,6 +181,58 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
   const [remoteDevices, setRemoteDevices] = useState<DeviceInfo[]>([]);
   const [deviceFilter, setDeviceFilter] = useState<string>("all");
   const syncEnabled = !!syncConfig?.enabled && !!syncConfig.device_token;
+  const compareCacheScope = deviceFilter;
+  // DataCache 的实时额度只代表它当前选中的设备；具体设备筛选时不能把本机
+  // 实时值误显示到远端设备上。默认“全部”与全局缓存口径一致，可直接秒显。
+  const liveSubscriptionQuotas =
+    compareCacheScope === cachedDeviceFilter
+      ? buildLiveSubscriptionQuotas(
+          liveZaiQuota,
+          liveZaiTodayDelta,
+          agentQuotaDeltas,
+          liveCodex,
+          liveClaude,
+          liveCursor
+        )
+      : [];
+  const hasLiveSubscriptionQuota = liveSubscriptionQuotas.some(
+    (quota) => quota.windows.length > 0
+  );
+  const hasSubscriptionQuotaData =
+    zaiQuotaSnapshots.length > 0 ||
+    agentQuotaSnapshots.length > 0 ||
+    hasLiveSubscriptionQuota;
+
+  const applyCompareCache = useCallback((entry: CompareCacheEntry) => {
+    setPeriods(entry.periods);
+    setZaiQuotaSnapshots(entry.zaiSnapshots);
+    setAgentQuotaSnapshots(entry.agentSnapshots);
+    setTokens(entry.tokens);
+    setTokensByAgent(entry.tokensByAgent);
+    setSelectedIdx((previous) =>
+      entry.periods.length === 0
+        ? null
+        : previous === null || previous >= entry.periods.length
+          ? entry.periods.length - 1
+          : previous
+    );
+  }, []);
+
+  // 页面切换回来或设备筛选变化时先读本地缓存，后台刷新完成后再替换。
+  useEffect(() => {
+    const cached = readCompareCache(compareCacheScope);
+    if (cached) {
+      applyCompareCache(cached);
+      setError(null);
+      return;
+    }
+    setPeriods([]);
+    setZaiQuotaSnapshots([]);
+    setAgentQuotaSnapshots([]);
+    setTokens([]);
+    setTokensByAgent({});
+    setSelectedIdx(null);
+  }, [applyCompareCache, compareCacheScope]);
 
   // 初始读同步配置 + 设备列表
   useEffect(() => {
@@ -169,9 +324,11 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
         remoteHistory.map(toQuotaSnapshot)
       );
       setZaiQuotaSnapshots(snapshots);
-      setAgentQuotaSnapshots(
-        mergeAgentQuotaSnapshots(localAgentHistory, remoteAgentHistory)
+      const mergedAgentSnapshots = mergeAgentQuotaSnapshots(
+        localAgentHistory,
+        remoteAgentHistory
       );
+      setAgentQuotaSnapshots(mergedAgentSnapshots);
       const ps = await getWeeklyCompareForSnapshots(snapshots);
       if (reqId !== loadReqId.current) return; // 已有更新的请求，丢弃旧响应
       setPeriods(ps);
@@ -180,6 +337,17 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
         setTokens([]);
         setTokensByAgent({});
         setSelectedIdx(null);
+        const latest = latestQuotaSnapshotsForCache(
+          snapshots,
+          mergedAgentSnapshots
+        );
+        writeCompareCache(compareCacheScope, {
+          periods: [],
+          tokens: [],
+          tokensByAgent: {},
+          ...latest,
+          ts: Date.now(),
+        });
         return;
       }
 
@@ -275,6 +443,17 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
       );
       setTokens(mergedTokens);
       setTokensByAgent(mergedByAgent);
+      const latest = latestQuotaSnapshotsForCache(
+        snapshots,
+        mergedAgentSnapshots
+      );
+      writeCompareCache(compareCacheScope, {
+        periods: ps,
+        tokens: mergedTokens,
+        tokensByAgent: mergedByAgent,
+        ...latest,
+        ts: Date.now(),
+      });
 
       // 仅在用户未选中或选中索引超出新周期范围时才落到当前周期，
       // 否则保持用户选择：60s 自动刷新不应把用户点选的历史周期静默跳回
@@ -288,7 +467,14 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
       // 只有最新请求才允许结束 loading，避免旧请求把新请求的加载态清掉
       if (reqId === loadReqId.current) setLoading(false);
     }
-  }, [agentVisibility, deviceFilter, syncConfig, syncEnabled, t]);
+  }, [
+    agentVisibility,
+    compareCacheScope,
+    deviceFilter,
+    syncConfig,
+    syncEnabled,
+    t,
+  ]);
 
   useEffect(() => {
     load();
@@ -339,15 +525,16 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
 
       {error && <div className="px-3 pt-2"><AlertBanner>{error}</AlertBanner></div>}
 
-      {periods.length === 0 && zaiQuotaSnapshots.length === 0 && agentQuotaSnapshots.length === 0 && !loading && !error && (
+      {periods.length === 0 && !hasSubscriptionQuotaData && !loading && !error && (
         <EmptyState title={t("compare.emptyTitle")} hint={t("compare.emptyHint")} />
       )}
 
-      {(periods.length > 0 || zaiQuotaSnapshots.length > 0 || agentQuotaSnapshots.length > 0) && (
+      {(periods.length > 0 || hasSubscriptionQuotaData) && (
         <PageBody className="page-stack">
           <SubscriptionQuotaPanel
             zaiSnapshots={zaiQuotaSnapshots}
             agentSnapshots={agentQuotaSnapshots}
+            liveQuotas={liveSubscriptionQuotas}
             agentVisibility={agentVisibility}
           />
           {periods.length === 0 && (
@@ -431,6 +618,7 @@ interface SubscriptionQuotaWindow {
   usedPct: number;
   resetAt: number | null;
   sampledAt: number;
+  delta?: AgentQuotaDelta;
 }
 
 interface SubscriptionQuotaGroup {
@@ -440,14 +628,22 @@ interface SubscriptionQuotaGroup {
   windows: SubscriptionQuotaWindow[];
 }
 
+interface LiveSubscriptionQuota {
+  agent: AgentId;
+  planType: string | null;
+  windows: SubscriptionQuotaWindow[];
+}
+
 /** 所有可获取订阅的最新额度：百分比统一解释为“已用”，进度条显示“剩余”。 */
 function SubscriptionQuotaPanel({
   zaiSnapshots,
   agentSnapshots,
+  liveQuotas,
   agentVisibility,
 }: {
   zaiSnapshots: QuotaSnapshot[];
   agentSnapshots: AgentQuotaSnapshot[];
+  liveQuotas: LiveSubscriptionQuota[];
   agentVisibility: AgentVisibility;
 }) {
   const { t } = useI18n();
@@ -461,6 +657,7 @@ function SubscriptionQuotaPanel({
   const groups = buildSubscriptionQuotaGroups(
     zaiSnapshots,
     agentSnapshots,
+    liveQuotas,
     agentVisibility
   );
   if (groups.length === 0) return null;
@@ -528,6 +725,11 @@ function SubscriptionQuotaPanel({
                         height="h-1.5"
                         gradient={remainingGradient(remaining)}
                       />
+                      {window.delta && window.delta.samples >= 2 && window.delta.pct > 0 && (
+                        <div className="text-[9px] mt-0.5 num text-slate-700/50">
+                          {t("quota.todayDelta", { pct: Math.round(window.delta.pct) })}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -540,9 +742,121 @@ function SubscriptionQuotaPanel({
   );
 }
 
+function normalizeQuotaPct(value: number | null | undefined): number | null {
+  if (value == null || !Number.isFinite(value)) return null;
+  return Math.min(100, Math.max(0, value));
+}
+
+function normalizeResetAt(value: number | null | undefined): number | null {
+  return value != null && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function parseResetAt(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : null;
+}
+
+/** 从 DataCache 的当前快照组装实时订阅额度，避免历史采样为空时只显示智谱。 */
+function buildLiveSubscriptionQuotas(
+  quota: QuotaResult | null,
+  zaiTodayDelta: [number, number] | null,
+  agentQuotaDeltas: AgentQuotaDeltaMap,
+  codex: CodexSnapshot | null,
+  claude: ClaudeSnapshot | null,
+  cursor: CursorSnapshot | null
+): LiveSubscriptionQuota[] {
+  const groups = new Map<AgentId, LiveSubscriptionQuota>();
+  const ensureGroup = (agent: AgentId, planType: string | null) => {
+    const existing = groups.get(agent);
+    if (existing) {
+      if (!existing.planType && planType) existing.planType = planType;
+      return existing;
+    }
+    const created: LiveSubscriptionQuota = { agent, planType, windows: [] };
+    groups.set(agent, created);
+    return created;
+  };
+  const addWindow = (
+    agent: AgentId,
+    planType: string | null,
+    key: string,
+    usedPct: number | null | undefined,
+    resetAt: number | null | undefined,
+    delta?: AgentQuotaDelta
+  ) => {
+    const pct = normalizeQuotaPct(usedPct);
+    if (pct == null) return;
+    ensureGroup(agent, planType).windows.push({
+      key,
+      usedPct: pct,
+      resetAt: normalizeResetAt(resetAt),
+      // 实时值不显示“采样时间”，历史快照只作为缺失窗口的兜底。
+      sampledAt: 0,
+      delta,
+    });
+  };
+
+  if (quota?.weekly) {
+    addWindow(
+      "zai",
+      quota.level || null,
+      "weekly",
+      quota.weekly.percentage,
+      quota.weekly.nextResetTime,
+      zaiTodayDelta
+        ? { pct: zaiTodayDelta[0], samples: zaiTodayDelta[1] }
+        : undefined
+    );
+  }
+
+  const addAgentRateLimits = (
+    agent: "codex" | "claude",
+    rate: CodexSnapshot["rate_limits"] | ClaudeSnapshot["rate_limits"]
+  ) => {
+    if (!rate) return;
+    addWindow(agent, rate.plan_type, "hour5", rate.primary_pct, rate.primary_reset_at);
+    addWindow(
+      agent,
+      rate.plan_type,
+      "weekly",
+      rate.secondary_pct,
+      rate.secondary_reset_at,
+      agentQuotaDeltas[agent]?.weekly
+    );
+  };
+  addAgentRateLimits("codex", codex?.rate_limits ?? null);
+  addAgentRateLimits("claude", claude?.rate_limits ?? null);
+
+  if (cursor?.plan) {
+    const resetAt = parseResetAt(cursor.billing_cycle_end);
+    addWindow(
+      "cursor",
+      cursor.membership_type,
+      "cursor_auto",
+      cursor.plan.auto_pct,
+      resetAt,
+      agentQuotaDeltas.cursor?.cursor_auto
+    );
+    addWindow(
+      "cursor",
+      cursor.membership_type,
+      "cursor_api",
+      cursor.plan.api_pct,
+      resetAt,
+      agentQuotaDeltas.cursor?.cursor_api
+    );
+  }
+
+  return COMPARE_AGENTS.map((agent) => groups.get(agent)).filter(
+    (group): group is LiveSubscriptionQuota => !!group && group.windows.length > 0
+  );
+}
+
 function buildSubscriptionQuotaGroups(
   zaiSnapshots: QuotaSnapshot[],
   agentSnapshots: AgentQuotaSnapshot[],
+  liveQuotas: LiveSubscriptionQuota[],
   agentVisibility: AgentVisibility
 ): SubscriptionQuotaGroup[] {
   const groups = new Map<AgentId, SubscriptionQuotaGroup>();
@@ -563,6 +877,13 @@ function buildSubscriptionQuotaGroups(
     if (agentVisibility[agent]) ensureGroup(agent);
   }
 
+  const liveDeltas = new Map<string, AgentQuotaDelta>();
+  for (const live of liveQuotas) {
+    for (const window of live.windows) {
+      if (window.delta) liveDeltas.set(`${live.agent}:${window.key}`, window.delta);
+    }
+  }
+
   if (agentVisibility.zai) {
     const sorted = zaiSnapshots
       .filter((snapshot) => Number.isFinite(snapshot.ts))
@@ -577,6 +898,7 @@ function buildSubscriptionQuotaGroups(
         usedPct: latest.weekly_pct,
         resetAt: latest.weekly_reset,
         sampledAt: latest.ts,
+        delta: liveDeltas.get("zai:weekly"),
       });
     }
   }
@@ -600,6 +922,7 @@ function buildSubscriptionQuotaGroups(
             usedPct: window.used_pct,
             resetAt: window.reset_at,
             sampledAt: snapshot.ts,
+            delta: liveDeltas.get(`${agent}:${window.key}`),
           });
         }
         if (snapshot.plan_type) planType = snapshot.plan_type;
@@ -613,6 +936,23 @@ function buildSubscriptionQuotaGroups(
     );
     group.windows = [...latestByWindow.values()].sort((a, b) =>
       quotaWindowOrder(agent, a.key) - quotaWindowOrder(agent, b.key)
+    );
+  }
+
+  // 实时缓存优先；历史中没有对应窗口时也能直接显示当前额度。
+  for (const live of liveQuotas) {
+    if (!agentVisibility[live.agent]) continue;
+    const group = ensureGroup(live.agent);
+    if (live.planType) group.planType = live.planType;
+    const liveKeys = new Set(live.windows.map((window) => window.key));
+    group.windows = group.windows.filter((window) => !liveKeys.has(window.key));
+    group.windows.push(...live.windows);
+    group.windows.sort(
+      (a, b) => quotaWindowOrder(live.agent, a.key) - quotaWindowOrder(live.agent, b.key)
+    );
+    group.sampledAt = Math.max(
+      0,
+      ...group.windows.map((window) => window.sampledAt)
     );
   }
 

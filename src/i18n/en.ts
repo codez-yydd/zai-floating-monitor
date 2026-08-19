@@ -283,14 +283,14 @@ export const en: typeof zh = {
       "{date}: {end}% used at period end · {peak}% sampled peak",
     "compare.subscriptionTitle": "All available subscription quotas",
     "compare.subscriptionHint":
-      "Numbers are quota used percentages; bars show remaining percentages. Quotas from different subscriptions are not added together.",
+      "Z.ai shows weekly quota; Codex/Claude show 5h and weekly quotas; Cursor shows Auto/API for the current billing cycle. Numbers are used percentages; bars show remaining percentages. Different subscriptions are not added together.",
     "compare.quotaUsed": "{pct}% used",
     "compare.sampledAt": "sampled {time}",
     "compare.noQuotaSnapshot": "No quota snapshot available",
     "compare.cursorAuto": "Auto",
     "compare.cursorApi": "API",
     "compare.noZaiHistory":
-      "No Z.ai weekly history yet; showing the current quotas available from other subscriptions.",
+      "No Z.ai weekly history yet; current subscription quotas from cache are still shown above.",
     "compare.allPeriods": "All periods",
     "compare.thisWeek": "This week",
     "compare.ongoing": "~ in progress",
