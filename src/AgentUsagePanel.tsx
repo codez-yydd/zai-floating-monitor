@@ -315,7 +315,8 @@ export function AgentUsagePanel({
                         {!hasPrice && <span className="text-[10px] text-amber-600/90 shrink-0" title={t("common.noPrice")}>⚠</span>}
                       </div>
                       <div className="flex items-center gap-1 text-slate-600/70 num shrink-0 text-[10px]">
-                        <span>{formatTokens(m.total_tokens)}</span>
+                        <span className="min-w-[1.5rem] text-right" title={t("common.requestCount")}>{formatTokens(m.requests)}</span>
+                        <span className="min-w-[2rem] text-right" title={t("common.totalTokens")}>{formatTokens(m.total_tokens)}</span>
                         <span className={`min-w-[2.5rem] text-right font-medium ${hasPrice ? "text-slate-900/90" : "text-slate-500/50"}`}>
                           {hasPrice ? formatCost(costVal, currency) : "—"}
                         </span>

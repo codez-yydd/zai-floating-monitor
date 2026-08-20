@@ -887,7 +887,12 @@ export function SummaryTab({
                       )}
                     </div>
                     <div className="flex items-center gap-1 text-slate-600/70 num shrink-0 whitespace-nowrap text-[10px]">
-                      <span>{formatTokens(m.tokens)}</span>
+                      <span className="min-w-[1.5rem] text-right" title={t("common.requestCount")}>
+                        {formatTokens(m.requests)}
+                      </span>
+                      <span className="min-w-[2rem] text-right" title={t("common.totalTokens")}>
+                        {formatTokens(m.tokens)}
+                      </span>
                       <span
                         className={`min-w-[2.5rem] text-right font-medium ${
                           m.hasPrice
