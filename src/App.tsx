@@ -6,7 +6,8 @@ import { SyncPanel } from "./SyncPanel";
 import { ComparePanel } from "./ComparePanel";
 import { ReportPanel } from "./ReportPanel";
 import { DataProvider } from "./DataCache";
-import { fetchPricing, fetchCurrency, saveCurrency } from "./api";
+import { fetchPricing, saveCurrency } from "./api";
+import { useI18n } from "./i18n";
 import type { Currency, PricingConfig } from "./types";
 import {
   loadAgentVisibility,
@@ -18,12 +19,13 @@ import {
 type View = "stats" | "pricing" | "sync" | "compare" | "report" | "settings";
 
 export default function App() {
+  const { locale } = useI18n();
   const [view, setView] = useState<View>("stats");
-  // 先用 localStorage 做即时初值（避免后端未就绪时闪一下默认值），
-  // 再用后端偏好覆盖 —— 菜单栏标题以后端为准。
-  const [currency, setCurrency] = useState<Currency>(() => {
-    return (localStorage.getItem("zbar-currency") as Currency) || "cny";
-  });
+  // 币种从属语言：中文=人民币、英文=美元。语言是显式偏好，切换语言时币种跟随
+  // （含启动对齐，菜单栏标题同步刷新）；价格表页仍可临时切换查看另一币种口径，
+  // 切语言或重启后回到语言对应值
+  const langCurrency: Currency = locale === "en" ? "usd" : "cny";
+  const [currency, setCurrency] = useState<Currency>(langCurrency);
   const [pricing, setPricing] = useState<PricingConfig>({
     usd: {},
   });
@@ -39,21 +41,19 @@ export default function App() {
     });
   };
 
-  // 初始化：以后端货币偏好为准，覆盖前端本地缓存
+  // 语言对应币种生效：启动时把后端偏好对齐到语言（覆盖旧的手动值，保证菜单栏
+  // 标题与界面一致），语言切换时立即跟随并持久化
   useEffect(() => {
-    fetchCurrency()
-      .then((c) => {
-        setCurrency(c);
-        try {
-          localStorage.setItem("zbar-currency", c);
-        } catch {
-          /* 忽略：QuotaExceededError、隐私模式等（对齐 cache.ts） */
-        }
-      })
-      .catch(() => {});
-  }, []);
+    setCurrency(langCurrency);
+    try {
+      localStorage.setItem("zbar-currency", langCurrency);
+    } catch {
+      /* 忽略：QuotaExceededError、隐私模式等（对齐 cache.ts） */
+    }
+    saveCurrency(langCurrency).catch(() => {});
+  }, [langCurrency]);
 
-  // 切换货币：同步写后端 + 本地缓存，确保菜单栏标题随之刷新
+  // 切换货币（价格表页临时查看口径）：同步写后端 + 本地缓存，菜单栏标题随之刷新
   const handleCurrencyChange = (c: Currency) => {
     setCurrency(c);
     try {

@@ -176,12 +176,6 @@ fn set_pricing(config: PricingConfig) -> Result<(), String> {
     save_pricing(&config)
 }
 
-/// get_currency：读取货币偏好（"cny" | "usd"），供前端初始化
-#[tauri::command]
-fn get_currency() -> String {
-    pricing::load_currency()
-}
-
 /// set_currency：保存货币偏好。前端切换货币时同步给后端，菜单栏标题据此显示。
 /// 保存后立即刷新一次菜单栏标题，避免用户切换后还要等 30 秒后台周期。
 /// 标题刷新含 SQLite 查询（开启同步后还有 HTTP 请求），必须卸载到阻塞线程池，
@@ -1650,7 +1644,6 @@ pub fn run() {
             list_models,
             get_pricing,
             set_pricing,
-            get_currency,
             set_currency,
             check_pricing_updates,
             apply_pricing_updates,

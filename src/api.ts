@@ -59,12 +59,9 @@ export async function savePricing(config: PricingConfig): Promise<void> {
   await invoke("set_pricing", { config });
 }
 
-/** 读取货币偏好（"cny" | "usd"），后端据此决定菜单栏显示 ¥ 还是 $ */
-export async function fetchCurrency(): Promise<Currency> {
-  return invoke<Currency>("get_currency");
-}
-
-/** 保存货币偏好，同步给后端（菜单栏标题随之刷新） */
+/** 保存货币偏好，同步给后端（菜单栏标题随之刷新）。
+ *  币种由语言决定（中文=人民币/英文=美元），语言切换时 App 统一下发；
+ *  价格表页的临时切换口径也走这里让菜单栏跟随。 */
 export async function saveCurrency(currency: Currency): Promise<void> {
   await invoke("set_currency", { currency });
 }
