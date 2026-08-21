@@ -284,9 +284,9 @@ export function AgentUsagePanel({
           action={
             <SortToggle
               options={[
-                { key: "cost", label: t("common.cost") },
-                { key: "token", label: "Token" },
                 { key: "requests", label: t("common.requests") },
+                { key: "token", label: "Token" },
+                { key: "cost", label: t("common.cost") },
               ]}
               value={sortBy}
               onChange={setSortBy}
