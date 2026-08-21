@@ -72,10 +72,10 @@ jobs:
       - name: 收集产物（安装包 + .sig 签名）
         shell: bash
         run: |
-          mkdir -p dist
+          mkdir -p out
           BASE="src-tauri/target/${{ matrix.target }}/release/bundle"
-          find "$BASE/nsis" -name '*-setup.exe*' -exec cp {} dist/ \; 2>/dev/null || true
-          find "$BASE/dmg" -name '*.dmg' -exec cp {} dist/ \; 2>/dev/null || true
+          find "$BASE/nsis" -name '*-setup.exe*' -exec cp {} out/ \; 2>/dev/null || true
+          find "$BASE/dmg" -name '*.dmg' -exec cp {} out/ \; 2>/dev/null || true
           # macOS 更新包产物名固定为 <产品名>.app.tar.gz（不带架构），手动补后缀：
           # 两个 mac 架构同名会互相覆盖，且 latest.json 需按架构区分下载地址
           if [[ -d "$BASE/macos" ]]; then
@@ -86,18 +86,18 @@ jobs:
             for f in "$BASE/macos/"*.app.tar.gz; do
               [[ -e "$f" ]] || continue
               stem="$(basename "$f" .app.tar.gz)"
-              cp "$f" "dist/${stem}_${SUFFIX}.app.tar.gz"
-              [[ -f "$f.sig" ]] && cp "$f.sig" "dist/${stem}_${SUFFIX}.app.tar.gz.sig"
+              cp "$f" "out/${stem}_${SUFFIX}.app.tar.gz"
+              [[ -f "$f.sig" ]] && cp "$f.sig" "out/${stem}_${SUFFIX}.app.tar.gz.sig"
             done
           fi
-          echo '--- dist ---'
-          ls -la dist/
-          [[ $(ls dist | wc -l) -gt 0 ]] || { echo '未收集到任何产物'; exit 1; }
+          echo '--- out ---'
+          ls -la out/
+          [[ $(ls out | wc -l) -gt 0 ]] || { echo '未收集到任何产物'; exit 1; }
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: dist/*
+          path: out/*
           if-no-files-found: error
 
   release:
@@ -109,7 +109,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          path: dist
+          path: out
           merge-multiple: true
 
       - name: 生成双源 latest.json
@@ -135,7 +135,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: codez-yydd/zai-floating-monitor
         run: |
-          gh release create "v$VERSION" dist/* \
+          # 重跑幂等：上次失败可能留下残缺 release，先清理（tag 保留）
+          gh release view "v$VERSION" >/dev/null 2>&1 && gh release delete "v$VERSION" --yes || true
+          gh release create "v$VERSION" out/* \
             --title "ZBar v$VERSION" \
             --notes "ZBar v$VERSION：Token 速率与首字延迟指标、各 Agent 当前模型显示、应用内自动更新（Windows / macOS）。首次升级需手动下载安装，此后可在应用内一键更新。" \
             --latest
@@ -161,10 +163,10 @@ jobs:
               -F "file=@$1;filename=$2" | grep -o '"path":"[^"]*"' | cut -d'"' -f4
           }
           FILES=""
-          for f in dist/*-setup.exe dist/*-setup.exe.sig \
-                   dist/*aarch64*.app.tar.gz dist/*aarch64*.app.tar.gz.sig \
-                   dist/*x64.app.tar.gz dist/*x64.app.tar.gz.sig \
-                   dist/*.dmg; do
+          for f in out/*-setup.exe out/*-setup.exe.sig \
+                   out/*aarch64*.app.tar.gz out/*aarch64*.app.tar.gz.sig \
+                   out/*x64.app.tar.gz out/*x64.app.tar.gz.sig \
+                   out/*.dmg; do
             [[ -f "$f" ]] || continue
             p=$(attach "$f" "$(basename "$f")") && FILES="$FILES$p," || { echo "附件上传失败: $f"; exit 1; }
           done

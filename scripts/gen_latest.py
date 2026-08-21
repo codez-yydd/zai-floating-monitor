@@ -20,9 +20,9 @@ if not version:
     with open("src-tauri/tauri.conf.json", encoding="utf-8") as f:
         version = json.load(f)["version"]
 
-nsis = glob.glob("dist/*x64-setup.exe")
-mac_arm = glob.glob("dist/*aarch64*.app.tar.gz")
-mac_x64 = glob.glob("dist/*x64.app.tar.gz")
+nsis = glob.glob("out/*x64-setup.exe")
+mac_arm = glob.glob("out/*aarch64*.app.tar.gz")
+mac_x64 = glob.glob("out/*x64.app.tar.gz")
 assert nsis and mac_arm and mac_x64, f"产物不全: nsis={nsis} arm={mac_arm} x64={mac_x64}"
 nsis, mac_arm, mac_x64 = nsis[0], mac_arm[0], mac_x64[0]
 
