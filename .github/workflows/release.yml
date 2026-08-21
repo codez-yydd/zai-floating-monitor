@@ -75,8 +75,21 @@ jobs:
           mkdir -p dist
           BASE="src-tauri/target/${{ matrix.target }}/release/bundle"
           find "$BASE/nsis" -name '*-setup.exe*' -exec cp {} dist/ \; 2>/dev/null || true
-          find "$BASE/macos" -name '*.app.tar.gz*' -exec cp {} dist/ \; 2>/dev/null || true
           find "$BASE/dmg" -name '*.dmg' -exec cp {} dist/ \; 2>/dev/null || true
+          # macOS 更新包产物名固定为 <产品名>.app.tar.gz（不带架构），手动补后缀：
+          # 两个 mac 架构同名会互相覆盖，且 latest.json 需按架构区分下载地址
+          if [[ -d "$BASE/macos" ]]; then
+            case "${{ matrix.target }}" in
+              aarch64-*) SUFFIX=aarch64 ;;
+              x86_64-*)  SUFFIX=x64 ;;
+            esac
+            for f in "$BASE/macos/"*.app.tar.gz; do
+              [[ -e "$f" ]] || continue
+              stem="$(basename "$f" .app.tar.gz)"
+              cp "$f" "dist/${stem}_${SUFFIX}.app.tar.gz"
+              [[ -f "$f.sig" ]] && cp "$f.sig" "dist/${stem}_${SUFFIX}.app.tar.gz.sig"
+            done
+          fi
           echo '--- dist ---'
           ls -la dist/
           [[ $(ls dist | wc -l) -gt 0 ]] || { echo '未收集到任何产物'; exit 1; }
