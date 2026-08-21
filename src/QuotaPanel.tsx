@@ -4,11 +4,6 @@ import { formatCountdownCore } from "./format";
 import { remainingGradient, remainingTextColor } from "./widgets";
 import { useI18n } from "./i18n";
 
-interface Props {
-  /** 点击「去设置」回调 */
-  onGoSettings: () => void;
-}
-
 const LEVEL_LABEL: Record<string, string> = {
   lite: "Lite",
   pro: "Pro",
@@ -16,7 +11,7 @@ const LEVEL_LABEL: Record<string, string> = {
   ultra: "Ultra",
 };
 
-export function QuotaPanel({ onGoSettings }: Props) {
+export function QuotaPanel() {
   // 额度数据由全局 DataProvider 统一预加载 + 30s 定时刷新，
   // 此组件仅负责展示（纯展示层），不再自己请求。
   const { quota, quotaError, todayDelta, refreshQuota } = useDataCache();
@@ -29,20 +24,12 @@ export function QuotaPanel({ onGoSettings }: Props) {
     return () => clearInterval(tickTimer);
   }, []);
 
-  // 未配置 token 的错误 → 显示引导
-  // 注意：正则匹配 Rust 后端返回的中文错误串（如「未配置 Token」），仅做布尔分支，不能翻译
-  if (quotaError && /未配置|Token/i.test(quotaError)) {
+  // 本地凭证缺失（未在 ZCode 客户端登录 Coding Plan）→ 显示登录引导
+  // 注意：正则匹配 Rust 后端返回的中文错误串（quota.rs 的固定前缀文案），仅做布尔分支，不能翻译
+  if (quotaError && quotaError.includes("未找到 ZCode Coding Plan 凭证")) {
     return (
       <div className="mx-3.5 mb-1 rounded-lg bg-sky-500/10 border border-sky-500/20 px-2.5 py-1.5">
-        <div className="flex items-center justify-between">
-          <span className="text-[11px] text-sky-700/80">{t("quota.title")}</span>
-          <button
-            onClick={onGoSettings}
-            className="text-[10px] text-sky-600 hover:text-sky-700 transition-colors"
-          >
-            {t("quota.goConfig")}
-          </button>
-        </div>
+        <span className="text-[11px] text-sky-700/80">{t("quota.title")}</span>
         <p className="text-[10px] text-slate-700/50 mt-0.5">
           {t("quota.configHint")}
         </p>

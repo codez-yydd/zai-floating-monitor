@@ -24,8 +24,7 @@ export const stats = {
 
   // ===== Coding Plan 额度面板 =====
   "quota.title": "Coding Plan 额度监控",
-  "quota.goConfig": "去配置 →",
-  "quota.configHint": "填写 API Token 后显示用量进度",
+  "quota.configHint": "请在 ZCode 客户端登录 Coding Plan 订阅，登录后自动读取额度",
   "quota.failed": "额度查询失败：{msg}",
   "quota.refresh": "刷新额度",
   "quota.todayDelta": "↑今日 {pct}%",
@@ -42,7 +41,7 @@ export const stats = {
 
   // ===== Cursor 面板 =====
   "cursor.notLoggedIn": "未检测到 Cursor 登录",
-  "cursor.loginHint": "请在 Cursor 应用中登录，或在「设置 → Cursor 统计」中手动粘贴 Cookie",
+  "cursor.loginHint": "请在 Cursor 应用中登录，登录后自动读取本地用量",
   "cursor.account": "账户",
   "cursor.unknown": "未知",
   "cursor.planQuota": "套餐额度",

@@ -482,7 +482,7 @@ pub fn resolve_cookie(cfg: &CursorConfig) -> Result<String, String> {
     if cfg.cookie_source == "manual" {
         let header = cfg.cookie_header.trim();
         if header.is_empty() {
-            return Err("Cookie 来源为手动模式，但未配置 cookie。请在设置中粘贴 Cookie".into());
+            return Err("Cookie 来源为手动模式，但未配置 cookie。请编辑 ~/.zbar/cursor.json 填写 cookie_header 字段".into());
         }
         return Ok(header.to_string());
     }
@@ -544,7 +544,7 @@ fn map_http_error(
         Ok(r) => Ok(r),
         Err(ureq::Error::Status(code, _)) => {
             if code == 401 {
-                Err(format!("Cursor 未登录或会话已过期（{ctx} HTTP {code}），请在 Cursor 应用中重新登录或在设置中更新 Cookie"))
+                Err(format!("Cursor 未登录或会话已过期（{ctx} HTTP {code}），请在 Cursor 应用中重新登录"))
             } else {
                 Err(format!("Cursor {ctx} 请求失败: HTTP {code}"))
             }
@@ -1061,15 +1061,6 @@ pub fn fetch_cursor_snapshot(from_ms: i64, to_ms: i64) -> Result<CursorSnapshot,
     })
 }
 
-/// 测试 Cursor 认证是否有效（设置页用）
-pub fn test_cursor_auth() -> Result<(Option<String>, Option<String>, Option<String>), String> {
-    let cfg = load_cursor_config()?;
-    let cookie = resolve_cookie(&cfg)?;
-    let auth = fetch_auth_me(&cookie)?;
-    let summary = fetch_usage_summary(&cookie).unwrap_or_default();
-    Ok((auth.email, auth.name, summary.membership_type))
-}
-
 /// 轻量拉取 Cursor 用量合计（菜单栏标题合并用）。
 /// 只走 events（带 120s 缓存），不拉 summary/auth，避免 30s 定时器狂发请求。
 /// 返回 (API 标价花费 USD, 总 token)。未配置/未登录/网络失败时返回 Err，调用方静默降级。
@@ -1130,85 +1121,6 @@ pub fn fetch_cursor_period_buckets(
         }
     }
     Ok(buckets)
-}
-
-/// 诊断信息：排查 events API 为何返回空。
-/// 返回 cookie 来源、events 原始响应状态码 + body 摘要。
-#[derive(Debug, Serialize)]
-pub struct CursorDebugInfo {
-    pub cookie_source: String,
-    pub db_found: bool,
-    pub user_id: String,
-    pub events_status: u16,
-    pub events_body_excerpt: String,
-}
-
-pub fn cursor_debug() -> Result<CursorDebugInfo, String> {
-    let cfg = load_cursor_config()?;
-
-    // 诊断 DB 是否存在
-    let db_found = cursor_db_path().is_some();
-
-    let cookie = resolve_cookie(&cfg)?;
-
-    // 提取 user_id（用于验证 JWT 解析）
-    let user_id = if cfg.cookie_source == "manual" {
-        "(manual cookie)".to_string()
-    } else {
-        match read_cursor_access_token() {
-            Ok(token) => jwt_user_id(&token).unwrap_or_else(|e| format!("解析失败: {e}")),
-            Err(e) => format!("读取失败: {e}"),
-        }
-    };
-
-    // 直接发一个 events 请求，看原始响应
-    let url = format!("{CURSOR_BASE}/api/dashboard/get-filtered-usage-events");
-    let now = chrono::Utc::now().timestamp_millis();
-    let week_ago = now - 7 * 86_400_000;
-    let body = serde_json::json!({
-        "page": 1,
-        "pageSize": 100,
-        "startDate": week_ago.to_string(),
-        "endDate": now.to_string(),
-    });
-
-    let resp_result = http_agent()
-        .post(&url)
-        .set("Content-Type", "application/json")
-        .set("Accept", "application/json")
-        .set("Cookie", &cookie)
-        .set("Origin", CURSOR_BASE)
-        .send_json(body);
-
-    let (status, body_excerpt) = match resp_result {
-        Ok(resp) => {
-            let status = resp.status();
-            let body_text = resp.into_string().unwrap_or_default();
-            (status, truncate_str(&body_text, 2000))
-        }
-        Err(ureq::Error::Status(code, resp)) => {
-            let body_text = resp.into_string().unwrap_or_default();
-            (code, truncate_str(&body_text, 2000))
-        }
-        Err(e) => (0, format!("网络错误: {e}")),
-    };
-
-    Ok(CursorDebugInfo {
-        cookie_source: cfg.cookie_source,
-        db_found,
-        user_id,
-        events_status: status,
-        events_body_excerpt: body_excerpt,
-    })
-}
-
-/// 按 char 边界安全截断字符串（避免 UTF-8 字节截断 panic）
-fn truncate_str(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        return s.to_string();
-    }
-    let truncated: String = s.chars().take(max_chars).collect();
-    format!("{truncated}...(truncated, total {len} bytes)", len = s.len())
 }
 
 #[cfg(test)]

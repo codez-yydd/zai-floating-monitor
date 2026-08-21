@@ -16,7 +16,6 @@ import type {
   PricingDiff,
   ApplyPriceItem,
   AgentQuotaSnapshot,
-  QuotaConfig,
   QuotaResult,
   QuotaSnapshot,
   RegisterRequest,
@@ -75,14 +74,6 @@ export async function applyPricingUpdates(
   items: ApplyPriceItem[]
 ): Promise<PricingConfig> {
   return invoke<PricingConfig>("apply_pricing_updates", { items });
-}
-
-export async function fetchQuotaConfig(): Promise<QuotaConfig> {
-  return invoke<QuotaConfig>("get_quota_config");
-}
-
-export async function saveQuotaConfig(config: QuotaConfig): Promise<void> {
-  await invoke("set_quota_config", { config });
 }
 
 export async function fetchQuota(): Promise<QuotaResult> {
@@ -373,26 +364,6 @@ export async function getCursorConfig(): Promise<CursorConfig> {
 /** 保存 Cursor 配置 */
 export async function setCursorConfig(config: CursorConfig): Promise<void> {
   await invoke("set_cursor_config", { config });
-}
-
-/** 测试 Cursor 认证，返回 [email, name, membership_type] */
-export async function testCursorAuth(): Promise<
-  [string | null, string | null, string | null]
-> {
-  return invoke<[string | null, string | null, string | null]>(
-    "test_cursor_auth"
-  );
-}
-
-/** 诊断 Cursor events API（排查"暂无明细"问题） */
-export async function cursorDebug(): Promise<{
-  cookie_source: string;
-  db_found: boolean;
-  user_id: string;
-  events_status: number;
-  events_body_excerpt: string;
-}> {
-  return invoke("cursor_debug");
 }
 
 /** 立即联网获取最新 USD→CNY 汇率（多源容错）并写入后端配置，返回 [汇率, 来源名] */

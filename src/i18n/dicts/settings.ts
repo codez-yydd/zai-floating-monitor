@@ -1,6 +1,6 @@
 /**
- * 设置页词典：外观（透明度/语言）、开机自启、统计来源、Coding Plan、
- * Cursor 统计、全局快捷键各卡片的文案。
+ * 设置页词典：外观（透明度/语言）、开机自启、统计来源、汇率、
+ * 全局快捷键各卡片的文案。
  */
 
 export const settings = {
@@ -36,34 +36,8 @@ export const settings = {
   "settings.agentClaudeDesc": "Claude Code 用量与订阅额度",
   "settings.agentCursorDesc": "Cursor 编辑器用量与套餐额度",
 
-  // ===== Coding Plan 额度监控 =====
-  "settings.tokenPh": "粘贴 Coding Plan API Token",
-  "settings.endpoint": "端点",
-  "settings.endpointCn": "🇨🇳 国内",
-  "settings.endpointGlobal": "🌐 国际",
-  "settings.endpointHint": "Token 从智谱开放平台获取。国内用户选「国内」端点。",
-
-  // ===== Cursor 统计 =====
-  "settings.cursorStats": "Cursor 统计",
-  "settings.debug": "诊断",
-  "settings.debugging": "诊断中…",
-  "settings.debugFailed": "诊断失败：{msg}",
-  "settings.debugSource": "来源",
-  "settings.debugDbFound": "已找到",
-  "settings.debugDbMissing": "未找到",
-  "settings.debugResponse": "响应",
-  "settings.test": "测试连接",
-  "settings.testing": "测试中…",
-  "settings.connectedEmail": "✓ 已连接：{email}",
-  "settings.connectedEmailPlan": "✓ 已连接：{email}（{plan}）",
-  "settings.connectedName": "✓ 已连接：{name}",
-  "settings.authOk": "✓ 认证成功",
-  "settings.auth": "认证",
-  "settings.authAuto": "自动（读 Cursor 应用）",
-  "settings.authManual": "手动 Cookie",
-  "settings.cookiePh": "粘贴 cursor.com 请求的 Cookie 头",
-
   // ===== 汇率 =====
+  "settings.fxCard": "汇率",
   "settings.fxAutoNote": "自动更新中，取消勾选可手动输入",
   "settings.fxNever": "尚未联网获取",
   "settings.fxUnknownSource": "未知来源",
@@ -74,8 +48,6 @@ export const settings = {
   "settings.updateNowTitle": "立即联网获取最新汇率（多个免费数据源自动容错）",
   "settings.fxNote":
     "模型价格只存美元，人民币花费按此汇率自动折算（价格设置页的 ¥ 视图同源）。",
-  "settings.cursorAutoHint":
-    "自动读取 Cursor 应用的本地登录凭据。请确保 Cursor 已安装并登录。",
 
   // ===== 全局快捷键 =====
   "settings.shortcut": "全局快捷键",

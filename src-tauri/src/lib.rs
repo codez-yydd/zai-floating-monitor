@@ -12,7 +12,7 @@ mod shortcut;
 mod sync;
 
 use pricing::{load_pricing, save_pricing, ModelPrice, PricingConfig};
-use quota::{load_quota, save_quota, QuotaConfig, QuotaResult};
+use quota::QuotaResult;
 use chrono::TimeZone;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -255,18 +255,6 @@ fn apply_pricing_updates(items: Vec<ApplyPriceItem>) -> Result<PricingConfig, St
     pricing::apply_updates(&tuples)
 }
 
-/// get_quota_config：读取额度查询配置（token + 端点）
-#[tauri::command]
-fn get_quota_config() -> Result<QuotaConfig, String> {
-    load_quota()
-}
-
-/// set_quota_config：保存额度查询配置
-#[tauri::command]
-fn set_quota_config(config: QuotaConfig) -> Result<(), String> {
-    save_quota(&config)
-}
-
 /// get_shortcut_config：读取全局快捷键配置
 #[tauri::command]
 fn get_shortcut_config() -> Result<shortcut::ShortcutConfig, String> {
@@ -303,16 +291,14 @@ fn unregister_shortcut(app: AppHandle) -> Result<(), String> {
 }
 
 /// fetch_quota：实时查询 Coding Plan 额度（5小时窗口 + 每周）。
+/// 凭证与端点由后端自动推断（只读 ZCode 客户端登录态，无入参）。
 /// async + spawn_blocking：内部为同步 HTTP（ureq），必须卸载到阻塞线程池，
 /// 否则同步 command 在主线程执行时，网络慢会冻结托盘/窗口事件（前端每 30s 调一次）。
 #[tauri::command]
 async fn fetch_quota() -> Result<QuotaResult, String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        let cfg = load_quota()?;
-        quota::fetch_quota(&cfg)
-    })
-    .await
-    .map_err(|e| format!("额度查询任务失败: {e}"))?
+    tauri::async_runtime::spawn_blocking(quota::fetch_quota)
+        .await
+        .map_err(|e| format!("额度查询任务失败: {e}"))?
 }
 
 // ===== 周额度追踪 / 对比页 =====
@@ -510,15 +496,6 @@ fn set_cursor_config(config: cursor::CursorConfig) -> Result<(), String> {
     cursor::save_cursor_config(&config)
 }
 
-/// 测试 Cursor 认证（设置页用）。返回 (email, name, membership_type)
-/// 同样用 spawn_blocking 卸载网络 I/O。
-#[tauri::command]
-async fn test_cursor_auth() -> Result<(Option<String>, Option<String>, Option<String>), String> {
-    tauri::async_runtime::spawn_blocking(|| cursor::test_cursor_auth())
-        .await
-        .map_err(|e| format!("Cursor 认证测试失败: {e}"))?
-}
-
 /// fetch_fx_rate：立即联网获取最新 USD→CNY 汇率（多源容错）并写入 cursor 配置，
 /// 返回 (汇率, 来源名)。设置页「立即更新」按钮用。
 /// async + spawn_blocking：内部为同步 HTTP（ureq），必须卸载到阻塞线程池，
@@ -528,14 +505,6 @@ async fn fetch_fx_rate() -> Result<(f64, String), String> {
     tauri::async_runtime::spawn_blocking(cursor::fetch_fx_rate)
         .await
         .map_err(|e| format!("汇率获取任务失败: {e}"))?
-}
-
-/// 诊断 Cursor events API（排查"暂无明细"问题）
-#[tauri::command]
-async fn cursor_debug() -> Result<cursor::CursorDebugInfo, String> {
-    tauri::async_runtime::spawn_blocking(|| cursor::cursor_debug())
-        .await
-        .map_err(|e| format!("Cursor 诊断失败: {e}"))?
 }
 
 // ===== Codex 用量统计 =====
@@ -1625,8 +1594,6 @@ pub fn run() {
             set_currency,
             check_pricing_updates,
             apply_pricing_updates,
-            get_quota_config,
-            set_quota_config,
             get_shortcut_config,
             set_shortcut_config,
             unregister_shortcut,
@@ -1662,8 +1629,6 @@ pub fn run() {
             get_cursor_usage,
             get_cursor_config,
             set_cursor_config,
-            test_cursor_auth,
-            cursor_debug,
             fetch_fx_rate,
             get_codex_usage,
             get_codex_debug,

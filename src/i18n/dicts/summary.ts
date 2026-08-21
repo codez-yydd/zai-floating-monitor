@@ -9,7 +9,7 @@ export const summary = {
   "summary.costDist": "花费分布",
   "summary.quotaMonitor": "额度监控",
   "summary.resetDate": "重置 {date}",
-  "summary.noToken": "未配置 Token",
+  "summary.noToken": "未登录 Coding Plan",
   "summary.quotaFailed": "额度获取失败",
   "summary.noData": "暂无数据",
   "summary.loadFailed": "数据获取失败",

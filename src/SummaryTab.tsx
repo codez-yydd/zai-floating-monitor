@@ -453,9 +453,9 @@ export function SummaryTab({
   // used_cents/limit_cents 是套餐标价口径，不能代表 Auto 额度。
   const plan = cursor?.plan;
 
-  // 注意：正则匹配 Rust 后端返回的中文错误串（如「未配置 Token」），仅做布尔分支，不能翻译
+  // 注意：匹配 Rust 后端返回的中文错误串固定前缀（quota.rs），仅做布尔分支，不能翻译
   const zcodeEmpty = quotaError
-    ? /未配置|Token/i.test(quotaError)
+    ? quotaError.includes("未找到 ZCode Coding Plan 凭证")
       ? t("summary.noToken")
       : t("summary.quotaFailed")
     : t("common.loading");

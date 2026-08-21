@@ -1,20 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import type {
-  CursorConfig,
-  QuotaConfig,
-  QuotaEndpoint,
-  ShortcutConfig,
-} from "./types";
+import type { CursorConfig, ShortcutConfig } from "./types";
 import {
-  cursorDebug,
   fetchFxRate,
-  fetchQuotaConfig,
   getCursorConfig,
   getShortcutConfig,
-  saveQuotaConfig,
   setCursorConfig,
   setShortcutConfig,
-  testCursorAuth,
 } from "./api";
 import {
   disable as disableAutostart,
@@ -35,7 +26,6 @@ import {
   PillGroup,
   PillButton,
   BtnPrimary,
-  BtnSecondary,
   AlertBanner,
 } from "./layout";
 import {
@@ -60,7 +50,7 @@ function fmtFxTime(ms: number): string {
 
 /**
  * 设置页：面板透明度 + 从价格设置页搬来的非价格配置
- * （开机自启 / Coding Plan 额度监控 / Cursor 统计 / 全局快捷键）。
+ * （开机自启 / 汇率 / 全局快捷键）。
  * 单列滚动，改完即存（无整页保存按钮）。
  */
 export function SettingsPanel({
@@ -70,8 +60,8 @@ export function SettingsPanel({
 }: Props) {
   const { locale, t, setLocale } = useI18n();
   const [error, setError] = useState<string | null>(null);
-  // 配置加载成功后才允许保存/测试/应用：加载失败时组件停在默认值，
-  // 若仍可保存会把空 token 等默认值写回后端覆盖真实配置
+  // 配置加载成功后才允许保存/更新/应用：加载失败时组件停在默认值，
+  // 若仍可保存会把默认汇率等值写回后端覆盖真实配置
   const [loaded, setLoaded] = useState(false);
 
   // ===== 外观：面板透明度（localStorage 持久化，改完即时生效）=====
@@ -86,16 +76,6 @@ export function SettingsPanel({
   // 最新透明度镜像：卸载清理的闭包读不到最新 state，从 ref 取
   const lastAlphaRef = useRef(alpha);
 
-  // ===== Coding Plan 额度查询配置 =====
-  const [quotaCfg, setQuotaCfg] = useState<QuotaConfig>({
-    token: "",
-    endpoint: "cn",
-  });
-  const [tokenDraft, setTokenDraft] = useState<string>("");
-  const [showToken, setShowToken] = useState(false);
-  const [savingQuota, setSavingQuota] = useState(false);
-  const [quotaSavedFlash, setQuotaSavedFlash] = useState(false);
-
   // ===== 全局快捷键配置 =====
   const [shortcutCfg, setShortcutCfg] = useState<ShortcutConfig | null>(null);
   const [shortcutDraft, setShortcutDraft] = useState("");
@@ -103,7 +83,7 @@ export function SettingsPanel({
   const [shortcutSavedFlash, setShortcutSavedFlash] = useState(false);
   const [shortcutError, setShortcutError] = useState<string | null>(null);
 
-  // ===== Cursor 配置 =====
+  // ===== Cursor 配置（设置页仅消费其中的汇率字段；认证自动读 Cursor 应用）=====
   const [cursorCfg, setCursorCfg] = useState<CursorConfig>({
     cookie_source: "auto",
     cookie_header: "",
@@ -114,10 +94,6 @@ export function SettingsPanel({
   });
   const [savingCursor, setSavingCursor] = useState(false);
   const [cursorSavedFlash, setCursorSavedFlash] = useState(false);
-  const [cursorTesting, setCursorTesting] = useState(false);
-  const [cursorTestResult, setCursorTestResult] = useState<string | null>(null);
-  const [cursorDebugInfo, setCursorDebugInfo] = useState<string | null>(null);
-  const [cursorDebugging, setCursorDebugging] = useState(false);
   // 汇率「立即更新」进行中（防重复点击）
   const [fxUpdating, setFxUpdating] = useState(false);
   // 最近一次「立即更新」的结果反馈（✓ 成功 / ✗ 失败）
@@ -137,10 +113,8 @@ export function SettingsPanel({
   }, []);
 
   useEffect(() => {
-    Promise.all([fetchQuotaConfig(), getShortcutConfig(), getCursorConfig()])
-      .then(([q, s, cc]) => {
-        setQuotaCfg(q);
-        setTokenDraft(q.token);
+    Promise.all([getShortcutConfig(), getCursorConfig()])
+      .then(([s, cc]) => {
         setShortcutCfg(s);
         setShortcutDraft(s.accelerator);
         setCursorCfg(cc);
@@ -159,30 +133,10 @@ export function SettingsPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleSaveQuota = async () => {
-    const merged: QuotaConfig = {
-      ...quotaCfg,
-      token: tokenDraft.trim(),
-    };
-    setSavingQuota(true);
-    setError(null);
-    try {
-      await saveQuotaConfig(merged);
-      setQuotaCfg(merged);
-      setQuotaSavedFlash(true);
-      setTimeout(() => setQuotaSavedFlash(false), 1500);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setSavingQuota(false);
-    }
-  };
-
-  // 保存 Cursor 配置
+  // 保存 Cursor 配置（设置页改动落盘：手动汇率输入、自动更新开关）
   const handleSaveCursor = async () => {
     setSavingCursor(true);
     setError(null);
-    setCursorTestResult(null);
     try {
       await setCursorConfig(cursorCfg);
       setCursorSavedFlash(true);
@@ -191,32 +145,6 @@ export function SettingsPanel({
       setError(String(e));
     } finally {
       setSavingCursor(false);
-    }
-  };
-
-  // 测试 Cursor 认证
-  const handleTestCursor = async () => {
-    setCursorTesting(true);
-    setCursorTestResult(null);
-    try {
-      // 先保存当前配置，再用最新配置测试
-      await setCursorConfig(cursorCfg);
-      const [email, name, membership] = await testCursorAuth();
-      if (email) {
-        setCursorTestResult(
-          membership
-            ? t("settings.connectedEmailPlan", { email, plan: membership })
-            : t("settings.connectedEmail", { email })
-        );
-      } else if (name) {
-        setCursorTestResult(t("settings.connectedName", { name }));
-      } else {
-        setCursorTestResult(t("settings.authOk"));
-      }
-    } catch (e) {
-      setCursorTestResult(`✗ ${String(e)}`);
-    } finally {
-      setCursorTesting(false);
     }
   };
 
@@ -408,246 +336,106 @@ export function SettingsPanel({
             ))}
         </SettingsCard>
 
+        {/* 汇率：USD→CNY 折算（价格只存美元，人民币花费实时折算） */}
         <SettingsCard
-          title={t("quota.title")}
+          title={t("settings.fxCard")}
           action={
-            <BtnPrimary onClick={handleSaveQuota} disabled={savingQuota || !loaded}>
-              {savingQuota ? t("common.saving") : quotaSavedFlash ? t("common.saved") : t("common.save")}
+            <BtnPrimary onClick={handleSaveCursor} disabled={savingCursor || !loaded}>
+              {savingCursor ? t("common.saving") : cursorSavedFlash ? t("common.saved") : t("common.save")}
             </BtnPrimary>
           }
         >
-          {/* Token 输入 */}
-          <label className="flex flex-col gap-0.5 text-[10px]">
-            <span className="text-slate-700/55">API Token</span>
-            <div className="flex items-center rounded-md bg-surface/60 border border-slate-900/10 focus-within:border-sky-400/60 focus-within:ring-1 focus-within:ring-sky-400/40 transition-colors">
-              <input
-                type={showToken ? "text" : "password"}
-                value={tokenDraft}
-                placeholder={t("settings.tokenPh")}
-                onChange={(e) => setTokenDraft(e.target.value)}
-                className="num w-full px-1.5 py-1 text-left bg-transparent text-slate-900/90 placeholder:text-slate-700/35 focus:outline-none text-[11px]"
-              />
-              <button
-                onClick={() => setShowToken((v) => !v)}
-                className="px-1.5 text-slate-700/40 hover:text-slate-900/70 transition-colors text-[10px] shrink-0"
-                title={showToken ? t("common.hide") : t("common.show")}
-              >
-                {showToken ? "🙈" : "👁"}
-              </button>
-            </div>
-          </label>
-          {/* 端点切换 */}
-          <div className="flex items-center justify-between mt-2">
-            <span className="text-[10px] text-slate-700/55">{t("settings.endpoint")}</span>
-            <div className="flex gap-1">
-              {(["cn", "global"] as QuotaEndpoint[]).map((ep) => (
-                <button
-                  key={ep}
-                  onClick={() =>
-                    setQuotaCfg((c) => ({ ...c, endpoint: ep }))
-                  }
-                  className={`px-2 py-0.5 rounded-md text-[10px] transition-colors ${
-                    quotaCfg.endpoint === ep
-                      ? "bg-sky-500 text-white"
-                      : "bg-slate-900/5 text-slate-700/65 hover:bg-slate-900/10"
-                  }`}
-                >
-                  {ep === "cn" ? t("settings.endpointCn") : t("settings.endpointGlobal")}
-                </button>
-              ))}
-            </div>
-          </div>
-          <p className="text-[9px] text-slate-500 mt-1.5 leading-relaxed">
-            {t("settings.endpointHint")}
-          </p>
-        </SettingsCard>
-
-        <SettingsCard
-          title={t("settings.cursorStats")}
-          action={
-            <div className="flex items-center gap-1.5">
-              <BtnSecondary onClick={async () => {
-                setCursorDebugging(true);
-                setCursorDebugInfo(null);
-                try {
-                  const info = await cursorDebug();
-                  setCursorDebugInfo(
-                    `${t("settings.debugSource")}: ${info.cookie_source}\nDB: ${info.db_found ? t("settings.debugDbFound") : t("settings.debugDbMissing")}\nUserID: ${info.user_id}\nEvents HTTP: ${info.events_status}\n${t("settings.debugResponse")}: ${info.events_body_excerpt}`
-                  );
-                } catch (e) {
-                  setCursorDebugInfo(t("settings.debugFailed", { msg: String(e) }));
-                } finally {
-                  setCursorDebugging(false);
-                }
-              }} disabled={cursorDebugging || !loaded}>
-                {cursorDebugging ? t("settings.debugging") : t("settings.debug")}
-              </BtnSecondary>
-              <BtnSecondary onClick={handleTestCursor} disabled={cursorTesting || !loaded}>
-                {cursorTesting ? t("settings.testing") : t("settings.test")}
-              </BtnSecondary>
-              <BtnPrimary onClick={handleSaveCursor} disabled={savingCursor || !loaded}>
-                {savingCursor ? t("common.saving") : cursorSavedFlash ? t("common.saved") : t("common.save")}
-              </BtnPrimary>
-            </div>
-          }
-        >
-
-          {/* Cookie 来源切换 */}
-          <div className="flex items-center gap-2 mb-1.5">
+          <div className="flex items-center gap-2">
             <span className="text-[10px] text-slate-700/60 w-12 shrink-0">
-              {t("settings.auth")}
+              USD→CNY
             </span>
-            <div className="flex gap-1">
-              {(["auto", "manual"] as const).map((src) => (
-                <button
-                  key={src}
-                  onClick={() =>
-                    setCursorCfg({ ...cursorCfg, cookie_source: src })
-                  }
-                  className={`px-2 py-0.5 rounded text-[10px] transition-colors ${
-                    cursorCfg.cookie_source === src
-                      ? "bg-sky-500/20 text-sky-700"
-                      : "text-slate-700/45 hover:text-slate-900/70"
-                  }`}
-                >
-                  {src === "auto" ? t("settings.authAuto") : t("settings.authManual")}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* 手动 Cookie 输入 */}
-          {cursorCfg.cookie_source === "manual" && (
             <input
-              type="text"
-              value={cursorCfg.cookie_header}
-              onChange={(e) =>
-                setCursorCfg({
-                  ...cursorCfg,
-                  cookie_header: e.target.value,
-                })
+              type="number"
+              step="0.1"
+              min="0.1"
+              value={
+                fxDraft !== null ? fxDraft : String(cursorCfg.usd_cny_rate)
               }
-              placeholder={t("settings.cookiePh")}
-              className="w-full px-2 py-1 rounded-md bg-surface/60 border border-slate-900/10 text-[10px] text-slate-900/80 focus:outline-none focus:border-sky-400/60 mb-1.5"
+              readOnly={cursorCfg.fx_rate_auto}
+              title={
+                cursorCfg.fx_rate_auto
+                  ? t("settings.fxAutoNote")
+                  : undefined
+              }
+              onChange={(e) => setFxDraft(e.target.value)}
+              onBlur={() => {
+                // 失焦才解析：清空/非法输入保持原值，不被立即跳回默认汇率
+                if (fxDraft !== null) {
+                  const v = parseFloat(fxDraft);
+                  if (v > 0 && v !== cursorCfg.usd_cny_rate) {
+                    setCursorCfg({ ...cursorCfg, usd_cny_rate: v });
+                  }
+                  setFxDraft(null);
+                }
+              }}
+              className={`num w-20 px-2 py-0.5 rounded-md bg-surface/60 border border-slate-900/10 text-[10px] text-slate-900/80 focus:outline-none focus:border-sky-400/60 ${
+                cursorCfg.fx_rate_auto
+                  ? "opacity-60 cursor-not-allowed"
+                  : ""
+              }`}
             />
-          )}
-
-          {/* 汇率：自动获取（每日后台刷一次）+ 手动立即更新 + 保留手动输入 */}
-          <div className="mb-1">
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] text-slate-700/60 w-12 shrink-0">
-                USD→CNY
-              </span>
+            <span className="text-[9px] text-slate-700/45 truncate">
+              {cursorCfg.fx_rate_fetched_at
+                ? `${cursorCfg.fx_rate_source ?? t("settings.fxUnknownSource")} · ${fmtFxTime(cursorCfg.fx_rate_fetched_at)}`
+                : t("settings.fxNever")}
+            </span>
+          </div>
+          <div className="flex items-center gap-2 mt-1">
+            <label
+              className="flex items-center gap-1 text-[9px] text-slate-700/55 cursor-pointer"
+              title={t("settings.fxDailyTitle")}
+            >
               <input
-                type="number"
-                step="0.1"
-                min="0.1"
-                value={
-                  fxDraft !== null ? fxDraft : String(cursorCfg.usd_cny_rate)
-                }
-                readOnly={cursorCfg.fx_rate_auto}
-                title={
-                  cursorCfg.fx_rate_auto
-                    ? t("settings.fxAutoNote")
-                    : undefined
-                }
-                onChange={(e) => setFxDraft(e.target.value)}
-                onBlur={() => {
-                  // 失焦才解析：清空/非法输入保持原值，不被立即跳回默认汇率
-                  if (fxDraft !== null) {
-                    const v = parseFloat(fxDraft);
-                    if (v > 0 && v !== cursorCfg.usd_cny_rate) {
-                      setCursorCfg({ ...cursorCfg, usd_cny_rate: v });
-                    }
-                    setFxDraft(null);
+                type="checkbox"
+                checked={cursorCfg.fx_rate_auto}
+                onChange={(e) => {
+                  const next = {
+                    ...cursorCfg,
+                    fx_rate_auto: e.target.checked,
+                  };
+                  setCursorCfg(next);
+                  // 勾选自动且从未获取过：顺带立即拉一次，避免长期显示"尚未联网获取"
+                  if (e.target.checked && !cursorCfg.fx_rate_fetched_at) {
+                    handleFetchFxRate(next);
                   }
                 }}
-                className={`num w-20 px-2 py-0.5 rounded-md bg-surface/60 border border-slate-900/10 text-[10px] text-slate-900/80 focus:outline-none focus:border-sky-400/60 ${
-                  cursorCfg.fx_rate_auto
-                    ? "opacity-60 cursor-not-allowed"
-                    : ""
-                }`}
+                className="accent-sky-500 w-3 h-3"
               />
-              <span className="text-[9px] text-slate-700/45 truncate">
-                {cursorCfg.fx_rate_fetched_at
-                  ? `${cursorCfg.fx_rate_source ?? t("settings.fxUnknownSource")} · ${fmtFxTime(cursorCfg.fx_rate_fetched_at)}`
-                  : t("settings.fxNever")}
-              </span>
-            </div>
-            <div className="flex items-center gap-2 mt-1">
-              <label
-                className="flex items-center gap-1 text-[9px] text-slate-700/55 cursor-pointer"
-                title={t("settings.fxDailyTitle")}
-              >
-                <input
-                  type="checkbox"
-                  checked={cursorCfg.fx_rate_auto}
-                  onChange={(e) => {
-                    const next = {
-                      ...cursorCfg,
-                      fx_rate_auto: e.target.checked,
-                    };
-                    setCursorCfg(next);
-                    // 勾选自动且从未获取过：顺带立即拉一次，避免长期显示"尚未联网获取"
-                    if (e.target.checked && !cursorCfg.fx_rate_fetched_at) {
-                      handleFetchFxRate(next);
-                    }
-                  }}
-                  className="accent-sky-500 w-3 h-3"
-                />
-                {t("settings.fxDaily")}
-              </label>
-              <button
-                onClick={() => handleFetchFxRate()}
-                disabled={fxUpdating || !loaded}
-                title={t("settings.updateNowTitle")}
-                className="text-[9px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-700/80 hover:bg-sky-500/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {fxUpdating ? t("settings.updating") : t("settings.updateNow")}
-              </button>
-              {fxUpdateResult && (
-                <span
-                  className={`text-[9px] truncate ${
-                    fxUpdateResult.startsWith("✓")
-                      ? "text-emerald-600"
-                      : "text-rose-600"
-                  }`}
-                >
-                  {fxUpdateResult}
-                </span>
-              )}
-            </div>
-            {cursorCfg.fx_rate_auto && (
-              <p className="text-[8px] text-slate-700/40 mt-0.5">
-                {t("settings.fxAutoNote")}
-              </p>
-            )}
-            <p className="text-[8px] text-slate-700/40 mt-0.5">
-              {t("settings.fxNote")}
-            </p>
-          </div>
-
-          {cursorTestResult && (
-            <p
-              className={`text-[9px] mt-1 leading-relaxed ${
-                cursorTestResult.startsWith("✓")
-                  ? "text-emerald-600"
-                  : "text-rose-600"
-              }`}
+              {t("settings.fxDaily")}
+            </label>
+            <button
+              onClick={() => handleFetchFxRate()}
+              disabled={fxUpdating || !loaded}
+              title={t("settings.updateNowTitle")}
+              className="text-[9px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-700/80 hover:bg-sky-500/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {cursorTestResult}
+              {fxUpdating ? t("settings.updating") : t("settings.updateNow")}
+            </button>
+            {fxUpdateResult && (
+              <span
+                className={`text-[9px] truncate ${
+                  fxUpdateResult.startsWith("✓")
+                    ? "text-emerald-600"
+                    : "text-rose-600"
+                }`}
+              >
+                {fxUpdateResult}
+              </span>
+            )}
+          </div>
+          {cursorCfg.fx_rate_auto && (
+            <p className="text-[8px] text-slate-700/40 mt-0.5">
+              {t("settings.fxAutoNote")}
             </p>
           )}
-          {cursorCfg.cookie_source === "auto" && (
-            <p className="text-[9px] text-slate-700/45 mt-1 leading-relaxed">
-              {t("settings.cursorAutoHint")}
-            </p>
-          )}
-          {cursorDebugInfo && (
-            <pre className="text-[8px] text-slate-600 mt-1.5 p-1.5 rounded-lg bg-slate-900/5 overflow-x-auto whitespace-pre-wrap break-all max-h-32 overflow-y-auto font-mono">
-              {cursorDebugInfo}
-            </pre>
-          )}
+          <p className="text-[8px] text-slate-700/40 mt-0.5">
+            {t("settings.fxNote")}
+          </p>
         </SettingsCard>
 
         {shortcutCfg && (

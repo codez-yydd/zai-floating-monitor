@@ -1590,7 +1590,7 @@ pub struct CodexDebugInfo {
     pub latest_session_ms: Option<i64>,
 }
 
-/// 诊断信息（cursor_debug 同款用途）。导入失败不阻断——目录不存在时
+/// 诊断信息（排查数据导入问题用）。导入失败不阻断——目录不存在时
 /// 恰恰要靠这些字段定位问题。诊断必须真实执行导入（绕过节流）。
 pub fn debug_info() -> Result<CodexDebugInfo, String> {
     if let Err(e) = import_incremental_force() {

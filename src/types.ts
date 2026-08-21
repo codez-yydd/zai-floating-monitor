@@ -78,14 +78,6 @@ export interface TrendPoint {
 
 // ===== Coding Plan 额度查询（与 Rust quota.rs 结构一一对应） =====
 
-export type QuotaEndpoint = "cn" | "global";
-
-/** 额度查询配置（token + 端点） */
-export interface QuotaConfig {
-  token: string;
-  endpoint: QuotaEndpoint;
-}
-
 /** MCP 工具用量明细（仅 MCP 月度额度会出现） */
 export interface McpUsageDetail {
   /** 工具代号：search-prime / web-reader / zread ... */

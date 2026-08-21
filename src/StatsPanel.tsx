@@ -305,7 +305,7 @@ export function StatsPanel({
 
       {/* Coding Plan 额度监控 —— 仅在 z.ai 标签显示。
           额度采样由 DataProvider 全局定时器负责，与组件挂载无关，无需 display:none hack。 */}
-      {tab === "zai" && <QuotaPanel onGoSettings={onGoSettings} />}
+      {tab === "zai" && <QuotaPanel />}
 
       {/* 标签内容 */}
       {tab === "zai" ? (

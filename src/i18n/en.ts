@@ -103,8 +103,7 @@ export const en: typeof zh = {
 
     // Coding Plan 额度面板
     "quota.title": "Coding Plan quota",
-    "quota.goConfig": "Set up →",
-    "quota.configHint": "Add an API token to see usage",
+    "quota.configHint": "Sign in to a Coding Plan in the ZCode client; quota is read automatically",
     "quota.failed": "Failed to load quota: {msg}",
     "quota.refresh": "Refresh quota",
     "quota.todayDelta": "+{pct}% today",
@@ -122,7 +121,7 @@ export const en: typeof zh = {
     // Cursor 面板
     "cursor.notLoggedIn": "Cursor not signed in",
     "cursor.loginHint":
-      "Sign in to the Cursor app, or paste a cookie in Settings → Cursor stats",
+      "Sign in to the Cursor app; local usage is read automatically",
     "cursor.account": "Account",
     "cursor.unknown": "Unknown",
     "cursor.planQuota": "Plan quotas",
@@ -144,7 +143,7 @@ export const en: typeof zh = {
     "summary.costDist": "Cost split",
     "summary.quotaMonitor": "Quotas",
     "summary.resetDate": "Resets {date}",
-    "summary.noToken": "No token set",
+    "summary.noToken": "Coding Plan not signed in",
     "summary.quotaFailed": "Quota unavailable",
     "summary.noData": "No data",
     "summary.loadFailed": "Failed to load",
@@ -431,32 +430,7 @@ export const en: typeof zh = {
     "settings.agentClaudeDesc": "Claude Code usage & plan quotas",
     "settings.agentCursorDesc": "Cursor usage & plan quotas",
 
-    "settings.tokenPh": "Paste the Coding Plan API token",
-    "settings.endpoint": "Endpoint",
-    "settings.endpointCn": "🇨🇳 China",
-    "settings.endpointGlobal": "🌐 Global",
-    "settings.endpointHint":
-      "Get the token from the Z.ai open platform. Mainland China users should choose the China endpoint.",
-
-    "settings.cursorStats": "Cursor stats",
-    "settings.debug": "Debug",
-    "settings.debugging": "Debugging…",
-    "settings.debugFailed": "Debug failed: {msg}",
-    "settings.debugSource": "Source",
-    "settings.debugDbFound": "found",
-    "settings.debugDbMissing": "missing",
-    "settings.debugResponse": "Response",
-    "settings.test": "Test",
-    "settings.testing": "Testing…",
-    "settings.connectedEmail": "✓ Connected: {email}",
-    "settings.connectedEmailPlan": "✓ Connected: {email} ({plan})",
-    "settings.connectedName": "✓ Connected: {name}",
-    "settings.authOk": "✓ Auth OK",
-    "settings.auth": "Auth",
-    "settings.authAuto": "Auto (from Cursor app)",
-    "settings.authManual": "Manual cookie",
-    "settings.cookiePh": "Paste the Cookie header from a cursor.com request",
-
+    "settings.fxCard": "Exchange rate",
     "settings.fxAutoNote": "Auto-updating; uncheck to edit manually",
     "settings.fxNever": "Never fetched",
     "settings.fxUnknownSource": "unknown source",
@@ -467,8 +441,6 @@ export const en: typeof zh = {
     "settings.updateNowTitle": "Fetch the latest rate online (multiple free sources with fallback)",
     "settings.fxNote":
       "Prices are stored in USD; CNY costs are converted at this rate (same source as the ¥ view in Pricing).",
-    "settings.cursorAutoHint":
-      "Reads Cursor's local sign-in credentials automatically. Make sure Cursor is installed and signed in.",
 
     "settings.shortcut": "Global shortcut",
     "settings.shortcutHint":
