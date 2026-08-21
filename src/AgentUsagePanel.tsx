@@ -314,9 +314,10 @@ export function AgentUsagePanel({
                         <span className="font-medium text-slate-900/90 truncate text-[11px]">{m.model_id}</span>
                         {!hasPrice && <span className="text-[10px] text-amber-600/90 shrink-0" title={t("common.noPrice")}>⚠</span>}
                       </div>
-                      <div className="flex items-center gap-1 text-slate-600/70 num shrink-0 text-[10px]">
-                        <span className="min-w-[1.5rem] text-right" title={t("common.requestCount")}>{formatTokens(m.requests)}</span>
-                        <span className="min-w-[2rem] text-right" title={t("common.totalTokens")}>{formatTokens(m.total_tokens)}</span>
+                      <div className="flex items-center gap-1 num shrink-0 text-[10px]">
+                        {/* 请求/Token/花费三列深浅递进（浅→中→深），便于扫视区分 */}
+                        <span className="min-w-[1.5rem] text-right text-slate-500/80" title={t("common.requestCount")}>{formatTokens(m.requests)}</span>
+                        <span className="min-w-[2rem] text-right text-slate-700" title={t("common.totalTokens")}>{formatTokens(m.total_tokens)}</span>
                         <span className={`min-w-[2.5rem] text-right font-medium ${hasPrice ? "text-slate-900/90" : "text-slate-500/50"}`}>
                           {hasPrice ? formatCost(costVal, currency) : "—"}
                         </span>

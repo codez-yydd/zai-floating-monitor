@@ -347,10 +347,11 @@ export function CursorPanel({
                           <span className="font-medium text-slate-900/90 truncate">
                             {m.model}
                           </span>
-                          <div className="flex items-center gap-2 text-slate-700/60 num shrink-0">
-                            <span>{m.requests}</span>
+                          {/* 请求/Token/花费三列深浅递进（浅→中→深），便于扫视区分 */}
+                          <div className="flex items-center gap-2 num shrink-0">
+                            <span className="text-slate-500/80">{m.requests}</span>
                             <span className="text-slate-700/25">·</span>
-                            <span>{formatTokens(m.total_tokens)}</span>
+                            <span className="text-slate-700">{formatTokens(m.total_tokens)}</span>
                             <span className="w-12 text-right text-slate-900/90">
                               {formatCost(
                                 currency === "cny"
