@@ -171,17 +171,21 @@ The app has a built-in updater: Settings → "About & update" checks, downloads 
    ```
 
 2. Put the public key (`~/.tauri/zbar-updater.key.pub`) into `plugins.updater.pubkey` of `src-tauri/tauri.conf.json` (already configured for this project).
-3. Export `GITEE_TOKEN` (Gitee → Settings → Personal access tokens, with the projects scope) and install & login the `gh` CLI for GitHub.
+3. Add repository Secrets under **Settings → Secrets and variables → Actions**:
+   - `TAURI_SIGNING_PRIVATE_KEY`: the **full content** of the private key file `~/.tauri/zbar-updater.key`
+   - `GITEE_TOKEN` (optional): a Gitee personal access token (with the projects scope); when missing, the Gitee endpoint is skipped and only the GitHub source is published
 
-**Releasing a new version**:
+**Releasing a new version** (built in the cloud by GitHub Actions for both platforms — no local toolchain needed):
 
 ```bash
-scripts/release.sh 0.2.0 --notes "Release notes"
-# Build and verify artifacts only, without uploading:
-scripts/release.sh 0.2.0 --no-upload
+# After the version is synced in package.json / src-tauri/tauri.conf.json / src-tauri/Cargo.toml and committed:
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
-The script syncs the version in three places → builds with signing (artifacts carry `.sig`) → generates two `latest.json` files (installer download URLs pointing at each repo) → uploads a GitHub Release (tag `v{version}`, marked latest) → recreates the Gitee Release under the fixed tag `latest` (update metadata source). macOS artifacts need to be built on a Mac and uploaded afterwards.
+The pipeline (`.github/workflows/release.yml`) automatically: builds and signs three platforms in parallel (Windows x64 / macOS Apple Silicon / macOS Intel, artifacts carry `.sig`) → generates two `latest.json` files (installer download URLs pointing at each repo) → creates a GitHub Release (tag `v{version}`, marked latest) → recreates the Gitee Release under the fixed tag `latest` (update metadata source). If the Gitee upload fails or the token is missing, re-run the `release` job from the Actions page to publish it alone.
+
+> The macOS packages are not signed with a developer certificate nor notarized; on first launch right-click the app → "Open", or allow it in System Settings.
 
 ---
 

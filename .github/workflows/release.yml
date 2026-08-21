@@ -1,0 +1,171 @@
+# ============================================================================
+# ZBar 发布流水线：推 v* tag 触发，云端构建 Windows + macOS 双平台安装包
+#
+# 流程：build（3 平台并行：签名构建 → 上传产物）→ release（生成双源
+# latest.json → GitHub Release → Gitee 固定 tag latest Release）
+#
+# 仓库 Secrets（Settings → Secrets and variables → Actions）：
+#   TAURI_SIGNING_PRIVATE_KEY          更新签名私钥内容（~/.tauri/zbar-updater.key）
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD 私钥密码（生成时为空可不设置）
+#   GITEE_TOKEN                        Gitee 私人令牌（勾选 projects），缺失时跳过 Gitee 源
+#
+# 本地发布：改好版本号提交后 `git tag v0.2.0 && git push origin v0.2.0`
+# ============================================================================
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis # Windows 更新只用 NSIS，跳过 MSI 省一半时间
+            artifact: dist-windows
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            bundles: ''
+            artifact: dist-macos-arm64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            bundles: ''
+            artifact: dist-macos-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          target: ${{ matrix.target }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - name: 签名构建
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          ARGS=(--target "${{ matrix.target }}")
+          [[ -n "${{ matrix.bundles }}" ]] && ARGS+=(--bundles ${{ matrix.bundles }})
+          npx tauri build "${ARGS[@]}"
+
+      - name: 收集产物（安装包 + .sig 签名）
+        shell: bash
+        run: |
+          mkdir -p dist
+          BASE="src-tauri/target/${{ matrix.target }}/release/bundle"
+          find "$BASE/nsis" -name '*-setup.exe*' -exec cp {} dist/ \; 2>/dev/null || true
+          find "$BASE/macos" -name '*.app.tar.gz*' -exec cp {} dist/ \; 2>/dev/null || true
+          find "$BASE/dmg" -name '*.dmg' -exec cp {} dist/ \; 2>/dev/null || true
+          echo '--- dist ---'
+          ls -la dist/
+          [[ $(ls dist | wc -l) -gt 0 ]] || { echo '未收集到任何产物'; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: 发布双仓库
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 生成双源 latest.json
+        env:
+          GH_REPO_NAME: codez-yydd/zai-floating-monitor
+          GITEE_REPO_NAME: codezwx/zai-floating-monitor
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+          GH_BASE="https://github.com/$GH_REPO_NAME/releases/download/v$VERSION"
+          GITEE_BASE="https://gitee.com/$GITEE_REPO_NAME/releases/download/latest"
+          python3 scripts/gen_latest.py "$GH_BASE" latest.json
+          python3 scripts/gen_latest.py "$GITEE_BASE" gitee-latest.json
+          cat latest.json
+
+      - name: 发布 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: codez-yydd/zai-floating-monitor
+        run: |
+          gh release create "v$VERSION" dist/* \
+            --title "ZBar v$VERSION" \
+            --notes "ZBar v$VERSION：Token 速率与首字延迟指标、各 Agent 当前模型显示、应用内自动更新（Windows / macOS）。首次升级需手动下载安装，此后可在应用内一键更新。" \
+            --latest
+
+      - name: 发布 Gitee 更新源（固定 tag latest）
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GITEE_REPO_NAME: codezwx/zai-floating-monitor
+        run: |
+          if [[ -z "${GITEE_TOKEN:-}" ]]; then
+            echo '::warning::未配置 GITEE_TOKEN secret，跳过 Gitee 更新源（配置后重跑本 job 即可补发）'
+            exit 0
+          fi
+          API="https://gitee.com/api/v5/repos/$GITEE_REPO_NAME/releases"
+          TOKEN="access_token=$GITEE_TOKEN"
+
+          # 删除旧 latest release（tag 复用）
+          OLD_ID=$(curl -sf "$API/tags/latest?$TOKEN" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2 || true)
+          [[ -n "${OLD_ID:-}" ]] && curl -sf -X DELETE "$API/$OLD_ID?$TOKEN" >/dev/null && echo '已删除旧 latest release'
+
+          attach() { # $1=文件 $2=上传名
+            curl -sf -X POST "$API/attach_files?$TOKEN" \
+              -F "file=@$1;filename=$2" | grep -o '"path":"[^"]*"' | cut -d'"' -f4
+          }
+          FILES=""
+          for f in dist/*-setup.exe dist/*-setup.exe.sig \
+                   dist/*aarch64*.app.tar.gz dist/*aarch64*.app.tar.gz.sig \
+                   dist/*x64.app.tar.gz dist/*x64.app.tar.gz.sig \
+                   dist/*.dmg; do
+            [[ -f "$f" ]] || continue
+            p=$(attach "$f" "$(basename "$f")") && FILES="$FILES$p," || { echo "附件上传失败: $f"; exit 1; }
+          done
+          p=$(attach gitee-latest.json latest.json) && FILES="$FILES$p" # Gitee 侧文件名必须是 latest.json
+          FILES="${FILES%,}"
+
+          curl -sf -X POST "$API" \
+            -d "$TOKEN" \
+            -d 'tag_name=latest' \
+            -d "name=ZBar v$VERSION（应用内更新源）" \
+            -d "body=ZBar $VERSION 自动更新通道，保持最新版即可。" \
+            -d "files=$FILES" >/dev/null && echo 'Gitee release 已创建'
+
+          echo ''
+          echo '发布完成，更新源：'
+          echo "  https://github.com/codez-yydd/zai-floating-monitor/releases/latest/download/latest.json"
+          echo "  https://gitee.com/codezwx/zai-floating-monitor/releases/download/latest/latest.json"

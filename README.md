@@ -184,17 +184,21 @@ npm run tauri build -- --target aarch64-apple-darwin
    ```
 
 2. 公钥（`~/.tauri/zbar-updater.key.pub` 内容）写入 `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey`（本项目已配置）。
-3. 导出 `GITEE_TOKEN`（Gitee → 设置 → 私人令牌，勾选 projects），GitHub 侧安装并登录 `gh` CLI。
+3. 在仓库 **Settings → Secrets and variables → Actions** 添加 Secrets：
+   - `TAURI_SIGNING_PRIVATE_KEY`：私钥文件 `~/.tauri/zbar-updater.key` 的**完整内容**
+   - `GITEE_TOKEN`（可选）：Gitee 私人令牌（设置 → 私人令牌，勾选 projects）；缺失时自动跳过 Gitee 更新源，仅发布 GitHub 源
 
-**发布新版本**：
+**发布新版本**（GitHub Actions 云端构建双平台，本地无需任何工具链）：
 
 ```bash
-scripts/release.sh 0.2.0 --notes "更新说明"
-# 只构建验证产物、不上传：
-scripts/release.sh 0.2.0 --no-upload
+# 版本号已在 package.json / src-tauri/tauri.conf.json / src-tauri/Cargo.toml 三处同步并提交后：
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
-脚本会自动：同步三处版本号 → 签名构建（产物带 `.sig`）→ 生成两份 `latest.json`（安装包下载地址分别指向 GitHub / Gitee 各自仓库）→ 上传 GitHub Release（tag `v{版本}`，自动标记 latest）→ 重建 Gitee 固定 tag `latest` 的 Release（作为更新元数据源）。macOS 产物需在 mac 上构建后手动补传，或在本机追加运行脚本上传。
+流水线（`.github/workflows/release.yml`）自动完成：三平台并行签名构建（Windows x64 / macOS Apple Silicon / macOS Intel，产物带 `.sig`）→ 生成两份 `latest.json`（安装包下载地址分别指向 GitHub / Gitee 各自仓库）→ 创建 GitHub Release（tag `v{版本}`，自动标记 latest）→ 重建 Gitee 固定 tag `latest` 的 Release（作为更新元数据源）。Gitee 源上传失败或未配置 token 时，在 Actions 页面重跑 `release` job 即可单独补发。
+
+> macOS 安装包未做开发者证书签名与公证，首次打开需右键安装包 →「打开」，或在系统设置中允许。
 
 ---
 
