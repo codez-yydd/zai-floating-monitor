@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use chrono::{Local, TimeZone};
 
+use crate::db;
 use crate::pricing::config_dir;
 
 const CURSOR_BASE: &str = "https://cursor.com";
@@ -915,6 +916,9 @@ pub struct CursorSnapshot {
     pub today_quota: Option<CursorTodayQuota>,
     pub daily: Vec<CursorDailyEntry>,
     pub by_model: Vec<CursorModelStat>,
+    /// 最近使用的模型（口径：查询时间范围内最新一条带模型名的用量事件）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_model: Option<db::CurrentModelStat>,
 }
 
 fn local_day_start_ms() -> i64 {
@@ -1018,6 +1022,22 @@ pub fn fetch_cursor_snapshot(from_ms: i64, to_ms: i64) -> Result<CursorSnapshot,
     let today_quota = today_events
         .as_deref()
         .and_then(|events| plan.as_ref().map(|quota| calculate_today_quota(events, quota)));
+    // 最近使用模型：范围内最新一条带模型名的有效事件（须在 match 移动 range_events 前计算）
+    let current_model = range_events.as_ref().ok().and_then(|events| {
+        events
+            .iter()
+            .filter_map(|ev| {
+                let ts = ev.timestamp.filter(|t| *t > 0)?;
+                let model = ev.model.as_deref().filter(|m| !m.is_empty())?;
+                Some((ts, model))
+            })
+            .max_by_key(|(ts, _)| *ts)
+            .map(|(ts, model)| db::CurrentModelStat {
+                model_id: model.to_string(),
+                provider_id: "cursor".into(),
+                last_used_ms: ts,
+            })
+    });
     let (events_summary, daily, by_model) = match range_events {
         Ok(events) => {
             if events.is_empty() {
@@ -1027,9 +1047,9 @@ pub fn fetch_cursor_snapshot(from_ms: i64, to_ms: i64) -> Result<CursorSnapshot,
                 (Some(s), d, m)
             }
         }
-        Err(e) => {
+        Err(ref e) => {
             // events 失败不阻断套餐展示，但记录错误供前端区分"无数据"和"拉取失败"
-            events_error = Some(e);
+            events_error = Some(e.clone());
             (None, Vec::new(), Vec::new())
         }
     };
@@ -1058,6 +1078,7 @@ pub fn fetch_cursor_snapshot(from_ms: i64, to_ms: i64) -> Result<CursorSnapshot,
         today_quota,
         daily,
         by_model,
+        current_model,
     })
 }
 

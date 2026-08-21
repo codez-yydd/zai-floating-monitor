@@ -22,6 +22,8 @@ use serde_json::{Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+// 仅 macOS 退出进程的等待逻辑使用（Windows/Linux 下避免 unused import）
+#[cfg(target_os = "macos")]
 use std::time::Duration;
 
 // ============================================================
@@ -797,11 +799,6 @@ fn launch_zcode() -> bool {
 }
 
 // Windows / Linux：留 cfg 骨架，切换事务在 quit 环节直接报错引导手动操作。
-#[cfg(not(target_os = "macos"))]
-fn zcode_running() -> bool {
-    false
-}
-
 #[cfg(not(target_os = "macos"))]
 fn quit_zcode() -> Result<(), String> {
     Err("当前平台暂不支持自动切换：请手动退出 ZCode 后重试".into())

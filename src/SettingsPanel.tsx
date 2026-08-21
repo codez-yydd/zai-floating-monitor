@@ -19,6 +19,7 @@ import {
 } from "./appearance";
 import { BrandIcon } from "./BrandIcon";
 import { AccountsCard } from "./AccountsCard";
+import { UpdaterCard } from "./UpdaterCard";
 import {
   PageShell,
   PageHeader,
@@ -479,6 +480,9 @@ export function SettingsPanel({
             )}
           </SettingsCard>
         )}
+
+        {/* 关于与更新：当前版本 + 检查/下载/安装（启动时已静默检查过一次） */}
+        <UpdaterCard />
       </PageBody>
     </PageShell>
   );

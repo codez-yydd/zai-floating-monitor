@@ -47,6 +47,9 @@
 - **📈 周额度对比** — 基于本地额度快照（90 天滚动保留）对比每个重置周期的额度用量，支持跨设备合并。
 - **📝 日报 / 周报** — 一键生成 Markdown 日报（今日）/ 周报（近 7 天）并保存到本地。
 - **🔄 多设备同步** — 自托管同步服务（`server/`），让公司 / 家里等多台电脑汇总查看全量用量。明细增量上传 + `(device, rowid)` 去重，支持**设备筛选**（全部 / 本机 / 指定设备）和**数据清理**（按设备 / 按时间 / 全清 + 可配置自动定时清理）。详见 [server/README.md](./server/README.md)。
+- **⚡ 速度与首字延迟** — 基于调用耗时统计**平均输出速度（tok/s）**与**首字延迟（TTFT）**，含噪声过滤口径（整块下发识别、计时异常剔除）。ZCode / Claude 面板可用（Codex / Cursor 数据源无耗时字段，自动隐藏）。
+- **🎯 当前模型** — 各 Agent 面板显示「当前模型」（口径：最近一次调用使用的模型 + 相对时间），汇总页各服务分组同步展示。
+- **⬆️ 应用内自动更新** — 设置 →「关于与更新」检查 / 下载 / 静默安装新版本，更新源 **GitHub / Gitee 双仓库自动降级**，更新包签名校验；启动静默检查，有新版时设置入口亮红点。
 
 ---
 
@@ -167,6 +170,31 @@ npm run tauri build
 ```bash
 npm run tauri build -- --target aarch64-apple-darwin
 ```
+
+### 🔄 应用内自动更新（双仓库）
+
+应用内置自动更新：设置 →「关于与更新」检查新版本、下载并静默安装；启动时会静默检查一次，有新版本时设置入口按钮显示红点。更新源为 **GitHub / Gitee 双 endpoint**，依次自动降级，任一仓库可达即可完成更新。
+
+**首次发版准备**（一次性）：
+
+1. 生成更新签名密钥对（私钥丢失将**永远无法**再推送更新，务必备份到安全位置）：
+
+   ```bash
+   npx tauri signer generate -w ~/.tauri/zbar-updater.key
+   ```
+
+2. 公钥（`~/.tauri/zbar-updater.key.pub` 内容）写入 `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey`（本项目已配置）。
+3. 导出 `GITEE_TOKEN`（Gitee → 设置 → 私人令牌，勾选 projects），GitHub 侧安装并登录 `gh` CLI。
+
+**发布新版本**：
+
+```bash
+scripts/release.sh 0.2.0 --notes "更新说明"
+# 只构建验证产物、不上传：
+scripts/release.sh 0.2.0 --no-upload
+```
+
+脚本会自动：同步三处版本号 → 签名构建（产物带 `.sig`）→ 生成两份 `latest.json`（安装包下载地址分别指向 GitHub / Gitee 各自仓库）→ 上传 GitHub Release（tag `v{版本}`，自动标记 latest）→ 重建 Gitee 固定 tag `latest` 的 Release（作为更新元数据源）。macOS 产物需在 mac 上构建后手动补传，或在本机追加运行脚本上传。
 
 ---
 

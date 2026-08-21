@@ -7,12 +7,14 @@ import type {
   TrendBucket,
   TrendPoint,
 } from "./types";
-import { formatCost, formatCountdownCore, formatPct, formatTokens } from "./format";
+import { formatCost, formatCountdownCore, formatPct, formatTokens, formatTps } from "./format";
 import { modelCost } from "./merge";
 import {
+  CurrentModelBar,
   DetailRow,
   Metric,
   ProgressBar,
+  SpeedMetricsGrid,
   TrendChart,
   remainingGradient,
   remainingTextColor,
@@ -251,6 +253,8 @@ export function AgentUsagePanel({
         }
       />
 
+      <CurrentModelBar model={snapshot.stats.current_model} />
+
       {snapshot.trend.length > 0 && (
         <TrendChart
           points={snapshot.trend}
@@ -266,6 +270,8 @@ export function AgentUsagePanel({
         <Metric label={t("common.cacheRate")} value={formatPct(cacheRate)} accent="text-emerald-600" />
         <Metric label={t("common.output")} value={formatTokens(stats.overall.output_tokens)} />
       </div>
+
+      <SpeedMetricsGrid overall={stats.overall} />
 
       <SectionCard title={t("common.tokenComposition")}>
         <div className="space-y-1.5">
@@ -304,6 +310,8 @@ export function AgentUsagePanel({
               });
               rows.sort((a, b) => b.sortVal - a.sortVal);
               const maxVal = rows.length ? rows[0].sortVal : 0;
+              // 任一模型有速度数据才显示速度列（Claude 有、Codex 无，自动隐藏）
+              const hasSpeedCol = rows.some((r) => r.m.avg_tps != null);
               return rows.map(({ m, hasPrice, costVal, sortVal }) => {
                 const pct = maxVal > 0 ? Math.max(sortVal / maxVal, 0.02) : 0;
                 return (
@@ -315,9 +323,14 @@ export function AgentUsagePanel({
                         {!hasPrice && <span className="text-[10px] text-amber-600/90 shrink-0" title={t("common.noPrice")}>⚠</span>}
                       </div>
                       <div className="flex items-center gap-1 num shrink-0 text-[10px]">
-                        {/* 请求/Token/花费三列深浅递进（浅→中→深），便于扫视区分 */}
+                        {/* 请求/Token/花费三列深浅递进（浅→中→深），便于扫视区分；速度列插在 Token 与花费之间 */}
                         <span className="min-w-[1.5rem] text-right text-slate-500/80" title={t("common.requestCount")}>{formatTokens(m.requests)}</span>
                         <span className="min-w-[2rem] text-right text-slate-700" title={t("common.totalTokens")}>{formatTokens(m.total_tokens)}</span>
+                        {hasSpeedCol && (
+                          <span className="min-w-[1.75rem] text-right text-sky-700/80" title={t("common.avgSpeed")}>
+                            {m.avg_tps != null ? `${formatTps(m.avg_tps)}/s` : "—"}
+                          </span>
+                        )}
                         <span className={`min-w-[2.5rem] text-right font-medium ${hasPrice ? "text-slate-900/90" : "text-slate-500/50"}`}>
                           {hasPrice ? formatCost(costVal, currency) : "—"}
                         </span>

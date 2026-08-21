@@ -7,6 +7,7 @@ import type {
 } from "./types";
 import { formatCost, formatTokens, formatPct } from "./format";
 import {
+  CurrentModelBar,
   Metric,
   ProgressBar,
   TrendChart,
@@ -168,6 +169,8 @@ export function CursorPanel({
           {partialError}
         </div>
       )}
+
+      <CurrentModelBar model={snapshot.current_model} />
 
       {/* 套餐额度：与 Cursor 客户端一致，只展示 Auto / API（本计费周期，不随时间范围变化） */}
       {plan && (

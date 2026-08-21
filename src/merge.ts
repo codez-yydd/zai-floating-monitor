@@ -108,6 +108,8 @@ export function computeRemoteCost(
 
 /** 合并本地 stats + 远端 usage → 汇总 stats */
 export function mergeStats(local: Stats, remote: RemoteUsage): Stats {
+  // 速度/TTFT 只在本地库有耗时数据：合并远端 token 后保留本地口径
+  //（远端无耗时字段，均值/最快值仍代表本机样本，不做跨设备加权）
   const addOverall = (a: OverallStat, b: RemoteUsage["overall"]): OverallStat => ({
     requests: a.requests + b.requests,
     input_tokens: a.input_tokens + b.input_tokens,
@@ -116,6 +118,9 @@ export function mergeStats(local: Stats, remote: RemoteUsage): Stats {
     cache_write_tokens: a.cache_write_tokens + b.cache_write_tokens,
     reasoning_tokens: a.reasoning_tokens + b.reasoning_tokens,
     total_tokens: a.total_tokens + b.total_tokens,
+    avg_tps: a.avg_tps,
+    max_tps: a.max_tps,
+    avg_ttft_ms: a.avg_ttft_ms,
   });
 
   // by_model 按 model_id+provider_id 合并相加
@@ -162,6 +167,8 @@ export function mergeStats(local: Stats, remote: RemoteUsage): Stats {
     by_model,
     earliest_ms: local.earliest_ms,
     latest_ms: local.latest_ms,
+    // 当前模型取本机最新记录（远端设备的使用不在本机体现）
+    current_model: local.current_model ?? null,
   };
 }
 

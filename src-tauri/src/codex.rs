@@ -846,22 +846,27 @@ fn import_one_file(
 // ===== 查询函数（与 db.rs 同名同构，查 codex.sqlite；查询前先增量导入）=====
 
 /// 查询 [from_ms, to_ms) 内的统计（口径与 db::query_stats 完全一致）。
+/// Codex 会话文件无耗时数据，速度/TTFT 恒为 None（聚合占位 NULL）。
 pub fn query_stats(from_ms: i64, to_ms: i64) -> Result<db::Stats, String> {
     import_incremental()?;
     let conn = open_codex_db()?;
+    let speed = db::speed_agg_columns(false, false);
 
     let overall: db::OverallStat = conn
         .query_row(
-            "SELECT
-                COUNT(*),
-                COALESCE(SUM(input_tokens),0),
-                COALESCE(SUM(output_tokens),0),
-                COALESCE(SUM(cache_read_input_tokens),0),
-                COALESCE(SUM(cache_creation_input_tokens),0),
-                COALESCE(SUM(reasoning_tokens),0),
-                COALESCE(SUM(computed_total_tokens),0)
-             FROM model_usage
-             WHERE started_at >= ?1 AND started_at < ?2",
+            &format!(
+                "SELECT
+                    COUNT(*),
+                    COALESCE(SUM(input_tokens),0),
+                    COALESCE(SUM(output_tokens),0),
+                    COALESCE(SUM(cache_read_input_tokens),0),
+                    COALESCE(SUM(cache_creation_input_tokens),0),
+                    COALESCE(SUM(reasoning_tokens),0),
+                    COALESCE(SUM(computed_total_tokens),0)
+                    {speed}
+                 FROM model_usage
+                 WHERE started_at >= ?1 AND started_at < ?2"
+            ),
             rusqlite::params![from_ms, to_ms],
             |row| {
                 Ok(db::OverallStat {
@@ -872,13 +877,18 @@ pub fn query_stats(from_ms: i64, to_ms: i64) -> Result<db::Stats, String> {
                     cache_write_tokens: row.get(4)?,
                     reasoning_tokens: row.get(5)?,
                     total_tokens: row.get(6)?,
+                    speed: db::SpeedMetrics {
+                        avg_tps: row.get(7)?,
+                        max_tps: row.get(8)?,
+                        avg_ttft_ms: row.get(9)?,
+                    },
                 })
             },
         )
         .map_err(|e| format!("查询 Codex 整体统计失败: {e}"))?;
 
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT
                 model_id,
                 provider_id,
@@ -889,11 +899,12 @@ pub fn query_stats(from_ms: i64, to_ms: i64) -> Result<db::Stats, String> {
                 COALESCE(SUM(cache_creation_input_tokens),0),
                 COALESCE(SUM(reasoning_tokens),0),
                 COALESCE(SUM(computed_total_tokens),0) AS total_tokens
+                {speed}
              FROM model_usage
              WHERE started_at >= ?1 AND started_at < ?2
              GROUP BY provider_id, model_id
              ORDER BY total_tokens DESC",
-        )
+        ))
         .map_err(|e| format!("准备 Codex 模型分组查询失败: {e}"))?;
 
     let by_model = stmt
@@ -908,6 +919,11 @@ pub fn query_stats(from_ms: i64, to_ms: i64) -> Result<db::Stats, String> {
                 cache_write_tokens: row.get(6)?,
                 reasoning_tokens: row.get(7)?,
                 total_tokens: row.get(8)?,
+                speed: db::SpeedMetrics {
+                    avg_tps: row.get(9)?,
+                    max_tps: row.get(10)?,
+                    avg_ttft_ms: row.get(11)?,
+                },
             })
         })
         .map_err(|e| format!("读取 Codex 模型分组失败: {e}"))?
@@ -929,6 +945,7 @@ pub fn query_stats(from_ms: i64, to_ms: i64) -> Result<db::Stats, String> {
         by_model,
         earliest_ms,
         latest_ms,
+        current_model: db::query_current_model(&conn),
     })
 }
 

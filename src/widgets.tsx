@@ -1,6 +1,6 @@
 import { useState } from "react";
-import type { Currency, TrendPoint } from "./types";
-import { formatCost, formatTokens } from "./format";
+import type { Currency, CurrentModel, TrendPoint } from "./types";
+import { formatCost, formatMs, formatTps, formatTokens, dateStr } from "./format";
 import { useI18n } from "./i18n";
 
 // ============================================================
@@ -81,13 +81,16 @@ export function Metric({
   label,
   value,
   accent,
+  title,
 }: {
   label: string;
   value: string;
   accent?: string;
+  /** 悬浮提示（如速度卡展示最快值） */
+  title?: string;
 }) {
   return (
-    <div className="card-base rounded-xl py-2 text-center">
+    <div className="card-base rounded-xl py-2 text-center" title={title}>
       <div className="text-[9px] text-slate-500">{label}</div>
       <div
         className={`num text-[13px] font-semibold mt-0.5 ${
@@ -124,6 +127,78 @@ export function DetailRow({
       <span className="num text-slate-900/85 font-medium w-14 text-right">
         {value}
       </span>
+    </div>
+  );
+}
+
+/** 速度/首字延迟指标卡行。仅数据源带耗时（ZCode/Claude）时 overall 上有值，
+ *  无值返回 null（Codex/Cursor 面板自动不渲染，不出现空卡片）。 */
+export function SpeedMetricsGrid({
+  overall,
+}: {
+  overall: {
+    avg_tps?: number | null;
+    max_tps?: number | null;
+    avg_ttft_ms?: number | null;
+  };
+}) {
+  const { t } = useI18n();
+  const hasTps = overall.avg_tps != null;
+  const hasTtft = overall.avg_ttft_ms != null;
+  if (!hasTps && !hasTtft) return null;
+  const cols = hasTps && hasTtft ? "grid-cols-2" : "grid-cols-1";
+  return (
+    <div className={`grid ${cols} gap-1.5`}>
+      {hasTps && (
+        <Metric
+          label={t("common.avgSpeed")}
+          value={`${formatTps(overall.avg_tps!)} t/s`}
+          accent="text-sky-700"
+          title={
+            overall.max_tps != null
+              ? `${t("common.fastest")} ${formatTps(overall.max_tps)} tok/s`
+              : undefined
+          }
+        />
+      )}
+      {hasTtft && (
+        <Metric
+          label={t("common.ttft")}
+          value={formatMs(overall.avg_ttft_ms!)}
+          accent="text-sky-700"
+        />
+      )}
+    </div>
+  );
+}
+
+/** 当前模型条：最近使用的模型 + 相对时间（null 不渲染） */
+export function CurrentModelBar({ model }: { model?: CurrentModel | null }) {
+  const { t } = useI18n();
+  if (!model) return null;
+  // 相对时间：刚刚 / N分钟前 / N小时前 / N天前，超 30 天回退日期
+  const min = Math.floor(Math.max(0, Date.now() - model.last_used_ms) / 60_000);
+  const rel =
+    min < 1
+      ? t("common.justNow")
+      : min < 60
+        ? t("common.minutesAgo", { n: min })
+        : min < 1440
+          ? t("common.hoursAgo", { n: Math.floor(min / 60) })
+          : min < 43200
+            ? t("common.daysAgo", { n: Math.floor(min / 1440) })
+            : dateStr(model.last_used_ms);
+  return (
+    <div className="card-base rounded-xl px-2.5 py-1.5 flex items-center justify-between gap-2">
+      <div className="flex items-center gap-1.5 min-w-0">
+        <span className="text-[9px] text-slate-500 shrink-0">
+          {t("common.currentModel")}
+        </span>
+        <span className="text-[11px] font-medium text-slate-900/85 truncate">
+          {model.model_id}
+        </span>
+      </div>
+      <span className="num text-[9px] text-slate-400 shrink-0">{rel}</span>
     </div>
   );
 }

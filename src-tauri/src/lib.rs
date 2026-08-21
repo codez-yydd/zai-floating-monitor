@@ -1408,6 +1408,8 @@ fn today_tray_title(app: &AppHandle) -> String {
                             cache_write_tokens: m.cache_write_tokens,
                             reasoning_tokens: m.reasoning_tokens,
                             total_tokens: m.total_tokens,
+                            // 远端数据不带速度指标，仅用于计费
+                            speed: Default::default(),
                         },
                         &pricing.usd,
                     )
@@ -1593,6 +1595,9 @@ pub fn run() {
                     tauri_plugin_autostart::MacosLauncher::LaunchAgent,
                     None,
                 ))?;
+                // 应用内更新：检查/下载/安装由前端 @tauri-apps/plugin-updater 驱动
+                app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
+                app.handle().plugin(tauri_plugin_process::init())?;
             }
 
             // macOS 隐藏 Dock 图标，只保留菜单栏

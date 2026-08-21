@@ -45,6 +45,9 @@ A lightweight menu-bar floating panel that tracks the Token usage and cost of th
 - **📈 Weekly quota compare** — compare quota usage across reset cycles based on local quota snapshots (90-day rolling retention), with cross-device merge.
 - **📝 Daily / weekly reports** — one-click Markdown report (daily = today, weekly = last 7 days) saved locally.
 - **🔄 Multi-device sync** — self-hosted sync server (`server/`) to aggregate usage across machines (office / home). Incremental detail upload + `(device, rowid)` dedup, with **device filtering** (all / local / specific device) and **data cleanup** (by device / by time / all + configurable auto cleanup). See [server/README.md](./server/README.md).
+- **⚡ Speed & TTFT** — average output speed (tok/s) and first-token latency (TTFT) from per-call durations, with noise filtering (whole-block delivery detection, timing-outlier rejection). Available on ZCode / Claude panels (Codex / Cursor data sources carry no duration; columns auto-hide).
+- **🎯 Current model** — each agent panel shows the "current model" (latest model actually used + relative time); the summary page shows it per service group.
+- **⬆️ In-app auto update** — Settings → "About & update" to check / download / silently install new versions; endpoints fall back between **GitHub and Gitee** automatically, packages are signature-verified, and a silent startup check lights a red dot on the settings entry when a new version is available.
 
 ---
 
@@ -154,6 +157,31 @@ To target a specific architecture:
 ```bash
 npm run tauri build -- --target aarch64-apple-darwin
 ```
+
+### 🔄 In-app auto update (dual repos)
+
+The app has a built-in updater: Settings → "About & update" checks, downloads and silently installs new versions; a silent check also runs at startup and lights a red dot on the settings entry. Update endpoints fall back between **GitHub / Gitee** automatically — either repo being reachable is enough.
+
+**One-time setup for the first release**:
+
+1. Generate the update signing keypair (if you lose the private key you can **never** push updates again — back it up somewhere safe):
+
+   ```bash
+   npx tauri signer generate -w ~/.tauri/zbar-updater.key
+   ```
+
+2. Put the public key (`~/.tauri/zbar-updater.key.pub`) into `plugins.updater.pubkey` of `src-tauri/tauri.conf.json` (already configured for this project).
+3. Export `GITEE_TOKEN` (Gitee → Settings → Personal access tokens, with the projects scope) and install & login the `gh` CLI for GitHub.
+
+**Releasing a new version**:
+
+```bash
+scripts/release.sh 0.2.0 --notes "Release notes"
+# Build and verify artifacts only, without uploading:
+scripts/release.sh 0.2.0 --no-upload
+```
+
+The script syncs the version in three places → builds with signing (artifacts carry `.sig`) → generates two `latest.json` files (installer download URLs pointing at each repo) → uploads a GitHub Release (tag `v{version}`, marked latest) → recreates the Gitee Release under the fixed tag `latest` (update metadata source). macOS artifacts need to be built on a Mac and uploaded afterwards.
 
 ---
 

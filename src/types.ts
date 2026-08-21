@@ -10,6 +10,11 @@ export interface ModelStat {
   cache_write_tokens: number;
   reasoning_tokens: number;
   total_tokens: number;
+  /** 平均输出速度 tok/s（数据源带耗时时才有：ZCode/Claude） */
+  avg_tps?: number | null;
+  max_tps?: number | null;
+  /** 平均首字延迟 ms（仅 ZCode 库有 TTFT 数据） */
+  avg_ttft_ms?: number | null;
 }
 
 export interface OverallStat {
@@ -20,6 +25,16 @@ export interface OverallStat {
   cache_write_tokens: number;
   reasoning_tokens: number;
   total_tokens: number;
+  avg_tps?: number | null;
+  max_tps?: number | null;
+  avg_ttft_ms?: number | null;
+}
+
+/** 最近使用的模型（口径：最新一条用量记录，非配置态的"当前选中"） */
+export interface CurrentModel {
+  model_id: string;
+  provider_id: string;
+  last_used_ms: number;
 }
 
 export interface Stats {
@@ -29,6 +44,7 @@ export interface Stats {
   by_model: ModelStat[];
   earliest_ms: number | null;
   latest_ms: number | null;
+  current_model?: CurrentModel | null;
 }
 
 export interface ModelInfo {
@@ -485,6 +501,8 @@ export interface CursorSnapshot {
   today_quota?: CursorTodayQuota | null;
   daily: CursorDailyEntry[];
   by_model: CursorModelStat[];
+  /** 最近使用的模型（范围内最新一条带模型名的用量事件） */
+  current_model?: CurrentModel | null;
 }
 
 /** 主面板五标签 */

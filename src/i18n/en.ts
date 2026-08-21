@@ -54,6 +54,16 @@ export const en: typeof zh = {
     "common.modelUsage": "Models",
     "common.noPrice": "No price set",
 
+    // Speed / current model
+    "common.avgSpeed": "Avg speed",
+    "common.fastest": "Fastest",
+    "common.ttft": "First token",
+    "common.currentModel": "Current model",
+    "common.justNow": "just now",
+    "common.minutesAgo": "{n}m ago",
+    "common.hoursAgo": "{n}h ago",
+    "common.daysAgo": "{n}d ago",
+
     // 趋势图
     "common.usageTrend": "Usage trend",
     "common.trendFlat": "Flat",
@@ -452,6 +462,20 @@ export const en: typeof zh = {
       "Show/hide the panel. Format like alt+shift+z (modifiers: ctrl/alt/shift/cmd; main key: a letter or number).",
     "settings.apply": "Apply",
     "settings.applied": "Applied ✓",
+
+    "settings.aboutCard": "About & update",
+    "settings.currentVersion": "Version",
+    "settings.checkUpdate": "Check update",
+    "settings.checking": "Checking…",
+    "settings.upToDate": "Up to date",
+    "settings.newVersion": "New version {v}",
+    "settings.downloadInstall": "Download & install",
+    "settings.downloading": "Downloading {pct}%",
+    "settings.installing": "Installing…",
+    "settings.updateFailed": "Update failed: {msg}",
+    "settings.openDownloadPage": "Open download page",
+    "settings.updateHint":
+      "Updates are signature-verified; endpoints fall back between GitHub and Gitee automatically.",
 
     "settings.accountsCard": "ZCode account switch",
     "settings.accountsHint":

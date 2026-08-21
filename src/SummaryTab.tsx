@@ -4,6 +4,7 @@ import type {
   ClaudeSnapshot,
   CodexSnapshot,
   CostResult,
+  CurrentModel,
   CursorSnapshot,
   Currency,
   OverallStat,
@@ -11,7 +12,7 @@ import type {
   Stats,
   TrendPoint,
 } from "./types";
-import { formatCost, formatCountdownCore, formatTokens, levelLabel } from "./format";
+import { formatCost, formatCountdownCore, formatMs, formatTokens, formatTps, levelLabel } from "./format";
 import { modelCost } from "./merge";
 import {
   ProgressBar,
@@ -93,6 +94,12 @@ interface AgentSummary {
   badgeClass: string;
   cost: number;
   tokens: number;
+  /** 最近使用的模型（额度区标题行展示） */
+  currentModel?: CurrentModel | null;
+  /** 平均输出速度 tok/s（数据源带耗时的 Agent 才有：ZCode/Claude） */
+  avgTps?: number | null;
+  /** 平均首字延迟 ms（仅 ZCode，悬浮提示展示） */
+  avgTtftMs?: number | null;
   /** 缓存命中率（有 cache_read 数据时展示） */
   cacheHitPct?: number | null;
   metrics: {
@@ -163,6 +170,19 @@ function AgentCostCard({
               style={{ color: agent.color }}
             >
               {t("common.cacheHit", { pct: `${Math.round(agent.cacheHitPct)}%` })}
+            </div>
+          )}
+          {agent.avgTps != null && (
+            <div
+              className="num text-[9px] font-medium mt-0.5"
+              style={{ color: agent.color }}
+              title={
+                agent.avgTtftMs != null
+                  ? `${t("common.ttft")} ${formatMs(agent.avgTtftMs)}`
+                  : undefined
+              }
+            >
+              ⚡ {formatTps(agent.avgTps)} t/s
             </div>
           )}
         </div>
@@ -674,6 +694,9 @@ export function SummaryTab({
       badgeClass: "bg-sky-500/12 text-sky-700",
       cost: zaiCost,
       tokens: zaiTokens,
+      currentModel: stats?.current_model ?? null,
+      avgTps: stats?.overall.avg_tps ?? null,
+      avgTtftMs: stats?.overall.avg_ttft_ms ?? null,
       cacheHitPct: zaiCacheHitPct,
       metrics: zcodeMetrics,
       empty: zcodeEmpty,
@@ -688,6 +711,8 @@ export function SummaryTab({
       badgeClass: "bg-emerald-500/12 text-emerald-700",
       cost: codexCostRaw,
       tokens: codexTokens,
+      currentModel: codex?.stats.current_model ?? null,
+      avgTps: codex?.stats.overall.avg_tps ?? null,
       cacheHitPct: codexCacheHitPct,
       metrics: codexMetrics,
       empty: codexEmpty,
@@ -702,6 +727,8 @@ export function SummaryTab({
       badgeClass: "bg-orange-500/12 text-orange-700 capitalize",
       cost: claudeCostRaw,
       tokens: claudeTokens,
+      currentModel: claude?.stats.current_model ?? null,
+      avgTps: claude?.stats.overall.avg_tps ?? null,
       cacheHitPct: claudeCacheHitPct,
       metrics: claudeMetrics,
       empty: claudeEmpty,
@@ -716,6 +743,7 @@ export function SummaryTab({
       badgeClass: "bg-violet-500/12 text-violet-700 capitalize",
       cost: cursorCost,
       tokens: cursorTokens,
+      currentModel: cursor?.current_model ?? null,
       cacheHitPct: cursorCacheHitPct,
       metrics: cursorMetrics,
       empty: cursor?.logged_in ? t("summary.noQuotaData") : t("summary.notLoggedIn"),
@@ -875,9 +903,14 @@ export function SummaryTab({
                 <div className="flex items-center justify-between gap-1 mb-1.5">
                   <div className="flex items-center gap-1.5 min-w-0">
                     <span className="w-2 h-2 rounded-full shrink-0" style={{ background: a.color }} />
-                    <span className="text-[10px] font-semibold text-slate-700 truncate">{a.name}</span>
+                    <span className="text-[10px] font-semibold text-slate-700 shrink-0">{a.name}</span>
                     {a.badge && (
                       <span className={`shrink-0 px-1 py-px rounded text-[8px] font-medium ${a.badgeClass}`}>{a.badge}</span>
+                    )}
+                    {a.currentModel && (
+                      <span className="text-[9px] text-slate-500/90 truncate" title={t("common.currentModel")}>
+                        {a.currentModel.model_id}
+                      </span>
                     )}
                   </div>
                   {a.cycleResetAt != null && a.cycleResetAt > now ? (

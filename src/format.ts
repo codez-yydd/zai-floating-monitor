@@ -95,3 +95,15 @@ export function dateStr(ms: number): string {
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
 }
+
+/** 输出速度 tok/s：≥100 取整、否则一位小数（如 53.4 / 212） */
+export function formatTps(v: number): string {
+  return v >= 100 ? String(Math.round(v)) : v.toFixed(1);
+}
+
+/** 耗时格式化：<1s 毫秒、<1min 秒（一位小数）、否则分钟（一位小数） */
+export function formatMs(v: number): string {
+  if (v < 1000) return `${Math.round(v)}ms`;
+  if (v < 60_000) return `${(v / 1000).toFixed(1)}s`;
+  return `${(v / 60_000).toFixed(1)}min`;
+}

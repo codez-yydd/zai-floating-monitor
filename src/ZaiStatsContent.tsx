@@ -7,8 +7,14 @@ import type {
   TrendBucket,
   TrendPoint,
 } from "./types";
-import { formatCost, formatPct, formatTokens } from "./format";
-import { DetailRow, Metric, TrendChart } from "./widgets";
+import { formatCost, formatPct, formatTokens, formatTps } from "./format";
+import {
+  CurrentModelBar,
+  DetailRow,
+  Metric,
+  SpeedMetricsGrid,
+  TrendChart,
+} from "./widgets";
 import {
   HeroMetric,
   MetricPair,
@@ -72,6 +78,8 @@ export function ZaiStatsContent({
         }
       />
 
+      <CurrentModelBar model={stats.current_model} />
+
       {trend.length > 0 && (
         <TrendChart
           points={trend}
@@ -87,6 +95,8 @@ export function ZaiStatsContent({
         <Metric label={t("common.cacheRate")} value={formatPct(cacheRate)} accent="text-emerald-600" />
         <Metric label={t("common.output")} value={formatTokens(stats.overall.output_tokens)} />
       </div>
+
+      <SpeedMetricsGrid overall={stats.overall} />
 
       <SectionCard title={t("common.tokenComposition")}>
         <div className="space-y-1.5">
@@ -180,6 +190,8 @@ function ModelRankList({
   });
   rows.sort((a, b) => b.sortVal - a.sortVal);
   const maxVal = rows.length ? rows[0].sortVal : 0;
+  // 任一模型有速度数据才显示速度列（整列显示/隐藏，保持列对齐）
+  const hasSpeedCol = rows.some((r) => r.m.avg_tps != null);
 
   return (
     <div className="space-y-1">
@@ -200,9 +212,14 @@ function ModelRankList({
                 {!hasPrice && <span className="text-[10px] text-amber-600/90 shrink-0" title={t("common.noPrice")}>⚠</span>}
               </div>
               <div className="flex items-center gap-1 num shrink-0 text-[10px]">
-                {/* 请求/Token/花费三列深浅递进（浅→中→深），便于扫视区分 */}
+                {/* 请求/Token/花费三列深浅递进（浅→中→深），便于扫视区分；速度列插在 Token 与花费之间 */}
                 <span className="min-w-[1.5rem] text-right text-slate-500/80" title={t("common.requestCount")}>{formatTokens(m.requests)}</span>
                 <span className="min-w-[2rem] text-right text-slate-700" title={t("common.totalTokens")}>{formatTokens(m.total_tokens)}</span>
+                {hasSpeedCol && (
+                  <span className="min-w-[1.75rem] text-right text-sky-700/80" title={t("common.avgSpeed")}>
+                    {m.avg_tps != null ? `${formatTps(m.avg_tps)}/s` : "—"}
+                  </span>
+                )}
                 <span className={`min-w-[2.5rem] text-right font-medium ${hasPrice ? "text-slate-900/90" : "text-slate-500/50"}`}>
                   {hasPrice ? formatCost(costVal, currency) : "—"}
                 </span>

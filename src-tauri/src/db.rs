@@ -4,6 +4,23 @@ use std::path::PathBuf;
 // TimeZone trait 提供 timestamp_millis_opt 等方法，用于把毫秒转回本地时间
 use chrono::TimeZone;
 
+/// 速度/延迟指标（serde flatten 平铺进 ModelStat/OverallStat，JSON 形状与
+/// 直接加字段一致）。仅数据源带耗时的 Agent 有值（zcode 库有 duration+TTFT、
+/// Claude 导入库有 duration；Codex/Cursor 无耗时数据恒为 None）。
+/// 同步链路里旧版本数据无这些字段，反序列化按 None 兜底。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SpeedMetrics {
+    /// 平均输出速度（tok/s，仅统计可信样本）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_tps: Option<f64>,
+    /// 最快一次输出速度（tok/s）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tps: Option<f64>,
+    /// 平均首字延迟（毫秒，仅 zcode 库有 TTFT 数据）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_ttft_ms: Option<f64>,
+}
+
 /// 单个模型在指定时间范围内的聚合统计
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelStat {
@@ -16,6 +33,8 @@ pub struct ModelStat {
     pub cache_write_tokens: i64,
     pub reasoning_tokens: i64,
     pub total_tokens: i64,
+    #[serde(flatten)]
+    pub speed: SpeedMetrics,
 }
 
 /// 整体统计（时间范围内汇总）
@@ -28,6 +47,17 @@ pub struct OverallStat {
     pub cache_write_tokens: i64,
     pub reasoning_tokens: i64,
     pub total_tokens: i64,
+    #[serde(flatten)]
+    pub speed: SpeedMetrics,
+}
+
+/// 最近使用的模型（口径：全库最新一条用量记录，非配置态的"当前选中"）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CurrentModelStat {
+    pub model_id: String,
+    pub provider_id: String,
+    /// 最近一次使用时间（毫秒时间戳）
+    pub last_used_ms: i64,
 }
 
 /// get_stats 命令返回的完整结构
@@ -40,6 +70,9 @@ pub struct Stats {
     /// 数据库中实际有数据的最早/最晚时间（用于判断是否有数据）
     pub earliest_ms: Option<i64>,
     pub latest_ms: Option<i64>,
+    /// 最近使用的模型（与查询时间范围无关，取全库最新）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_model: Option<CurrentModelStat>,
 }
 
 /// 价格表中的一个模型的单价（每百万 token）
@@ -87,23 +120,116 @@ pub(crate) fn open_db() -> Result<Connection, String> {
     Ok(conn)
 }
 
+/// 探测表列是否存在（速度聚合按列有无动态降级；table 为代码内常量，无注入风险）。
+pub(crate) fn has_column(conn: &Connection, table: &str, column: &str) -> bool {
+    let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1");
+    conn.query_row(&sql, [column], |row| row.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false)
+}
+
+// ===== 输出速度（tok/s）与首字延迟（TTFT）聚合 =====
+//
+// 口径参考 zcode-assistant 的噪声过滤：
+// - 生成窗口 = 总耗时 − 首 token 等待（TTFT），即真实吐字窗口；
+// - 「整块下发」（TTFT ≥ 90% 总耗时，非流式接口/中转缓冲把响应攒在服务端）：
+//   总耗时 − TTFT 只是传输耗时，会把速度放大到数千 tok/s，改用 TTFT 本身
+//   作为生成窗口（含排队与预填充，是速度的保守下界）；
+// - 可信样本条件：输出 ≥10 tokens、生成窗口 ≥100ms、速度 ≤500 tok/s
+//   （现有模型物理上达不到 500，超出视为计时异常丢弃，不参与均值）；
+// - TTFT 均值取正值行（负值/缺失忽略）。
+
+/// 行级生成窗口的 SQL CASE 表达式（引用列 duration_ms / time_to_first_token_ms）。
+/// has_ttft = false（无 TTFT 列，如 Claude 导入库）：生成窗口退化为总耗时。
+fn gen_window_expr(has_ttft: bool) -> String {
+    if !has_ttft {
+        return "CASE WHEN COALESCE(duration_ms,0) > 0 THEN duration_ms END".into();
+    }
+    "CASE
+        WHEN COALESCE(duration_ms,0) <= 0 THEN NULL
+        WHEN time_to_first_token_ms IS NOT NULL
+             AND time_to_first_token_ms >= 0
+             AND time_to_first_token_ms <= duration_ms
+        THEN CASE
+            WHEN time_to_first_token_ms * 10 >= duration_ms * 9
+            THEN time_to_first_token_ms
+            ELSE duration_ms - time_to_first_token_ms
+        END
+        ELSE duration_ms
+    END"
+    .into()
+}
+
+/// 速度/TTFT 聚合的 SELECT 尾部片段（3 列：avg_tps, max_tps, avg_ttft_ms）。
+/// 列缺失时全部占位 NULL（如 Codex 导入库无耗时数据）。
+/// 追加在既有聚合 SQL 的最后一个聚合列之后，读取方按 Option<f64> 取列。
+pub(crate) fn speed_agg_columns(has_duration: bool, has_ttft: bool) -> String {
+    if !has_duration {
+        return ", NULL, NULL, NULL".into();
+    }
+    let gen = gen_window_expr(has_ttft);
+    let tps = format!(
+        "CASE
+            WHEN COALESCE(output_tokens,0) >= 10 AND ({gen}) >= 100
+                 AND COALESCE(output_tokens,0) * 1000.0 / ({gen}) <= 500.0
+            THEN COALESCE(output_tokens,0) * 1000.0 / ({gen})
+        END"
+    );
+    let ttft = if has_ttft {
+        // TTFT 物理上不超过总耗时，超出视为异常计时一并忽略
+        "CASE WHEN time_to_first_token_ms >= 0
+               AND time_to_first_token_ms <= duration_ms
+          THEN time_to_first_token_ms END"
+    } else {
+        "NULL"
+    };
+    format!(", AVG({tps}), MAX({tps}), AVG({ttft})")
+}
+
+/// 最近使用模型查询（全库最新一条；空模型名的行跳过，表空返回 None）。
+pub(crate) fn query_current_model(conn: &Connection) -> Option<CurrentModelStat> {
+    conn.query_row(
+        "SELECT model_id, provider_id, started_at
+         FROM model_usage
+         WHERE model_id IS NOT NULL AND model_id != ''
+         ORDER BY started_at DESC LIMIT 1",
+        [],
+        |row| {
+            Ok(CurrentModelStat {
+                model_id: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                provider_id: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                last_used_ms: row.get(2)?,
+            })
+        },
+    )
+    .ok()
+}
+
 /// 查询指定时间范围 [from_ms, to_ms] 内的统计（时间均为毫秒时间戳）。
 pub fn query_stats(from_ms: i64, to_ms: i64) -> Result<Stats, String> {
     let conn = open_db()?;
+    // zcode 库带 duration/TTFT 列；其它模块的导入库按列有无自动降级
+    let speed = speed_agg_columns(
+        has_column(&conn, "model_usage", "duration_ms"),
+        has_column(&conn, "model_usage", "time_to_first_token_ms"),
+    );
 
     // 整体汇总
     let overall: OverallStat = conn
         .query_row(
-            "SELECT
-                COUNT(*),
-                COALESCE(SUM(input_tokens),0),
-                COALESCE(SUM(output_tokens),0),
-                COALESCE(SUM(cache_read_input_tokens),0),
-                COALESCE(SUM(cache_creation_input_tokens),0),
-                COALESCE(SUM(reasoning_tokens),0),
-                COALESCE(SUM(computed_total_tokens),0)
-             FROM model_usage
-             WHERE started_at >= ?1 AND started_at < ?2",
+            &format!(
+                "SELECT
+                    COUNT(*),
+                    COALESCE(SUM(input_tokens),0),
+                    COALESCE(SUM(output_tokens),0),
+                    COALESCE(SUM(cache_read_input_tokens),0),
+                    COALESCE(SUM(cache_creation_input_tokens),0),
+                    COALESCE(SUM(reasoning_tokens),0),
+                    COALESCE(SUM(computed_total_tokens),0)
+                    {speed}
+                 FROM model_usage
+                 WHERE started_at >= ?1 AND started_at < ?2"
+            ),
             rusqlite::params![from_ms, to_ms],
             |row| {
                 Ok(OverallStat {
@@ -114,6 +240,11 @@ pub fn query_stats(from_ms: i64, to_ms: i64) -> Result<Stats, String> {
                     cache_write_tokens: row.get(4)?,
                     reasoning_tokens: row.get(5)?,
                     total_tokens: row.get(6)?,
+                    speed: SpeedMetrics {
+                        avg_tps: row.get(7)?,
+                        max_tps: row.get(8)?,
+                        avg_ttft_ms: row.get(9)?,
+                    },
                 })
             },
         )
@@ -121,7 +252,7 @@ pub fn query_stats(from_ms: i64, to_ms: i64) -> Result<Stats, String> {
 
     // 按模型分组
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT
                 model_id,
                 provider_id,
@@ -132,11 +263,12 @@ pub fn query_stats(from_ms: i64, to_ms: i64) -> Result<Stats, String> {
                 COALESCE(SUM(cache_creation_input_tokens),0),
                 COALESCE(SUM(reasoning_tokens),0),
                 COALESCE(SUM(computed_total_tokens),0) AS total_tokens
+                {speed}
              FROM model_usage
              WHERE started_at >= ?1 AND started_at < ?2
              GROUP BY provider_id, model_id
              ORDER BY total_tokens DESC",
-        )
+        ))
         .map_err(|e| format!("准备模型分组查询失败: {e}"))?;
 
     let by_model = stmt
@@ -151,6 +283,11 @@ pub fn query_stats(from_ms: i64, to_ms: i64) -> Result<Stats, String> {
                 cache_write_tokens: row.get(6)?,
                 reasoning_tokens: row.get(7)?,
                 total_tokens: row.get(8)?,
+                speed: SpeedMetrics {
+                    avg_tps: row.get(9)?,
+                    max_tps: row.get(10)?,
+                    avg_ttft_ms: row.get(11)?,
+                },
             })
         })
         .map_err(|e| format!("读取模型分组失败: {e}"))?
@@ -173,6 +310,7 @@ pub fn query_stats(from_ms: i64, to_ms: i64) -> Result<Stats, String> {
         by_model,
         earliest_ms,
         latest_ms,
+        current_model: query_current_model(&conn),
     })
 }
 
@@ -466,4 +604,145 @@ pub fn query_period_buckets(periods: &[(i64, i64)]) -> Result<Vec<PeriodBucket>,
         });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 建一个模拟 zcode model_usage 的内存表（带 duration/TTFT 列）并返回连接
+    fn zcode_like_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE model_usage (
+                started_at INTEGER, model_id TEXT, provider_id TEXT,
+                input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
+                cache_read_input_tokens INTEGER DEFAULT 0,
+                cache_creation_input_tokens INTEGER DEFAULT 0,
+                reasoning_tokens INTEGER DEFAULT 0,
+                computed_total_tokens INTEGER DEFAULT 0,
+                duration_ms INTEGER, time_to_first_token_ms INTEGER
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn insert(conn: &Connection, ms: i64, output: i64, dur: Option<i64>, ttft: Option<i64>) {
+        conn.execute(
+            "INSERT INTO model_usage (started_at, model_id, provider_id, output_tokens,
+                input_tokens, computed_total_tokens, duration_ms, time_to_first_token_ms)
+             VALUES (?1, 'm', 'p', ?2, 0, ?2, ?3, ?4)",
+            rusqlite::params![ms, output, dur, ttft],
+        )
+        .unwrap();
+    }
+
+    fn approx(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-6
+    }
+
+    /// 速度/TTFT 聚合口径：正常流式、整块下发、噪声过滤、TTFT 异常值忽略。
+    #[test]
+    fn speed_aggregation_semantics() {
+        let conn = zcode_like_db();
+        // 正常流式：生成窗口 = 2000-500 = 1500ms，300 tok → 200 tok/s
+        insert(&conn, 1_000, 300, Some(2000), Some(500));
+        // 整块下发：TTFT(1900) ≥ 90%×2000 → 窗口=1900，950 tok → 500 tok/s
+        insert(&conn, 2_000, 950, Some(2000), Some(1900));
+        // 输出 <10 tok：不可信，不计入
+        insert(&conn, 3_000, 5, Some(2000), Some(500));
+        // 生成窗口 50-10=40ms <100ms：计时噪声，不计入
+        insert(&conn, 4_000, 100, Some(50), Some(10));
+        // 10000 tok / 1s = 10000 tok/s >500：计时异常，不计入
+        insert(&conn, 5_000, 10_000, Some(1000), Some(0));
+        // TTFT 缺失：窗口退化为总耗时，300/3s = 100 tok/s
+        insert(&conn, 6_000, 300, Some(3000), None);
+        // TTFT > 总耗时（异常）：窗口退化总耗时 100 tok/s，TTFT 本身也不计均值
+        insert(&conn, 7_000, 300, Some(3000), Some(4000));
+        // 总耗时缺失：完全无速度信息
+        insert(&conn, 8_000, 300, None, Some(100));
+
+        let speed = speed_agg_columns(true, true);
+        let (avg, max, ttft): (Option<f64>, Option<f64>, Option<f64>) = conn
+            .query_row(
+                &format!("SELECT COUNT(*) {speed} FROM model_usage"),
+                [],
+                |r| Ok((r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        // 可信样本 = {200, 500, 100, 100}；TTFT 样本 = {500,1900,500,10,0}
+        assert!(approx(avg.unwrap(), 225.0), "avg={avg:?}");
+        assert!(approx(max.unwrap(), 500.0), "max={max:?}");
+        assert!(approx(ttft.unwrap(), 582.0), "ttft={ttft:?}");
+    }
+
+    /// 无耗时列的库（Codex 导入库同构）：占位 NULL，查询不报错。
+    #[test]
+    fn speed_columns_missing_degrade_to_null() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE model_usage (
+                started_at INTEGER, model_id TEXT, provider_id TEXT,
+                output_tokens INTEGER DEFAULT 0,
+                input_tokens INTEGER DEFAULT 0,
+                cache_read_input_tokens INTEGER DEFAULT 0,
+                cache_creation_input_tokens INTEGER DEFAULT 0,
+                reasoning_tokens INTEGER DEFAULT 0,
+                computed_total_tokens INTEGER DEFAULT 0
+            );
+            INSERT INTO model_usage (started_at, model_id, provider_id, output_tokens)
+             VALUES (1000, 'm', 'p', 300);",
+        )
+        .unwrap();
+        assert!(!has_column(&conn, "model_usage", "duration_ms"));
+        let speed = speed_agg_columns(false, false);
+        let (avg, max, ttft): (Option<f64>, Option<f64>, Option<f64>) = conn
+            .query_row(
+                &format!("SELECT COUNT(*) {speed} FROM model_usage"),
+                [],
+                |r| Ok((r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!((avg, max, ttft), (None, None, None));
+    }
+
+    /// 最近使用模型：取 started_at 最新一条（跳过空模型名行）；空表为 None。
+    #[test]
+    fn current_model_takes_latest_row() {
+        let conn = zcode_like_db();
+        assert!(query_current_model(&conn).is_none());
+        insert(&conn, 1_000, 10, None, None);
+        insert(&conn, 9_000, 10, None, None);
+        insert(&conn, 5_000, 10, None, None);
+        let cur = query_current_model(&conn).unwrap();
+        assert_eq!(cur.last_used_ms, 9_000);
+        assert_eq!(cur.model_id, "m");
+        assert_eq!(cur.provider_id, "p");
+    }
+
+    /// 最新一条恰好是空模型名（codex 回填失败场景）：跳过它取次新的有效模型。
+    #[test]
+    fn current_model_skips_empty_model_rows() {
+        let conn = zcode_like_db();
+        conn.execute(
+            "INSERT INTO model_usage (started_at, model_id, provider_id, output_tokens)
+             VALUES (9000, '', 'p', 10)",
+            [],
+        )
+        .unwrap();
+        insert(&conn, 5_000, 10, None, None);
+        let cur = query_current_model(&conn).unwrap();
+        assert_eq!(cur.last_used_ms, 5_000);
+        // 全库只有空模型行 → None
+        let conn2 = zcode_like_db();
+        conn2
+            .execute(
+                "INSERT INTO model_usage (started_at, model_id, provider_id, output_tokens)
+                 VALUES (9000, '', 'p', 10)",
+                [],
+            )
+            .unwrap();
+        assert!(query_current_model(&conn2).is_none());
+    }
 }

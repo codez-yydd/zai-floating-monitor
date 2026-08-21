@@ -76,6 +76,14 @@ fn claude_db_path() -> Result<PathBuf, String> {
 /// 冲突时保留 computed_total 更大的一行（同 id 多行 usage 为累计口径，末行
 /// 即终值；取更大者防御末行意外回退的脏数据）。被覆盖的行 updated_at 记录
 /// 修订时间，供同步补传（否则已上传的中间值永远不会被终值修正）。
+
+/// 进程内串行化结构迁移（codex.rs SCHEMA_MIGRATION_LOCK 同款）。
+static SCHEMA_MIGRATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn schema_migration_lock() -> &'static Mutex<()> {
+    SCHEMA_MIGRATION_LOCK.get_or_init(|| Mutex::new(()))
+}
+
 fn open_claude_db() -> Result<Connection, String> {
     let dir = config_dir()?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建配置目录失败: {e}"))?;
@@ -84,24 +92,34 @@ fn open_claude_db() -> Result<Connection, String> {
     conn.busy_timeout(std::time::Duration::from_secs(3))
         .map_err(|e| format!("设置 busy_timeout 失败: {e}"))?;
 
-    // 结构版本迁移：表存在但无 dedupe_key 列（旧版结构）时整表重建。
-    // 本库是从原始 jsonl 全量派生的缓存库，重建后下次导入自动补齐，
-    // 唯一代价是同步游标之后的记录重新入库（新 id，正常增量上传）。
-    let legacy = conn
-        .query_row(
-            "SELECT (SELECT COUNT(*) FROM sqlite_master
-                     WHERE type = 'table' AND name = 'model_usage')
-                  + (SELECT COUNT(*) FROM pragma_table_info('model_usage')
-                     WHERE name = 'dedupe_key')",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .map(|c| c == 1) // 表存在(1) + 无新列(0) → 旧结构；表不存在(0) 或新结构(2) → 无需迁移
-        .unwrap_or(false);
-    if legacy {
-        eprintln!("[zbar-claude] 检测到旧版导入库结构，重建（自动从原始会话重新导入）");
-        conn.execute_batch("DROP TABLE IF EXISTS model_usage; DROP TABLE IF EXISTS file_progress;")
-            .map_err(|e| format!("重建 Claude 导入库失败: {e}"))?;
+    // 结构版本迁移：表存在但缺 dedupe_key / duration_ms 列（旧版结构）时整表重建。
+    // 本库是从原始 jsonl 全量派生的缓存库，重建后下次导入自动补齐。重建后自增
+    // id 从头重排，普通 id 游标选不出低 id 行，靠修订通道（query_revised_since，
+    // 重建行 updated_at=导入时刻）全量补传到服务端收敛——勿删修订通道。
+    // 进程内互斥：升级后首次启动多个命令并发 open，避免同时判旧+交错 DROP/CREATE
+    //（跨进程竞态由 DROP IF EXISTS / CREATE IF NOT EXISTS 幂等兜底）。
+    {
+        let _guard = schema_migration_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let legacy = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM sqlite_master
+                         WHERE type = 'table' AND name = 'model_usage')
+                      + (SELECT COUNT(*) FROM pragma_table_info('model_usage')
+                         WHERE name = 'dedupe_key')
+                      + (SELECT COUNT(*) FROM pragma_table_info('model_usage')
+                         WHERE name = 'duration_ms')",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|c| c == 1 || c == 2) // 表存在(1)+两列全缺(0)→1；表存在+缺一列→2；表不存在→0 或新结构→3
+            .unwrap_or(false);
+        if legacy {
+            eprintln!("[zbar-claude] 检测到旧版导入库结构，重建（自动从原始会话重新导入）");
+            conn.execute_batch("DROP TABLE IF EXISTS model_usage; DROP TABLE IF EXISTS file_progress;")
+                .map_err(|e| format!("重建 Claude 导入库失败: {e}"))?;
+        }
     }
 
     conn.execute_batch(
@@ -119,6 +137,7 @@ fn open_claude_db() -> Result<Connection, String> {
             cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
             reasoning_tokens INTEGER NOT NULL DEFAULT 0,
             computed_total_tokens INTEGER NOT NULL DEFAULT 0,
+            duration_ms REAL,
             updated_at INTEGER NOT NULL DEFAULT 0,
             UNIQUE(dedupe_key)
          );
@@ -148,12 +167,15 @@ struct TranscriptLine {
 }
 
 /// assistant 行的 message 对象（content 不取，serde 忽略未知字段）。
+/// durationMs 为该次调用的总耗时（毫秒），旧版本 CLI 的行无此字段 → None。
 #[derive(Debug, Deserialize)]
 struct AssistantMessage {
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(rename = "durationMs", default)]
+    duration_ms: Option<f64>,
     #[serde(default)]
     usage: Option<UsagePayload>,
 }
@@ -431,8 +453,8 @@ fn import_one_file(
                 (session_id, dedupe_key, started_at, model_id, provider_id,
                  input_tokens, output_tokens, cache_read_input_tokens,
                  cache_creation_input_tokens, reasoning_tokens, computed_total_tokens,
-                 updated_at)
-             VALUES (?1, ?2, ?3, ?4, 'claude', ?5, ?6, ?7, ?8, 0, ?9, 0)
+                 duration_ms, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 'claude', ?5, ?6, ?7, ?8, 0, ?9, ?10, ?11)
              ON CONFLICT(dedupe_key) DO UPDATE SET
                 started_at = excluded.started_at,
                 model_id = excluded.model_id,
@@ -441,7 +463,8 @@ fn import_one_file(
                 cache_read_input_tokens = excluded.cache_read_input_tokens,
                 cache_creation_input_tokens = excluded.cache_creation_input_tokens,
                 computed_total_tokens = excluded.computed_total_tokens,
-                updated_at = ?10
+                duration_ms = excluded.duration_ms,
+                updated_at = ?11
              WHERE excluded.computed_total_tokens > model_usage.computed_total_tokens",
             rusqlite::params![
                 session_id,
@@ -453,6 +476,7 @@ fn import_one_file(
                 usage.cache_read_input_tokens,
                 usage.cache_creation_input_tokens,
                 total,
+                msg.duration_ms,
                 now_ms,
             ],
         )
@@ -475,22 +499,30 @@ fn import_one_file(
 // ===== 查询函数（与 codex.rs 同名同构，查 claude.sqlite；查询前先增量导入）=====
 
 /// 查询 [from_ms, to_ms) 内的统计（口径与 db::query_stats 完全一致）。
+/// Claude 会话无 TTFT 数据（jsonl 只有总耗时 durationMs），首字延迟恒为 None。
 pub fn query_stats(from_ms: i64, to_ms: i64) -> Result<db::Stats, String> {
     import_incremental()?;
     let conn = open_claude_db()?;
+    let speed = db::speed_agg_columns(
+        db::has_column(&conn, "model_usage", "duration_ms"),
+        false,
+    );
 
     let overall: db::OverallStat = conn
         .query_row(
-            "SELECT
-                COUNT(*),
-                COALESCE(SUM(input_tokens),0),
-                COALESCE(SUM(output_tokens),0),
-                COALESCE(SUM(cache_read_input_tokens),0),
-                COALESCE(SUM(cache_creation_input_tokens),0),
-                COALESCE(SUM(reasoning_tokens),0),
-                COALESCE(SUM(computed_total_tokens),0)
-             FROM model_usage
-             WHERE started_at >= ?1 AND started_at < ?2",
+            &format!(
+                "SELECT
+                    COUNT(*),
+                    COALESCE(SUM(input_tokens),0),
+                    COALESCE(SUM(output_tokens),0),
+                    COALESCE(SUM(cache_read_input_tokens),0),
+                    COALESCE(SUM(cache_creation_input_tokens),0),
+                    COALESCE(SUM(reasoning_tokens),0),
+                    COALESCE(SUM(computed_total_tokens),0)
+                    {speed}
+                 FROM model_usage
+                 WHERE started_at >= ?1 AND started_at < ?2"
+            ),
             rusqlite::params![from_ms, to_ms],
             |row| {
                 Ok(db::OverallStat {
@@ -501,13 +533,18 @@ pub fn query_stats(from_ms: i64, to_ms: i64) -> Result<db::Stats, String> {
                     cache_write_tokens: row.get(4)?,
                     reasoning_tokens: row.get(5)?,
                     total_tokens: row.get(6)?,
+                    speed: db::SpeedMetrics {
+                        avg_tps: row.get(7)?,
+                        max_tps: row.get(8)?,
+                        avg_ttft_ms: row.get(9)?,
+                    },
                 })
             },
         )
         .map_err(|e| format!("查询 Claude 整体统计失败: {e}"))?;
 
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT
                 model_id,
                 provider_id,
@@ -518,11 +555,12 @@ pub fn query_stats(from_ms: i64, to_ms: i64) -> Result<db::Stats, String> {
                 COALESCE(SUM(cache_creation_input_tokens),0),
                 COALESCE(SUM(reasoning_tokens),0),
                 COALESCE(SUM(computed_total_tokens),0) AS total_tokens
+                {speed}
              FROM model_usage
              WHERE started_at >= ?1 AND started_at < ?2
              GROUP BY provider_id, model_id
              ORDER BY total_tokens DESC",
-        )
+        ))
         .map_err(|e| format!("准备 Claude 模型分组查询失败: {e}"))?;
 
     let by_model = stmt
@@ -537,6 +575,11 @@ pub fn query_stats(from_ms: i64, to_ms: i64) -> Result<db::Stats, String> {
                 cache_write_tokens: row.get(6)?,
                 reasoning_tokens: row.get(7)?,
                 total_tokens: row.get(8)?,
+                speed: db::SpeedMetrics {
+                    avg_tps: row.get(9)?,
+                    max_tps: row.get(10)?,
+                    avg_ttft_ms: row.get(11)?,
+                },
             })
         })
         .map_err(|e| format!("读取 Claude 模型分组失败: {e}"))?
@@ -558,6 +601,7 @@ pub fn query_stats(from_ms: i64, to_ms: i64) -> Result<db::Stats, String> {
         by_model,
         earliest_ms,
         latest_ms,
+        current_model: db::query_current_model(&conn),
     })
 }
 

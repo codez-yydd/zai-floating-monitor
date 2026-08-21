@@ -56,6 +56,21 @@ export const settings = {
   "settings.apply": "应用",
   "settings.applied": "已应用 ✓",
 
+  // ===== 关于与更新 =====
+  "settings.aboutCard": "关于与更新",
+  "settings.currentVersion": "当前版本",
+  "settings.checkUpdate": "检查更新",
+  "settings.checking": "检查中…",
+  "settings.upToDate": "已是最新版本",
+  "settings.newVersion": "发现新版本 {v}",
+  "settings.downloadInstall": "下载并安装",
+  "settings.downloading": "下载中 {pct}%",
+  "settings.installing": "安装中…",
+  "settings.updateFailed": "更新失败：{msg}",
+  "settings.openDownloadPage": "打开下载页",
+  "settings.updateHint":
+    "更新包带签名校验；更新源为 GitHub / Gitee 双仓库，自动依次尝试。",
+
   // ===== 多智谱账号切换 =====
   "settings.accountsCard": "ZCode 账号切换",
   "settings.accountsHint":

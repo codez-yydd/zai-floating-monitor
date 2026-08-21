@@ -41,6 +41,16 @@ export const common = {
   "common.modelUsage": "模型用量",
   "common.noPrice": "未配置价格",
 
+  // 速度 / 当前模型
+  "common.avgSpeed": "平均速度",
+  "common.fastest": "最快",
+  "common.ttft": "首字延迟",
+  "common.currentModel": "当前模型",
+  "common.justNow": "刚刚",
+  "common.minutesAgo": "{n}分钟前",
+  "common.hoursAgo": "{n}小时前",
+  "common.daysAgo": "{n}天前",
+
   // 趋势图
   "common.usageTrend": "用量趋势",
   "common.trendFlat": "持平",
