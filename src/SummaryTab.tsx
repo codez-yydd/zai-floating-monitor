@@ -25,6 +25,11 @@ import { useI18n } from "./i18n";
 import type { AgentId, AgentVisibility } from "./agentVisibility";
 import { BrandIcon, type BrandIconName } from "./BrandIcon";
 import {
+  SwitchAccountButton,
+  SwitchConfirmOverlay,
+  useAccountSwitch,
+} from "./accountSwitch";
+import {
   HeroMetric,
   MetricPair,
   SectionCard,
@@ -374,17 +379,22 @@ function cycleEndMs(iso: string | null | undefined): number | null {
 }
 
 /** ZCode 多账号额度分组：快照 ≥2 时在额度监控区按账号逐组展示。
- *  每组子标题（账号名 + 当前徽标 + 等级徽标）+ 该账号的 5小时/每周行；
- *  MCP 月度行只给当前账号（多账号时页长可控，用户切换决策主要看周额度）；
- *  当前账号的每周行挂今日增量（其余账号不参与本机采样）。 */
+ *  每组子标题（账号名 + 当前徽标 + 等级徽标 + 非当前组的切换按钮）
+ *  + 该账号的 5小时/每周行；MCP 月度行只给当前账号（多账号时页长可控，
+ *  用户切换决策主要看周额度）；当前账号的每周行挂今日增量（其余账号不参与本机采样）。 */
 function AccountQuotaGroup({
   entries,
   now,
   currentDelta,
+  onSwitch,
+  switchDisabled,
 }: {
   entries: AccountQuotaEntry[];
   now: number;
   currentDelta?: AgentQuotaDelta;
+  /** 非当前账号的切换回调（点击弹确认） */
+  onSwitch: (e: AccountQuotaEntry) => void;
+  switchDisabled?: boolean;
 }) {
   const { t } = useI18n();
   return (
@@ -394,18 +404,26 @@ function AccountQuotaGroup({
         return (
           <div key={e.id}>
             <div className="flex items-center gap-1.5 mb-1 min-w-0">
-              <span className="text-[9px] font-medium text-slate-600 truncate">
-                {e.display_name}
+              <span className="flex items-center gap-1.5 min-w-0 flex-1">
+                <span className="text-[9px] font-medium text-slate-600 truncate">
+                  {e.display_name}
+                </span>
+                {e.is_current && (
+                  <span className="shrink-0 text-[8px] px-1 py-px rounded-full bg-violet-500/10 text-violet-600">
+                    {t("settings.accountsCurrent")}
+                  </span>
+                )}
+                {q?.level && (
+                  <span className="shrink-0 px-1 py-px rounded text-[8px] font-medium bg-sky-500/12 text-sky-700">
+                    {levelLabel(q.level)}
+                  </span>
+                )}
               </span>
-              {e.is_current && (
-                <span className="shrink-0 text-[8px] px-1 py-px rounded-full bg-violet-500/10 text-violet-600">
-                  {t("settings.accountsCurrent")}
-                </span>
-              )}
-              {q?.level && (
-                <span className="shrink-0 px-1 py-px rounded text-[8px] font-medium bg-sky-500/12 text-sky-700">
-                  {levelLabel(q.level)}
-                </span>
+              {!e.is_current && (
+                <SwitchAccountButton
+                  onClick={() => onSwitch(e)}
+                  disabled={switchDisabled}
+                />
               )}
             </div>
             {q ? (
@@ -484,6 +502,8 @@ export function SummaryTab({
     agentQuotaDeltas,
     accountQuotas,
   } = useDataCache();
+  // 额度监控区 ZCode 多账号分组的内嵌切换
+  const sw = useAccountSwitch();
   const hour5 = quota?.hour5 ?? null;
   const weekly = quota?.weekly ?? null;
   const mcp = quota?.mcp ?? null;
@@ -846,7 +866,12 @@ export function SummaryTab({
         <SectionCard title={t("summary.quotaMonitor")}>
           <div className="divide-y divide-slate-900/6 -mx-1">
             {agents.map((a) => (
-              <div key={a.id} className="px-1 py-2 first:pt-0 last:pb-0">
+              <div
+                key={a.id}
+                className={`px-1 py-2 first:pt-0 last:pb-0 ${
+                  a.id === "zai" ? "relative" : ""
+                }`}
+              >
                 <div className="flex items-center justify-between gap-1 mb-1.5">
                   <div className="flex items-center gap-1.5 min-w-0">
                     <span className="w-2 h-2 rounded-full shrink-0" style={{ background: a.color }} />
@@ -866,12 +891,36 @@ export function SummaryTab({
                   ) : null}
                 </div>
                 {a.id === "zai" && accountQuotas.length >= 2 ? (
-                  // 多账号：按账号分组展示（当前账号条目已由 DataCache 用 live quota 覆盖）
-                  <AccountQuotaGroup
-                    entries={accountQuotas}
-                    now={now}
-                    currentDelta={zcodeWeeklyDelta}
-                  />
+                  // 多账号：按账号分组展示（当前账号条目已由 DataCache 用 live quota 覆盖），
+                  // 非当前账号组带切换按钮
+                  <>
+                    <AccountQuotaGroup
+                      entries={accountQuotas}
+                      now={now}
+                      currentDelta={zcodeWeeklyDelta}
+                      onSwitch={(e) => sw.request(e)}
+                      switchDisabled={sw.switching}
+                    />
+                    {sw.notice && (
+                      <p
+                        className={`text-[9px] mt-1 leading-relaxed break-all ${
+                          sw.notice.kind === "ok"
+                            ? "text-emerald-600"
+                            : "text-rose-600"
+                        }`}
+                      >
+                        {sw.notice.text}
+                      </p>
+                    )}
+                    {sw.confirming && (
+                      <SwitchConfirmOverlay
+                        account={sw.confirming}
+                        switching={sw.switching}
+                        onConfirm={sw.confirm}
+                        onCancel={sw.cancel}
+                      />
+                    )}
+                  </>
                 ) : a.metrics.length > 0 ? (
                   <div className="space-y-1.5">
                     {a.metrics.map((m) => (

@@ -167,9 +167,6 @@ export function StatsPanel({
           }
         >
           <div className="flex items-center gap-1.5 select-none">
-            <span className="text-sky-600">
-              <BrandIcon brand="zai" className="h-4 w-4" />
-            </span>
             <h1 className="text-[13px] font-bold text-slate-900/90 tracking-tight">
               ZCode Token
             </h1>
@@ -303,15 +300,14 @@ export function StatsPanel({
         </div>
       </div>
 
-      {/* Coding Plan 额度监控 —— 仅在 z.ai 标签显示。
-          额度采样由 DataProvider 全局定时器负责，与组件挂载无关，无需 display:none hack。 */}
-      {tab === "zai" && <QuotaPanel />}
-
-      {/* 标签内容 */}
+      {/* 标签内容（zai：额度卡与统计内容同处一个滚动流，额度卡不再固定置顶
+          挤压统计区高度，向下滚动时随内容滚出视野。
+          额度采样由 DataProvider 全局定时器负责，与组件挂载无关。 */}
       {tab === "zai" ? (
-        <>
+        <div className="flex-1 min-h-0 overflow-y-auto px-3 py-2.5 page-stack">
+          <QuotaPanel />
           {error && (
-            <div className="mx-3 mt-2 px-2.5 py-1.5 rounded-lg bg-red-500/15 text-red-700 text-xs">
+            <div className="mb-2 px-2.5 py-1.5 rounded-lg bg-red-500/15 text-red-700 text-xs">
               {error}
             </div>
           )}
@@ -323,7 +319,7 @@ export function StatsPanel({
             currency={currency}
             trendBucket={trendBucket}
           />
-        </>
+        </div>
       ) : tab === "codex" ? (
         <CodexPanel
           snapshot={codex}

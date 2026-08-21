@@ -3,6 +3,11 @@ import { useDataCache } from "./DataCache";
 import { formatCountdownCore, levelLabel } from "./format";
 import { remainingGradient, remainingTextColor } from "./widgets";
 import { useI18n } from "./i18n";
+import {
+  SwitchAccountButton,
+  SwitchConfirmOverlay,
+  useAccountSwitch,
+} from "./accountSwitch";
 import type { AccountQuotaEntry } from "./types";
 
 export function QuotaPanel() {
@@ -10,6 +15,8 @@ export function QuotaPanel() {
   // 此组件仅负责展示（纯展示层），不再自己请求。
   const { quota, quotaError, todayDelta, refreshQuota, accountQuotas } =
     useDataCache();
+  // 卡片内嵌账号切换（全部账号区各非当前账号行）
+  const sw = useAccountSwitch();
   const { t } = useI18n();
   const [now, setNow] = useState(Date.now());
 
@@ -23,7 +30,7 @@ export function QuotaPanel() {
   // 注意：正则匹配 Rust 后端返回的中文错误串（quota.rs 的固定前缀文案），仅做布尔分支，不能翻译
   if (quotaError && quotaError.includes("未找到 ZCode Coding Plan 凭证")) {
     return (
-      <div className="mx-3.5 mb-1 rounded-lg bg-sky-500/10 border border-sky-500/20 px-2.5 py-1.5">
+      <div className="mb-1 rounded-lg bg-sky-500/10 border border-sky-500/20 px-2.5 py-1.5">
         <span className="text-[11px] text-sky-700/80">{t("quota.title")}</span>
         <p className="text-[10px] text-slate-700/50 mt-0.5">
           {t("quota.configHint")}
@@ -37,7 +44,7 @@ export function QuotaPanel() {
   const quotaFailed = quotaError != null || !quota;
   if (quotaFailed && accountQuotas.length < 2) {
     return (
-      <div className="mx-3.5 mb-1 rounded-lg bg-amber-500/10 border border-amber-500/20 px-2.5 py-1.5">
+      <div className="mb-1 rounded-lg bg-amber-500/10 border border-amber-500/20 px-2.5 py-1.5">
         <span className="text-[10px] text-amber-700/80">
           {quotaError ? t("quota.failed", { msg: quotaError }) : t("common.loading")}
         </span>
@@ -48,7 +55,7 @@ export function QuotaPanel() {
   const planBadge = quota?.level ? levelLabel(quota.level) : "—";
 
   return (
-    <div className="mx-3 mb-1 card-base rounded-2xl px-3 py-2.5">
+    <div className="relative mb-1 card-base rounded-2xl px-3 py-2.5">
       {/* 标题行 */}
       <div className="flex items-center justify-between mb-1.5">
         <div className="flex items-center gap-1.5">
@@ -111,7 +118,8 @@ export function QuotaPanel() {
 
       {/* 全部账号：≥2 个快照时逐账号展示（仅 1 个时与上方重复，不显示）。
           当前账号条目已由 DataCache 用 30s live quota 覆盖，其余为 5 分钟一轮。
-          列表限高内滚：账号多时不能把 zai 标签的统计主内容挤出可视区。 */}
+          列表限高内滚：账号多时不能把 zai 标签的统计主内容挤出可视区。
+          非当前账号行带「切换」按钮（确认后退出并重启 ZCode）。 */}
       {accountQuotas.length >= 2 && (
         <div className="mt-2 pt-1.5 border-t border-slate-900/6">
           <div className="text-[9px] uppercase tracking-wide text-slate-700/45 mb-1">
@@ -119,18 +127,53 @@ export function QuotaPanel() {
           </div>
           <div className="max-h-36 overflow-y-auto overscroll-contain space-y-1.5">
             {accountQuotas.map((e) => (
-              <AccountQuotaRow key={e.id} entry={e} />
+              <AccountQuotaRow
+                key={e.id}
+                entry={e}
+                onSwitch={e.is_current ? undefined : () => sw.request(e)}
+                switchDisabled={sw.switching}
+              />
             ))}
           </div>
         </div>
+      )}
+
+      {/* 切换结果反馈：成功绿色短暂展示，失败红字保留 */}
+      {sw.notice && (
+        <p
+          className={`text-[9px] mt-1.5 leading-relaxed break-all ${
+            sw.notice.kind === "ok" ? "text-emerald-600" : "text-rose-600"
+          }`}
+        >
+          {sw.notice.text}
+        </p>
+      )}
+
+      {/* 切换确认浮层（覆盖整卡） */}
+      {sw.confirming && (
+        <SwitchConfirmOverlay
+          account={sw.confirming}
+          switching={sw.switching}
+          onConfirm={sw.confirm}
+          onCancel={sw.cancel}
+        />
       )}
     </div>
   );
 }
 
 /** 多账号列表单行：名称 + 当前 pill + 等级徽标（sky，与汇总页 ZCode 徽标同色；
- *  violet 只留给"当前"一个语义）+ 每周剩余（条）+ 5小时剩余小字 */
-function AccountQuotaRow({ entry }: { entry: AccountQuotaEntry }) {
+ *  violet 只留给"当前"一个语义）+ 每周剩余（条）+ 5小时剩余小字 + 切换按钮 */
+function AccountQuotaRow({
+  entry,
+  onSwitch,
+  switchDisabled,
+}: {
+  entry: AccountQuotaEntry;
+  /** 非当前账号时传入（点击弹切换确认）；当前账号为 undefined */
+  onSwitch?: () => void;
+  switchDisabled?: boolean;
+}) {
   const { t } = useI18n();
   const { display_name, is_current, quota, error } = entry;
 
@@ -176,6 +219,9 @@ function AccountQuotaRow({ entry }: { entry: AccountQuotaEntry }) {
             </span>
           )}
         </span>
+        {onSwitch && (
+          <SwitchAccountButton onClick={onSwitch} disabled={switchDisabled} />
+        )}
         {weeklyRemain != null && (
           <span
             className="num text-[10px] font-semibold shrink-0 whitespace-nowrap"

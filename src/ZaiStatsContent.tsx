@@ -52,7 +52,7 @@ export function ZaiStatsContent({
   if (!stats) return <StatsSkeleton />;
 
   return (
-    <div className="flex-1 overflow-y-auto px-3 py-2.5 page-stack">
+    <div className="page-stack">
       <HeroMetric
         label={t("common.totalCost")}
         value={formatCost(totalCost, currency)}
@@ -217,7 +217,7 @@ function ModelRankList({
 function StatsSkeleton() {
   const barHeights = [38, 55, 42, 70, 48, 62, 35, 58];
   return (
-    <div className="flex-1 overflow-y-auto px-3 py-2.5 page-stack">
+    <div className="page-stack">
       <div className="hero-sky rounded-2xl px-3.5 py-3 animate-pulse">
         <div className="h-2.5 w-12 rounded bg-slate-900/15 mb-2" />
         <div className="h-7 w-28 rounded bg-slate-900/15" />
