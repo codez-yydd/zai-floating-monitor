@@ -126,9 +126,9 @@ jobs:
 
           GH_BASE="https://github.com/$GH_REPO_NAME/releases/download/v$VERSION"
           GITEE_BASE="https://gitee.com/$GITEE_REPO_NAME/releases/download/latest"
-          python3 scripts/gen_latest.py "$GH_BASE" latest.json
-          python3 scripts/gen_latest.py "$GITEE_BASE" gitee-latest.json
-          cat latest.json
+          python3 scripts/gen_latest.py "$GH_BASE" out/latest.json
+          python3 scripts/gen_latest.py "$GITEE_BASE" out/gitee-latest.json
+          cat out/latest.json
 
       - name: 发布 GitHub Release
         env:
@@ -152,14 +152,22 @@ jobs:
             exit 0
           fi
           API="https://gitee.com/api/v5/repos/$GITEE_REPO_NAME/releases"
+          TAGS_API="https://gitee.com/api/v5/repos/$GITEE_REPO_NAME/tags"
           TOKEN="access_token=$GITEE_TOKEN"
+
+          # 固定 tag latest 不存在则先建（Gitee 创建 release 要求 tag 已存在）
+          if ! curl -sf "$TAGS_API/latest?$TOKEN" >/dev/null 2>&1; then
+            curl -sS -f -X POST "$TAGS_API" -d "$TOKEN" \
+              -d 'tag_name=latest' -d 'ref=master' >/dev/null \
+              && echo '已创建 tag latest' || { echo '::error::创建 tag latest 失败'; exit 1; }
+          fi
 
           # 删除旧 latest release（tag 复用）
           OLD_ID=$(curl -sf "$API/tags/latest?$TOKEN" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2 || true)
           [[ -n "${OLD_ID:-}" ]] && curl -sf -X DELETE "$API/$OLD_ID?$TOKEN" >/dev/null && echo '已删除旧 latest release'
 
           attach() { # $1=文件 $2=上传名
-            curl -sf -X POST "$API/attach_files?$TOKEN" \
+            curl -sS -f -X POST "$API/attach_files?$TOKEN" \
               -F "file=@$1;filename=$2" | grep -o '"path":"[^"]*"' | cut -d'"' -f4
           }
           FILES=""
@@ -168,17 +176,26 @@ jobs:
                    out/*x64.app.tar.gz out/*x64.app.tar.gz.sig \
                    out/*.dmg; do
             [[ -f "$f" ]] || continue
-            p=$(attach "$f" "$(basename "$f")") && FILES="$FILES$p," || { echo "附件上传失败: $f"; exit 1; }
+            p=$(attach "$f" "$(basename "$f")") && FILES="$FILES$p," || { echo "::error::附件上传失败: $f"; exit 1; }
           done
-          p=$(attach gitee-latest.json latest.json) && FILES="$FILES$p" # Gitee 侧文件名必须是 latest.json
+          p=$(attach out/gitee-latest.json latest.json) && FILES="$FILES$p" || { echo '::error::latest.json 上传失败'; exit 1; } # Gitee 侧文件名必须是 latest.json
           FILES="${FILES%,}"
 
-          curl -sf -X POST "$API" \
+          # 创建 release；失败必须显式报错退出（-f 静默失败会被 && 短路吞掉）
+          RESP=$(curl -sS -w '\n%{http_code}' -X POST "$API" \
             -d "$TOKEN" \
             -d 'tag_name=latest' \
             -d "name=ZBar v$VERSION（应用内更新源）" \
             -d "body=ZBar $VERSION 自动更新通道，保持最新版即可。" \
-            -d "files=$FILES" >/dev/null && echo 'Gitee release 已创建'
+            -d "files=$FILES")
+          CODE=$(echo "$RESP" | tail -1)
+          if [[ "$CODE" == 2* ]]; then
+            echo 'Gitee release 已创建'
+          else
+            echo "::error::Gitee release 创建失败 HTTP $CODE："
+            echo "$RESP" | head -n -1
+            exit 1
+          fi
 
           echo ''
           echo '发布完成，更新源：'
