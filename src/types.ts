@@ -539,3 +539,56 @@ export interface ClaudeSnapshot {
   /** 订阅额度（未登录 claude.ai 订阅 / 第三方中转模式为 null） */
   rate_limits: ClaudeRateLimits | null;
 }
+
+// ===== 多智谱账号切换（与 Rust accounts 模块结构一一对应）=====
+
+/** 账号快照元信息（~/.zbar/accounts/<id>.account.json 的元数据部分） */
+export interface AccountMeta {
+  id: string;
+  display_name: string;
+  email: string | null;
+  fingerprint: string;
+  /** 创建时间（ms 时间戳） */
+  created_at: number;
+  is_current: boolean;
+}
+
+/** 当前实时登录账号（解密 ~/.zcode/v2/credentials.json 推断） */
+export interface CurrentAccount {
+  fingerprint: string;
+  email: string | null;
+  /** 当前账号匹配到的快照 id（未捕获过为 null） */
+  matched_snapshot_id: string | null;
+}
+
+/** list_accounts 返回：当前登录 + 快照列表 */
+export interface AccountsState {
+  current: CurrentAccount | null;
+  accounts: AccountMeta[];
+}
+
+/** capture_account 返回（updated_existing=true 表示更新了已存在的同账号快照） */
+export interface CaptureOutcome {
+  account: AccountMeta;
+  updated_existing: boolean;
+}
+
+/** switch_account 返回 */
+export interface SwitchOutcome {
+  switched_to: string;
+  /** ZCode 是否自动重启成功（false 时提示手动打开） */
+  zcode_relaunched: boolean;
+}
+
+/** account_quotas 返回：单个账号快照的订阅额度查询结果 */
+export interface AccountQuotaEntry {
+  id: string;
+  display_name: string;
+  email: string | null;
+  /** 是否当前登录账号（按实时指纹与快照指纹匹配回填） */
+  is_current: boolean;
+  /** 额度查询结果（失败为 null，原因见 error） */
+  quota: QuotaResult | null;
+  /** 查询失败原因（不含 token，后端原样透传） */
+  error: string | null;
+}

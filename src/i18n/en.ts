@@ -23,6 +23,7 @@ export const en: typeof zh = {
     "common.refresh": "Refresh",
     "common.cancel": "Cancel",
     "common.confirm": "Confirm",
+    "common.delete": "Delete",
     "common.show": "Show",
     "common.hide": "Hide",
 
@@ -107,6 +108,10 @@ export const en: typeof zh = {
     "quota.failed": "Failed to load quota: {msg}",
     "quota.refresh": "Refresh quota",
     "quota.todayDelta": "+{pct}% today",
+    "quota.allAccounts": "All accounts",
+    "quota.quotaFail": "Quota query failed",
+    "quota.weekShort": "Wk",
+    "quota.hour5Short": "5h",
 
     // Agent 用量面板
     "stats.rateLimits": "Quotas",
@@ -447,5 +452,30 @@ export const en: typeof zh = {
       "Show/hide the panel. Format like alt+shift+z (modifiers: ctrl/alt/shift/cmd; main key: a letter or number).",
     "settings.apply": "Apply",
     "settings.applied": "Applied ✓",
+
+    "settings.accountsCard": "ZCode account switch",
+    "settings.accountsHint":
+      "Capture the current ZCode login as a snapshot, then switch between accounts with one click (ZCode quits and relaunches automatically; the current login is backed up first and restored on failure). Snapshots stay local only and are never synced.",
+    "settings.accountsCurrent": "Current",
+    "settings.accountsUnknown": "Unrecognized",
+    "settings.accountsCapture": "Capture login",
+    "settings.accountsCapturing": "Capturing…",
+    "settings.accountsCapturedNew": "New account snapshot saved ✓",
+    "settings.accountsCapturedUpdate": "Account snapshot updated ✓",
+    "settings.accountsSwitch": "Switch",
+    "settings.accountsSwitching": "Switching…",
+    "settings.accountsSwitched": "Switched to \"{name}\" ✓",
+    "settings.accountsRelaunchFail":
+      " (ZCode failed to relaunch automatically, please open it manually)",
+    "settings.accountsConfirmTitle": "Switch account",
+    "settings.accountsConfirmDesc":
+      "This quits and relaunches the ZCode desktop app and switches the login to \"{name}\". The current login is backed up first and rolled back automatically on failure.",
+    "settings.accountsRemoveConfirm":
+      "Only the snapshot saved by this app is deleted; the current ZCode login is not affected.",
+    "settings.accountsRename": "Rename",
+    "settings.accountsRenameDesc": "Set a recognizable name for this snapshot.",
+    "settings.accountsEmpty":
+      "No snapshots yet. Log in to an account in the ZCode client and click \"Capture login\", then log in to another account and capture again — after that you can switch with one click.",
+    "settings.accountsLoadFail": "Failed to load accounts: {msg}",
   } satisfies typeof settings),
 };

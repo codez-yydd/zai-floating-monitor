@@ -93,6 +93,8 @@ fn base_from_provider_url(url: &str) -> &'static str {
 /// 读取 ~/.zcode/v2/config.json 中登录 Coding Plan 后自动写入的凭证
 /// （只读，绝不写回——该文件由 ZCode 客户端维护，外部写回极易把
 /// ZCode 的登录态搞坏；key 的增删与刷新由 ZCode 客户端自行管理）。
+/// 整个额度查询路径都不写 ~/.zcode 目录；全应用唯一受控写该目录的位置
+/// 是 accounts.rs 的切换事务（先退出 ZCode 再原文回写，详见其模块头注释）。
 /// 返回 (provider_key, api_key, base_url)，其中 base_url 取该 provider
 /// 的 options.baseURL（用于推断额度接口端点，缺失时为空串）。
 ///
@@ -121,6 +123,25 @@ fn pick_from_config() -> Result<(String, String, String), String> {
     )
 }
 
+/// 单个 provider 的凭证（纯解析，便于单测）：非空 apiKey（首尾空白去除）
+/// + baseURL（缺失给空串，由 base_from_provider_url 兜底）。apiKey 无效返回 None。
+pub(crate) fn provider_credential(v: &serde_json::Value) -> Option<(String, String)> {
+    let api_key = v
+        .get("options")
+        .and_then(|o| o.get("apiKey"))
+        .and_then(|k| k.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())?;
+    let base_url = v
+        .get("options")
+        .and_then(|o| o.get("baseURL"))
+        .and_then(|u| u.as_str())
+        .unwrap_or("")
+        .to_string();
+    Some((api_key, base_url))
+}
+
 /// 从 config.json 顶层 provider map 中选出 Coding Plan 凭证（纯解析，便于单测），
 /// 返回 (provider_key, api_key, base_url)。
 /// 优先按内置顺序取 builtin:bigmodel-coding-plan / builtin:zai-coding-plan；
@@ -128,35 +149,14 @@ fn pick_from_config() -> Result<(String, String, String), String> {
 /// 非空的 provider（用户通常只登录一个订阅，回退天然命中实际登录方）。
 /// 注意：builtin:bigmodel-start-plan / builtin:zai-start-plan 是轻量入门订阅，
 /// 不可用于查询订阅额度，好在它们的 key 不含 "coding-plan" 子串，天然被回退排除。
-fn pick_coding_plan_api_key(
+pub(crate) fn pick_coding_plan_api_key(
     providers: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<(String, String, String)> {
-    // 单个 provider 的非空 apiKey（首尾空白去除）
-    let non_empty_key = |v: &serde_json::Value| -> Option<String> {
-        v.get("options")
-            .and_then(|o| o.get("apiKey"))
-            .and_then(|k| k.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-    };
-
-    // 单个 provider 的 baseURL（字符串值，缺失给空串，由 base_from_provider_url 兜底）
-    let base_url_of = |v: &serde_json::Value| -> String {
-        v.get("options")
-            .and_then(|o| o.get("baseURL"))
-            .and_then(|u| u.as_str())
-            .unwrap_or("")
-            .to_string()
-    };
-
     // 内置 Coding Plan provider 固定优先顺序（无端点配置后的确定性选择）
     for preferred in ["builtin:bigmodel-coding-plan", "builtin:zai-coding-plan"] {
-        if let Some(api_key) = providers.get(preferred).and_then(non_empty_key) {
-            let base_url = providers
-                .get(preferred)
-                .map(base_url_of)
-                .unwrap_or_default();
+        if let Some((api_key, base_url)) =
+            providers.get(preferred).and_then(provider_credential)
+        {
             return Some((preferred.to_string(), api_key, base_url));
         }
     }
@@ -165,24 +165,20 @@ fn pick_coding_plan_api_key(
         .iter()
         .filter(|(k, _)| k.contains("coding-plan"))
         .find_map(|(k, v)| {
-            non_empty_key(v).map(|key| (k.clone(), key, base_url_of(v)))
+            provider_credential(v).map(|(key, base)| (k.clone(), key, base))
         })
 }
 
-/// 请求额度接口并解析（纯查询，不写快照）。
+/// 请求额度接口并解析（给定 apiKey 与 provider baseURL 的纯查询）。
 ///
 /// 接口返回的 limits 中包含多个类型和窗口，不能只按 nextResetTime 排序：
 /// 5 小时窗口刚刷新后可能没有 nextResetTime，反而会被排序到最后。
 ///
-/// 注意：本函数不写 quota_history 快照。仅前端 QuotaPanel 的主动刷新（fetch_quota）
-/// 才写快照；其他调用方应使用本函数，避免高频轮询污染历史。
-///
-/// 凭证与接口端点均自动推断：读取 ZCode 客户端本地登录态选出的 provider，
-/// 按其 options.baseURL 判断走 api.z.ai 还是 open.bigmodel.cn。
-pub fn query_quota() -> Result<QuotaResult, String> {
-    let (_provider_key, token, base_url) = pick_from_config()?;
-
-    let base = base_from_provider_url(&base_url);
+/// 注意：本函数不写 quota_history 快照。仅前端 QuotaPanel 的主动刷新
+/// （fetch_quota → query_quota）才写快照；其他调用方（如多账号额度查询
+/// accounts::account_quotas）应使用本函数，避免高频轮询污染历史。
+pub(crate) fn query_quota_with(token: &str, base_url: &str) -> Result<QuotaResult, String> {
+    let base = base_from_provider_url(base_url);
     let url = format!("{base}/api/monitor/usage/quota/limit");
 
     // 15s 请求总超时：ureq 默认无超时，网络异常时会无限等待卡死调用方；
@@ -255,6 +251,16 @@ pub fn query_quota() -> Result<QuotaResult, String> {
         weekly,
         mcp,
     })
+}
+
+/// 请求额度接口并解析（凭证自动推断版）。
+///
+/// 凭证与接口端点均自动推断：读取 ZCode 客户端本地登录态选出的 provider，
+/// 按其 options.baseURL 判断走 api.z.ai 还是 open.bigmodel.cn。
+/// 对外行为与错误文案不变（pick_from_config 的错误前缀被前端识别为登录引导分支）。
+pub fn query_quota() -> Result<QuotaResult, String> {
+    let (_provider_key, token, base_url) = pick_from_config()?;
+    query_quota_with(&token, &base_url)
 }
 
 /// 查询额度并写一条历史快照（供前端 fetch_quota 命令调用）。

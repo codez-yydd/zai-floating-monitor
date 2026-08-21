@@ -286,6 +286,7 @@ The panel and the menu-bar title share the same Rust calculation logic, so the n
 
 - The DB connection uses `SQLITE_OPEN_READ_ONLY` — **strictly read-only**, never touching ZCode data.
 - Pricing config is stored only in the user-local `~/.zbar/` directory; nothing is uploaded.
+- **Account switching** saves ZCode login snapshots under `~/.zbar/accounts/` (directory mode 700, file mode 600) for one-click switching. Snapshots **stay on this machine only** and are never synced. This app is an unofficial community tool, not affiliated with Zhipu AI.
 - **Multi-device sync** is optional and off by default. When enabled, only model names, token counts and timestamps are synced — **never code or conversation content**. The server is self-hosted; the data stays on your own server.
 - The panel hides on blur; the window stays alive (not destroyed) and can be re-summoned by clicking the tray.
 

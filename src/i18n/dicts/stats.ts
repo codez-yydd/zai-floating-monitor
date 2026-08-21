@@ -28,6 +28,10 @@ export const stats = {
   "quota.failed": "额度查询失败：{msg}",
   "quota.refresh": "刷新额度",
   "quota.todayDelta": "↑今日 {pct}%",
+  "quota.allAccounts": "全部账号",
+  "quota.quotaFail": "额度查询失败",
+  "quota.weekShort": "周剩",
+  "quota.hour5Short": "5h",
 
   // ===== Agent 用量面板（Codex / Claude / Cursor 共用结构）=====
   "stats.rateLimits": "额度",

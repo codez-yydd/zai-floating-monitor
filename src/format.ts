@@ -37,6 +37,25 @@ export function formatCountdownCore(ms: number): string {
       : `${mins}m`;
 }
 
+// ============================================================
+// Coding Plan 套餐等级 → 展示标签。
+// 原先在 QuotaPanel / SummaryTab 各有一份 LEVEL_LABEL，多账号额度
+// 展示（AccountsCard 等）也需要，统一收敛到这里共用。
+// ============================================================
+
+const LEVEL_LABEL: Record<string, string> = {
+  lite: "Lite",
+  pro: "Pro",
+  max: "Max",
+  ultra: "Ultra",
+};
+
+/** 套餐等级标签：已知等级（lite/pro/max/ultra）映射为首字母大写短标，
+ *  未知等级原样返回（接口未来加档位时不至于显示空白） */
+export function levelLabel(level: string): string {
+  return LEVEL_LABEL[level] || level;
+}
+
 /** 时间范围预设 → [from_ms, to_ms] 毫秒时间戳 */
 export function rangeToMs(
   preset: string,

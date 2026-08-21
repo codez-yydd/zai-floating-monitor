@@ -10,6 +10,7 @@ import {
 import type { ReactNode } from "react";
 import type {
   AgentQuotaDeltaMap,
+  AccountQuotaEntry,
   ClaudeSnapshot,
   CostResult,
   CodexSnapshot,
@@ -25,6 +26,7 @@ import type {
   TrendPoint,
 } from "./types";
 import {
+  accountQuotas as fetchAccountQuotas,
   computeCost,
   fetchClaudeUsage,
   fetchCodexUsage,
@@ -231,6 +233,10 @@ export interface DataCacheValue {
   /** Codex / Claude / Cursor 今日额度增量，按来源和窗口索引。 */
   agentQuotaDeltas: AgentQuotaDeltaMap;
   quotaError: string | null;
+  /** 全部账号快照的订阅额度（当前账号条目已用 30s live quota 覆盖，见 value 派生） */
+  accountQuotas: AccountQuotaEntry[];
+  /** 手动刷新多账号额度（账号捕获/切换/删除/重命名后调用） */
+  refreshAccountQuotas: () => void;
 
   // ===== 同步配置（启动时加载一次）=====
   syncConfig: SyncConfig | null;
@@ -311,6 +317,10 @@ export function DataProvider({ pricing, children }: ProviderProps) {
   );
   const [agentQuotaDeltas, setAgentQuotaDeltas] = useState<AgentQuotaDeltaMap>({});
   const [quotaError, setQuotaError] = useState<string | null>(null);
+  // 多账号额度（低频 5 分钟一轮 + 账号操作后手动刷，持久化供冷启动秒显）
+  const [accountQuotas, setAccountQuotas] = useState<AccountQuotaEntry[]>(
+    () => loadCache<AccountQuotaEntry[]>("zbar-account-quotas") ?? []
+  );
 
   // ===== 同步配置 =====
   const [syncConfig, setSyncConfig] = useState<SyncConfig | null>(null);
@@ -323,6 +333,12 @@ export function DataProvider({ pricing, children }: ProviderProps) {
   const codexInflight = useRef<Set<string>>(new Set());
   const claudeInflight = useRef<Set<string>>(new Set());
   const quotaReqId = useRef(0);
+  const accountQuotasInflight = useRef(false);
+  // 两路额度数据各自的最近成功时刻：切换账号后 refreshQuota（live，读 ~/.zcode
+  // 实时凭证）与 refreshAccountQuotas（读快照 + 实时指纹）并行、到达顺序不定，
+  // 合并时只允许较新一路覆盖当前账号条目，避免把旧账号额度贴到新账号名下
+  const quotaTsRef = useRef(0);
+  const accountQuotasTsRef = useRef(0);
   const agentQuotaReqId = useRef(0);
   const agentQuotaDeltaRefreshRef = useRef<() => void>(() => {});
   const agentQuotaReloadTimer = useRef<number | null>(null);
@@ -724,6 +740,7 @@ export function DataProvider({ pricing, children }: ProviderProps) {
     fetchQuota()
       .then((r) => {
         if (reqId !== quotaReqId.current) return;
+        quotaTsRef.current = Date.now();
         setQuota(r);
         setQuotaError(null);
         // 额度刷新成功后顺带读今日增量（快照由 fetch_quota 采样写入）
@@ -732,6 +749,22 @@ export function DataProvider({ pricing, children }: ProviderProps) {
       .catch((e) => {
         if (reqId !== quotaReqId.current) return;
         setQuotaError(String(e));
+      });
+  }, []);
+
+  // 多账号额度加载（读各账号快照里的凭证并行查询，不写额度历史）。
+  // 失败静默保留旧值：账号级失败原因在各条目 error 字段里，不设全局 error。
+  const loadAccountQuotas = useCallback(() => {
+    if (accountQuotasInflight.current) return;
+    accountQuotasInflight.current = true;
+    fetchAccountQuotas()
+      .then((r) => {
+        accountQuotasTsRef.current = Date.now();
+        setAccountQuotas(r);
+      })
+      .catch(() => {})
+      .finally(() => {
+        accountQuotasInflight.current = false;
       });
   }, []);
 
@@ -870,6 +903,18 @@ export function DataProvider({ pricing, children }: ProviderProps) {
     };
   }, [loadQuota]);
 
+  // 多账号额度定时 300s：非当前账号的额度只随窗口翻转变化，低频足够；
+  // 当前账号条目展示时由 30s 的 quota 实时覆盖（见下方 value 派生），
+  // 不必与 quota 同频。延后首刷（3.5s）再错一峰。
+  useEffect(() => {
+    const first = setTimeout(loadAccountQuotas, 3_500);
+    const timer = setInterval(loadAccountQuotas, 300_000);
+    return () => {
+      clearTimeout(first);
+      clearInterval(timer);
+    };
+  }, [loadAccountQuotas]);
+
   // Agent 额度快照在各数据源首刷后读取，后续与额度查询同频刷新。
   useEffect(() => {
     const first = setTimeout(loadAgentQuotaDeltas, 3_000);
@@ -967,6 +1012,9 @@ export function DataProvider({ pricing, children }: ProviderProps) {
   useEffect(() => {
     if (todayDelta) saveCache("zbar-today-delta", todayDelta);
   }, [todayDelta]);
+  useEffect(() => {
+    saveCache("zbar-account-quotas", accountQuotas);
+  }, [accountQuotas]);
 
   // 手动刷新：刷新当前范围（z.ai + Codex + Claude + Cursor）一次
   const refresh = useCallback(() => {
@@ -981,6 +1029,10 @@ export function DataProvider({ pricing, children }: ProviderProps) {
   }, [preset, custom, deviceFilter, trendBucket, refreshZaiRange, refreshCodexRange, refreshClaudeRange, refreshCursorRange, loadAgentQuotaDeltas]);
 
   const refreshQuota = useCallback(() => loadQuota(), [loadQuota]);
+  const refreshAccountQuotas = useCallback(
+    () => loadAccountQuotas(),
+    [loadAccountQuotas]
+  );
 
   // ===== 当前范围数据（展示层只读这些）=====
   const curZaiKey = `${deviceFilter}|${rangeKey(preset, custom)}`;
@@ -997,6 +1049,20 @@ export function DataProvider({ pricing, children }: ProviderProps) {
   const lastUpdate = updateTs.length ? Math.min(...updateTs) : 0;
   const refreshing =
     curZai.refreshing || curCursor.refreshing || curCodex.refreshing || curClaude.refreshing;
+
+  // 展示派生：当前账号条目用 30s live quota 覆盖（用量实时变化，5 分钟一轮的
+  // 多账号查询跟不上）。仅当 live 一路更新（时间戳较新）时才覆盖——切换账号后
+  // 两路数据到达顺序不定，旧一路的额度可能是另一个账号的；live 查询失败
+  // （quota=null 或时间戳较旧）时保留后端值，避免闪空或错配
+  const accountQuotasMerged = useMemo(
+    () =>
+      accountQuotas.map((e) =>
+        e.is_current && quota && quotaTsRef.current >= accountQuotasTsRef.current
+          ? { ...e, quota }
+          : e
+      ),
+    [accountQuotas, quota]
+  );
 
   const value = useMemo<DataCacheValue>(
     () => ({
@@ -1022,6 +1088,8 @@ export function DataProvider({ pricing, children }: ProviderProps) {
       todayDelta,
       agentQuotaDeltas,
       quotaError,
+      accountQuotas: accountQuotasMerged,
+      refreshAccountQuotas,
       syncConfig,
       remoteDevices,
       syncEnabled,
@@ -1044,6 +1112,8 @@ export function DataProvider({ pricing, children }: ProviderProps) {
       todayDelta,
       agentQuotaDeltas,
       quotaError,
+      accountQuotasMerged,
+      refreshAccountQuotas,
       syncConfig,
       remoteDevices,
       syncEnabled,
@@ -1051,7 +1121,7 @@ export function DataProvider({ pricing, children }: ProviderProps) {
       refreshing,
       refresh,
       refreshQuota,
-    ]
+    ],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

@@ -55,4 +55,29 @@ export const settings = {
     "唤起/隐藏面板。格式如 alt+shift+z（修饰键用 ctrl/alt/shift/cmd，主键用字母/数字）。",
   "settings.apply": "应用",
   "settings.applied": "已应用 ✓",
+
+  // ===== 多智谱账号切换 =====
+  "settings.accountsCard": "ZCode 账号切换",
+  "settings.accountsHint":
+    "捕获当前 ZCode 登录为快照后，可在多个账号间一键切换（自动退出并重启 ZCode，切换前备份、失败自动回滚）。快照仅存本机，不参与同步。",
+  "settings.accountsCurrent": "当前",
+  "settings.accountsUnknown": "未识别",
+  "settings.accountsCapture": "捕获当前登录",
+  "settings.accountsCapturing": "捕获中…",
+  "settings.accountsCapturedNew": "已保存新账号快照 ✓",
+  "settings.accountsCapturedUpdate": "已更新该账号的快照 ✓",
+  "settings.accountsSwitch": "切换",
+  "settings.accountsSwitching": "切换中…",
+  "settings.accountsSwitched": "已切换到「{name}」✓",
+  "settings.accountsRelaunchFail": "（ZCode 自动重启失败，请手动打开）",
+  "settings.accountsConfirmTitle": "切换账号",
+  "settings.accountsConfirmDesc":
+    "将退出并重启 ZCode 桌面应用，登录态切换为「{name}」。切换前会自动备份当前登录，失败时自动回滚。",
+  "settings.accountsRemoveConfirm":
+    "仅删除本应用保存的快照，不影响 ZCode 当前登录。",
+  "settings.accountsRename": "重命名",
+  "settings.accountsRenameDesc": "为该账号快照设置一个好认的名字。",
+  "settings.accountsEmpty":
+    "还没有账号快照。在 ZCode 客户端登录账号后点「捕获当前登录」保存，之后在另一个账号登录再捕获一次，即可一键切换。",
+  "settings.accountsLoadFail": "读取账号列表失败：{msg}",
 };

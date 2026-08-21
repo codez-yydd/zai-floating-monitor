@@ -10,6 +10,7 @@ export const common = {
   "common.refresh": "刷新",
   "common.cancel": "取消",
   "common.confirm": "确认",
+  "common.delete": "删除",
   "common.show": "显示",
   "common.hide": "隐藏",
 

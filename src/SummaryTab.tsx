@@ -1,4 +1,5 @@
 import type {
+  AccountQuotaEntry,
   AgentQuotaDelta,
   ClaudeSnapshot,
   CodexSnapshot,
@@ -10,7 +11,7 @@ import type {
   Stats,
   TrendPoint,
 } from "./types";
-import { formatCost, formatCountdownCore, formatTokens } from "./format";
+import { formatCost, formatCountdownCore, formatTokens, levelLabel } from "./format";
 import { modelCost } from "./merge";
 import {
   ProgressBar,
@@ -44,13 +45,6 @@ interface Props {
   pricing: PricingConfig;
   agentVisibility: AgentVisibility;
 }
-
-const LEVEL_LABEL: Record<string, string> = {
-  lite: "Lite",
-  pro: "Pro",
-  max: "Max",
-  ultra: "Ultra",
-};
 
 /** 缓存命中率：input 含 cache_read 口径（ZCode / Codex） */
 function cacheHitPctIncluded(
@@ -379,6 +373,84 @@ function cycleEndMs(iso: string | null | undefined): number | null {
   return Number.isFinite(t) ? t : null;
 }
 
+/** ZCode 多账号额度分组：快照 ≥2 时在额度监控区按账号逐组展示。
+ *  每组子标题（账号名 + 当前徽标 + 等级徽标）+ 该账号的 5小时/每周行；
+ *  MCP 月度行只给当前账号（多账号时页长可控，用户切换决策主要看周额度）；
+ *  当前账号的每周行挂今日增量（其余账号不参与本机采样）。 */
+function AccountQuotaGroup({
+  entries,
+  now,
+  currentDelta,
+}: {
+  entries: AccountQuotaEntry[];
+  now: number;
+  currentDelta?: AgentQuotaDelta;
+}) {
+  const { t } = useI18n();
+  return (
+    <div className="space-y-2">
+      {entries.map((e) => {
+        const q = e.quota;
+        return (
+          <div key={e.id}>
+            <div className="flex items-center gap-1.5 mb-1 min-w-0">
+              <span className="text-[9px] font-medium text-slate-600 truncate">
+                {e.display_name}
+              </span>
+              {e.is_current && (
+                <span className="shrink-0 text-[8px] px-1 py-px rounded-full bg-violet-500/10 text-violet-600">
+                  {t("settings.accountsCurrent")}
+                </span>
+              )}
+              {q?.level && (
+                <span className="shrink-0 px-1 py-px rounded text-[8px] font-medium bg-sky-500/12 text-sky-700">
+                  {levelLabel(q.level)}
+                </span>
+              )}
+            </div>
+            {q ? (
+              <div className="space-y-1">
+                {q.hour5 && (
+                  <QuotaMiniRow
+                    label={t("common.hour5")}
+                    usedPct={q.hour5.percentage}
+                    resetAt={q.hour5.nextResetTime}
+                    now={now}
+                  />
+                )}
+                {q.weekly && (
+                  <QuotaMiniRow
+                    label={t("common.weekly")}
+                    usedPct={q.weekly.percentage}
+                    resetAt={q.weekly.nextResetTime}
+                    now={now}
+                    delta={e.is_current ? currentDelta : undefined}
+                  />
+                )}
+                {q.mcp && e.is_current && (
+                  <QuotaMiniRow
+                    label="MCP"
+                    usedPct={q.mcp.percentage}
+                    resetAt={q.mcp.nextResetTime}
+                    now={now}
+                  />
+                )}
+              </div>
+            ) : (
+              <div
+                className="text-[9px] text-rose-500/90"
+                title={e.error ?? undefined}
+              >
+                ⚠ {t("quota.quotaFail")}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export function SummaryTab({
   stats,
   cost,
@@ -410,13 +482,12 @@ export function SummaryTab({
     codexError,
     claudeError,
     agentQuotaDeltas,
+    accountQuotas,
   } = useDataCache();
   const hour5 = quota?.hour5 ?? null;
   const weekly = quota?.weekly ?? null;
   const mcp = quota?.mcp ?? null;
-  const levelLabel = quota?.level
-    ? LEVEL_LABEL[quota.level] || quota.level
-    : null;
+  const planBadge = quota?.level ? levelLabel(quota.level) : null;
   const zcodeWeeklyDelta: AgentQuotaDelta | undefined = todayDelta
     ? { pct: todayDelta[0], samples: todayDelta[1] }
     : undefined;
@@ -579,7 +650,7 @@ export function SummaryTab({
       color: "#0ea5e9",
       tintBg: "rgba(14, 165, 233, 0.07)",
       nameClass: "text-sky-700",
-      badge: levelLabel,
+      badge: planBadge,
       badgeClass: "bg-sky-500/12 text-sky-700",
       cost: zaiCost,
       tokens: zaiTokens,
@@ -794,7 +865,14 @@ export function SummaryTab({
                     </span>
                   ) : null}
                 </div>
-                {a.metrics.length > 0 ? (
+                {a.id === "zai" && accountQuotas.length >= 2 ? (
+                  // 多账号：按账号分组展示（当前账号条目已由 DataCache 用 live quota 覆盖）
+                  <AccountQuotaGroup
+                    entries={accountQuotas}
+                    now={now}
+                    currentDelta={zcodeWeeklyDelta}
+                  />
+                ) : a.metrics.length > 0 ? (
                   <div className="space-y-1.5">
                     {a.metrics.map((m) => (
                       <QuotaMiniRow

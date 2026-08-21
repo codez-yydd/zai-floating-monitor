@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AccountsState,
+  AccountMeta,
+  AccountQuotaEntry,
   AutoCleanupConfig,
+  CaptureOutcome,
   CleanupResult,
   CleanupStatus,
   ClaudeSnapshot,
@@ -25,6 +29,7 @@ import type {
   RemoteUsage,
   ShortcutConfig,
   Stats,
+  SwitchOutcome,
   SyncConfig,
   SyncOutcome,
   TrendBucket,
@@ -397,4 +402,39 @@ export async function fetchClaudeUsage(
   return invoke<ClaudeSnapshot>("get_claude_usage", {
     req: { from_ms: fromMs, to_ms: toMs, bucket },
   });
+}
+
+// ===== 多智谱账号切换 =====
+
+/** 账号快照列表 + 实时解密推断的当前登录账号 */
+export async function listAccounts(): Promise<AccountsState> {
+  return invoke<AccountsState>("list_accounts");
+}
+
+/** 捕获当前 ZCode 登录为快照（同账号重复捕获为更新） */
+export async function captureAccount(): Promise<CaptureOutcome> {
+  return invoke<CaptureOutcome>("capture_account");
+}
+
+/** 切换登录账号（备份 → 退出 ZCode → 写回凭证 → 重启；失败自动回滚） */
+export async function switchAccount(id: string): Promise<SwitchOutcome> {
+  return invoke<SwitchOutcome>("switch_account", { id });
+}
+
+/** 删除账号快照（仅删本应用保存的快照，不影响 ZCode 当前登录） */
+export async function removeAccount(id: string): Promise<void> {
+  await invoke("remove_account", { id });
+}
+
+/** 重命名账号快照（上限 32 字，后端再截断兜底） */
+export async function renameAccount(
+  id: string,
+  name: string
+): Promise<AccountMeta> {
+  return invoke<AccountMeta>("rename_account", { id, name });
+}
+
+/** 查询全部账号快照各自的订阅额度（凭证取自快照，与当前登录无关；不写额度历史） */
+export async function accountQuotas(): Promise<AccountQuotaEntry[]> {
+  return invoke<AccountQuotaEntry[]>("account_quotas");
 }

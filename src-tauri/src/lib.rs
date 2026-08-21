@@ -1,5 +1,6 @@
 #![allow(linker_messages)]
 
+mod accounts;
 mod agent_quota_history;
 mod claude;
 mod codex;
@@ -10,6 +11,7 @@ mod quota;
 mod quota_history;
 mod shortcut;
 mod sync;
+mod zcode_crypto;
 
 use pricing::{load_pricing, save_pricing, ModelPrice, PricingConfig};
 use quota::QuotaResult;
@@ -299,6 +301,64 @@ async fn fetch_quota() -> Result<QuotaResult, String> {
     tauri::async_runtime::spawn_blocking(quota::fetch_quota)
         .await
         .map_err(|e| format!("额度查询任务失败: {e}"))?
+}
+
+// ===== 多智谱账号切换（accounts.rs）=====
+// 以下命令是全应用唯一允许写 ~/.zcode/v2/（credentials.json / config.json）
+// 的入口，且只发生在 switch_account 的事务内部；额度查询路径始终只读。
+
+/// 列出账号快照 + 实时解密推断当前登录账号（文件 IO + AES 解密）。
+#[tauri::command]
+async fn list_accounts() -> Result<accounts::AccountsState, String> {
+    tauri::async_runtime::spawn_blocking(accounts::list_accounts)
+        .await
+        .map_err(|e| format!("读取账号列表任务失败: {e}"))?
+}
+
+/// 捕获当前 ZCode 登录为快照（读两文件 + 写快照，文件 IO）。
+#[tauri::command]
+async fn capture_account() -> Result<accounts::CaptureOutcome, String> {
+    tauri::async_runtime::spawn_blocking(accounts::capture_account)
+        .await
+        .map_err(|e| format!("捕获账号任务失败: {e}"))?
+}
+
+/// 切换登录账号：备份 → 退出 ZCode → 写回凭证 → 重启（进程轮询最长约 8s，
+/// 重 IO，必须 spawn_blocking，否则冻结托盘/窗口事件）。
+#[tauri::command]
+async fn switch_account(id: String) -> Result<accounts::SwitchOutcome, String> {
+    tauri::async_runtime::spawn_blocking(move || accounts::switch_account(&id))
+        .await
+        .map_err(|e| format!("切换账号任务失败: {e}"))?
+}
+
+/// 删除账号快照（仅删本应用快照文件，不影响 ZCode 当前登录）。
+/// 持 ACCOUNTS_LOCK（与切换事务互斥，切换最长约 8s），必须 spawn_blocking
+/// 避免同步命令在主线程等锁冻结托盘/窗口事件。
+#[tauri::command]
+async fn remove_account(id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || accounts::remove_account(&id))
+        .await
+        .map_err(|e| format!("删除账号任务失败: {e}"))?
+}
+
+/// 重命名账号快照（只改 display_name）。同 remove_account：持锁操作
+/// 统一卸载到阻塞线程池。
+#[tauri::command]
+async fn rename_account(id: String, name: String) -> Result<accounts::AccountMeta, String> {
+    tauri::async_runtime::spawn_blocking(move || accounts::rename_account(&id, &name))
+        .await
+        .map_err(|e| format!("重命名账号任务失败: {e}"))?
+}
+
+/// 查询全部账号快照各自的订阅额度（读快照 + 按账号并行 HTTP，
+/// 单账号 15s 超时独立计时）。与 fetch_quota 不同：不写额度历史，
+/// 也不依赖当前登录态（凭证取自各账号捕获时的快照）。
+#[tauri::command]
+async fn account_quotas() -> Result<Vec<accounts::AccountQuotaEntry>, String> {
+    tauri::async_runtime::spawn_blocking(accounts::account_quotas)
+        .await
+        .map_err(|e| format!("多账号额度查询任务失败: {e}"))?
 }
 
 // ===== 周额度追踪 / 对比页 =====
@@ -1633,7 +1693,13 @@ pub fn run() {
             get_codex_usage,
             get_codex_debug,
             get_claude_usage,
-            get_claude_debug
+            get_claude_debug,
+            list_accounts,
+            capture_account,
+            switch_account,
+            remove_account,
+            rename_account,
+            account_quotas
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

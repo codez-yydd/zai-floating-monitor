@@ -31,6 +31,9 @@ chrono = { version = "0.4", features = ["serde"] }
 open = "5"
 ureq = { version = "2", features = ["json", "socks-proxy"] }
 base64 = "0.22"
+# 账号切换：解密 ~/.zcode/v2/credentials.json 的 enc:v1: 凭证（AES-256-GCM）
+aes-gcm = "0.10"
+sha2 = "0.10"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-autostart = "2.5.1"

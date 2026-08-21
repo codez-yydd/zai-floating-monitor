@@ -18,6 +18,7 @@ import {
   persistPanelAlpha,
 } from "./appearance";
 import { BrandIcon } from "./BrandIcon";
+import { AccountsCard } from "./AccountsCard";
 import {
   PageShell,
   PageHeader,
@@ -335,6 +336,9 @@ export function SettingsPanel({
               </label>
             ))}
         </SettingsCard>
+
+        {/* ZCode 账号切换：捕获/切换登录快照（数据自管，不进 DataCache） */}
+        <AccountsCard />
 
         {/* 汇率：USD→CNY 折算（价格只存美元，人民币花费实时折算） */}
         <SettingsCard
