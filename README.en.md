@@ -23,7 +23,7 @@ A lightweight menu-bar floating panel that tracks the Token usage and cost of th
 | Pricing settings | Device sync |
 |:---:|:---:|
 | ![Pricing settings](doc/img/settings.png) | ![Device sync](doc/img/sync.png) |
-| Dual-currency prices, quota monitor, FX rate & global hotkey | Incremental multi-device sync & data management |
+| USD unit prices, FX rate & global hotkey | Incremental multi-device sync & data management |
 
 ---
 
@@ -37,9 +37,9 @@ A lightweight menu-bar floating panel that tracks the Token usage and cost of th
 - **Cache-aware billing** — `input_tokens` already includes cache-read tokens; cache-read is billed at the cache rate and non-cache input at the input rate, avoiding double counting.
 - **Native feel** — macOS uses the `popover` vibrancy material + transparent window; Windows/Linux panels unfold near the taskbar.
 - **Auto refresh** — panel data is re-fetched every 30 seconds.
-- **Coding Plan quota monitor** — subscribers can view the **5-hour window**, **weekly quota** and **MCP monthly quota** progress bars at the top of the panel; the color escalates with usage (green → amber → red) and shows a reset countdown. Supports **China / Global** endpoint switching.
-- **🖥 Cursor usage stats** — reads the local Cursor app's login credentials automatically (manual cookie also supported); tracks Pro / Auto / API plan quotas and per-model token costs, with USD costs converted at the FX rate and merged into the summary view.
-- **💱 Auto FX rate** — the USD→CNY rate is refreshed online daily by default (manual input supported); used for Cursor cost conversion and CNY reference prices.
+- **Coding Plan quota monitor** — subscribers can view the **5-hour window**, **weekly quota** and **MCP monthly quota** progress bars at the top of the panel; the color escalates with usage (green → amber → red) and shows a reset countdown. Credentials and the API endpoint are read **automatically** from the local ZCode client's signed-in state (`~/.zcode/v2/config.json`) — zero configuration.
+- **🖥 Cursor usage stats** — reads the local Cursor app's login credentials automatically; tracks Pro / Auto / API plan quotas and per-model token costs, with USD costs converted at the FX rate and merged into the summary view.
+- **💱 Auto FX rate** — the USD→CNY rate is refreshed online daily by default (manual input supported); used to convert USD costs across services and for CNY reference prices.
 - **🧭 Multi-service summary view** — summary / Z.ai / Cursor tabs: total cost & tokens across services, subscription quota cards, hourly trend chart and model ranking.
 - **⌨️ Global hotkey** — summon / hide the panel with `alt+shift+z` by default; customizable or disable-able in settings.
 - **📈 Weekly quota compare** — compare quota usage across reset cycles based on local quota snapshots (90-day rolling retention), with cross-device merge.
@@ -69,7 +69,8 @@ zai-floating-monitor/
 │   ├── StatsPanel.tsx        # Stats panel (device filter + local/remote merge)
 │   ├── SummaryTab.tsx        # Summary view (multi-service totals / trend / model ranking)
 │   ├── CursorPanel.tsx       # Cursor view (quotas + usage stats)
-│   ├── PricingPanel.tsx      # Pricing config panel (Coding Plan / Cursor stats / hotkey)
+│   ├── PricingPanel.tsx      # Pricing config panel
+│   ├── SettingsPanel.tsx     # Settings page (opacity / language / autostart / sources / FX rate / hotkey)
 │   ├── QuotaPanel.tsx        # Coding Plan quota monitor
 │   ├── ComparePanel.tsx      # Weekly quota compare
 │   ├── ReportPanel.tsx       # Daily / weekly reports (Markdown export)
@@ -84,7 +85,7 @@ zai-floating-monitor/
 │   │   ├── lib.rs            # App entry, tray, panel logic, Tauri commands
 │   │   ├── db.rs             # Read-only SQLite queries (stats / model list)
 │   │   ├── pricing.rs        # Pricing config read/write + models.dev updates
-│   │   ├── quota.rs          # Coding Plan quota queries (5h / weekly / MCP)
+│   │   ├── quota.rs          # Coding Plan quota queries (auto ZCode-client credentials; 5h / weekly / MCP)
 │   │   ├── quota_history.rs  # Quota snapshot history (JSONL, 90-day retention)
 │   │   ├── cursor.rs         # Cursor usage stats (auto credentials / cookie / API)
 │   │   ├── shortcut.rs       # Global hotkey config
@@ -197,21 +198,9 @@ In the panel, "⚙ Pricing → open directory" opens `~/.zbar/` directly in Find
 
 GLM Coding Plan subscribers can view real-time usage of the 5-hour window, weekly quota and MCP monthly quota at the top of the stats panel.
 
-**Setup**: open "⚙ Pricing" and fill in the "Coding Plan quota monitor" section:
+**Zero configuration**: the credential is read automatically (read-only, never written back) from the local ZCode client's signed-in state — the apiKey of the built-in Coding Plan provider in `~/.zcode/v2/config.json` — and the API endpoint is inferred from that provider's baseURL (`open.bigmodel.cn` / `api.z.ai`). The only prerequisite is that the ZCode client on this machine is signed in to a Coding Plan subscription; otherwise the panel shows a sign-in prompt without affecting other features.
 
-- **API Token**: your Coding Plan token from the BigModel platform
-- **Endpoint**: "🇨🇳 China" (`open.bigmodel.cn`) for mainland users, "🌐 Global" (`api.z.ai`) for overseas
-
-The config is stored at **`~/.zbar/quota.json`**:
-
-```json
-{
-  "token": "your-coding-plan-api-token",
-  "endpoint": "cn"
-}
-```
-
-Quota data is fetched live via `GET /api/monitor/usage/quota/limit` and auto-refreshes every 30 seconds. Without a configured token the panel shows a "configure" prompt without affecting other features.
+Quota data is fetched live via `GET /api/monitor/usage/quota/limit` and auto-refreshes every 30 seconds.
 
 ### Global Hotkey
 
@@ -226,12 +215,9 @@ Summon / hide the panel with `alt+shift+z` by default; change or disable it unde
 
 ### Cursor Stats
 
-Configure under "⚙ Pricing → Cursor stats":
+Reads the local Cursor app's login credentials automatically (Cursor must be installed and signed in) — no configuration needed.
 
-- **Auth** — **auto** (default; reads the local Cursor app's login credentials — Cursor must be installed and signed in) or **manual cookie**.
-- **FX rate** — USD→CNY, refreshed online daily by default; can also be entered manually. Cursor's USD costs are converted to CNY at this rate.
-
-The config is stored at `~/.zbar/cursor.json` (in manual-cookie mode the cookie is stored here too, locally only).
+**FX rate** (Settings → FX rate): USD→CNY refreshed online daily by default, or entered manually; USD costs across services are converted to CNY at this rate. The config is stored at `~/.zbar/cursor.json` (locally only).
 
 ### Weekly Compare & Reports
 
