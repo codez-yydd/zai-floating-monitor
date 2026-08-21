@@ -90,10 +90,45 @@ fn base_from_provider_url(url: &str) -> &'static str {
 
 // ===== ZCode 客户端凭证（只读）=====
 
-/// 读取 ~/.zcode/v2/config.json 中登录 Coding Plan 后自动写入的凭证
+/// ZCode v2 数据目录定位：默认 `~/.zcode/v2`；但 ZCode 支持「更改数据目录」
+/// （记录在默认位置 setting.json 的 dataBaseDir 字段，如 `D:\app\ZCode-cache`），
+/// 迁移后登录凭证与 config 全部写入 `{dataBaseDir}/.zcode/v2/`，默认位置只剩
+/// 迁移前的旧数据——仍按默认位置读会永远拿到过期账号（捕获/额度查询均受影响）。
+/// 迁移目录真实存在才启用；setting 缺失/损坏/字段为空一律回退默认位置。
+pub(crate) fn zcode_v2_dir() -> Result<std::path::PathBuf, String> {
+    let home = dirs::home_dir().ok_or("无法定位用户主目录")?;
+    let default = home.join(".zcode").join("v2");
+    let migrated = std::fs::read_to_string(default.join("setting.json"))
+        .ok()
+        .as_deref()
+        .and_then(data_base_dir_from_setting)
+        .map(|base| base.join(".zcode").join("v2"));
+    match migrated {
+        Some(dir) if dir.is_dir() => Ok(dir),
+        _ => Ok(default),
+    }
+}
+
+/// 从 setting.json 原文解析 dataBaseDir（缺失/空白/坏 JSON → None，纯函数便于单测）。
+/// 相对路径不可用：按进程 CWD 判定 is_dir 不可控，直接回退默认位置。
+fn data_base_dir_from_setting(raw: &str) -> Option<std::path::PathBuf> {
+    let dir: String = serde_json::from_str::<serde_json::Value>(raw)
+        .ok()?
+        .get("dataBaseDir")?
+        .as_str()?
+        .trim()
+        .to_string();
+    if dir.is_empty() {
+        return None;
+    }
+    let path = std::path::PathBuf::from(dir);
+    path.is_absolute().then_some(path)
+}
+
+/// 读取 ZCode 数据目录 config.json 中登录 Coding Plan 后自动写入的凭证
 /// （只读，绝不写回——该文件由 ZCode 客户端维护，外部写回极易把
 /// ZCode 的登录态搞坏；key 的增删与刷新由 ZCode 客户端自行管理）。
-/// 整个额度查询路径都不写 ~/.zcode 目录；全应用唯一受控写该目录的位置
+/// 整个额度查询路径都不写 ZCode 数据目录；全应用唯一受控写该目录的位置
 /// 是 accounts.rs 的切换事务（先退出 ZCode 再原文回写，详见其模块头注释）。
 /// 返回 (provider_key, api_key, base_url)，其中 base_url 取该 provider
 /// 的 options.baseURL（用于推断额度接口端点，缺失时为空串）。
@@ -101,12 +136,13 @@ fn base_from_provider_url(url: &str) -> &'static str {
 /// 错误文案统一以「未找到 ZCode Coding Plan 凭证」开头：前端 QuotaPanel /
 /// SummaryTab 以该固定前缀识别登录引导分支（后端改前缀须与前端同步）。
 fn pick_from_config() -> Result<(String, String, String), String> {
-    let home = dirs::home_dir().ok_or(
-        "未找到 ZCode Coding Plan 凭证：无法定位用户主目录，请先在 ZCode 客户端登录 Coding Plan 订阅",
-    )?;
-    let path = home.join(".zcode").join("v2").join("config.json");
+    let path = zcode_v2_dir()
+        .map_err(|e| {
+            format!("未找到 ZCode Coding Plan 凭证：{e}，请先在 ZCode 客户端登录 Coding Plan 订阅")
+        })?
+        .join("config.json");
     if !path.exists() {
-        return Err("未找到 ZCode Coding Plan 凭证（~/.zcode/v2/config.json 不存在），请先在 ZCode 客户端登录 Coding Plan 订阅".into());
+        return Err("未找到 ZCode Coding Plan 凭证（ZCode 数据目录下 config.json 不存在），请先在 ZCode 客户端登录 Coding Plan 订阅".into());
     }
     let data = std::fs::read_to_string(&path).map_err(|e| {
         format!("未找到 ZCode Coding Plan 凭证（读取 config.json 失败: {e}），请先在 ZCode 客户端登录 Coding Plan 订阅")
@@ -118,7 +154,7 @@ fn pick_from_config() -> Result<(String, String, String), String> {
         "未找到 ZCode Coding Plan 凭证（config.json 缺少 provider 配置），请先在 ZCode 客户端登录 Coding Plan 订阅",
     )?;
     pick_coding_plan_api_key(providers).ok_or(
-        "未找到 ZCode Coding Plan 凭证（~/.zcode/v2/config.json），请先在 ZCode 客户端登录 Coding Plan 订阅"
+        "未找到 ZCode Coding Plan 凭证（config.json 中无可用 Coding Plan 凭证），请先在 ZCode 客户端登录 Coding Plan 订阅"
             .into(),
     )
 }
@@ -287,6 +323,31 @@ pub fn fetch_quota() -> Result<QuotaResult, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// setting.json 的 dataBaseDir 解析：正常路径/前后空白可解析，
+    /// 空串、缺失、坏 JSON、非字符串均回退 None（对应回退默认目录）
+    #[test]
+    fn data_base_dir_from_setting_parses() {
+        let got = data_base_dir_from_setting(r#"{"dataBaseDir":"D:\\app\\ZCode-cache"}"#);
+        assert_eq!(
+            got,
+            Some(std::path::PathBuf::from("D:\\app\\ZCode-cache"))
+        );
+        // 前后空白保留语义（trim 后仍非空即可用）
+        assert_eq!(
+            data_base_dir_from_setting(r#"{ "dataBaseDir": "  D:\\data  " }"#),
+            Some(std::path::PathBuf::from("D:\\data"))
+        );
+        // 空串 / 缺失 / 坏 JSON / 非字符串 / 相对路径 → None
+        assert_eq!(data_base_dir_from_setting(r#"{"dataBaseDir":"   "}"#), None);
+        assert_eq!(data_base_dir_from_setting(r#"{"other":1}"#), None);
+        assert_eq!(data_base_dir_from_setting("not json"), None);
+        assert_eq!(data_base_dir_from_setting(r#"{"dataBaseDir":123}"#), None);
+        assert_eq!(
+            data_base_dir_from_setting(r#"{"dataBaseDir":"ZCode-cache"}"#),
+            None
+        );
+    }
 
     /// 内嵌样例：模拟 ~/.zcode/v2/config.json 顶层 provider map（不读本机真实文件）
     fn sample_providers() -> serde_json::Map<String, serde_json::Value> {

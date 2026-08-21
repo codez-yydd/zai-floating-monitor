@@ -1,6 +1,7 @@
 //! 多智谱账号切换：快照存储 + 切换事务 + ZCode 进程控制。
 //!
-//! 【重要声明】本模块是整个应用中**唯一**允许写 `~/.zcode/` 目录的位置，
+//! 【重要声明】本模块是整个应用中**唯一**允许写 ZCode 数据目录的位置
+//! （默认 `~/.zcode/v2/`，支持 ZCode「更改数据目录」迁移，定位见 zcode_dir），
 //! 且只写 `credentials.json` 与 `config.json` 两个文件、只发生在切换事务
 //! （switch_account）内部。额度查询（quota.rs）对该目录严格只读，两者互不干扰。
 //!
@@ -129,10 +130,11 @@ fn backup_dir() -> Result<PathBuf, String> {
     Ok(accounts_dir()?.join(".last"))
 }
 
-/// ZCode 数据目录与两文件路径。
+/// ZCode 数据目录与两文件路径。支持 ZCode「更改数据目录」（setting.json 的
+/// dataBaseDir，如 D:\app\ZCode-cache）——迁移后凭证写在 {dataBaseDir}/.zcode/v2/，
+/// 默认位置只剩旧数据；解析逻辑见 quota::zcode_v2_dir（本应用唯一入口）。
 fn zcode_dir() -> Result<PathBuf, String> {
-    let home = dirs::home_dir().ok_or("无法定位用户主目录")?;
-    Ok(home.join(".zcode").join("v2"))
+    crate::quota::zcode_v2_dir()
 }
 
 fn credentials_path() -> Result<PathBuf, String> {
@@ -358,7 +360,7 @@ pub fn capture_account() -> Result<CaptureOutcome, String> {
 
     let live = read_live_files()?;
     let raw = live.credentials.clone().ok_or(
-        "未找到 ZCode 登录凭证（~/.zcode/v2/credentials.json 不存在），请先在 ZCode 客户端登录后再捕获",
+        "未找到 ZCode 登录凭证（ZCode 数据目录下 credentials.json 不存在），请先在 ZCode 客户端登录后再捕获",
     )?;
     let creds: Value = serde_json::from_str(&raw)
         .map_err(|e| format!("credentials.json 格式异常: {e}"))?;
@@ -568,7 +570,7 @@ fn rollback(live: &LiveFiles, step: String) -> Result<SwitchOutcome, String> {
     match restore {
         Ok(()) => Err(format!("切换失败（{step}），已回滚到切换前的登录状态")),
         Err(e) => Err(format!(
-            "切换失败（{step}），且回滚失败（{e}）：请手动将 ~/.zbar/accounts/.last/ 下的备份文件复制到 ~/.zcode/v2/ 目录，或重启 ZCode 重新登录"
+            "切换失败（{step}），且回滚失败（{e}）：请手动将 ~/.zbar/accounts/.last/ 下的备份文件复制到 ZCode 数据目录（ZCode 设置中可见，默认 ~/.zcode/v2/），或重启 ZCode 重新登录"
         )),
     }
 }

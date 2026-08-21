@@ -339,7 +339,11 @@ mod tests {
         let path = std::env::temp_dir().join(format!(
             "zbar-agent-history-test-{}-{}.jsonl",
             std::process::id(),
-            std::thread::current().name().unwrap_or("cleanup")
+            // 线程名含 "::"（模块路径），Windows 文件名不允许冒号
+            std::thread::current()
+                .name()
+                .unwrap_or("cleanup")
+                .replace(':', "_")
         ));
         let expired = sample(
             Local::now().timestamp_millis() - RETENTION_MS - 1,

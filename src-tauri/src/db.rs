@@ -51,6 +51,9 @@ pub struct ModelInfo {
 
 /// 定位 ZCode 的 SQLite 数据库路径。
 /// 优先级：环境变量 ZBAR_DB > ~/.zcode/cli/db/db.sqlite
+/// 注意：CLI 数据库不跟随 ZCode 桌面端的「更改数据目录」（setting.json 的
+/// dataBaseDir）迁移，始终在用户主目录下；若未来 ZCode 版本改变该行为，
+/// 需要与 quota::zcode_v2_dir 的迁移解析对齐。
 pub fn db_path() -> Result<PathBuf, String> {
     if let Ok(p) = std::env::var("ZBAR_DB") {
         let pb = PathBuf::from(p);
