@@ -158,30 +158,24 @@ jobs:
           OLD_ID=$(curl -sf "$API/tags/latest?$TOKEN" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2 || true)
           [[ -n "${OLD_ID:-}" ]] && curl -sf -X DELETE "$API/$OLD_ID?$TOKEN" >/dev/null && echo '已删除旧 latest release'
 
-          attach() { # $1=文件 $2=上传名
-            curl -sS -f -X POST "$API/attach_files?$TOKEN" \
-              -F "file=@$1;filename=$2" | grep -o '"path":"[^"]*"' | cut -d'"' -f4
-          }
-          FILES=""
+          # multipart 直传附件创建 release（一步到位；两步 attach_files 的响应
+          # path 字段不稳定，曾导致 files 参数为空、附件全部丢失）；
+          # target_commitish 让 Gitee 在 tag 不存在时自动从 master 创建
+          ARGS=(-sS -w '\n%{http_code}' -X POST "$API"
+            -F "$TOKEN"
+            -F 'tag_name=latest'
+            -F 'target_commitish=master'
+            -F "name=ZBar v$VERSION（应用内更新源）"
+            -F 'body=ZBar 自动更新通道，保持最新版即可。')
           for f in out/*-setup.exe out/*-setup.exe.sig \
                    out/*aarch64*.app.tar.gz out/*aarch64*.app.tar.gz.sig \
                    out/*x64.app.tar.gz out/*x64.app.tar.gz.sig \
                    out/*.dmg; do
-            [[ -f "$f" ]] || continue
-            p=$(attach "$f" "$(basename "$f")") && FILES="$FILES$p," || { echo "::error::附件上传失败: $f"; exit 1; }
+            [[ -f "$f" ]] && ARGS+=(-F "files[]=@$f")
           done
-          p=$(attach out/gitee-latest.json latest.json) && FILES="$FILES$p" || { echo '::error::latest.json 上传失败'; exit 1; } # Gitee 侧文件名必须是 latest.json
-          FILES="${FILES%,}"
+          ARGS+=(-F 'files[]=@out/gitee-latest.json;filename=latest.json') # Gitee 侧文件名必须是 latest.json
 
-          # 创建 release；target_commitish 让 Gitee 在 tag 不存在时自动从 master 创建；
-          # 失败必须显式报错退出（-f 静默失败会被 && 短路吞掉）
-          RESP=$(curl -sS -w '\n%{http_code}' -X POST "$API" \
-            -d "$TOKEN" \
-            -d 'tag_name=latest' \
-            -d 'target_commitish=master' \
-            -d "name=ZBar v$VERSION（应用内更新源）" \
-            -d "body=ZBar $VERSION 自动更新通道，保持最新版即可。" \
-            -d "files=$FILES")
+          RESP=$(curl "${ARGS[@]}")
           CODE=$(echo "$RESP" | tail -1)
           if [[ "$CODE" == 2* ]]; then
             echo 'Gitee release 已创建'
