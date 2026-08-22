@@ -22,8 +22,8 @@ use serde_json::{Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-// 仅 macOS 退出进程的等待逻辑使用（Windows/Linux 下避免 unused import）
-#[cfg(target_os = "macos")]
+// macOS/Windows 退出进程的轮询等待使用（Linux 下避免 unused import）
+#[cfg(any(target_os = "macos", windows))]
 use std::time::Duration;
 
 // ============================================================
@@ -742,7 +742,7 @@ pub fn account_quotas() -> Result<Vec<AccountQuotaEntry>, String> {
 }
 
 // ============================================================
-// 第五节：ZCode 桌面应用进程控制（macOS）
+// 第五节：ZCode 桌面应用进程控制（macOS / Windows）
 // ============================================================
 
 /// 桌面应用可执行名/进程名（macOS）。
@@ -798,13 +798,148 @@ fn launch_zcode() -> bool {
         .unwrap_or(false)
 }
 
-// Windows / Linux：留 cfg 骨架，切换事务在 quit 环节直接报错引导手动操作。
-#[cfg(not(target_os = "macos"))]
+// ---------- Windows 实现 ----------
+// 思路与 macOS 相同：优雅退出 → 轮询 → 强杀兜底 → 轮询。
+// 本应用是 GUI 进程，直接 Command::new 拉起 tasklist/taskkill 会闪控制台
+// 黑窗，统一走 CREATE_NO_WINDOW 的 run_hidden。
+
+/// Windows 下的进程/镜像名（tasklist/taskkill 用，不带 .exe）。
+#[cfg(windows)]
+const ZCODE_EXE_NAME: &str = "ZCode";
+
+/// exe 路径缓存文件（~/.zbar/.zcode-exe-path）。ZCode 可装在任意盘符
+/// （如 D:\app\ZCode），切换时趁进程存活捕获一次，之后 ZCode 未运行的
+/// 切换也能自动重启。
+#[cfg(windows)]
+fn zcode_exe_cache_path() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join(".zcode-exe-path"))
+}
+
+/// 静默执行外部命令（CREATE_NO_WINDOW，GUI 进程下不闪控制台黑窗）。
+#[cfg(windows)]
+fn run_hidden(program: &str, args: &[&str]) -> Option<std::process::Output> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    std::process::Command::new(program)
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()
+}
+
+/// ZCode 桌面应用是否在运行（tasklist 按镜像名过滤；CSV + /NH 避开
+/// 本地化表头，未命中时输出 "INFO: ..." 行也不含镜像名，不会误判）。
+#[cfg(windows)]
+fn zcode_running() -> bool {
+    let filter = format!("IMAGENAME eq {ZCODE_EXE_NAME}.exe");
+    match run_hidden("tasklist", &["/FI", &filter, "/FO", "CSV", "/NH"]) {
+        Some(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .to_lowercase()
+            .contains(&format!("{}.exe", ZCODE_EXE_NAME.to_lowercase())),
+        _ => false,
+    }
+}
+
+/// 捕获运行中 ZCode 进程的 exe 完整路径（PowerShell Get-Process；
+/// 强制 UTF-8 输出——管道重定向下 5.1 默认按 OEM 代码页编码，中文安装
+/// 路径会变乱码；失败返回 None，不阻塞退出流程）。
+#[cfg(windows)]
+fn capture_zcode_exe_path() -> Option<PathBuf> {
+    let script = format!(
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; \
+          (Get-Process -Name {ZCODE_EXE_NAME} -ErrorAction SilentlyContinue \
+          | Where-Object {{ $_.Path }} | Select-Object -First 1 -ExpandProperty Path)"
+    );
+    let out = run_hidden("powershell", &["-NoProfile", "-Command", &script])?;
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
+}
+
+/// 退出 ZCode：先捕获并缓存 exe 路径（供重启用）→ taskkill 发送 WM_CLOSE
+/// 优雅退出 → 轮询 5s → taskkill /F 强杀 → 再轮询 3s。未运行直接返回 Ok。
+/// 只匹配 ZCode.exe 镜像，CLI 会话进程（node.exe）不受影响，与 macOS
+/// pkill -x 的边界一致。
+#[cfg(windows)]
+fn quit_zcode() -> Result<(), String> {
+    if !zcode_running() {
+        return Ok(());
+    }
+    // 趁进程还活着记下安装位置；捕获失败不阻塞（重启退回常见路径探测）
+    if let Some(exe) = capture_zcode_exe_path().filter(|p| p.is_file()) {
+        if let Ok(cache) = zcode_exe_cache_path() {
+            if let Some(parent) = cache.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = fs::write(&cache, exe.to_string_lossy().as_bytes());
+        }
+    }
+    let image = format!("{ZCODE_EXE_NAME}.exe");
+    let _ = run_hidden("taskkill", &["/IM", image.as_str()]);
+    for _ in 0..20 {
+        if !zcode_running() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let _ = run_hidden("taskkill", &["/F", "/IM", image.as_str()]);
+    for _ in 0..12 {
+        if !zcode_running() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Err("无法退出 ZCode 桌面应用（可尝试手动退出后重试）".into())
+}
+
+/// 启动 ZCode 桌面应用：优先退出时缓存的 exe 路径，其次常见安装位置；
+/// open::that_detached 分离启动，不随本面板退出而终止。
+#[cfg(windows)]
+fn launch_zcode() -> bool {
+    let exe_suffix = format!("{}.exe", ZCODE_EXE_NAME).to_lowercase();
+    let mut candidates: Vec<PathBuf> = vec![];
+    if let Ok(cache) = zcode_exe_cache_path() {
+        if let Ok(s) = fs::read_to_string(&cache) {
+            // 缓存只信任指向 ZCode.exe 的内容，防篡改后借本面板拉起任意程序
+            let s = s.trim();
+            if !s.is_empty() && s.to_lowercase().ends_with(&exe_suffix) {
+                candidates.push(PathBuf::from(s));
+            }
+        }
+    }
+    if let Some(base) = std::env::var_os("LOCALAPPDATA") {
+        candidates.push(
+            PathBuf::from(base)
+                .join("Programs")
+                .join(ZCODE_EXE_NAME)
+                .join(format!("{ZCODE_EXE_NAME}.exe")),
+        );
+    }
+    if let Some(base) = std::env::var_os("ProgramFiles") {
+        candidates.push(
+            PathBuf::from(base)
+                .join(ZCODE_EXE_NAME)
+                .join(format!("{ZCODE_EXE_NAME}.exe")),
+        );
+    }
+    for exe in candidates {
+        if exe.is_file() && open::that_detached(&exe).is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
+// Linux：桌面端进程控制暂未实现，切换事务在 quit 环节直接报错引导手动操作。
+#[cfg(target_os = "linux")]
 fn quit_zcode() -> Result<(), String> {
     Err("当前平台暂不支持自动切换：请手动退出 ZCode 后重试".into())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn launch_zcode() -> bool {
     false
 }

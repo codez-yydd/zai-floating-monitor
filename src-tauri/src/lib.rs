@@ -317,8 +317,9 @@ async fn capture_account() -> Result<accounts::CaptureOutcome, String> {
         .map_err(|e| format!("捕获账号任务失败: {e}"))?
 }
 
-/// 切换登录账号：备份 → 退出 ZCode → 写回凭证 → 重启（进程轮询最长约 8s，
-/// 重 IO，必须 spawn_blocking，否则冻结托盘/窗口事件）。
+/// 切换登录账号：备份 → 退出 ZCode → 写回凭证 → 重启（Windows 下含 exe 路径
+/// 捕获 + 优雅/强杀两级轮询，最坏 15s 上下；macOS 轮询最长约 8s。重 IO，必须
+/// spawn_blocking，否则冻结托盘/窗口事件）。
 #[tauri::command]
 async fn switch_account(id: String) -> Result<accounts::SwitchOutcome, String> {
     tauri::async_runtime::spawn_blocking(move || accounts::switch_account(&id))
