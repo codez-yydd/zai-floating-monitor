@@ -105,9 +105,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     # 双仓库发布总限时：Gitee 附件接口偶发挂起（curl 已加单文件超时重试），
-    # 大文件重试耗时长，留足 45 分钟；超时整体失败可重跑（发布步骤幂等：
+    # 大文件重试耗时长，留足 60 分钟；超时整体失败可重跑（发布步骤幂等：
     # 双仓库均先删旧再建新），不挂默认 6h
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -181,9 +181,9 @@ jobs:
           echo "Gitee release 已创建 (id=$RELEASE_ID)，开始上传附件"
 
           upload() { # $1=文件 $2=上传名
-            # 单文件 5 分钟超时 + 2 次重试：Gitee 附件接口偶发大文件上传
-            # 挂起且 curl 默认无超时，会卡死整个步骤直到 job 级 6h 超时
-            curl -sS -f --max-time 300 --retry 2 --retry-delay 5 -X POST "$API/$RELEASE_ID/attach_files" \
+            # 单文件 4 分钟超时 + 5 次重试：Gitee 附件接口对个别大文件偶发
+            # 持续挂起（实测同一文件一次成功一次失败），多给重试机会
+            curl -sS -f --max-time 240 --retry 5 --retry-delay 10 -X POST "$API/$RELEASE_ID/attach_files" \
               -F "access_token=$GITEE_TOKEN" \
               -F "file=@$1;filename=$2" >/dev/null
           }
