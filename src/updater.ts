@@ -1,25 +1,226 @@
-// 应用内更新：启动静默检查（App.tsx 调用）与设置入口红点（StatsPanel 消费）。
-// 检查/下载/安装的完整交互在 UpdaterCard.tsx。
-import { check } from "@tauri-apps/plugin-updater";
+// 应用内更新：定时检查 + 后台下载 + 设置入口红点（下载完成后）+ 设置页重启安装。
+import { check, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 
-/** localStorage：启动静默检查发现的新版本号（无值 = 无更新或未检查） */
-export const UPDATE_AVAILABLE_KEY = "zbar.updateAvailable";
+/** localStorage：后台下载完成、待安装的版本号 */
+export const UPDATE_READY_KEY = "zbar.updateReady";
 
-/** 静默检查写入后广播的窗口事件（StatsPanel 红点即时刷新） */
-export const UPDATE_EVENT = "zbar:update-available";
+/** 下载完成待安装时广播（StatsPanel 红点即时刷新） */
+export const UPDATE_READY_EVENT = "zbar:update-ready";
 
-/** 启动静默检查：有新版本记 localStorage 并广播；无版本/失败一律静默，
- *  不打扰用户（失败时用户仍可在设置页手动检查）。 */
-export async function silentCheckForUpdate(): Promise<void> {
+/** 更新状态变化时广播（UpdaterCard 同步进度/阶段） */
+export const UPDATE_STATE_EVENT = "zbar:update-state";
+
+export type UpdatePhase =
+  | "idle"
+  | "checking"
+  | "downloading"
+  | "ready"
+  | "uptodate"
+  | "installing"
+  | "error";
+
+export interface UpdateState {
+  phase: UpdatePhase;
+  progress: number;
+  readyVersion: string | null;
+  pendingVersion: string | null;
+  releaseNote: string | null;
+  error: string | null;
+}
+
+let pendingUpdate: Update | null = null;
+
+let state: UpdateState = {
+  phase: "idle",
+  progress: 0,
+  readyVersion: null,
+  pendingVersion: null,
+  releaseNote: null,
+  error: null,
+};
+
+// 进程重启后内存中的 Update 已失效，清除残留的 ready 标记，由调度器重新下载
+try {
+  localStorage.removeItem(UPDATE_READY_KEY);
+  localStorage.removeItem("zbar.updateAvailable");
+} catch {
+  /* 忽略存储异常 */
+}
+
+function notifyState() {
+  window.dispatchEvent(new Event(UPDATE_STATE_EVENT));
+}
+
+function setState(partial: Partial<UpdateState>) {
+  state = { ...state, ...partial };
+  notifyState();
+}
+
+export function getUpdateState(): UpdateState {
+  return { ...state };
+}
+
+function clearUpdateReady() {
   try {
-    const update = await check();
-    if (update?.available) {
-      localStorage.setItem(UPDATE_AVAILABLE_KEY, update.version);
-      window.dispatchEvent(new Event(UPDATE_EVENT));
-    } else {
-      localStorage.removeItem(UPDATE_AVAILABLE_KEY);
+    const had = localStorage.getItem(UPDATE_READY_KEY);
+    localStorage.removeItem(UPDATE_READY_KEY);
+    if (had) {
+      window.dispatchEvent(new Event(UPDATE_READY_EVENT));
     }
   } catch {
-    // 网络不通 / 端点全挂：静默跳过
+    /* 忽略存储异常 */
   }
+}
+
+async function closePending() {
+  if (!pendingUpdate) return;
+  try {
+    await pendingUpdate.close();
+  } catch {
+    /* 忽略关闭异常 */
+  }
+  pendingUpdate = null;
+}
+
+function markReady(version: string) {
+  try {
+    localStorage.setItem(UPDATE_READY_KEY, version);
+  } catch {
+    /* 忽略存储异常 */
+  }
+  setState({ phase: "ready", readyVersion: version, progress: 100 });
+  window.dispatchEvent(new Event(UPDATE_READY_EVENT));
+}
+
+/** 后台（或手动）检查更新并在发现新版本时自动下载；下载完成后写 localStorage 并广播红点 */
+export async function checkAndDownloadInBackground(opts?: {
+  silent?: boolean;
+}): Promise<void> {
+  const silent = opts?.silent ?? true;
+
+  if (
+    state.phase === "checking" ||
+    state.phase === "downloading" ||
+    state.phase === "installing"
+  ) {
+    return;
+  }
+  if (state.phase === "ready" && state.readyVersion) {
+    return;
+  }
+
+  setState({ phase: "checking", error: null });
+
+  try {
+    const update = await check();
+    if (!update?.available) {
+      await closePending();
+      clearUpdateReady();
+      setState({
+        phase: silent ? "idle" : "uptodate",
+        progress: 0,
+        readyVersion: null,
+        pendingVersion: null,
+        releaseNote: null,
+      });
+      return;
+    }
+
+    if (pendingUpdate && state.readyVersion !== update.version) {
+      await closePending();
+      clearUpdateReady();
+    }
+
+    pendingUpdate = update;
+    setState({
+      phase: "downloading",
+      progress: 0,
+      pendingVersion: update.version,
+      releaseNote: update.body?.trim() || null,
+      readyVersion: null,
+    });
+
+    let contentLength = 0;
+    let downloaded = 0;
+    await update.download((event) => {
+      switch (event.event) {
+        case "Started":
+          contentLength = event.data.contentLength ?? 0;
+          break;
+        case "Progress":
+          downloaded += event.data.chunkLength;
+          if (contentLength > 0) {
+            setState({
+              progress: Math.min(
+                100,
+                Math.round((downloaded / contentLength) * 100)
+              ),
+            });
+          }
+          break;
+        case "Finished":
+          setState({ progress: 100 });
+          break;
+      }
+    });
+
+    markReady(update.version);
+  } catch (e) {
+    await closePending();
+    clearUpdateReady();
+    if (silent) {
+      setState({
+        phase: "idle",
+        progress: 0,
+        readyVersion: null,
+        pendingVersion: null,
+        releaseNote: null,
+        error: null,
+      });
+    } else {
+      setState({ phase: "error", error: String(e) });
+    }
+  }
+}
+
+/** 安装已下载的更新包并重启应用 */
+export async function installPendingUpdate(): Promise<void> {
+  if (!pendingUpdate || state.phase !== "ready") {
+    throw new Error("No pending update ready to install");
+  }
+
+  setState({ phase: "installing", error: null });
+
+  try {
+    await pendingUpdate.install();
+    clearUpdateReady();
+    pendingUpdate = null;
+    setState({
+      phase: "idle",
+      progress: 0,
+      readyVersion: null,
+      pendingVersion: null,
+      releaseNote: null,
+    });
+    // Windows NSIS 安装器启动前应用会自动退出；macOS/Linux 需主动重启
+    await relaunch();
+  } catch (e) {
+    setState({ phase: "error", error: String(e) });
+    throw e;
+  }
+}
+
+/** 启动更新调度：首次延迟 10s，之后每 1 小时检查并后台下载 */
+export function startUpdateScheduler(): () => void {
+  const initialTimer = window.setTimeout(() => {
+    checkAndDownloadInBackground({ silent: true });
+  }, 10_000);
+  const hourlyInterval = window.setInterval(() => {
+    checkAndDownloadInBackground({ silent: true });
+  }, 3_600_000);
+  return () => {
+    window.clearTimeout(initialTimer);
+    window.clearInterval(hourlyInterval);
+  };
 }

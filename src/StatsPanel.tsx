@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { UPDATE_AVAILABLE_KEY, UPDATE_EVENT } from "./updater";
+import { UPDATE_READY_KEY, UPDATE_READY_EVENT } from "./updater";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Currency, PricingConfig, StatsTab } from "./types";
 import { fetchPin, setPin } from "./api";
@@ -139,10 +139,10 @@ export function StatsPanel({
       .catch(() => {});
   }, [isWindows]);
 
-  // ===== 更新红点：启动静默检查发现新版本时，设置入口按钮提示 =====
-  const [updateAvailable, setUpdateAvailable] = useState(() => {
+  // ===== 更新红点：后台下载完成后，设置入口按钮提示 =====
+  const [updateReady, setUpdateReady] = useState(() => {
     try {
-      return Boolean(localStorage.getItem(UPDATE_AVAILABLE_KEY));
+      return Boolean(localStorage.getItem(UPDATE_READY_KEY));
     } catch {
       return false;
     }
@@ -150,13 +150,13 @@ export function StatsPanel({
   useEffect(() => {
     const sync = () => {
       try {
-        setUpdateAvailable(Boolean(localStorage.getItem(UPDATE_AVAILABLE_KEY)));
+        setUpdateReady(Boolean(localStorage.getItem(UPDATE_READY_KEY)));
       } catch {
         /* 忽略存储异常 */
       }
     };
-    window.addEventListener(UPDATE_EVENT, sync);
-    return () => window.removeEventListener(UPDATE_EVENT, sync);
+    window.addEventListener(UPDATE_READY_EVENT, sync);
+    return () => window.removeEventListener(UPDATE_READY_EVENT, sync);
   }, []);
 
   // 记忆当前标签（localStorage 异常静默，对齐 cache.ts：记忆仅锦上添花，不影响主流程）
@@ -224,7 +224,7 @@ export function StatsPanel({
               title={t("stats.settings")}
             >
               ⚙
-              {updateAvailable && (
+              {updateReady && (
                 <span className="absolute top-0 right-0 w-1.5 h-1.5 rounded-full bg-rose-500" />
               )}
             </button>

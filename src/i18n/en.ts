@@ -472,10 +472,13 @@ export const en: typeof zh = {
     "settings.downloadInstall": "Download & install",
     "settings.downloading": "Downloading {pct}%",
     "settings.installing": "Installing…",
+    "settings.restartUpdate": "Restart to update",
+    "settings.updateReady": "Version {v} is downloaded — restart to apply",
+    "settings.backgroundDownloading": "Downloading update in the background…",
     "settings.updateFailed": "Update failed: {msg}",
     "settings.openDownloadPage": "Open download page",
     "settings.updateHint":
-      "Updates are signature-verified; endpoints fall back between GitHub and Gitee automatically.",
+      "Checks for updates every hour and downloads in the background; a red dot appears on Settings when ready. Updates are signature-verified; endpoints fall back between GitHub and Gitee automatically.",
 
     "settings.accountsCard": "ZCode account switch",
     "settings.accountsHint":

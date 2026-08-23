@@ -7,7 +7,7 @@ import { ComparePanel } from "./ComparePanel";
 import { ReportPanel } from "./ReportPanel";
 import { DataProvider } from "./DataCache";
 import { fetchPricing, saveCurrency } from "./api";
-import { silentCheckForUpdate } from "./updater";
+import { startUpdateScheduler } from "./updater";
 import { useI18n } from "./i18n";
 import type { Currency, PricingConfig } from "./types";
 import {
@@ -71,14 +71,9 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  // 启动静默检查更新（延迟 10s，避开启动时的额度/用量请求高峰）；
-  // 结果写 localStorage 供设置入口红点展示，失败静默不打扰
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      silentCheckForUpdate();
-    }, 10_000);
-    return () => window.clearTimeout(timer);
-  }, []);
+  // 启动更新调度：延迟 10s 首次检查，之后每 1h 后台检查并下载；
+  // 下载完成后写 localStorage 供设置入口红点展示，失败静默不打扰
+  useEffect(() => startUpdateScheduler(), []);
 
   const backToStats = () => {
     fetchPricing()

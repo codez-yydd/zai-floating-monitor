@@ -66,10 +66,13 @@ export const settings = {
   "settings.downloadInstall": "下载并安装",
   "settings.downloading": "下载中 {pct}%",
   "settings.installing": "安装中…",
+  "settings.restartUpdate": "重启并更新",
+  "settings.updateReady": "新版本 {v} 已下载，重启即可完成更新",
+  "settings.backgroundDownloading": "正在后台下载更新…",
   "settings.updateFailed": "更新失败：{msg}",
   "settings.openDownloadPage": "打开下载页",
   "settings.updateHint":
-    "更新包带签名校验；更新源为 GitHub / Gitee 双仓库，自动依次尝试。",
+    "每小时自动检查并在后台下载更新；下载完成后设置入口会显示红点。更新包带签名校验，更新源为 GitHub / Gitee 双仓库，自动依次尝试。",
 
   // ===== 多智谱账号切换 =====
   "settings.accountsCard": "ZCode 账号切换",
