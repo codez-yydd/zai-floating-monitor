@@ -347,8 +347,9 @@ async fn rename_account(id: String, name: String) -> Result<accounts::AccountMet
 }
 
 /// 查询全部账号快照各自的订阅额度（读快照 + 按账号并行 HTTP，
-/// 单账号 15s 超时独立计时）。与 fetch_quota 不同：不写额度历史，
-/// 也不依赖当前登录态（凭证取自各账号捕获时的快照）。
+/// 单账号 15s 超时独立计时）。凭证取自各账号捕获时的快照，不依赖当前
+/// 登录态；查询成功的同时写带指纹的历史采样（各账号"今日增量"的数据源），
+/// 读路径按指纹过滤，不污染当前账号。
 #[tauri::command]
 async fn account_quotas() -> Result<Vec<accounts::AccountQuotaEntry>, String> {
     tauri::async_runtime::spawn_blocking(accounts::account_quotas)
@@ -361,20 +362,40 @@ async fn account_quotas() -> Result<Vec<accounts::AccountQuotaEntry>, String> {
 // （busy_timeout 3s），对比页每 60s 触发一轮，统一 async + spawn_blocking
 // 卸载到阻塞线程池，避免阻塞主线程（与 get_stats 同款模式）。
 
-/// 读取全部额度快照历史（按 ts 升序）。
+/// 读取额度快照历史（按 ts 升序）。默认为"当前账号视角"：
+/// 过滤为"当前账号指纹 + 旧版无账号快照"——多账号并行采样写入后，
+/// 其他账号的历史不得混入当前账号的趋势图（过滤规则见 filter_for_current）。
+/// all=true 返回全部账号的本机快照（各账号"今日增量"多端合并计算用）；
+/// from_ms 非空时只返回 ts >= from_ms 的快照（今日增量的 60s 轮询只需
+/// 当日数据，避免 90 天全量 ~38MB 逐轮过 IPC）。
 #[tauri::command]
-async fn get_quota_history() -> Result<Vec<quota_history::QuotaSnapshot>, String> {
-    tauri::async_runtime::spawn_blocking(quota_history::load_all)
-        .await
-        .map_err(|e| format!("读取快照历史任务失败: {e}"))?
+async fn get_quota_history(
+    all: Option<bool>,
+    from_ms: Option<i64>,
+) -> Result<Vec<quota_history::QuotaSnapshot>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let snaps = quota_history::load_all()?;
+        let snaps = match from_ms {
+            Some(from) => snaps.into_iter().filter(|s| s.ts >= from).collect(),
+            None => snaps,
+        };
+        if all.unwrap_or(false) {
+            return Ok(snaps);
+        }
+        let current = accounts::current_fingerprint().map(|fp| fp.user_id);
+        Ok(quota_history::filter_for_current(snaps, &current))
+    })
+    .await
+    .map_err(|e| format!("读取快照历史任务失败: {e}"))?
 }
 
-/// 解析快照为"智谱重置周期"列表（对比页用）。
+/// 解析快照为"智谱重置周期"列表（对比页用，当前账号视角，过滤同上）。
 #[tauri::command]
 async fn get_weekly_compare() -> Result<Vec<quota_history::WeeklyPeriod>, String> {
     tauri::async_runtime::spawn_blocking(|| {
-        let snaps = quota_history::load_all()?;
-        Ok(quota_history::split_periods(&snaps))
+        let current = accounts::current_fingerprint().map(|fp| fp.user_id);
+        let filtered = quota_history::filter_for_current(quota_history::load_all()?, &current);
+        Ok(quota_history::split_periods(&filtered))
     })
     .await
     .map_err(|e| format!("周期解析任务失败: {e}"))?
@@ -394,12 +415,24 @@ async fn get_weekly_compare_for_snapshots(
     .map_err(|e| format!("指定快照周期解析任务失败: {e}"))?
 }
 
-/// 今日增量：(增量百分比, 今日采样数)。
+/// 今日增量：(增量百分比, 今日采样数)，按当前登录账号指纹过滤。
+/// 指纹严格匹配（旧版无账号快照不参与）——切号当日的混合序列一旦计入，
+/// 峰值与首条分属不同账号，增量会跨账号失真。拿不到指纹（未登录）给 (0, 0)。
 #[tauri::command]
 async fn get_today_delta() -> Result<(u32, u32), String> {
-    tauri::async_runtime::spawn_blocking(quota_history::today_delta)
-        .await
-        .map_err(|e| format!("今日增量任务失败: {e}"))?
+    tauri::async_runtime::spawn_blocking(|| {
+        let fp = accounts::current_fingerprint().map(|f| f.user_id);
+        match fp {
+            Some(fp) => Ok(quota_history::today_deltas(&[fp])
+                .map_err(|e| format!("读取今日增量失败: {e}"))?
+                .into_values()
+                .next()
+                .unwrap_or((0, 0))),
+            None => Ok((0, 0)),
+        }
+    })
+    .await
+    .map_err(|e| format!("今日增量任务失败: {e}"))?
 }
 
 /// 读取 Codex / Claude / Cursor 的 Agent 额度快照历史。

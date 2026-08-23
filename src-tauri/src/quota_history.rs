@@ -1,10 +1,12 @@
 //! 额度快照历史：append-only JSONL 存储 + 周期解析查询。
 //!
 //! 设计要点：
-//! - 快照来源：每次 quota.rs::fetch_quota 成功后追加写一条。
+//! - 快照来源：quota.rs::fetch_quota（当前账号，30s 轮询）与
+//!   accounts.rs::account_quotas（全部账号快照，5 分钟一轮）成功后各追加一条，
+//!   均带账号指纹（account 字段）——读路径按指纹过滤，互不污染。
 //! - 存储：~/.zbar/quota_history.jsonl（每行一条 JSON），轻量、可 append、易调试。
 //! - 周期划分：用 weekly_reset (nextResetTime) 的变化点切分"智谱重置周期"。
-//! - 去重/限频：同秒内只写一条（用最后一条的 ts 防抖）。
+//! - 去重/限频：同账号同秒内只写一条（尾部窗口回读该账号最后一条防抖）。
 //! - 滚动保留：定期（每 24h 至多一次）删除超过保留期的行，防止文件无限增长。
 
 use serde::{Deserialize, Serialize};
@@ -30,6 +32,11 @@ static LAST_CLEANUP: OnceLock<Mutex<Option<SystemTime>>> = OnceLock::new();
 pub struct QuotaSnapshot {
     /// 采样毫秒时间戳（UTC，与 model_usage.started_at 口径一致）
     pub ts: i64,
+    /// 归属账号指纹（accounts 的 user_id）。None = 旧版本写入的快照，
+    /// 归属无法分辨：今日增量等账号敏感计算一律跳过（参与就会跨账号混算），
+    /// 仅趋势图/周对比在"当前账号视角"下把 None 视作当前账号的历史遗留。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
     /// 套餐等级："pro" / "max" ...
     #[serde(default)]
     pub level: String,
@@ -74,18 +81,30 @@ fn try_append(snap: &QuotaSnapshot) -> Result<(), String> {
     // 滚动清理：写入前检查（内部有 24h 节流，不会每次写都全量重写）
     maybe_cleanup(&path);
 
-    // 防抖：读最后一条，若同秒则覆盖最后一条而非新增。
+    append_to(&path, snap)
+}
+
+/// 追加一条快照到指定文件（防抖 + 残行修补），路径由调用方决定（便于单测）。
+fn append_to(path: &std::path::Path, snap: &QuotaSnapshot) -> Result<(), String> {
+    // 防抖：窗口内回读该账号的最后一条，同秒视为同一次刷新的重复采样，跳过。
+    // 必须按账号查找而非只看文件最后一条——多账号并行查询几乎同时落盘时，
+    // 本账号刚写的采样可能已排在其他账号的行后面，只比最后一条会漏判重复；
+    // 反过来只看 ts 不比账号，又会把其他账号的采样误吞。
     if path.exists() {
-        if let Ok(last_ts) = read_last_ts(&path) {
-            // 同一条的秒级时间戳相同 → 视为同一次刷新的重复采样，跳过
-            if last_ts / 1000 == snap.ts / 1000 {
+        if let Ok(recent) = read_recent_entries(path) {
+            let dup = recent
+                .iter()
+                .rev()
+                .find(|s| s.account == snap.account)
+                .is_some_and(|s| s.ts / 1000 == snap.ts / 1000);
+            if dup {
                 return Ok(());
             }
         }
         // 防残行拼接：若上次进程崩溃残留了无换行的半截行，直接 append 会
         // 与残行拼成一行导致 JSON 损坏（load_all 会跳过整行丢新快照）。
         // 文件尾字节非 \n 时先补一个换行，让新快照独占一行。
-        ensure_trailing_newline(&path)?;
+        ensure_trailing_newline(path)?;
     }
 
     let line = serde_json::to_string(snap)
@@ -93,10 +112,16 @@ fn try_append(snap: &QuotaSnapshot) -> Result<(), String> {
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
+        .open(path)
         .map_err(|e| format!("打开快照文件失败: {e}"))?;
-    // 每行一条，末尾换行
-    writeln!(file, "{line}").map_err(|e| format!("写入快照失败: {e}"))
+    // 每行一条，末尾换行。拼成单个缓冲一次 write_all：fetch_quota 与
+    // account_quotas 多线程并发追加时，writeln! 的分段 write 可能交错
+    // 产生损坏行；单次写入让行交错窗口最小化（OS O_APPEND 单次写原子）。
+    let mut buf = String::with_capacity(line.len() + 1);
+    buf.push_str(&line);
+    buf.push('\n');
+    file.write_all(buf.as_bytes())
+        .map_err(|e| format!("写入快照失败: {e}"))
 }
 
 /// 确保文件以换行符结尾：尾部是半截残行（进程崩溃残留）时补一个 \n，
@@ -207,10 +232,10 @@ fn try_cleanup(path: &std::path::Path) -> Result<(), String> {
     fs::rename(&tmp, path).map_err(|e| format!("替换快照文件失败: {e}"))
 }
 
-/// 读取最后一条快照的 ts（用于防抖判断）。
-/// 从文件末尾往回读一个小窗口，在窗口内找最后一个完整 JSON 行解析，
-/// 避免全文件读取。单行快照 JSON 可能超过初始窗口，不够时逐倍扩大（上限 64KB）。
-fn read_last_ts(path: &PathBuf) -> Result<i64, String> {
+/// 回读文件尾部窗口内的全部完整快照（防抖判断用，通常几条到几十条）。
+/// 从文件末尾往回读一个小窗口，解析窗口内的完整 JSON 行，避免全文件读取。
+/// 单行快照 JSON 可能超过初始窗口，不够时逐倍扩大（上限 64KB）。
+fn read_recent_entries(path: &std::path::Path) -> Result<Vec<QuotaSnapshot>, String> {
     let mut file = OpenOptions::new()
         .read(true)
         .open(path)
@@ -220,7 +245,7 @@ fn read_last_ts(path: &PathBuf) -> Result<i64, String> {
         .map_err(|e| format!("读取快照文件元数据失败: {e}"))?
         .len();
     if len == 0 {
-        return Ok(0);
+        return Ok(Vec::new());
     }
 
     let mut window: u64 = 2048;
@@ -236,31 +261,31 @@ fn read_last_ts(path: &PathBuf) -> Result<i64, String> {
 
         // 窗口首行可能被左边界截断（start > 0 时），不可信，跳过；
         // 其余行前面必有换行边界，均为完整行。
-        let mut last_line: Option<&str> = None;
+        let mut entries = Vec::new();
+        let mut saw_complete_line = false;
         for (i, line) in text.lines().enumerate() {
             if start > 0 && i == 0 {
                 continue;
             }
-            if !line.trim().is_empty() {
-                last_line = Some(line);
+            if line.trim().is_empty() {
+                continue;
+            }
+            // 损坏行跳过（与 load_all 策略一致），不影响其余行
+            if let Ok(snap) = serde_json::from_str::<QuotaSnapshot>(line.trim()) {
+                entries.push(snap);
+                saw_complete_line = true;
             }
         }
 
-        match last_line {
-            Some(line) => {
-                return serde_json::from_str::<QuotaSnapshot>(line.trim())
-                    .map(|v| v.ts)
-                    .map_err(|e| format!("解析最后一条快照失败: {e}"));
-            }
-            None => {
-                // 窗口内没找到完整非空行：已读全文件则确实没有；否则扩大窗口重试
-                if start > 0 && window < MAX_WINDOW {
-                    window *= 2;
-                    continue;
-                }
-                return Ok(0);
-            }
+        if saw_complete_line || start == 0 {
+            return Ok(entries);
         }
+        // 窗口内没找到完整非空行：扩大窗口重试
+        if window < MAX_WINDOW {
+            window *= 2;
+            continue;
+        }
+        return Ok(entries);
     }
 }
 
@@ -300,6 +325,26 @@ pub fn clear_history() -> Result<(), String> {
         fs::remove_file(&path).map_err(|e| format!("删除快照文件失败: {e}"))?;
     }
     Ok(())
+}
+
+/// 过滤为"当前账号视角"的快照序列（趋势图/周对比等当前账号读路径共用）：
+/// - 无 account 字段的旧快照：归属无法分辨，视为当前账号的历史遗留保留
+///   （单账号用户升级后 90 天历史不清空；代价是多账号用户切号后旧数据
+///   仍在其视图内，随 90 天滚动清理自然消退）；
+/// - 带指纹的快照：仅保留当前账号——多账号并行采样不得混入；
+/// - 拿不到当前指纹（未登录等）：只剩旧版快照可看。
+pub fn filter_for_current(
+    snaps: Vec<QuotaSnapshot>,
+    current: &Option<String>,
+) -> Vec<QuotaSnapshot> {
+    snaps
+        .into_iter()
+        .filter(|s| match (&s.account, current) {
+            (None, _) => true,
+            (Some(acc), Some(cur)) => acc == cur,
+            (Some(_), None) => false,
+        })
+        .collect()
 }
 
 // ===== 周期解析 =====
@@ -423,8 +468,8 @@ fn build_period(
     }
 }
 
-/// 取"今日"快照（本地 0 点之后）。
-pub fn today_snapshots() -> Result<Vec<QuotaSnapshot>, String> {
+/// 取"今日"快照（本地 0 点之后，含全部账号）。
+fn today_snapshots() -> Result<Vec<QuotaSnapshot>, String> {
     let all = load_all()?;
     let today_start = chrono::Local::now()
         .date_naive()
@@ -437,17 +482,47 @@ pub fn today_snapshots() -> Result<Vec<QuotaSnapshot>, String> {
     Ok(all.into_iter().filter(|s| s.ts >= today_start).collect())
 }
 
-/// 今日增量 = 今日峰值百分比 - 今日起始百分比（纯前端也可算，这里提供一份）。
-/// 返回 (增量, 今日采样数)。
-pub fn today_delta() -> Result<(u32, u32), String> {
+/// 一批账号的今日增量（多账号一次文件读取算完，避免逐账号重复解析全量历史）。
+/// 单账号增量 = 该账号今日峰值百分比 - 今日起始百分比；返回 (增量, 采样数)。
+///
+/// 账号严格匹配：快照 account 为 None（旧版本写入、归属无法分辨）的行
+/// 不参与任何账号——切号当日的旧混合序列一旦被计入，峰值与首条分属不同
+/// 账号，增量会跨账号失真（历史上"今日xx%像多账号总和"的根因）。
+pub fn today_deltas(
+    accounts: &[String],
+) -> Result<std::collections::HashMap<String, (u32, u32)>, String> {
     let today = today_snapshots()?;
-    if today.len() < 2 {
-        return Ok((0, today.len() as u32));
+    Ok(today_deltas_from(&today, accounts))
+}
+
+/// today_deltas 的纯计算部分（已过滤为"今日"的快照，便于单测注入）。
+fn today_deltas_from(
+    today: &[QuotaSnapshot],
+    accounts: &[String],
+) -> std::collections::HashMap<String, (u32, u32)> {
+    let mut out = std::collections::HashMap::new();
+    let wanted: std::collections::HashSet<&str> = accounts.iter().map(|s| s.as_str()).collect();
+    // 按账号分组（保持传入顺序即时间升序，首条即起始）
+    let mut grouped: std::collections::HashMap<&str, Vec<&QuotaSnapshot>> =
+        std::collections::HashMap::new();
+    for snap in today {
+        if let Some(acc) = snap.account.as_deref() {
+            if wanted.contains(acc) {
+                grouped.entry(acc).or_default().push(snap);
+            }
+        }
     }
-    let start = today.first().map(|s| s.weekly_pct).unwrap_or(0);
-    let peak = today.iter().map(|s| s.weekly_pct).max().unwrap_or(0);
-    // peak 一定 >= start；增量用峰值减起点，反映当日真实消耗
-    Ok((peak.saturating_sub(start), today.len() as u32))
+    for (acc, snaps) in grouped {
+        let start = snaps.first().map(|s| s.weekly_pct).unwrap_or(0);
+        let peak = snaps.iter().map(|s| s.weekly_pct).max().unwrap_or(0);
+        // peak 一定 >= start；增量用峰值减起点，反映当日真实消耗
+        out.insert(acc.to_string(), (peak.saturating_sub(start), snaps.len() as u32));
+    }
+    // 请求了但今日无采样的账号给 (0, 0)，前端按采样数<2 自然不显示
+    for acc in accounts {
+        out.entry(acc.clone()).or_insert((0, 0));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -467,6 +542,7 @@ mod tests {
     fn snap(ts: i64, level: &str) -> QuotaSnapshot {
         QuotaSnapshot {
             ts,
+            account: None,
             level: level.to_string(),
             weekly_pct: 10,
             weekly_reset: Some(ts + 86_400_000),
@@ -474,6 +550,15 @@ mod tests {
             mcp_pct: 0,
             mcp_used: None,
             mcp_total: None,
+        }
+    }
+
+    /// 生成指定账号与周额百分比的快照（今日增量隔离用例需要精确控制）
+    fn snap_of(ts: i64, account: &str, weekly_pct: u32) -> QuotaSnapshot {
+        QuotaSnapshot {
+            account: Some(account.to_string()),
+            weekly_pct,
+            ..snap(ts, "pro")
         }
     }
 
@@ -545,9 +630,9 @@ mod tests {
         assert!(periods[0].is_current);
     }
 
-    /// 尾部回读：常规多行文件能取到最后一条的 ts
+    /// 尾部回读：常规多行文件能取到窗口内全部快照（末尾即最后一条）
     #[test]
-    fn read_last_ts_returns_last_line() {
+    fn read_recent_entries_returns_tail_lines() {
         let path = temp_jsonl("last");
         let content = format!(
             "{}\n{}\n{}\n",
@@ -556,13 +641,15 @@ mod tests {
             serde_json::to_string(&snap(3000, "max")).unwrap()
         );
         std::fs::write(&path, &content).unwrap();
-        assert_eq!(read_last_ts(&path).unwrap(), 3000, "应返回最后一条快照的 ts");
+        let entries = read_recent_entries(&path).unwrap();
+        assert_eq!(entries.len(), 3, "小文件窗口应覆盖全部行");
+        assert_eq!(entries.last().unwrap().ts, 3000, "末尾应为最后一条快照");
         std::fs::remove_file(&path).ok();
     }
 
     /// 尾部回读：单行 JSON 超过初始 2KB 窗口时逐倍扩大窗口仍能取到
     #[test]
-    fn read_last_ts_expands_window_for_long_line() {
+    fn read_recent_entries_expands_window_for_long_line() {
         let path = temp_jsonl("long");
         let long = snap(42, &"x".repeat(5000));
         let content = format!(
@@ -571,16 +658,17 @@ mod tests {
             serde_json::to_string(&long).unwrap()
         );
         std::fs::write(&path, &content).unwrap();
-        assert_eq!(read_last_ts(&path).unwrap(), 42, "长行应通过扩大窗口解析到");
+        let entries = read_recent_entries(&path).unwrap();
+        assert_eq!(entries.last().unwrap().ts, 42, "长行应通过扩大窗口解析到");
         std::fs::remove_file(&path).ok();
     }
 
-    /// 尾部回读：空文件返回 0（视作无历史，防抖直接放行）
+    /// 尾部回读：空文件返回空（视作无历史，防抖直接放行）
     #[test]
-    fn read_last_ts_empty_file_returns_zero() {
+    fn read_recent_entries_empty_file_returns_empty() {
         let path = temp_jsonl("empty");
         std::fs::write(&path, "").unwrap();
-        assert_eq!(read_last_ts(&path).unwrap(), 0, "空文件应返回 0");
+        assert!(read_recent_entries(&path).unwrap().is_empty(), "空文件应无快照");
         std::fs::remove_file(&path).ok();
     }
 
@@ -603,7 +691,7 @@ mod tests {
         let cleaned = std::fs::read_to_string(&path).unwrap();
         assert!(!cleaned.contains("old"), "过期行应被删除");
         assert_eq!(cleaned.lines().count(), 2, "保留行应原样保留");
-        assert_eq!(read_last_ts(&path).unwrap(), now);
+        assert_eq!(read_recent_entries(&path).unwrap().last().unwrap().ts, now);
         std::fs::remove_file(&path).ok();
     }
 
@@ -627,6 +715,55 @@ mod tests {
             patched,
             "正常结尾时不应追加换行"
         );
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// 今日增量按账号严格隔离：账号 A 20→40、账号 B 50→85、
+    /// 旧版无账号快照（weekly_pct=10）混在中间时，A/B 各得各的增量，
+    /// None 快照不参与任何账号（否则峰值与首条跨账号取差，
+    /// 增量会失真成"多账号总和"——本次修复的目标场景）
+    #[test]
+    fn today_deltas_isolates_accounts() {
+        let snaps = vec![
+            snap_of(1_000, "A", 20),
+            snap(2_000, "pro"), // 旧版快照 weekly_pct=10
+            snap_of(3_000, "B", 50),
+            snap_of(4_000, "A", 40),
+            snap(5_000, "pro"), // 旧版快照 weekly_pct=10
+            snap_of(6_000, "B", 85),
+        ];
+        let accounts = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        let deltas = today_deltas_from(&snaps, &accounts);
+        assert_eq!(deltas["A"], (20, 2), "A：峰值40-起始20=20，2条采样");
+        assert_eq!(deltas["B"], (35, 2), "B：峰值85-起始50=35，2条采样");
+        assert_eq!(deltas["C"], (0, 0), "今日无采样的账号给(0,0)");
+    }
+
+    /// 防抖联合判断：同秒不同账号的采样不得互相吞掉（多账号并行查询
+    /// 几乎同时落盘的场景）；同秒同账号仍视为重复采样跳过。
+    /// 注：必须用 append_to（指定临时路径）——try_append 固定写真实
+    /// ~/.zbar/quota_history.jsonl，测试不得触碰。
+    #[test]
+    fn try_append_same_second_different_account_not_dropped() {
+        let path = temp_jsonl("dedup");
+        let ts = 1_800_000_000_000_i64;
+        // 账号 A 先写一条
+        append_to(&path, &snap_of(ts, "A", 20)).unwrap();
+        // 同秒账号 B：不得被 A 的防抖误伤
+        append_to(&path, &snap_of(ts, "B", 50)).unwrap();
+        // 同秒账号 A 再次写入：重复采样，跳过
+        append_to(&path, &snap_of(ts, "A", 30)).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = content
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+        assert_eq!(lines.len(), 2, "A、B 各一条，A 的重复采样被跳过");
+        let first: QuotaSnapshot = serde_json::from_str(lines[0]).unwrap();
+        let second: QuotaSnapshot = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(first.account.as_deref(), Some("A"));
+        assert_eq!(second.account.as_deref(), Some("B"));
         std::fs::remove_file(&path).ok();
     }
 }

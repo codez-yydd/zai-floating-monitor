@@ -47,6 +47,16 @@ def _agent_quota_storage_available():
     ) and isinstance(getattr(db, "AGENT_QUOTA_WINDOWS", None), dict)
 
 
+def _quota_account_available():
+    """判断当前加载的 db.py 是否支持额度快照的 account 维度（proto 4）。
+
+    旧版 db.py 的 quota_snapshots 无 account 列（存不进也查不出），快照
+    回传时 account 恒缺失，客户端多账号今日增量的多端合并会静默退化为
+    仅本机。标记为 proto 4 供客户端探测；兼容模式下继续原有同步服务。
+    """
+    return callable(getattr(db, "_migrate_quota_snapshots", None))
+
+
 # ===== 鉴权辅助 =====
 
 def get_master_token():
@@ -177,13 +187,18 @@ def sync():
         "max_snapshot_ts": max_snapshot_ts,
         "accepted_agent_quota_snapshots": accepted_agent_quota_snapshots,
         "max_agent_quota_snapshot_ts": max_agent_quota_snapshot_ts,
-        # 服务端协议版本：3 = 支持 Agent 额度快照同步；若当前加载的是
-        # 旧版 db.py，则降级为 2，客户端会保留本地 Agent 快照游标并稍后补传。
+        # 服务端协议版本：4 = 额度快照带 account 维度（多账号采样隔离与
+        # 多端今日增量合并）；3 = 支持 Agent 额度快照同步；若当前加载的是
+        # 旧版 db.py，则降级为 3/2，客户端按版本探测能力。
         # proto 2 的多来源 usage_records.source 行为。
         # 客户端据此探测——旧版服务端（无 source 列）会把 codex 记录按
         # (device_id, local_rowid) 撞键静默丢弃，客户端发现 proto < 2 时
         # 不会推进 codex 游标，升级服务端后自动恢复，数据不丢。
-        "proto": 3 if _agent_quota_storage_available() else 2,
+        "proto": (
+            4
+            if _quota_account_available()
+            else (3 if _agent_quota_storage_available() else 2)
+        ),
     })
 
 

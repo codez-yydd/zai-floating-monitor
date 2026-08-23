@@ -299,9 +299,17 @@ export async function setPin(enabled: boolean): Promise<void> {
 
 // ===== 周额度追踪 / 对比页 =====
 
-/** 读取全部额度快照历史（按 ts 升序） */
-export async function getQuotaHistory(): Promise<QuotaSnapshot[]> {
-  return invoke<QuotaSnapshot[]>("get_quota_history");
+/** 读取额度快照历史（按 ts 升序）。默认当前账号视角；all=true 返回
+ *  全部账号的本机快照（各账号今日增量的多端合并计算用）；fromMs 非空时
+ *  只返回该时刻之后的快照（避免 90 天全量过 IPC） */
+export async function getQuotaHistory(
+  all = false,
+  fromMs?: number
+): Promise<QuotaSnapshot[]> {
+  return invoke<QuotaSnapshot[]>("get_quota_history", {
+    all,
+    fromMs,
+  });
 }
 
 /** 解析快照为"智谱重置周期"列表 */
@@ -431,7 +439,8 @@ export async function renameAccount(
   return invoke<AccountMeta>("rename_account", { id, name });
 }
 
-/** 查询全部账号快照各自的订阅额度（凭证取自快照，与当前登录无关；不写额度历史） */
+/** 查询全部账号快照各自的订阅额度（凭证取自快照，与当前登录无关；
+ *  查询成功会写带账号指纹的历史采样，作为各账号今日增量的数据源） */
 export async function accountQuotas(): Promise<AccountQuotaEntry[]> {
   return invoke<AccountQuotaEntry[]>("account_quotas");
 }

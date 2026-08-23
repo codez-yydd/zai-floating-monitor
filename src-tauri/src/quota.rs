@@ -210,9 +210,9 @@ pub(crate) fn pick_coding_plan_api_key(
 /// 接口返回的 limits 中包含多个类型和窗口，不能只按 nextResetTime 排序：
 /// 5 小时窗口刚刷新后可能没有 nextResetTime，反而会被排序到最后。
 ///
-/// 注意：本函数不写 quota_history 快照。仅前端 QuotaPanel 的主动刷新
-/// （fetch_quota → query_quota）才写快照；其他调用方（如多账号额度查询
-/// accounts::account_quotas）应使用本函数，避免高频轮询污染历史。
+/// 注意：本函数不写 quota_history 快照。写采样由调用方决定：
+/// fetch_quota（当前账号）与 account_quotas（全部账号）各自成功后经
+/// snapshot_of 带账号指纹写入——读路径按指纹过滤，互不污染。
 pub(crate) fn query_quota_with(token: &str, base_url: &str) -> Result<QuotaResult, String> {
     let base = base_from_provider_url(base_url);
     let url = format!("{base}/api/monitor/usage/quota/limit");
@@ -252,10 +252,18 @@ pub(crate) fn query_quota_with(token: &str, base_url: &str) -> Result<QuotaResul
         .filter(|l| l.kind == "TOKENS_LIMIT")
         .collect();
 
-    let hour5 = token_limits
-        .iter()
-        .find(|l| l.unit == 3 && l.number == 5)
-        .cloned()
+    // 同一账号存在多个订阅时，limits 里可能出现多条同 (unit, number) 的窗口。
+    // .find() 只按数组顺序取第一条，若服务端返回顺序在轮询间漂移，取到的
+    // 订阅会来回切换，百分比跳变并污染"今日增量"的峰值-首条差值。
+    // 因此匹配到多条时按 next_reset_time 升序取最近重置的一条（最活跃订阅），
+    // None 排最后，保证轮询间选择稳定。
+    let pick_stable = |pred: &dyn Fn(&QuotaLimit) -> bool| -> Option<QuotaLimit> {
+        let mut matched: Vec<&QuotaLimit> = token_limits.iter().filter(|l| pred(l)).collect();
+        matched.sort_by_key(|l| l.next_reset_time.unwrap_or(i64::MAX));
+        matched.first().map(|l| (*l).clone())
+    };
+
+    let hour5 = pick_stable(&|l| l.unit == 3 && l.number == 5)
         // 兼容旧接口：刚刷新后的短窗口通常没有 nextResetTime。
         .or_else(|| {
             token_limits
@@ -265,21 +273,17 @@ pub(crate) fn query_quota_with(token: &str, base_url: &str) -> Result<QuotaResul
         })
         .or_else(|| token_limits.first().cloned());
 
-    let weekly = token_limits
-        .iter()
-        .find(|l| l.unit == 6 && l.number == 1)
-        .cloned()
-        .or_else(|| {
-            token_limits
-                .iter()
-                .find(|l| {
-                    hour5
-                        .as_ref()
-                        .map(|h| h.unit != l.unit || h.number != l.number)
-                        .unwrap_or(true)
-                })
-                .cloned()
-        });
+    let weekly = pick_stable(&|l| l.unit == 6 && l.number == 1).or_else(|| {
+        token_limits
+            .iter()
+            .find(|l| {
+                hour5
+                    .as_ref()
+                    .map(|h| h.unit != l.unit || h.number != l.number)
+                    .unwrap_or(true)
+            })
+            .cloned()
+    });
 
     Ok(QuotaResult {
         level: data.level,
@@ -299,14 +303,15 @@ pub fn query_quota() -> Result<QuotaResult, String> {
     query_quota_with(&token, &base_url)
 }
 
-/// 查询额度并写一条历史快照（供前端 fetch_quota 命令调用）。
-pub fn fetch_quota() -> Result<QuotaResult, String> {
-    let result = query_quota()?;
-
-    // 采样：每次成功查询追加一条快照（静默失败，不影响额度查询本身）。
-    // 用本地时间作为采样 ts，与 model_usage.started_at (UTC) 保持同口径。
-    let snap = crate::quota_history::QuotaSnapshot {
+/// 把一次成功的额度查询转为历史快照（fetch_quota 与 account_quotas 共用，
+/// 避免两处字段映射漂移）。ts 由调用方取当下时间，account 为账号指纹。
+pub(crate) fn snapshot_of(
+    result: &QuotaResult,
+    account: Option<&str>,
+) -> crate::quota_history::QuotaSnapshot {
+    crate::quota_history::QuotaSnapshot {
         ts: chrono::Local::now().timestamp_millis(),
+        account: account.map(|s| s.to_string()),
         level: result.level.clone(),
         weekly_pct: result.weekly.as_ref().map(|w| w.percentage).unwrap_or(0),
         weekly_reset: result.weekly.as_ref().and_then(|w| w.next_reset_time),
@@ -314,7 +319,34 @@ pub fn fetch_quota() -> Result<QuotaResult, String> {
         mcp_pct: result.mcp.as_ref().map(|m| m.percentage).unwrap_or(0),
         mcp_used: result.mcp.as_ref().and_then(|m| m.current_value),
         mcp_total: result.mcp.as_ref().and_then(|m| m.usage),
-    };
+    }
+}
+
+/// 查询额度并写一条历史快照（供前端 fetch_quota 命令调用）。
+/// 快照带当前登录账号指纹：quota_history 的账号敏感读路径（今日增量等）
+/// 按指纹过滤，切换账号后互不污染。指纹解密失败时写 None（宁缺毋错，
+/// 该条不参与任何账号的增量计算）。
+pub fn fetch_quota() -> Result<QuotaResult, String> {
+    // 指纹必须在查询前取：额度查询本身要读 config.json 选凭证并发起 HTTP
+    // （最长 15s），若等查询结束才取指纹，切换事务可能已把 credentials.json
+    // 换成新账号，出现"旧账号数值 + 新账号指纹"的错配采样。
+    let account = crate::accounts::current_fingerprint().map(|fp| fp.user_id);
+
+    let result = query_quota()?;
+
+    // 复核指纹未变：查询期间发生账号切换则本条数值归属不明，丢弃采样
+    // （最坏丢一条 30s 采样，30s 后补采），绝不写错配数据。
+    if let Some(acc) = &account {
+        if crate::accounts::current_fingerprint().map(|fp| fp.user_id).as_deref()
+            != Some(acc.as_str())
+        {
+            return Ok(result);
+        }
+    }
+
+    // 采样：每次成功查询追加一条快照（静默失败，不影响额度查询本身）。
+    // 用本地时间作为采样 ts，与 model_usage.started_at (UTC) 保持同口径。
+    let snap = snapshot_of(&result, account.as_deref());
     crate::quota_history::append_snapshot(&snap);
 
     Ok(result)

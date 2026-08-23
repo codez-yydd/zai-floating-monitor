@@ -400,18 +400,18 @@ function cycleEndMs(iso: string | null | undefined): number | null {
 
 /** ZCode 多账号额度分组：快照 ≥2 时在额度监控区按账号逐组展示。
  *  每组子标题（账号名 + 当前徽标 + 等级徽标 + 非当前组的切换按钮）
- *  + 该账号的 5小时/每周行；MCP 月度行只给当前账号（多账号时页长可控，
- *  用户切换决策主要看周额度）；当前账号的每周行挂今日增量（其余账号不参与本机采样）。 */
+ *  + 该账号的 5小时/每周/MCP 行——各账号的 MCP 月度额度相互独立，
+ *  均逐账号展示；每个账号的每周行挂各自的今日增量
+ *  （entry.today_delta 来自该账号的带指纹采样；当前账号由 DataCache
+ *  用 30s live 值覆盖，两路同账号采样已按 (ts, account) 防抖合流）。 */
 function AccountQuotaGroup({
   entries,
   now,
-  currentDelta,
   onSwitch,
   switchDisabled,
 }: {
   entries: AccountQuotaEntry[];
   now: number;
-  currentDelta?: AgentQuotaDelta;
   /** 非当前账号的切换回调（点击弹确认） */
   onSwitch: (e: AccountQuotaEntry) => void;
   switchDisabled?: boolean;
@@ -462,10 +462,14 @@ function AccountQuotaGroup({
                     usedPct={q.weekly.percentage}
                     resetAt={q.weekly.nextResetTime}
                     now={now}
-                    delta={e.is_current ? currentDelta : undefined}
+                    delta={
+                      e.today_delta
+                        ? { pct: e.today_delta[0], samples: e.today_delta[1] }
+                        : undefined
+                    }
                   />
                 )}
-                {q.mcp && e.is_current && (
+                {q.mcp && (
                   <QuotaMiniRow
                     label="MCP"
                     usedPct={q.mcp.percentage}
@@ -930,7 +934,6 @@ export function SummaryTab({
                     <AccountQuotaGroup
                       entries={accountQuotas}
                       now={now}
-                      currentDelta={zcodeWeeklyDelta}
                       onSwitch={(e) => sw.request(e)}
                       switchDisabled={sw.switching}
                     />

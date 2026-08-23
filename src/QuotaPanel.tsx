@@ -202,6 +202,10 @@ function AccountQuotaRow({
   const hour5RemainPct = quota.hour5
     ? Math.max(0, 100 - quota.hour5.percentage)
     : null;
+  // 今日增量：各账号自己的带指纹采样算出（当前账号由 DataCache 用 30s live 值
+  // 覆盖）；采样不足(<2)不显示，与 QuotaBar 的 delta 徽标同口径
+  const delta = entry.today_delta;
+  const hasDelta = delta != null && delta[1] >= 2 && delta[0] > 0;
 
   return (
     <div>
@@ -242,11 +246,27 @@ function AccountQuotaRow({
           />
         </div>
       )}
-      {hour5RemainPct != null && (
-        <div className="num text-[9px] text-slate-700/45 mt-0.5">
-          {t("quota.hour5Short")} {Math.round(hour5RemainPct)}%
-        </div>
-      )}
+      <div className="num text-[9px] text-slate-700/45 mt-0.5 flex items-center gap-2 flex-wrap">
+        {hour5RemainPct != null && (
+          <span>
+            {t("quota.hour5Short")} {Math.round(hour5RemainPct)}%
+          </span>
+        )}
+        {quota.mcp && (
+          <span>
+            MCP{" "}
+            {typeof quota.mcp.currentValue === "number" &&
+            typeof quota.mcp.usage === "number"
+              ? `${quota.mcp.currentValue}/${quota.mcp.usage}`
+              : `${Math.round(quota.mcp.percentage)}%`}
+          </span>
+        )}
+        {hasDelta && (
+          <span className="text-slate-700/50">
+            {t("quota.todayDelta", { pct: delta[0] })}
+          </span>
+        )}
+      </div>
     </div>
   );
 }

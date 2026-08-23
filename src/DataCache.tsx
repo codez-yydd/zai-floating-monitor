@@ -18,6 +18,7 @@ import type {
   DeviceInfo,
   PricingConfig,
   QuotaResult,
+  QuotaSnapshot,
   RangePreset,
   RemoteUsage,
   Stats,
@@ -36,11 +37,13 @@ import {
   fetchStats,
   fetchTrend,
   getCursorConfig,
+  getQuotaHistory,
   getSyncConfig,
   getTodayDelta,
   listRemoteDevices,
   remoteUsage,
   remoteAgentQuotaSnapshots,
+  remoteSnapshots,
 } from "./api";
 import { resolveRange } from "./RangePicker";
 import { dateStr } from "./format";
@@ -229,6 +232,7 @@ export interface DataCacheValue {
 
   // ===== Quota 数据（与范围无关）=====
   quota: QuotaResult | null;
+  /** 当前账号今日增量 [增量百分比, 采样数]（本机+远端多端合并口径） */
   todayDelta: [number, number] | null;
   /** Codex / Claude / Cursor 今日额度增量，按来源和窗口索引。 */
   agentQuotaDeltas: AgentQuotaDeltaMap;
@@ -317,10 +321,21 @@ export function DataProvider({ pricing, children }: ProviderProps) {
   );
   const [agentQuotaDeltas, setAgentQuotaDeltas] = useState<AgentQuotaDeltaMap>({});
   const [quotaError, setQuotaError] = useState<string | null>(null);
-  // 多账号额度（低频 5 分钟一轮 + 账号操作后手动刷，持久化供冷启动秒显）
+  // 多账号额度（低频 60s 一轮 + 账号操作后手动刷，持久化供冷启动秒显）。
+  // 旧版本缓存条目无 today_delta/fingerprint，恢复时补默认值规范化
   const [accountQuotas, setAccountQuotas] = useState<AccountQuotaEntry[]>(
-    () => loadCache<AccountQuotaEntry[]>("zbar-account-quotas") ?? []
+    () =>
+      (loadCache<AccountQuotaEntry[]>("zbar-account-quotas") ?? []).map((e) => ({
+        ...e,
+        fingerprint: e.fingerprint ?? "",
+        today_delta: e.today_delta ?? null,
+      }))
   );
+  // 各账号今日增量（fingerprint → [增量百分比, 采样数]）：本机全部快照 +
+  // 远端其他设备快照合并计算（覆盖本机离线时段其他设备的消耗）
+  const [accountTodayDeltas, setAccountTodayDeltas] = useState<
+    Record<string, [number, number]>
+  >({});
 
   // ===== 同步配置 =====
   const [syncConfig, setSyncConfig] = useState<SyncConfig | null>(null);
@@ -752,7 +767,8 @@ export function DataProvider({ pricing, children }: ProviderProps) {
       });
   }, []);
 
-  // 多账号额度加载（读各账号快照里的凭证并行查询，不写额度历史）。
+  // 多账号额度加载（读各账号快照里的凭证并行查询，查询成功会写带指纹的
+  // 历史采样——各账号"今日增量"的数据源，读路径按指纹过滤互不污染）。
   // 失败静默保留旧值：账号级失败原因在各条目 error 字段里，不设全局 error。
   const loadAccountQuotas = useCallback(() => {
     if (accountQuotasInflight.current) return;
@@ -767,6 +783,56 @@ export function DataProvider({ pricing, children }: ProviderProps) {
         accountQuotasInflight.current = false;
       });
   }, []);
+
+  /** 各账号今日增量（多端合并）：本机全部账号快照 + 远端其他设备的快照
+   *  （排除本机设备防重复），按账号指纹分组算"今日峰值 − 今日首条"。
+   *  额度百分比是账号服务端总量而非设备增量，多设备采样互补合并后
+   *  首条/峰值语义仍正确——本机离线时段其他设备的消耗由此补全。
+   *  失败静默保留旧值（后端 account_quotas 的本机 today_delta 仍在兜底）。 */
+  const loadAccountTodayDeltas = useCallback(() => {
+    const from = todayStartMs();
+    const to = Date.now() + 1;
+    const localPromise = getQuotaHistory(true, from);
+    const wantRemote = syncEnabled && !!syncConfig;
+    const remotePromise = wantRemote
+      ? remoteSnapshots(from, to, {
+          excludeDevice: syncConfig!.device_id,
+        }).catch(() => [])
+      : Promise.resolve([]);
+    Promise.all([localPromise, remotePromise])
+      .then(([local, remote]) => {
+        // 只取今日 + 带账号指纹的采样（无指纹的旧版快照归属不明，不参与），
+        // 按 (ts, account) 去重后时间升序，逐账号记首条与峰值
+        const seen = new Set<string>();
+        const list = [...local, ...remote]
+          .filter((s): s is QuotaSnapshot & { account: string } =>
+            typeof s.account === "string" && !!s.account && s.ts >= from
+          )
+          .sort((a, b) => a.ts - b.ts)
+          .filter((s) => {
+            const key = `${s.ts}|${s.account}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+        const groups = new Map<string, { start: number; peak: number; n: number }>();
+        for (const s of list) {
+          const g = groups.get(s.account);
+          if (!g) {
+            groups.set(s.account, { start: s.weekly_pct, peak: s.weekly_pct, n: 1 });
+          } else {
+            g.peak = Math.max(g.peak, s.weekly_pct);
+            g.n += 1;
+          }
+        }
+        const out: Record<string, [number, number]> = {};
+        for (const [acc, g] of groups) {
+          out[acc] = [Math.max(0, g.peak - g.start), g.n];
+        }
+        setAccountTodayDeltas(out);
+      })
+      .catch(() => {});
+  }, [syncEnabled, syncConfig]);
 
   /** 读取并合并今日 Agent 额度快照，供详情页与汇总页共用。 */
   const loadAgentQuotaDeltas = useCallback(() => {
@@ -903,17 +969,29 @@ export function DataProvider({ pricing, children }: ProviderProps) {
     };
   }, [loadQuota]);
 
-  // 多账号额度定时 300s：非当前账号的额度只随窗口翻转变化，低频足够；
-  // 当前账号条目展示时由 30s 的 quota 实时覆盖（见下方 value 派生），
-  // 不必与 quota 同频。延后首刷（3.5s）再错一峰。
+  // 多账号额度定时 60s：非当前账号的额度查询兼今日增量采样，5 分钟一轮
+  // 会漏掉轻度账号两次采样间的百分比变化（增量恒为 0 不显示）；当前账号
+  // 条目展示时仍由 30s 的 quota 实时覆盖（见下方 value 派生）。
+  // 延后首刷（3.5s）错峰。
   useEffect(() => {
     const first = setTimeout(loadAccountQuotas, 3_500);
-    const timer = setInterval(loadAccountQuotas, 300_000);
+    const timer = setInterval(loadAccountQuotas, 60_000);
     return () => {
       clearTimeout(first);
       clearInterval(timer);
     };
   }, [loadAccountQuotas]);
+
+  // 各账号今日增量（本机+远端合并）与多账号额度同频刷新；依赖 syncConfig，
+  // 配置异步就绪后本函数重建、effect 重跑，远端部分自动生效。
+  useEffect(() => {
+    const first = setTimeout(loadAccountTodayDeltas, 4_000);
+    const timer = setInterval(loadAccountTodayDeltas, 60_000);
+    return () => {
+      clearTimeout(first);
+      clearInterval(timer);
+    };
+  }, [loadAccountTodayDeltas]);
 
   // Agent 额度快照在各数据源首刷后读取，后续与额度查询同频刷新。
   useEffect(() => {
@@ -1050,19 +1128,30 @@ export function DataProvider({ pricing, children }: ProviderProps) {
   const refreshing =
     curZai.refreshing || curCursor.refreshing || curCodex.refreshing || curClaude.refreshing;
 
-  // 展示派生：当前账号条目用 30s live quota 覆盖（用量实时变化，5 分钟一轮的
+  // 展示派生 1：各账号今日增量优先用"本机+远端合并"计算值（多端同步，
+  // 覆盖本机离线时段），未就绪时退回后端 account_quotas 的本机计算值。
+  // 展示派生 2：当前账号条目用 30s live quota 覆盖（用量实时变化，60s 一轮的
   // 多账号查询跟不上）。仅当 live 一路更新（时间戳较新）时才覆盖——切换账号后
   // 两路数据到达顺序不定，旧一路的额度可能是另一个账号的；live 查询失败
   // （quota=null 或时间戳较旧）时保留后端值，避免闪空或错配
   const accountQuotasMerged = useMemo(
     () =>
-      accountQuotas.map((e) =>
-        e.is_current && quota && quotaTsRef.current >= accountQuotasTsRef.current
-          ? { ...e, quota }
-          : e
-      ),
-    [accountQuotas, quota]
+      accountQuotas.map((e) => {
+        const delta = accountTodayDeltas[e.fingerprint] ?? e.today_delta ?? null;
+        return e.is_current && quota && quotaTsRef.current >= accountQuotasTsRef.current
+          ? { ...e, quota, today_delta: delta }
+          : { ...e, today_delta: delta };
+      }),
+    [accountQuotas, quota, accountTodayDeltas]
   );
+
+  // 当前账号今日增量：多端合并值优先（口径与各账号行一致），未就绪时退回
+  // 本机 30s 路径的全局值（get_today_delta 按当前指纹过滤）
+  const currentAccountFp =
+    accountQuotas.find((e) => e.is_current)?.fingerprint ?? "";
+  const todayDeltaMerged =
+    (currentAccountFp ? accountTodayDeltas[currentAccountFp] : undefined) ??
+    todayDelta;
 
   const value = useMemo<DataCacheValue>(
     () => ({
@@ -1085,7 +1174,7 @@ export function DataProvider({ pricing, children }: ProviderProps) {
       cursorError: curCursor.error,
       fxRate,
       quota,
-      todayDelta,
+      todayDelta: todayDeltaMerged,
       agentQuotaDeltas,
       quotaError,
       accountQuotas: accountQuotasMerged,
@@ -1109,7 +1198,7 @@ export function DataProvider({ pricing, children }: ProviderProps) {
       curCursor,
       fxRate,
       quota,
-      todayDelta,
+      todayDeltaMerged,
       agentQuotaDeltas,
       quotaError,
       accountQuotasMerged,

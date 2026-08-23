@@ -853,6 +853,10 @@ pub struct RemoteSnapshot {
     pub device_id: String,
     #[serde(default)]
     pub ts: i64,
+    /// 归属账号指纹（新版上传的快照携带；旧服务端不回传则 None，
+    /// 该快照不参与账号敏感计算，仅趋势图等宽松口径使用）
+    #[serde(default)]
+    pub account: Option<String>,
     #[serde(default)]
     pub level: String,
     #[serde(default)]

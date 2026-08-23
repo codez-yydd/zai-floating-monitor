@@ -274,6 +274,8 @@ export type DeviceFilter = "all" | "local" | string; // string 为具体 device_
 export interface QuotaSnapshot {
   /** 采样毫秒时间戳 */
   ts: number;
+  /** 归属账号指纹（Rust 侧 None 时省略该字段） */
+  account?: string | null;
   /** 套餐等级："pro" / "max" ... */
   level: string;
   /** weekly 已用百分比 0-100 */
@@ -603,10 +605,14 @@ export interface AccountQuotaEntry {
   id: string;
   display_name: string;
   email: string | null;
+  /** 账号指纹（与额度快照的 account 同一标识，前端据此关联各账号今日增量） */
+  fingerprint: string;
   /** 是否当前登录账号（按实时指纹与快照指纹匹配回填） */
   is_current: boolean;
   /** 额度查询结果（失败为 null，原因见 error） */
   quota: QuotaResult | null;
+  /** 该账号今日增量 [增量百分比, 今日采样数]（查询失败为 null） */
+  today_delta: [number, number] | null;
   /** 查询失败原因（不含 token，后端原样透传） */
   error: string | null;
 }

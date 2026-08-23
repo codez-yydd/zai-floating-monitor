@@ -314,7 +314,8 @@ fn read_live_files() -> Result<LiveFiles, String> {
 }
 
 /// 解析当前 credentials.json 并提取指纹（文件缺失/格式异常/解密失败均 None）。
-fn current_fingerprint() -> Option<Fingerprint> {
+/// pub(crate)：quota.rs 的 fetch_quota 写历史采样时需要当前账号指纹。
+pub(crate) fn current_fingerprint() -> Option<Fingerprint> {
     let raw = fs::read_to_string(credentials_path().ok()?).ok()?;
     let v: Value = serde_json::from_str(&raw).ok()?;
     fingerprint_of_credentials(&v)
@@ -640,10 +641,17 @@ pub struct AccountQuotaEntry {
     pub id: String,
     pub display_name: String,
     pub email: Option<String>,
+    /// 账号指纹（user_id，与 quota_history 快照的 account 同一标识）。
+    /// 前端用它把"本机+远端合并计算的各账号今日增量"关联回本条目。
+    pub fingerprint: String,
     /// 是否当前登录账号（按实时指纹与快照指纹匹配回填，与 list_accounts 同口径）
     pub is_current: bool,
     /// 额度查询结果（失败为 None，错误见 error）
     pub quota: Option<crate::quota::QuotaResult>,
+    /// 该账号今日增量 (增量百分比, 今日采样数)（查询失败为 None）。
+    /// 由本函数写入的带指纹采样累积计算，当前账号另由 fetch_quota
+    /// 30s 一轮补采样，数据比非当前账号更新。
+    pub today_delta: Option<(u32, u32)>,
     /// 查询失败原因（quota 为 Some 时为 None；错误串不含 token，原样透传）
     pub error: Option<String>,
 }
@@ -671,14 +679,15 @@ fn snapshot_credential(snap: &AccountSnapshot) -> Option<(String, String, String
 /// 只读快照目录与实时指纹，全程不持 ACCOUNTS_LOCK（与切换/捕获写事务互不阻塞）；
 /// 各账号 HTTP 用 std::thread::scope 并行（单账号 15s 超时独立计时，不叠加）。
 ///
-/// 注意：本函数绝不写 quota_history——历史采样只应记录当前登录账号
-/// （fetch_quota 路径），把其他账号的用量写进去会污染周额度对比。
+/// 每个查询成功的账号同时写一条带指纹的额度历史采样（quota_history）：
+/// 快照的 account 字段使读写按账号隔离，非当前账号由此获得自己的
+/// "今日增量"数据源（5 分钟一轮），且不会污染当前账号的任何读路径。
 pub fn account_quotas() -> Result<Vec<AccountQuotaEntry>, String> {
     let base = config_dir()?;
     let snapshots = load_snapshots_at(&base);
     let current_fp = current_fingerprint().map(|fp| fp.user_id);
 
-    // 先在主线程提取元数据与凭证（纯内存解析），线程内只做 HTTP 查询
+    // 先在主线程提取元数据与凭证（纯内存解析），线程内只做 HTTP 查询与采样落盘
     let metas: Vec<_> = snapshots
         .iter()
         .map(|snap| {
@@ -690,12 +699,16 @@ pub fn account_quotas() -> Result<Vec<AccountQuotaEntry>, String> {
             )
         })
         .collect();
-    let credentials: Vec<_> = snapshots.iter().map(|snap| snapshot_credential(snap)).collect();
+    // 指纹与凭证打包进线程：查询成功后写采样需要知道归属账号
+    let jobs: Vec<_> = snapshots
+        .iter()
+        .map(|snap| (snap.fingerprint.clone(), snapshot_credential(snap)))
+        .collect();
 
     let results: Vec<_> = std::thread::scope(|scope| {
-        let handles: Vec<_> = credentials
+        let handles: Vec<_> = jobs
             .into_iter()
-            .map(|cred| {
+            .map(|(fingerprint, cred)| {
                 scope.spawn(move || match cred {
                     // 错误文案刻意不以「未找到 ZCode Coding Plan 凭证」开头：
                     // 该前缀被前端识别为"当前账号未登录"的引导分支，而这里是
@@ -709,7 +722,13 @@ pub fn account_quotas() -> Result<Vec<AccountQuotaEntry>, String> {
                     ),
                     Some((_provider_key, token, base_url)) => {
                         match crate::quota::query_quota_with(&token, &base_url) {
-                            Ok(q) => (Some(q), None),
+                            Ok(q) => {
+                                // 写带指纹采样（静默失败，不影响额度查询本身）；
+                                // 与 fetch_quota 的 30s 采样经 (ts, account) 防抖去重
+                                let snap = crate::quota::snapshot_of(&q, Some(&fingerprint));
+                                crate::quota_history::append_snapshot(&snap);
+                                (Some(q), None)
+                            }
                             // 失败原样透传（query_quota_with 的错误串不含 token）
                             Err(e) => (None, Some(e)),
                         }
@@ -727,17 +746,29 @@ pub fn account_quotas() -> Result<Vec<AccountQuotaEntry>, String> {
             .collect()
     });
 
+    // 全部采样落盘后统一计算各账号今日增量（一次历史文件读取）
+    let accounts: Vec<String> = metas.iter().map(|m| m.3.clone()).collect();
+    let deltas = crate::quota_history::today_deltas(&accounts).unwrap_or_default();
+
     Ok(metas
         .into_iter()
         .zip(results)
-        .map(|((id, display_name, email, fingerprint), (quota, error))| AccountQuotaEntry {
-            id,
-            display_name,
-            email,
-            is_current: Some(fingerprint.as_str()) == current_fp.as_deref(),
-            quota,
-            error,
-        })
+        .map(
+            |((id, display_name, email, fingerprint), (quota, error))| AccountQuotaEntry {
+                id,
+                display_name,
+                email,
+                fingerprint: fingerprint.clone(),
+                is_current: Some(fingerprint.as_str()) == current_fp.as_deref(),
+                today_delta: if quota.is_some() {
+                    deltas.get(&fingerprint).copied()
+                } else {
+                    None
+                },
+                quota,
+                error,
+            },
+        )
         .collect())
 }
 

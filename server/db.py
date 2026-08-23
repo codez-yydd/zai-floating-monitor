@@ -63,10 +63,14 @@ SCHEMA_USAGE_RECORDS = _usage_records_schema("usage_records")
 
 # 额度快照表：客户端每次查询额度后追加一条，周期解析靠 weekly_reset 跳变。
 # 与客户端本地 quota_history.jsonl 字段对齐，多一个 device_id 用于按设备筛选。
+# account 为快照归属账号指纹（客户端多账号采样隔离用）：旧客户端不传，
+# 统一存空串；主键含 account，同设备多账号同毫秒落盘的多条采样互不撞键
+# （旧主键 (device_id, ts) 会把其他账号的采样静默吞掉）。
 SCHEMA_QUOTA_SNAPSHOTS = """
 CREATE TABLE IF NOT EXISTS quota_snapshots (
     device_id    TEXT    NOT NULL,
     ts           INTEGER NOT NULL,
+    account      TEXT    NOT NULL DEFAULT '',
     level        TEXT,
     weekly_pct   INTEGER NOT NULL DEFAULT 0,
     weekly_reset INTEGER,
@@ -74,7 +78,7 @@ CREATE TABLE IF NOT EXISTS quota_snapshots (
     mcp_pct      INTEGER NOT NULL DEFAULT 0,
     mcp_used     INTEGER,
     mcp_total    INTEGER,
-    PRIMARY KEY (device_id, ts)
+    PRIMARY KEY (device_id, ts, account)
 )
 """
 
@@ -173,11 +177,52 @@ def _migrate_usage_records(conn):
         conn.isolation_level = ""
 
 
+def _migrate_quota_snapshots(conn):
+    """quota_snapshots 增加 account 维度的幂等自动迁移。
+
+    检测现有表无 account 列时：建新表（主键扩为 device_id+ts+account）→
+    旧数据全部按 account='' 搬入 → 删旧表 → 改名。单事务完成，老数据无损；
+    已迁移/全新库直接跳过（可重复调用，幂等）。主键扩展后同设备多账号
+    同毫秒的采样互不撞键；旧客户端（不上传 account）统一存 ''，
+    与旧主键 (device_id, ts) 的去重行为一致。
+    """
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(quota_snapshots)").fetchall()]
+    if not cols or "account" in cols:
+        return
+
+    conn.isolation_level = None  # 手动管理事务，保证搬迁原子性
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(SCHEMA_QUOTA_SNAPSHOTS.replace(
+            "IF NOT EXISTS quota_snapshots", "IF NOT EXISTS quota_snapshots_new"
+        ))
+        conn.execute(
+            """
+            INSERT INTO quota_snapshots_new
+                (device_id, ts, account, level, weekly_pct, weekly_reset,
+                 hour5_pct, mcp_pct, mcp_used, mcp_total)
+            SELECT device_id, ts, '', level, weekly_pct, weekly_reset,
+                   hour5_pct, mcp_pct, mcp_used, mcp_total
+            FROM quota_snapshots
+            """
+        )
+        conn.execute("DROP TABLE quota_snapshots")
+        conn.execute("ALTER TABLE quota_snapshots_new RENAME TO quota_snapshots")
+        conn.execute("COMMIT")
+        print("[zbar-sync] quota_snapshots 已自动迁移：新增 account 维度，老数据无损保留")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.isolation_level = ""
+
+
 def init_db():
     """初始化数据库：创建数据目录 + 自动建库建表（幂等，可重复调用）。
 
     老库（无 source 列）在此处自动迁移；迁移中 DROP TABLE 会连带删掉
     usage_records 上的两个索引，故迁移后重放一遍索引语句挂回新表。
+    quota_snapshots 的 account 迁移同理（DROP 会删掉 ts 索引）。
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = get_conn()
@@ -188,8 +233,9 @@ def init_db():
             conn.execute(sql)
         conn.commit()
         _migrate_usage_records(conn)
+        _migrate_quota_snapshots(conn)
         if not conn.in_transaction:
-            for sql in (INDEX_STARTED, INDEX_DEVICE_STARTED):
+            for sql in (INDEX_STARTED, INDEX_DEVICE_STARTED, INDEX_SNAPSHOT_TS):
                 conn.execute(sql)
             conn.commit()
     finally:
@@ -604,8 +650,9 @@ def empty_usage_result(from_ms, to_ms):
 # ===== 额度快照（quota_snapshots）=====
 
 def insert_snapshots(device_id, snaps, uploaded_at):
-    """批量插入额度快照（INSERT OR IGNORE 去重，按 device_id+ts 主键）。
-    返回实际写入条数。单条字段缺失时用默认值兜底。
+    """批量插入额度快照（INSERT OR IGNORE 去重，按 device_id+ts+account 主键）。
+    返回实际写入条数。单条字段缺失时用默认值兜底；account 缺失（旧客户端）
+    统一存空串。
     """
     if not snaps:
         return 0
@@ -618,13 +665,14 @@ def insert_snapshots(device_id, snaps, uploaded_at):
                 cur.execute(
                     """
                     INSERT OR IGNORE INTO quota_snapshots
-                        (device_id, ts, level, weekly_pct, weekly_reset,
+                        (device_id, ts, account, level, weekly_pct, weekly_reset,
                          hour5_pct, mcp_pct, mcp_used, mcp_total)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         device_id,
                         s.get("ts", 0),
+                        s.get("account") or "",
                         s.get("level", ""),
                         s.get("weekly_pct", 0),
                         s.get("weekly_reset"),
@@ -657,13 +705,15 @@ def max_snapshot_ts_of(device_id):
 def query_snapshots(from_ms, to_ms, device_ids):
     """查询时间范围内的快照（带 device_id，按 ts 升序）。
     device_ids 为空 = 全部设备；非空 = 仅这些设备。
+    account 为快照归属账号指纹；空串（旧客户端数据/旧客户端上传）返回 None，
+    与客户端 RemoteSnapshot.account 的 Option 语义对齐。
     """
     dev_frag, dev_params = _build_device_filter(device_ids)
     conn = get_conn()
     try:
         rows = conn.execute(
             f"""
-            SELECT device_id, ts, level, weekly_pct, weekly_reset,
+            SELECT device_id, ts, account, level, weekly_pct, weekly_reset,
                    hour5_pct, mcp_pct, mcp_used, mcp_total
             FROM quota_snapshots
             WHERE ts >= ? AND ts < ? {dev_frag}
@@ -675,6 +725,7 @@ def query_snapshots(from_ms, to_ms, device_ids):
             {
                 "device_id": r["device_id"],
                 "ts": r["ts"],
+                "account": r["account"] or None,
                 "level": r["level"] or "",
                 "weekly_pct": r["weekly_pct"],
                 "weekly_reset": r["weekly_reset"],
