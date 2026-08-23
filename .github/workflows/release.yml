@@ -105,8 +105,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     # 双仓库发布总限时：Gitee 附件接口偶发挂起（curl 已加单文件超时重试），
-    # 超时整体失败可重跑（发布步骤幂等：双仓库均先删旧再建新），不挂 6h
-    timeout-minutes: 30
+    # 大文件重试耗时长，留足 45 分钟；超时整体失败可重跑（发布步骤幂等：
+    # 双仓库均先删旧再建新），不挂默认 6h
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -186,6 +187,10 @@ jobs:
               -F "access_token=$GITEE_TOKEN" \
               -F "file=@$1;filename=$2" >/dev/null
           }
+          # latest.json 最先传：它是应用内更新源的入口（2KB 秒传），Gitee
+          # 接口不稳导致后续大文件全部失败时，更新源依然可用
+          upload out/gitee-latest.json latest.json || { echo '::error::latest.json 上传失败'; exit 1; }
+          echo '  已上传 latest.json'
           for f in out/*-setup.exe out/*-setup.exe.sig \
                    out/*aarch64*.app.tar.gz out/*aarch64*.app.tar.gz.sig \
                    out/*x64.app.tar.gz out/*x64.app.tar.gz.sig \
@@ -194,8 +199,6 @@ jobs:
             upload "$f" "$(basename "$f")" || { echo "::error::附件上传失败: $f"; exit 1; }
             echo "  已上传 $(basename "$f")"
           done
-          upload out/gitee-latest.json latest.json || { echo '::error::latest.json 上传失败'; exit 1; } # Gitee 侧文件名必须是 latest.json
-          echo '  已上传 latest.json'
 
           echo ''
           echo '发布完成，更新源：'
