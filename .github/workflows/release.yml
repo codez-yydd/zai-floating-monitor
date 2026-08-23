@@ -139,7 +139,7 @@ jobs:
           gh release view "v$VERSION" >/dev/null 2>&1 && gh release delete "v$VERSION" --yes || true
           gh release create "v$VERSION" out/* \
             --title "ZBar v$VERSION" \
-            --notes "ZBar v$VERSION：Token 速率与首字延迟指标、各 Agent 当前模型显示、应用内自动更新（Windows / macOS）。首次升级需手动下载安装，此后可在应用内一键更新。" \
+            --notes "ZBar v$VERSION：修复多账号切换后今日用量百分比跨账号混算（各账号独立计算并显示）；全部账号显示各自独立的 MCP 额度与今日用量；今日增量支持多端同步合并（自建同步服务器需同步更新 server/ 模块，数据库自动迁移）。首次升级需手动下载安装，此后可在应用内一键更新。" \
             --latest
 
       - name: 发布 Gitee 更新源（固定 tag latest）
@@ -165,7 +165,7 @@ jobs:
             -F 'tag_name=latest' \
             -F 'target_commitish=master' \
             -F "name=ZBar v$VERSION（应用内更新源）" \
-            -F 'body=ZBar $VERSION 自动更新通道，保持最新版即可。')
+            -F "body=ZBar v$VERSION 自动更新通道，保持最新版即可。")
           CODE=$(echo "$RESP" | tail -1)
           if [[ "$CODE" != 2* ]]; then
             echo "::error::Gitee release 创建失败 HTTP $CODE："
