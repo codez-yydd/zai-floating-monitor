@@ -98,4 +98,26 @@ export const settings = {
   "settings.accountsEmpty":
     "还没有账号快照。在 ZCode 客户端登录账号后点「捕获当前登录」保存，之后在另一个账号登录再捕获一次，即可一键切换。",
   "settings.accountsLoadFail": "读取账号列表失败：{msg}",
+
+  // ===== 智能切换（手动按钮按额度算法选号）+ 自动切换（额度用满无人值守开关）=====
+  "settings.accountsAutoSwitch": "智能切换",
+  "settings.accountsAutoConfirmTitle": "智能切换到「{name}」",
+  "settings.accountsAutoSummary": "5h 剩 {h5}% · 周剩 {wk}%",
+  "settings.accountsAutoReasonReady": "该账号 5h 与周额度均有剩余，综合剩余量最高",
+  "settings.accountsAutoReasonWait":
+    "所有账号 5h 额度均已用满，该账号 5h 将最早恢复（约 {min} 分钟后）",
+  "settings.accountsAutoReasonWaitNoTime":
+    "所有账号 5h 额度均已用满，已选择 5h 较早恢复的账号",
+  "settings.accountsAutoNoTarget": "没有合适的账号可切换：其他账号查询失败或周额度已用尽",
+  "settings.accountsAutoSingle": "当前只有一个账号，没有其他账号可切换",
+  "settings.accountsAutoNoData": "额度数据尚未就绪，请稍后再试",
+  "settings.accountsAutoToggle": "额度用满时自动切换",
+  "settings.accountsAutoToggleHint":
+    "当前账号 5h 额度用满时自动切换到可用账号并重启 ZCode，中断的任务请在 ZCode 任务列表中手动继续",
+  "settings.accountsAutoNotifyOk":
+    "已自动切换到「{name}」（5h 额度用满），中断的任务请在 ZCode 任务列表中继续",
+  "settings.accountsAutoNotifyFail": "5h 额度用满，但没有可切换的可用账号",
+  "settings.accountsAutoLogOk": "{time} 已自动切换到「{name}」",
+  "settings.accountsAutoLogFail": "{time} 尝试自动切换失败：无可用账号",
+  "settings.accountsAutoLinuxUnsupported": "当前平台不支持切换账号",
 };

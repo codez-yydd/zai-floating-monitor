@@ -7,17 +7,33 @@ import {
   renameAccount,
   switchAccount,
 } from "./api";
+import {
+  AUTO_SWITCH_DONE_EVENT,
+  pickAutoSwitchTarget,
+  readAutoSwitchEnabled,
+  readAutoSwitchLog,
+  writeAutoSwitchEnabled,
+  type AutoSwitchLogEntry,
+  type AutoSwitchPick,
+} from "./autoSwitch";
 import { useDataCache } from "./DataCache";
 import { levelLabel } from "./format";
 import { remainingTextColor } from "./widgets";
 import { SettingsCard } from "./layout";
 import { useI18n } from "./i18n";
 
+/** 日志时间格式化：HH:mm（本地时区） */
+function logTime(ts: number): string {
+  const d = new Date(ts);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
 /**
  * 多智谱账号切换卡片（设置页，挂在统计来源卡与汇率卡之间）。
  * - 捕获：把当前 ZCode 客户端登录态存为快照（仅存本机 ~/.zbar/accounts/，
  *   目录 0700 / 文件 0600，不参与同步）
  * - 切换：退出 ZCode → 原文写回凭证 → 重启；失败自动回滚（后端事务保证）
+ * - 自动切换：按 5h/周剩余挑最合适的其他账号；可选额度用满时无人值守切换
  * 列表数据不进 DataCache（配置类数据，组件自管 state）。
  */
 export function AccountsCard() {
@@ -35,6 +51,27 @@ export function AccountsCard() {
   const [confirmSwitch, setConfirmSwitch] = useState<AccountMeta | null>(null);
   const [confirmRemove, setConfirmRemove] = useState<AccountMeta | null>(null);
   const [renaming, setRenaming] = useState<AccountMeta | null>(null);
+  // 自动切换：手动挑选结果（entry 来自额度条目，切换命令需找回 AccountMeta）
+  const [autoPick, setAutoPick] = useState<{
+    pick: AutoSwitchPick;
+    meta: AccountMeta;
+  } | null>(null);
+  // 额度用满自动切换（无人值守）开关：localStorage 持久化，默认关
+  const [autoEnabled, setAutoEnabled] = useState(() => readAutoSwitchEnabled());
+  // 最近一次自动切换记录（DataCache 广播事件后重读；挂载时也读一次）
+  const [autoLog, setAutoLog] = useState<AutoSwitchLogEntry | null>(() =>
+    readAutoSwitchLog()
+  );
+
+  useEffect(() => {
+    const sync = () => setAutoLog(readAutoSwitchLog());
+    window.addEventListener(AUTO_SWITCH_DONE_EVENT, sync);
+    return () => window.removeEventListener(AUTO_SWITCH_DONE_EVENT, sync);
+  }, []);
+
+  // Linux 的切换事务（进程退出/重启）后端未实现，开关禁用并提示
+  const isLinux =
+    typeof navigator !== "undefined" && /linux/i.test(navigator.userAgent);
 
   const showFlash = useCallback((text: string) => {
     setFlash(text);
@@ -113,6 +150,34 @@ export function AccountsCard() {
     }
   };
 
+  // 手动「自动切换」：按 5h/周剩余挑最合适的其他账号，确认后走现有切换链路
+  const handleAutoSwitch = () => {
+    setActionError(null);
+    // 多账号额度未就绪（含账号列表本身还在加载）：这些是"未能执行"的引导
+    // 提示，与无目标一样走红色 actionError（showFlash 是绿色成功语义）
+    if (accountQuotas.length === 0 || !state) {
+      setActionError(t("settings.accountsAutoNoData"));
+      return;
+    }
+    if (state.accounts.length <= 1) {
+      setActionError(t("settings.accountsAutoSingle"));
+      return;
+    }
+    const pick = pickAutoSwitchTarget(accountQuotas);
+    if (!pick) {
+      setActionError(t("settings.accountsAutoNoTarget"));
+      return;
+    }
+    // 额度条目按 id 找回快照元信息（切换命令以快照 id 为准；正常必有，
+    // 找不到说明额度数据与快照列表不一致，按无目标处理）
+    const meta = state.accounts.find((a) => a.id === pick.entry.id);
+    if (!meta) {
+      setActionError(t("settings.accountsAutoNoTarget"));
+      return;
+    }
+    setAutoPick({ pick, meta });
+  };
+
   const handleRename = async (id: string, name: string) => {
     setActionError(null);
     try {
@@ -143,15 +208,25 @@ export function AccountsCard() {
       <SettingsCard
         title={t("settings.accountsCard")}
         action={
-          <button
-            onClick={handleCapture}
-            disabled={busy}
-            className="text-[9px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-700/80 hover:bg-sky-500/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {capturing
-              ? t("settings.accountsCapturing")
-              : t("settings.accountsCapture")}
-          </button>
+          <span className="flex items-center gap-1">
+            <button
+              onClick={handleCapture}
+              disabled={busy}
+              className="text-[9px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-700/80 hover:bg-sky-500/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {capturing
+                ? t("settings.accountsCapturing")
+                : t("settings.accountsCapture")}
+            </button>
+            {/* 自动切换：按额度剩余智能挑选目标（紫色与「当前」徽标同色系区分） */}
+            <button
+              onClick={handleAutoSwitch}
+              disabled={busy}
+              className="text-[9px] px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-600/90 hover:bg-violet-500/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {t("settings.accountsAutoSwitch")}
+            </button>
+          </span>
         }
         hint={t("settings.accountsHint")}
       >
@@ -239,6 +314,51 @@ export function AccountsCard() {
           })}
         </div>
 
+        {/* 额度用满自动切换（无人值守）开关：Linux 后端不支持切换事务，禁用 */}
+        <label
+          className={`flex items-center gap-1.5 mt-2 rounded-md px-1.5 py-1 transition-colors ${
+            isLinux ? "" : "hover:bg-slate-900/5 cursor-pointer"
+          }`}
+        >
+          <input
+            type="checkbox"
+            checked={autoEnabled}
+            disabled={isLinux}
+            onChange={(e) => {
+              setAutoEnabled(e.target.checked);
+              writeAutoSwitchEnabled(e.target.checked);
+            }}
+            className="accent-sky-500 h-3 w-3 shrink-0 disabled:opacity-40"
+          />
+          <span className="text-[10px] text-slate-900/80">
+            {t("settings.accountsAutoToggle")}
+          </span>
+        </label>
+        {isLinux ? (
+          <p className="text-[9px] text-slate-500 mt-0.5 px-1.5 leading-relaxed">
+            {t("settings.accountsAutoLinuxUnsupported")}
+          </p>
+        ) : (
+          autoEnabled && (
+            <p className="text-[9px] text-slate-500 mt-0.5 px-1.5 leading-relaxed">
+              {t("settings.accountsAutoToggleHint")}
+            </p>
+          )
+        )}
+        {/* 最近一次自动切换记录（无人值守触发时可能不在设置页，落 localStorage 持久展示） */}
+        {autoLog && (
+          <p className="text-[9px] text-slate-700/45 mt-1 px-1.5 truncate">
+            {autoLog.ok
+              ? t("settings.accountsAutoLogOk", {
+                  time: logTime(autoLog.ts),
+                  name: autoLog.to ?? "",
+                })
+              : t("settings.accountsAutoLogFail", {
+                  time: logTime(autoLog.ts),
+                })}
+          </p>
+        )}
+
         {/* 读取失败 */}
         {loadError && (
           <p className="text-[9px] text-rose-600 mt-1.5 leading-relaxed break-all">
@@ -269,6 +389,42 @@ export function AccountsCard() {
           danger={false}
           onCancel={() => setConfirmSwitch(null)}
           onConfirm={() => handleSwitch(confirmSwitch)}
+        />
+      )}
+
+      {/* 自动切换确认弹窗：摘要（剩余量）+ 选择理由，确认后走现有切换链路 */}
+      {autoPick && !busy && (
+        <ConfirmDialog
+          title={t("settings.accountsAutoConfirmTitle", {
+            name: autoPick.meta.display_name,
+          })}
+          desc={
+            t("settings.accountsAutoSummary", {
+              h5: Math.round(autoPick.pick.hour5Remain),
+              wk: Math.round(autoPick.pick.weeklyRemain),
+            }) +
+            "\n" +
+            (autoPick.pick.layer === 1
+              ? t("settings.accountsAutoReasonReady")
+              : autoPick.pick.resetAt == null
+                ? t("settings.accountsAutoReasonWaitNoTime")
+                : t("settings.accountsAutoReasonWait", {
+                    min: Math.max(
+                      1,
+                      Math.round(
+                        (autoPick.pick.resetAt - Date.now()) / 60_000
+                      )
+                    ),
+                  }))
+          }
+          confirmText={t("settings.accountsSwitch")}
+          danger={false}
+          onCancel={() => setAutoPick(null)}
+          onConfirm={() => {
+            const meta = autoPick.meta;
+            setAutoPick(null);
+            handleSwitch(meta);
+          }}
         />
       )}
 
@@ -365,7 +521,7 @@ function ConfirmDialog({
         <div className="text-[12px] font-semibold text-slate-900 mb-1">
           {title}
         </div>
-        <p className="text-[10px] text-slate-700/65 leading-relaxed mb-2">
+        <p className="text-[10px] text-slate-700/65 leading-relaxed mb-2 whitespace-pre-line">
           {desc}
         </p>
         <div className="flex gap-1.5">

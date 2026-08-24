@@ -483,5 +483,30 @@ export const en: typeof zh = {
     "settings.accountsEmpty":
       "No snapshots yet. Log in to an account in the ZCode client and click \"Capture login\", then log in to another account and capture again — after that you can switch with one click.",
     "settings.accountsLoadFail": "Failed to load accounts: {msg}",
+
+    "settings.accountsAutoSwitch": "Smart",
+    "settings.accountsAutoConfirmTitle": "Smart-switch to \"{name}\"",
+    "settings.accountsAutoSummary": "5h {h5}% left · Wk {wk}% left",
+    "settings.accountsAutoReasonReady":
+      "Both 5h and weekly quotas available, with the best combined headroom",
+    "settings.accountsAutoReasonWait":
+      "All accounts' 5h quotas are exhausted; this account's 5h quota resets first (in ~{min} min)",
+    "settings.accountsAutoReasonWaitNoTime":
+      "All accounts' 5h quotas are exhausted; picked the account whose 5h quota resets sooner",
+    "settings.accountsAutoNoTarget":
+      "No suitable account to switch to: other accounts failed to query or their weekly quotas are exhausted",
+    "settings.accountsAutoSingle": "Only one account — no other account to switch to",
+    "settings.accountsAutoNoData": "Quota data not ready yet, please retry later",
+    "settings.accountsAutoToggle": "Auto-switch when 5h quota is exhausted",
+    "settings.accountsAutoToggleHint":
+      "When the current account's 5h quota runs out, automatically switch to an available account and relaunch ZCode. Interrupted tasks must be resumed manually from the ZCode task list.",
+    "settings.accountsAutoNotifyOk":
+      "Auto-switched to \"{name}\" (5h quota exhausted). Resume interrupted tasks from the ZCode task list.",
+    "settings.accountsAutoNotifyFail":
+      "5h quota exhausted, but no available account to switch to",
+    "settings.accountsAutoLogOk": "{time} auto-switched to \"{name}\"",
+    "settings.accountsAutoLogFail": "{time} auto-switch failed: no available account",
+    "settings.accountsAutoLinuxUnsupported":
+      "Account switching is not supported on this platform",
   } satisfies typeof settings),
 };

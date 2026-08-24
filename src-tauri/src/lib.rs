@@ -321,11 +321,18 @@ async fn capture_account() -> Result<accounts::CaptureOutcome, String> {
 /// 切换登录账号：备份 → 退出 ZCode → 写回凭证 → 重启（Windows 下含 exe 路径
 /// 捕获 + 优雅/强杀两级轮询，最坏 15s 上下；macOS 轮询最长约 8s。重 IO，必须
 /// spawn_blocking，否则冻结托盘/窗口事件）。
+/// expect_fingerprint：无人值守自动切换传入触发时观察到的当前登录指纹，
+/// 持锁后现场不符则取消切换（防排队期间用户手动切换被覆盖）；手动切换不传。
 #[tauri::command]
-async fn switch_account(id: String) -> Result<accounts::SwitchOutcome, String> {
-    tauri::async_runtime::spawn_blocking(move || accounts::switch_account(&id))
-        .await
-        .map_err(|e| format!("切换账号任务失败: {e}"))?
+async fn switch_account(
+    id: String,
+    expect_fingerprint: Option<String>,
+) -> Result<accounts::SwitchOutcome, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        accounts::switch_account(&id, expect_fingerprint.as_deref())
+    })
+    .await
+    .map_err(|e| format!("切换账号任务失败: {e}"))?
 }
 
 /// 删除账号快照（仅删本应用快照文件，不影响 ZCode 当前登录）。
@@ -1671,6 +1678,66 @@ async fn check_update(
     }
 }
 
+// ===== 系统通知（无人值守自动切换结果提醒） =====
+
+/// 弹系统通知（用于额度用满自动切换的结果提醒，非关键路径）。
+/// macOS 用 osascript display notification；Windows 用 PowerShell toast
+/// （app id 借用 PowerShell 自身的 AUMID，任意字符串在部分系统上不弹）；
+/// Linux 桌面通知差异大，直接跳过。任何失败都静默返回 Ok——通知只锦上添花，
+/// 绝不影响自动切换主流程。放线程里执行，PowerShell 冷启动较慢也不阻塞 IPC。
+#[tauri::command]
+async fn show_notification(title: String, body: String) -> Result<(), String> {
+    std::thread::spawn(move || {
+        #[cfg(target_os = "macos")]
+        {
+            // -e 参数不经 shell、由 osascript 按 AppleScript 源码解析：
+            // 字符串字面量用双引号，内部只需转义 \ 与 "；裸换行会导致
+            // AppleScript 编译失败（通知静默丢失），统一替换为空格
+            let esc = |s: &str| {
+                s.replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+                    .replace("\r\n", " ")
+                    .replace('\n', " ")
+                    .replace('\r', " ")
+            };
+            let script = format!(
+                "display notification \"{}\" with title \"{}\"",
+                esc(&body),
+                esc(&title)
+            );
+            let _ = std::process::Command::new("osascript")
+                .args(["-e", &script])
+                .output();
+        }
+
+        #[cfg(windows)]
+        {
+            // PowerShell 单引号字符串（内部单引号写成两遍）；toast 文本用
+            // CreateTextNode 创建，内容自动做 XML 转义，无需手工拼接
+            let ps = |s: &str| format!("'{}'", s.replace('\'', "''"));
+            let script = format!(
+                "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime] | Out-Null; \
+                 $x=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); \
+                 $t=$x.GetElementsByTagName('text'); \
+                 $null=$t.Item(0).AppendChild($x.CreateTextNode({title})); \
+                 $null=$t.Item(1).AppendChild($x.CreateTextNode({body})); \
+                 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{aumid}\\WindowsPowerShell\\v1.0\\powershell.exe').Show([Windows.UI.Notifications.ToastNotification]::new($x))",
+                title = ps(&title),
+                body = ps(&body),
+                aumid = "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}",
+            );
+            let _ = accounts::run_hidden("powershell", &["-NoProfile", "-Command", &script]);
+        }
+
+        // 其他平台（Linux）：无统一通知方案，跳过
+        #[cfg(not(any(target_os = "macos", windows)))]
+        {
+            let _ = (&title, &body);
+        }
+    });
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1803,7 +1870,8 @@ pub fn run() {
             remove_account,
             rename_account,
             account_quotas,
-            check_update
+            check_update,
+            show_notification
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

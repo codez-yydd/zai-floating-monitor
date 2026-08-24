@@ -44,7 +44,15 @@ import {
   remoteUsage,
   remoteAgentQuotaSnapshots,
   remoteSnapshots,
+  showNotification,
+  switchAccount,
 } from "./api";
+import {
+  AUTO_SWITCH_DONE_EVENT,
+  pickAutoSwitchTarget,
+  readAutoSwitchEnabled,
+  writeAutoSwitchLog,
+} from "./autoSwitch";
 import { resolveRange } from "./RangePicker";
 import { dateStr } from "./format";
 import {
@@ -357,6 +365,22 @@ export function DataProvider({ pricing, children }: ProviderProps) {
   const agentQuotaReqId = useRef(0);
   const agentQuotaDeltaRefreshRef = useRef<() => void>(() => {});
   const agentQuotaReloadTimer = useRef<number | null>(null);
+
+  // ===== 额度用满自动切换（无人值守）=====
+  // loadQuota 的 useCallback([]) 闭包无法直接引用后定义的检查函数，走 ref 转发
+  // （与 agentQuotaDeltaRefreshRef 同模式）
+  const maybeAutoSwitchRef = useRef<(q: QuotaResult) => void>(() => {});
+  // 切换执行中标志：切换含退出/重启 ZCode 的长事务（约 8-15s），期间 30s 一轮
+  // 的 loadQuota 可能再进成功回调，重入直接跳过
+  const autoSwitchingRef = useRef(false);
+  // 检查冷却截止时间戳：无可用目标/切换失败后一段时间内不再重复检查与通知，
+  // 避免额度轮询每 30s 反复打扰；切换成功后也短暂冷却（见下方注释）
+  const autoSwitchCooldownUntilRef = useRef(0);
+  // "无可切换账号"类通知的上次发出时间：满额窗口可持续约 5h，30 分钟冷却
+  // 一轮仍会重复通知约 10 次，该类通知单独 2 小时节流（检查冷却不受影响）
+  const lastNoTargetNotifyTsRef = useRef(0);
+  // accountQuotasMerged 的 ref 镜像：检查触发时读最新值，避免闭包拿到旧列表
+  const accountQuotasMergedRef = useRef<AccountQuotaEntry[]>([]);
 
   // 各 Agent 的额度查询完成后立即重读历史，避免网络较慢时首轮 3 秒读取
   // 先于快照写入，用户要等到下一轮 30 秒定时器才看到今日增量。
@@ -760,6 +784,9 @@ export function DataProvider({ pricing, children }: ProviderProps) {
         setQuotaError(null);
         // 额度刷新成功后顺带读今日增量（快照由 fetch_quota 采样写入）
         getTodayDelta().then(setTodayDelta).catch(() => {});
+        // 额度用满自动切换只挂在成功路径：自动切换执行期间（约 8-15s）live
+        // 查询可能超时失败，失败路径不检查，天然不会误触发
+        maybeAutoSwitchRef.current(r);
       })
       .catch((e) => {
         if (reqId !== quotaReqId.current) return;
@@ -783,6 +810,118 @@ export function DataProvider({ pricing, children }: ProviderProps) {
         accountQuotasInflight.current = false;
       });
   }, []);
+
+  /**
+   * 额度用满自动切换检查（无人值守，只在 loadQuota 成功路径调用）：
+   * 当前账号 5h 额度用满 → 按算法挑一个「立即可用」的其他账号切换并系统通知。
+   * 防抖：autoSwitching 重入保护 + 冷却时间戳 + 多账号数据未就绪直接跳过
+   * （不算失败、不进冷却）。与 AccountsCard 手动切换的并发靠事务内前提校验
+   * 兜底：请求携带触发时的当前指纹（expectFingerprint），等锁期间用户先手动
+   * 切换了账号则后端取消本次自动切换，不会覆盖用户的选择。
+   */
+  const maybeAutoSwitch = useCallback(
+    (fresh: QuotaResult) => {
+      // 开关现读（不缓存）：设置页切换开关后即时生效，与 locale 读取同模式
+      if (!readAutoSwitchEnabled()) return;
+      if (autoSwitchingRef.current) return;
+      // 5h 窗口缺失（接口异常）或未用满（<100%）不触发
+      const h5 = fresh.hour5;
+      if (!h5 || h5.percentage < 100) return;
+      // 多账号额度未就绪（冷启动首轮未跑，ts=0）或数据已过期（面板长期隐藏、
+      // 轮询被节流）：直接返回，不算失败不冷却——拿旧数据挑目标会误切
+      if (
+        accountQuotasMergedRef.current.length === 0 ||
+        accountQuotasTsRef.current === 0 ||
+        Date.now() - accountQuotasTsRef.current > 5 * 60_000
+      ) {
+        return;
+      }
+      if (Date.now() < autoSwitchCooldownUntilRef.current) return;
+
+      // 无人值守只切「立即可用」账号（readyOnly）：切过去还要等 5h 重置没有意义
+      const pick = pickAutoSwitchTarget(accountQuotasMergedRef.current, {
+        readyOnly: true,
+      });
+      if (!pick) {
+        autoSwitchCooldownUntilRef.current = Date.now() + 30 * 60_000;
+        writeAutoSwitchLog({
+          ts: Date.now(),
+          to: null,
+          ok: false,
+          reasonKey: "quotaFull",
+        });
+        window.dispatchEvent(new Event(AUTO_SWITCH_DONE_EVENT));
+        // 通知单独 2 小时节流（见 lastNoTargetNotifyTsRef 注释）；冷却仍 30
+        // 分钟，继续挡住 30s 轮询的重复触发
+        if (Date.now() - lastNoTargetNotifyTsRef.current >= 2 * 3_600_000) {
+          lastNoTargetNotifyTsRef.current = Date.now();
+          void showNotification(
+            "ZBar",
+            tRef.current("settings.accountsAutoNotifyFail")
+          ).catch(() => {});
+        }
+        return;
+      }
+
+      // 触发时观察到的当前登录指纹：随请求带给后端做事务内前提校验。找不到
+      // 当前账号条目（数据异常）时不传，退化为无前提校验的普通切换
+      const expectFingerprint =
+        accountQuotasMergedRef.current.find((e) => e.is_current)
+          ?.fingerprint ?? null;
+
+      autoSwitchingRef.current = true;
+      void (async () => {
+        try {
+          await switchAccount(
+            pick.entry.id,
+            expectFingerprint ?? undefined
+          );
+          // 成功后短暂冷却：给刚触发的 loadAccountQuotas 一点时间刷新各条目
+          // is_current，避免下一轮 30s 检查在未更新的列表里把刚切走的旧账号
+          // 又当成候选目标
+          autoSwitchCooldownUntilRef.current = Date.now() + 90_000;
+          writeAutoSwitchLog({
+            ts: Date.now(),
+            to: pick.entry.display_name,
+            ok: true,
+            reasonKey: "quotaFull",
+          });
+          window.dispatchEvent(new Event(AUTO_SWITCH_DONE_EVENT));
+          void showNotification(
+            "ZBar",
+            tRef.current("settings.accountsAutoNotifyOk", {
+              name: pick.entry.display_name,
+            })
+          ).catch(() => {});
+          // 立即刷新多账号额度（新当前账号条目与 is_current 标记）
+          loadAccountQuotas();
+        } catch (e) {
+          const msg = String(e);
+          if (msg.includes("登录态已变化")) {
+            // 前提校验取消：本请求等锁期间登录态已被其他切换（多为用户手动
+            // 切换）改变，本次自动切换作废——不通知、不写失败日志、不冷却。
+            // 文案判断与 Rust 侧 accounts.rs switch_account 的固定错误文案
+            // 约定，两侧勿单独改动
+            return;
+          }
+          autoSwitchCooldownUntilRef.current = Date.now() + 30 * 60_000;
+          writeAutoSwitchLog({
+            ts: Date.now(),
+            to: null,
+            ok: false,
+            reasonKey: "quotaFull",
+          });
+          window.dispatchEvent(new Event(AUTO_SWITCH_DONE_EVENT));
+          // 通知直接透传后端错误（多为中文事务错误），比固定文案更可诊断
+          void showNotification("ZBar", msg).catch(() => {});
+        } finally {
+          autoSwitchingRef.current = false;
+        }
+      })();
+    },
+    [loadAccountQuotas]
+  );
+  maybeAutoSwitchRef.current = maybeAutoSwitch;
 
   /** 各账号今日增量（多端合并）：本机全部账号快照 + 远端其他设备的快照
    *  （排除本机设备防重复），按账号指纹分组算"今日峰值 − 今日首条"。
@@ -1144,6 +1283,12 @@ export function DataProvider({ pricing, children }: ProviderProps) {
       }),
     [accountQuotas, quota, accountTodayDeltas]
   );
+
+  // ref 镜像同步：自动切换检查（loadQuota 闭包）经 ref 读最新合并列表，
+  // 避免闭包拿到旧值（accountQuotasMerged 定义在 loadQuota 之后，无法直接引用）
+  useEffect(() => {
+    accountQuotasMergedRef.current = accountQuotasMerged;
+  }, [accountQuotasMerged]);
 
   // 当前账号今日增量：多端合并值优先（口径与各账号行一致），未就绪时退回
   // 本机 30s 路径的全局值（get_today_delta 按当前指纹过滤）

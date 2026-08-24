@@ -399,9 +399,17 @@ export async function captureAccount(): Promise<CaptureOutcome> {
   return invoke<CaptureOutcome>("capture_account");
 }
 
-/** 切换登录账号（备份 → 退出 ZCode → 写回凭证 → 重启；失败自动回滚） */
-export async function switchAccount(id: string): Promise<SwitchOutcome> {
-  return invoke<SwitchOutcome>("switch_account", { id });
+/** 切换登录账号（备份 → 退出 ZCode → 写回凭证 → 重启；失败自动回滚）。
+ *  expectFingerprint：无人值守自动切换传触发时观察到的当前登录指纹，
+ *  后端持锁后现场不符则取消（防排队期间用户手动切换被覆盖）；手动切换不传。 */
+export async function switchAccount(
+  id: string,
+  expectFingerprint?: string
+): Promise<SwitchOutcome> {
+  return invoke<SwitchOutcome>("switch_account", {
+    id,
+    expectFingerprint: expectFingerprint ?? null,
+  });
 }
 
 /** 删除账号快照（仅删本应用保存的快照，不影响 ZCode 当前登录） */
@@ -421,4 +429,13 @@ export async function renameAccount(
  *  查询成功会写带账号指纹的历史采样，作为各账号今日增量的数据源） */
 export async function accountQuotas(): Promise<AccountQuotaEntry[]> {
   return invoke<AccountQuotaEntry[]>("account_quotas");
+}
+
+/** 发系统通知（额度满自动切换的结果提醒）：macOS osascript / Windows toast，
+ *  Rust 侧失败静默，通知不是关键路径 */
+export async function showNotification(
+  title: string,
+  body: string
+): Promise<void> {
+  await invoke("show_notification", { title, body });
 }

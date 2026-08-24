@@ -454,7 +454,13 @@ pub fn list_accounts() -> Result<AccountsState, String> {
 
 /// 切换到指定快照账号。事务顺序 = 先退出桌面应用后写入；
 /// 任一步失败回滚到切换前状态（详见模块头注释）。
-pub fn switch_account(id: &str) -> Result<SwitchOutcome, String> {
+/// expect_fingerprint：调用方（无人值守自动切换）在发起时观察到的当前登录
+/// 指纹；持锁读出现场后若与之不符，说明等待锁期间登录态已被其他切换改变
+/// （如用户手动切换），直接取消，避免把用户刚切好的账号再切走。
+pub fn switch_account(
+    id: &str,
+    expect_fingerprint: Option<&str>,
+) -> Result<SwitchOutcome, String> {
     let _guard = accounts_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -466,6 +472,19 @@ pub fn switch_account(id: &str) -> Result<SwitchOutcome, String> {
     // 2. 记录当前两文件现场（存在但读取失败时中止，零改动）
     let live =
         read_live_files().map_err(|e| format!("读取当前登录态失败（{e}），已取消切换"))?;
+
+    // 2.5 前提校验（零改动）：提供了期望指纹而现场不符（含读不出当前指纹）时
+    // 取消。注意错误文案是前端识别"自动切换被取消"的约定，勿改动。
+    if let Some(expect) = expect_fingerprint {
+        let actual = live.credentials.as_deref().and_then(|raw| {
+            serde_json::from_str::<Value>(raw)
+                .ok()
+                .and_then(|v| fingerprint_of_credentials(&v).map(|fp| fp.user_id))
+        });
+        if actual.as_deref() != Some(expect) {
+            return Err("登录态已变化，已取消本次自动切换".into());
+        }
+    }
 
     // 3. 备份到 .last/（失败零改动）
     backup_live(&live).map_err(|e| format!("备份失败（{e}），已取消切换"))?;
@@ -847,8 +866,9 @@ fn zcode_exe_cache_path() -> Result<PathBuf, String> {
 }
 
 /// 静默执行外部命令（CREATE_NO_WINDOW，GUI 进程下不闪控制台黑窗）。
+/// pub(crate)：lib.rs 的 show_notification（Windows toast 走 PowerShell）复用。
 #[cfg(windows)]
-fn run_hidden(program: &str, args: &[&str]) -> Option<std::process::Output> {
+pub(crate) fn run_hidden(program: &str, args: &[&str]) -> Option<std::process::Output> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     std::process::Command::new(program)
