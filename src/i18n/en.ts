@@ -317,13 +317,12 @@ export const en: typeof zh = {
   ...({
     "report.title": "Usage Report",
     "report.refresh": "Refresh report",
-    "report.today": "Today",
-    "report.last7": "Last 7 days",
+    // Range selection reuses the shared RangePicker (range.* dict)
     "report.allDevices": "All devices",
     "report.loading": "Building report…",
     "report.emptyTitle": "No usage in this range",
     "report.emptyHint":
-      "Make sure agents are enabled and had requests today or in the last 7 days.",
+      "Make sure agents are enabled and had requests within the selected range.",
     "report.refreshing": "Refreshing latest data…",
 
     "report.cnyHint": "CNY converted",
@@ -336,8 +335,6 @@ export const en: typeof zh = {
 
     "report.noTrend": "No trend data to plot",
     "report.agentDist": "Agent breakdown",
-    "report.byCost": "By cost share",
-    "report.byToken": "Unpriced; by token share",
     "report.modelRank": "Top models",
     "report.noModels": "No model breakdown available.",
 
@@ -372,9 +369,6 @@ export const en: typeof zh = {
     "report.q.plan": "Plan",
     "report.q.onDemand": "On-demand",
 
-    "report.markdownPreview": "Markdown preview",
-    "report.viewMarkdown": "View Markdown",
-    "report.hideMarkdown": "Hide Markdown",
     "report.copy": "Copy",
     "report.copied": "Copied ✓",
     "report.savedOpened": "Saved and opened ✓",
@@ -383,10 +377,10 @@ export const en: typeof zh = {
       "Cursor's official usage is daily, so the hourly trend excludes it; agent totals still include it.",
 
     "report.file.daily": "Daily-",
-    "report.file.weekly": "Weekly-",
+    "report.file.custom": "Report-",
 
     "report.md.daily": "Daily Report",
-    "report.md.weekly": "Weekly Report",
+    "report.md.custom": "Usage Report",
     "report.md.noData": "(no data)",
     "report.md.summaryLine": "Total cost {cost} | Tokens {tokens} | Requests {requests}",
     "report.md.agentLine": "{label}: {cost} | {tokens} tokens | {requests} requests",

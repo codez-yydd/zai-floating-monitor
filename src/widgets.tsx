@@ -203,13 +203,17 @@ export function CurrentModelBar({ model }: { model?: CurrentModel | null }) {
   );
 }
 
-/** 趋势图：迷你柱状图 + 最新桶环比 + 花费/Token 切换。
+/** 趋势图指标：花费 / Token / 请求（报告页三选，其余页面默认前两者） */
+export type TrendMetric = "cost" | "token" | "requests";
+
+/** 趋势图：迷你柱状图 + 最新桶环比 + 指标切换（按钮组由 metrics 决定）。
  *  粒度跟随所选时间范围：今日/24h 按小时，更长范围按日。 */
-export function TrendChart({
+export function TrendChart<M extends TrendMetric>({
   points,
   bucket,
   currency,
   metric,
+  metrics,
   onMetricChange,
   showMetricToggle = true,
   fill = false,
@@ -217,44 +221,41 @@ export function TrendChart({
   points: TrendPoint[];
   bucket: "hour" | "day";
   currency: Currency;
-  metric: "cost" | "token";
-  onMetricChange?: (m: "cost" | "token") => void;
+  metric: M;
+  /** 可选：切换按钮组渲染哪些指标；不传则保持默认花费/Token 两选 */
+  metrics?: M[];
+  onMetricChange?: (m: M) => void;
   showMetricToggle?: boolean;
   /** 撑满父级剩余高度（汇总页用，避免柱图下方大块留白） */
   fill?: boolean;
 }) {
   const { t } = useI18n();
+  const metricOptions: M[] = metrics ?? (["cost", "token"] as M[]);
 
-  // 取每根柱子的数值
-  const values = points.map((d) =>
+  // 取每根柱子的数值（跟随当前指标：请求 / 花费 / Token）
+  const valueOf = (d: TrendPoint): number =>
     metric === "cost"
       ? currency === "cny"
         ? d.cost_cny
         : d.cost_usd
-      : d.total_tokens
-  );
+      : metric === "token"
+        ? d.total_tokens
+        : d.requests;
+  const values = points.map(valueOf);
   const maxValue = Math.max(...values, 1); // 至少为 1，避免除 0
 
-  // 最新桶 vs 上一桶 环比（始终按花费比较，更直观）
+  // 最新桶 vs 上一桶 环比（跟随当前指标比较）
   const last = points[points.length - 1];
   const prev = points[points.length - 2];
-  const lastCost = last
-    ? currency === "cny"
-      ? last.cost_cny
-      : last.cost_usd
-    : 0;
-  const prevCost = prev
-    ? currency === "cny"
-      ? prev.cost_cny
-      : prev.cost_usd
-    : 0;
+  const lastValue = last ? valueOf(last) : 0;
+  const prevValue = prev ? valueOf(prev) : 0;
   let deltaText: string | null = null;
   // deltaKind：flat/new 用词典文案（灰底），pct 为涨跌百分比（红/绿底）
   let deltaKind: "flat" | "new" | "pct" = "pct";
   let deltaUp = false;
   if (last && prev) {
-    if (prevCost > 0) {
-      const pct = ((lastCost - prevCost) / prevCost) * 100;
+    if (prevValue > 0) {
+      const pct = ((lastValue - prevValue) / prevValue) * 100;
       if (Math.abs(pct) < 0.5) {
         deltaKind = "flat";
         deltaText = t("common.trendFlat");
@@ -262,7 +263,7 @@ export function TrendChart({
         deltaUp = pct > 0;
         deltaText = `${deltaUp ? "↑" : "↓"}${Math.abs(pct).toFixed(0)}%`;
       }
-    } else if (lastCost > 0) {
+    } else if (lastValue > 0) {
       deltaKind = "new";
       deltaText = t("common.trendNew");
     }
@@ -305,10 +306,10 @@ export function TrendChart({
             </span>
           )}
         </div>
-        {/* 花费/Token 切换 */}
+        {/* 指标切换：按钮组按 metrics 渲染 */}
         {showMetricToggle && onMetricChange && (
           <div className="flex gap-0.5 p-0.5 rounded-lg bg-slate-900/4">
-            {(["cost", "token"] as const).map((m) => (
+            {metricOptions.map((m) => (
               <button
                 key={m}
                 onClick={() => onMetricChange(m)}
@@ -318,7 +319,11 @@ export function TrendChart({
                     : "text-slate-500 hover:text-slate-700"
                 }`}
               >
-                {m === "cost" ? t("common.cost") : "Token"}
+                {m === "cost"
+                  ? t("common.cost")
+                  : m === "token"
+                    ? "Token"
+                    : t("common.requests")}
               </button>
             ))}
           </div>
@@ -355,6 +360,9 @@ export function TrendChart({
                   </div>
                   <div className="num opacity-70">
                     {formatTokens(d.total_tokens)}
+                  </div>
+                  <div className="num opacity-70">
+                    {d.requests.toLocaleString()} {t("common.requests")}
                   </div>
                 </div>
               )}

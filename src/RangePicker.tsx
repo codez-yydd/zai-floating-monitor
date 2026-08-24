@@ -7,6 +7,8 @@ import { useI18n, type MessageKey } from "./i18n";
 interface Props {
   preset: RangePreset;
   custom: { from: string; to: string };
+  /** 可选：from 下限（如数据保留期），不传则不限 */
+  min?: string;
   onChange: (preset: RangePreset, custom: { from: string; to: string }) => void;
 }
 
@@ -19,7 +21,7 @@ const PRESETS: { value: RangePreset; labelKey: MessageKey }[] = [
   { value: "custom", labelKey: "range.custom" },
 ];
 
-export function RangePicker({ preset, custom, onChange }: Props) {
+export function RangePicker({ preset, custom, min, onChange }: Props) {
   const [showCustom, setShowCustom] = useState(preset === "custom");
   const { t } = useI18n();
 
@@ -47,6 +49,7 @@ export function RangePicker({ preset, custom, onChange }: Props) {
         <div className="flex items-center gap-1.5 text-[11px]">
           <DatePicker
             value={custom.from}
+            min={min}
             max={custom.to}
             onChange={(v) => onChange("custom", { ...custom, from: v })}
           />

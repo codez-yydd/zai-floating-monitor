@@ -7,6 +7,7 @@ import type {
   DeviceInfo,
   PricingConfig,
   QuotaSnapshot,
+  RangePreset,
   RemoteSnapshot,
   RemoteUsage,
   Stats,
@@ -45,14 +46,12 @@ import {
   PageBody,
   PageFooter,
   SectionCard,
-  PillGroup,
-  PillButton,
   BtnPrimary,
   BtnSecondary,
   AlertBanner,
   LoadingState,
-  SortToggle,
 } from "./layout";
+import { RangePicker, resolveRange } from "./RangePicker";
 import { useI18n, type MessageKey, type TFn } from "./i18n";
 import { dateLocale, type Locale } from "./i18n/locale";
 
@@ -63,8 +62,7 @@ interface Props {
   agentVisibility: AgentVisibility;
 }
 
-type ReportKind = "daily" | "weekly";
-type ReportMetric = "cost" | "token";
+type ReportMetric = "requests" | "cost" | "token";
 
 interface ReportSource {
   stats: Stats;
@@ -149,15 +147,48 @@ function localDateStr(ms: number): string {
   return y + "-" + m + "-" + day;
 }
 
+/** 本地日期偏移 n 天后格式化（用 Date 加减，避免毫秒减法的 DST 偏移）。 */
+function offsetLocalDateStr(ms: number, days: number): string {
+  const d = new Date(ms);
+  d.setDate(d.getDate() + days);
+  return localDateStr(d.getTime());
+}
+
 function startOfLocalDay(ms: number): number {
   const d = new Date(ms);
   d.setHours(0, 0, 0, 0);
   return d.getTime();
 }
 
-function reportRange(kind: ReportKind, now: number): [number, number] {
-  if (kind === "daily") return [startOfLocalDay(now), now];
-  return [startOfLocalDay(now - 6 * DAY_MS), now];
+/** 结束日整天包含，取当天 23:59:59.999（本地时区）。 */
+function endOfLocalDay(ms: number): number {
+  const d = new Date(ms);
+  d.setHours(23, 59, 59, 999);
+  return d.getTime();
+}
+
+/** 解析 YYYY-MM-DD 为本地当天 0 点，格式非法时返回 NaN。 */
+function parseLocalDate(date: string): number {
+  const [y, m, d] = date.split("-").map(Number);
+  return new Date(y, (m ?? 1) - 1, d ?? 1).getTime();
+}
+
+/** 解析所选范围并收敛到界内：from 下限 = 89 天前 0 点（数据只保留 90 天），
+ *  to 上限 = 今天 23:59:59.999（自定义可点到未来日期），倒置时交换。
+ *  today/1d/7d/30d 的 to=now 本就在界内，防御不改变其行为。 */
+function boundedRange(
+  preset: RangePreset,
+  custom: { from: string; to: string },
+  now: number
+): [number, number] {
+  const raw = resolveRange(preset, custom);
+  const minFrom = startOfLocalDay(
+    parseLocalDate(offsetLocalDateStr(now, -89))
+  );
+  const maxTo = endOfLocalDay(now);
+  const from = Math.max(raw[0], minFrom);
+  const to = Math.min(raw[1], maxTo);
+  return from <= to ? [from, to] : [to, from];
 }
 
 function shortError(error: unknown): string {
@@ -354,24 +385,38 @@ function combineSource(
   return null;
 }
 
-function trendLabelOrder(label: string, bucket: TrendBucket): number {
+/** 生成排序基准的期望标签序列：day 桶逐日 "MM-DD"（跨年也按时间顺序），
+ *  hour 桶仅单日、逐小时 "HH:00"，均与后端 db.rs 的标签格式一致。 */
+function expectedTrendLabels(
+  bucket: TrendBucket,
+  fromMs: number,
+  toMs: number
+): Map<string, number> {
+  const order = new Map<string, number>();
   if (bucket === "hour") {
-    const parts = label.split(":");
-    const hour = Number(parts[0]);
-    const minute = Number(parts[1] ?? 0);
-    return Number.isFinite(hour) ? hour * 60 + minute : Number.MAX_SAFE_INTEGER;
+    for (let h = 0; h < 24; h++) {
+      order.set(String(h).padStart(2, "0") + ":00", h);
+    }
+    return order;
   }
-  const parts = label.split("-");
-  const month = Number(parts[0]);
-  const day = Number(parts[1]);
-  return Number.isFinite(month) && Number.isFinite(day)
-    ? month * 100 + day
-    : Number.MAX_SAFE_INTEGER;
+  const cursor = new Date(startOfLocalDay(fromMs));
+  const end = startOfLocalDay(toMs);
+  while (cursor.getTime() <= end && order.size < 400) {
+    const label =
+      String(cursor.getMonth() + 1).padStart(2, "0") +
+      "-" +
+      String(cursor.getDate()).padStart(2, "0");
+    if (!order.has(label)) order.set(label, order.size);
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return order;
 }
 
 function mergeReportTrends(
   agents: ReportAgent[],
-  bucket: TrendBucket
+  bucket: TrendBucket,
+  fromMs: number,
+  toMs: number
 ): TrendPoint[] {
   const byLabel = new Map<string, TrendPoint>();
   for (const agent of agents) {
@@ -387,10 +432,11 @@ function mergeReportTrends(
       }
     }
   }
-  return [...byLabel.values()].sort(
-    (a, b) =>
-      trendLabelOrder(a.label, bucket) - trendLabelOrder(b.label, bucket)
-  );
+  // 按时间范围生成的期望序列排序，避免 "MM-DD" 标签跨年时按字典序错乱；
+  // 序列外的标签（如 Cursor 的 "YYYY-MM-DD"）排在最后。
+  const order = expectedTrendLabels(bucket, fromMs, toMs);
+  const rank = (label: string) => order.get(label) ?? Number.MAX_SAFE_INTEGER;
+  return [...byLabel.values()].sort((a, b) => rank(a.label) - rank(b.label));
 }
 
 function toQuotaSnapshot(snapshot: RemoteSnapshot): QuotaSnapshot {
@@ -422,6 +468,22 @@ function selectedCost(
   item: { cost_cny: number; cost_usd: number },
   currency: Currency
 ): number {
+  return currency === "cny" ? item.cost_cny : item.cost_usd;
+}
+
+/** 当前筛选指标取值：请求 / 花费（随币种）/ Token，全页维度统一跟随。 */
+function metricValue(
+  item: {
+    requests: number;
+    total_tokens: number;
+    cost_cny: number;
+    cost_usd: number;
+  },
+  metric: ReportMetric,
+  currency: Currency
+): number {
+  if (metric === "requests") return item.requests;
+  if (metric === "token") return item.total_tokens;
   return currency === "cny" ? item.cost_cny : item.cost_usd;
 }
 
@@ -558,13 +620,17 @@ export function ReportPanel({
   agentVisibility,
 }: Props) {
   const { locale, t } = useI18n();
-  const [kind, setKind] = useState<ReportKind>("daily");
+  const [preset, setPreset] = useState<RangePreset>("today");
   const [metric, setMetric] = useState<ReportMetric>("cost");
+  // 自定义范围默认近 30 天（起 = 29 天前，止 = 今天）。
+  const [custom, setCustom] = useState(() => ({
+    from: localDateStr(Date.now() - 29 * DAY_MS),
+    to: localDateStr(Date.now()),
+  }));
   const [report, setReport] = useState<ReportData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [doneFlash, setDoneFlash] = useState<string | null>(null);
-  const [showMarkdown, setShowMarkdown] = useState(false);
 
   const [syncConfig, setSyncConfig] = useState<SyncConfig | null>(null);
   const [remoteDevices, setRemoteDevices] = useState<DeviceInfo[]>([]);
@@ -588,8 +654,13 @@ export function ReportPanel({
   const load = useCallback(async () => {
     const reqId = ++loadReqId.current;
     const now = Date.now();
-    const [fromMs, toMs] = reportRange(kind, now);
-    const bucket: TrendBucket = kind === "daily" ? "hour" : "day";
+    const [fromMs, toMs] = boundedRange(preset, custom, now);
+    // 桶规则：起止落在同一自然日用小时（"今天"与单日自定义），跨日一律按天；
+    // 后端 hour 标签只有 "HH:00" 无日期，跨天会折叠重复标签（含 1d 滚动 24h）。
+    const daySpan = Math.round(
+      (startOfLocalDay(toMs) - startOfLocalDay(fromMs)) / DAY_MS
+    );
+    const bucket: TrendBucket = daySpan === 0 ? "hour" : "day";
     const wantLocal = deviceFilter === "all" || deviceFilter === "local";
     const wantRemote =
       syncEnabled &&
@@ -771,12 +842,14 @@ export function ReportPanel({
         agents.push(cursorAgent);
       }
 
+      // Cursor 官方明细按日返回，小时桶趋势无法混入，需剔除并加说明；
+      // 判断依据是 bucket 而非 kind（自定义短跨度同样走小时桶）。
       const trendAgents =
-        kind === "daily"
+        bucket === "hour"
           ? agents.filter((agent) => agent.id !== "cursor")
           : agents;
       const notes: string[] = [];
-      if (kind === "daily" && cursorAgent) {
+      if (bucket === "hour" && cursorAgent) {
         notes.push(t("report.noteCursorDaily"));
       }
 
@@ -805,7 +878,7 @@ export function ReportPanel({
         to_ms: toMs,
         bucket,
         agents,
-        trend: mergeReportTrends(trendAgents, bucket),
+        trend: mergeReportTrends(trendAgents, bucket, fromMs, toMs),
         agentQuotas,
         warnings: [],
         notes,
@@ -819,8 +892,9 @@ export function ReportPanel({
     }
   }, [
     agentVisibility,
+    custom,
     deviceFilter,
-    kind,
+    preset,
     pricing,
     syncConfig,
     syncEnabled,
@@ -852,12 +926,12 @@ export function ReportPanel({
     () =>
       [...allModels]
         .sort((a, b) => {
-          const costDiff =
-            selectedCost(b, currency) - selectedCost(a, currency);
-          return costDiff !== 0 ? costDiff : b.total_tokens - a.total_tokens;
+          const diff =
+            metricValue(b, metric, currency) - metricValue(a, metric, currency);
+          return diff !== 0 ? diff : b.total_tokens - a.total_tokens;
         })
         .slice(0, 6),
-    [allModels, currency]
+    [allModels, currency, metric]
   );
   const unpricedTokens = useMemo(
     () =>
@@ -868,24 +942,54 @@ export function ReportPanel({
   );
   const topTrend = useMemo(() => {
     if (!report || report.trend.length === 0) return null;
-    return report.trend.reduce((best, point) => {
-      const value =
-        metric === "token"
-          ? point.total_tokens
-          : selectedCost(point, currency);
-      const bestValue =
-        metric === "token"
-          ? best.total_tokens
-          : selectedCost(best, currency);
-      return value > bestValue ? point : best;
-    }, report.trend[0]);
+    return report.trend.reduce(
+      (best, point) =>
+        metricValue(point, metric, currency) >
+        metricValue(best, metric, currency)
+          ? point
+          : best,
+      report.trend[0]
+    );
   }, [currency, metric, report]);
 
-  const markdown = buildMarkdown(kind, report, currency, t, locale);
+  // Agent 分布：按当前指标降序 + 全体指标总和作占比分母
+  const sortedAgents = useMemo(
+    () =>
+      [...(report?.agents ?? [])].sort(
+        (a, b) =>
+          metricValue(b, metric, currency) - metricValue(a, metric, currency)
+      ),
+    [report, metric, currency]
+  );
+  const agentTotal = useMemo(
+    () =>
+      (report?.agents ?? []).reduce(
+        (sum, agent) => sum + metricValue(agent, metric, currency),
+        0
+      ),
+    [report, metric, currency]
+  );
+  const modelTotal = useMemo(
+    () =>
+      allModels.reduce(
+        (sum, model) => sum + metricValue(model, metric, currency),
+        0
+      ),
+    [allModels, metric, currency]
+  );
+
+  const markdown = buildMarkdown(preset, report, currency, t, locale);
+  // 文件名拼入实际所选范围（与 load 相同的收敛解析，不依赖 report 是否已
+  // 加载），避免同日导出不同范围时互相覆盖。
+  const [rangeFromMs, rangeToMs] = boundedRange(preset, custom, Date.now());
+  const rangeText =
+    localDateStr(rangeFromMs) === localDateStr(rangeToMs)
+      ? localDateStr(rangeFromMs)
+      : localDateStr(rangeFromMs) + "~" + localDateStr(rangeToMs);
   const filename =
-    (kind === "daily" ? t("report.file.daily") : t("report.file.weekly")) +
-    localDateStr(Date.now()) +
-    ".md";
+    preset === "today"
+      ? t("report.file.daily") + localDateStr(Date.now()) + ".md"
+      : t("report.file.custom") + rangeText + ".md";
 
   const handleCopy = async () => {
     try {
@@ -915,19 +1019,21 @@ export function ReportPanel({
         onBack={onBack}
         right={<button onClick={load} disabled={loading} className="toolbar-btn" title={t("report.refresh")}>↻</button>}
         subtitle={
-          <div className="flex gap-1 mt-0">
-            <PillGroup>
-              {(["daily", "weekly"] as ReportKind[]).map((item) => (
-                <PillButton key={item} active={kind === item} onClick={() => setKind(item)}>
-                  {item === "daily" ? t("report.today") : t("report.last7")}
-                </PillButton>
-              ))}
-            </PillGroup>
+          <div className="space-y-2">
+            <RangePicker
+              preset={preset}
+              custom={custom}
+              min={offsetLocalDateStr(Date.now(), -89)}
+              onChange={(nextPreset, nextCustom) => {
+                setPreset(nextPreset);
+                setCustom(nextCustom);
+              }}
+            />
             {syncEnabled && (
               <select
                 value={deviceFilter}
                 onChange={(event) => setDeviceFilter(event.target.value)}
-                className="input-box num ml-auto min-w-0 flex-1 text-[10px] py-1"
+                className="input-box num w-full min-w-0 text-[10px] py-1"
                 title={t("stats.deviceFilter")}
               >
                 <option value="all">{t("report.allDevices")}</option>
@@ -984,58 +1090,48 @@ export function ReportPanel({
               <MetricCard label={t("report.activeAgents")} value={String(report.agents.length)} hint={report.agents.length === 1 ? t("report.agentsHintOne") : t("report.agentsHint")} />
             </div>
 
-            <SectionCard title={t("common.usageTrend")} action={
-              <SortToggle options={[{ key: "cost", label: t("common.cost") }, { key: "token", label: "Token" }]} value={metric} onChange={setMetric} accent="sky" />
-            }>
-              {report.trend.length > 0 ? (
-                <TrendChart
-                  points={report.trend}
-                  bucket={report.bucket}
-                  currency={currency}
-                  metric={metric === "cost" ? "cost" : "token"}
-                  onMetricChange={(next) => setMetric(next)}
-                />
-              ) : (
+            {/* TrendChart 自带卡片外壳与标题，直接渲染避免双层卡片 */}
+            {report.trend.length > 0 ? (
+              <TrendChart
+                points={report.trend}
+                bucket={report.bucket}
+                currency={currency}
+                metric={metric}
+                metrics={["requests", "cost", "token"]}
+                onMetricChange={setMetric}
+              />
+            ) : (
+              <SectionCard title={t("common.usageTrend")}>
                 <div className="text-[10px] text-slate-700/45 py-5 text-center">
                   {t("report.noTrend")}
                 </div>
-              )}
-              {report.notes.map((note) => (
-                <div
-                  key={note}
-                  className="text-[9px] text-slate-700/45 leading-relaxed mt-1.5"
-                >
-                  {note}
-                </div>
-              ))}
-            </SectionCard>
+              </SectionCard>
+            )}
+            {report.notes.map((note) => (
+              <div
+                key={note}
+                className="text-[9px] text-slate-700/45 leading-relaxed"
+              >
+                {note}
+              </div>
+            ))}
 
-            <SectionCard title={t("report.agentDist")} action={
-              <span className="text-[9px] text-slate-500">
-                {(currency === "cny" ? totals.cost_cny : totals.cost_usd) > 0 ? t("report.byCost") : t("report.byToken")}
-              </span>
-            }>
+            <SectionCard title={t("report.agentDist")}>
               <div className="space-y-1.5">
-                {report.agents.map((agent) => {
-                  const totalMetric = report.agents.reduce(
-                    (sum, item) => sum + selectedCost(item, currency),
-                    0
-                  );
-                  const share =
-                    totalMetric > 0
-                      ? (selectedCost(agent, currency) / totalMetric) * 100
-                      : (agent.total_tokens /
-                          Math.max(totals.total_tokens, 1)) *
-                        100;
-                  return (
-                    <AgentUsageRow
-                      key={agent.id}
-                      agent={agent}
-                      currency={currency}
-                      share={share}
-                    />
-                  );
-                })}
+                {sortedAgents.map((agent) => (
+                  <AgentUsageRow
+                    key={agent.id}
+                    agent={agent}
+                    currency={currency}
+                    metric={metric}
+                    share={
+                      agentTotal > 0
+                        ? (metricValue(agent, metric, currency) / agentTotal) *
+                          100
+                        : 0
+                    }
+                  />
+                ))}
               </div>
             </SectionCard>
 
@@ -1048,10 +1144,8 @@ export function ReportPanel({
                       model={model}
                       index={index}
                       currency={currency}
-                      totalCost={
-                        currency === "cny" ? totals.cost_cny : totals.cost_usd
-                      }
-                      totalTokens={totals.total_tokens}
+                      metric={metric}
+                      totalMetric={modelTotal}
                     />
                   ))}
                 </div>
@@ -1080,9 +1174,11 @@ export function ReportPanel({
                     {t("report.peakWindowLine", {
                       label: topTrend.label,
                       value:
-                        metric === "token"
-                          ? formatTokens(topTrend.total_tokens) + " Token"
-                          : formatCost(selectedCost(topTrend, currency), currency),
+                        metric === "requests"
+                          ? topTrend.requests.toLocaleString()
+                          : metric === "token"
+                            ? formatTokens(topTrend.total_tokens) + " Token"
+                            : formatCost(selectedCost(topTrend, currency), currency),
                     })}
                   </div>
                 )}
@@ -1104,14 +1200,6 @@ export function ReportPanel({
             {report.agentQuotas.length > 0 && (
               <QuotaSummary quotas={report.agentQuotas} />
             )}
-
-            {showMarkdown && (
-              <SectionCard title={t("report.markdownPreview")}>
-                <pre className="num text-[10px] leading-relaxed text-slate-800/80 whitespace-pre-wrap break-words">
-                  {markdown}
-                </pre>
-              </SectionCard>
-            )}
           </div>
         )}
       </PageBody>
@@ -1119,9 +1207,6 @@ export function ReportPanel({
       <PageFooter>
         <span className="text-slate-500 truncate">{doneFlash || filename}</span>
         <div className="flex gap-1.5 shrink-0">
-          <BtnSecondary onClick={() => setShowMarkdown((visible) => !visible)} disabled={!report || loading}>
-            {showMarkdown ? t("report.hideMarkdown") : t("report.viewMarkdown")}
-          </BtnSecondary>
           <BtnSecondary onClick={handleCopy} disabled={!report || loading}>{t("report.copy")}</BtnSecondary>
           <BtnPrimary onClick={handleSave} disabled={!report || loading}>{t("common.save")}</BtnPrimary>
         </div>
@@ -1153,10 +1238,12 @@ function MetricCard({
 function AgentUsageRow({
   agent,
   currency,
+  metric,
   share,
 }: {
   agent: ReportAgent;
   currency: Currency;
+  metric: ReportMetric;
   share: number;
 }) {
   const { t } = useI18n();
@@ -1175,7 +1262,11 @@ function AgentUsageRow({
           {Math.round(share)}%
         </span>
         <span className="num text-[10px] text-slate-900/80">
-          {formatCost(selectedCost(agent, currency), currency)}
+          {metric === "requests"
+            ? agent.requests.toLocaleString()
+            : metric === "token"
+              ? formatTokens(agent.total_tokens)
+              : formatCost(selectedCost(agent, currency), currency)}
         </span>
       </div>
       <div className="h-1 rounded-full bg-slate-900/8 overflow-hidden mt-1">
@@ -1199,22 +1290,19 @@ function ModelUsageRow({
   model,
   index,
   currency,
-  totalCost,
-  totalTokens,
+  metric,
+  totalMetric,
 }: {
   model: ReportModel;
   index: number;
   currency: Currency;
-  totalCost: number;
-  totalTokens: number;
+  metric: ReportMetric;
+  totalMetric: number;
 }) {
-  const cost = selectedCost(model, currency);
-  const share =
-    totalCost > 0
-      ? Math.round((cost / totalCost) * 100)
-      : totalTokens > 0
-        ? Math.round((model.total_tokens / totalTokens) * 100)
-        : 0;
+  const value = metricValue(model, metric, currency);
+  const share = totalMetric > 0 ? Math.round((value / totalMetric) * 100) : 0;
+  const barPct =
+    totalMetric > 0 ? Math.min(100, Math.max(0, (value / totalMetric) * 100)) : 0;
   const color = AGENT_META[model.agentId].color;
   return (
     <div className="flex items-center gap-1.5 min-w-0">
@@ -1238,24 +1326,17 @@ function ModelUsageRow({
         <div className="h-0.5 rounded-full bg-slate-900/8 overflow-hidden mt-0.5">
           <div
             className="h-full rounded-full opacity-70"
-            style={{
-              width:
-                (totalCost > 0
-                  ? Math.min(100, Math.max(0, (cost / totalCost) * 100))
-                  : totalTokens > 0
-                    ? Math.min(
-                        100,
-                        Math.max(0, (model.total_tokens / totalTokens) * 100)
-                      )
-                    : 0) + "%",
-              background: color,
-            }}
+            style={{ width: barPct + "%", background: color }}
           />
         </div>
       </div>
       <div className="text-right shrink-0">
         <div className="num text-[10px] text-slate-900/80">
-          {formatCost(cost, currency)}
+          {metric === "requests"
+            ? model.requests.toLocaleString()
+            : metric === "token"
+              ? formatTokens(model.total_tokens)
+              : formatCost(selectedCost(model, currency), currency)}
           {share > 0 ? " · " + share + "%" : ""}
         </div>
         <div className="num text-[9px] text-slate-700/45">
@@ -1341,14 +1422,15 @@ function QuotaBar({ label, value }: { label: string; value: number }) {
 
 /** 生成报告 Markdown 全文（模式 B：接收 t / locale，报告语言跟随 UI 语言） */
 function buildMarkdown(
-  kind: ReportKind,
+  preset: RangePreset,
   report: ReportData | null,
   currency: Currency,
   t: TFn,
   locale: Locale
 ): string {
   const now = Date.now();
-  const title = kind === "daily" ? t("report.md.daily") : t("report.md.weekly");
+  const title =
+    preset === "today" ? t("report.md.daily") : t("report.md.custom");
   if (!report || report.agents.length === 0) {
     return (
       "📊 ZBar " + title + " · " + localDateStr(now) + "\n\n" + t("report.md.noData")
@@ -1356,7 +1438,7 @@ function buildMarkdown(
   }
 
   const range =
-    kind === "daily"
+    preset === "today"
       ? localDateStr(report.from_ms)
       : localDateStr(report.from_ms) + " ~ " + localDateStr(report.to_ms);
   const totalCost = currency === "cny" ? report.agents.reduce(

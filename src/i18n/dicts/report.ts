@@ -7,12 +7,11 @@ export const report = {
   // ===== 页面框架 =====
   "report.title": "用量报告",
   "report.refresh": "刷新报告",
-  "report.today": "今天",
-  "report.last7": "近 7 天",
+  // 时间范围选择复用共享 RangePicker（range.* 词典）
   "report.allDevices": "全部设备",
   "report.loading": "正在整理用量数据…",
   "report.emptyTitle": "当前范围暂无用量",
-  "report.emptyHint": "请确认 Agent 已开启，并在今天或近 7 天内产生过请求。",
+  "report.emptyHint": "请确认 Agent 已开启，并在所选时间范围内产生过请求。",
   "report.refreshing": "正在刷新最新数据…",
 
   // ===== 指标卡 =====
@@ -27,8 +26,6 @@ export const report = {
   // ===== 区块 =====
   "report.noTrend": "当前来源没有可绘制的趋势数据",
   "report.agentDist": "Agent 分布",
-  "report.byCost": "按花费占比",
-  "report.byToken": "未配价格，按 Token 占比",
   "report.modelRank": "模型排行",
   "report.noModels": "当前 Agent 没有返回模型明细。",
 
@@ -67,24 +64,21 @@ export const report = {
   "report.q.onDemand": "按需",
 
   // ===== 底部操作 =====
-  "report.markdownPreview": "Markdown 预览",
-  "report.viewMarkdown": "查看 Markdown",
-  "report.hideMarkdown": "收起预览",
   "report.copy": "复制",
   "report.copied": "已复制到剪贴板 ✓",
   "report.savedOpened": "已保存并在文件夹打开 ✓",
 
   // ===== 数据说明 =====
   "report.noteCursorDaily":
-    "Cursor 官方明细按日返回，日报小时趋势未混入 Cursor，Agent 汇总仍包含它。",
+    "Cursor 官方明细按日返回，小时趋势未混入 Cursor，Agent 汇总仍包含它。",
 
   // ===== 导出文件名 =====
   "report.file.daily": "日报-",
-  "report.file.weekly": "周报-",
+  "report.file.custom": "用量报告-",
 
   // ===== 导出 Markdown 全文 =====
   "report.md.daily": "用量日报",
-  "report.md.weekly": "用量周报",
+  "report.md.custom": "用量报告",
   "report.md.noData": "（暂无数据）",
   "report.md.summaryLine": "总花费 {cost}｜Token {tokens}｜请求 {requests} 次",
   "report.md.agentLine": "{label}：{cost}｜{tokens} Token｜{requests} 次请求",
