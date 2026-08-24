@@ -34,7 +34,6 @@ import type {
   SyncOutcome,
   TrendBucket,
   TrendPoint,
-  WeeklyPeriod,
   WeeklyTokenBucket,
 } from "./types";
 
@@ -312,20 +311,6 @@ export async function getQuotaHistory(
   });
 }
 
-/** 解析快照为"智谱重置周期"列表 */
-export async function getWeeklyCompare(): Promise<WeeklyPeriod[]> {
-  return invoke<WeeklyPeriod[]>("get_weekly_compare");
-}
-
-/** 用指定快照解析周额度周期（对比页多设备筛选用） */
-export async function getWeeklyCompareForSnapshots(
-  snapshots: QuotaSnapshot[]
-): Promise<WeeklyPeriod[]> {
-  return invoke<WeeklyPeriod[]>("get_weekly_compare_for_snapshots", {
-    snapshots,
-  });
-}
-
 /** 今日增量：[增量百分比, 今日采样数] */
 export async function getTodayDelta(): Promise<[number, number]> {
   return invoke<[number, number]>("get_today_delta");
@@ -334,13 +319,6 @@ export async function getTodayDelta(): Promise<[number, number]> {
 /** 清空额度快照历史 */
 export async function clearQuotaHistory(): Promise<void> {
   await invoke("clear_quota_history");
-}
-
-/** 对比页"实际 token"（本地部分）：对一组周期 [reset_at, end_at) 逐周期聚合 */
-export async function getCompareTokens(
-  periods: [number, number][]
-): Promise<WeeklyTokenBucket[]> {
-  return invoke<WeeklyTokenBucket[]>("get_compare_tokens", { periods });
 }
 
 /** 对比页：按指定 Agent 和周期聚合 Token（支持 zai/codex/claude/cursor） */

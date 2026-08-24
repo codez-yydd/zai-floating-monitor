@@ -1,39 +1,31 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
-  AgentQuotaDelta,
-  AgentQuotaDeltaMap,
+  AccountMeta,
   AgentQuotaSnapshot,
-  ClaudeSnapshot,
-  CodexSnapshot,
-  CursorSnapshot,
+  AgentQuotaWindowKey,
   DeviceInfo,
-  QuotaResult,
   QuotaSnapshot,
   RemoteSnapshot,
   RemoteAgentQuotaSnapshot,
   RemoteUsage,
   SyncConfig,
-  WeeklyPeriod,
   WeeklyTokenBucket,
 } from "./types";
 import type { AgentId, AgentVisibility } from "./agentVisibility";
+import { AGENT_COLOR, AGENT_COLOR_SCALE } from "./agentVisibility";
 import {
-  getCompareTokensForAgent,
   getAgentQuotaHistory,
+  getCompareTokensForAgent,
   getQuotaHistory,
   getSyncConfig,
-  getWeeklyCompareForSnapshots,
+  listAccounts,
   listRemoteDevices,
   remoteAgentQuotaSnapshots,
   remoteSnapshots,
   remoteUsage,
 } from "./api";
-import { formatCountdownCore, formatTokens } from "./format";
-import {
-  ProgressBar,
-  remainingGradient,
-  remainingTextColor,
-} from "./widgets";
+import { formatTokens } from "./format";
+import { remainingTextColor } from "./widgets";
 import { BrandIcon, type BrandIconName } from "./BrandIcon";
 import {
   PageShell,
@@ -41,12 +33,12 @@ import {
   PageBody,
   SectionCard,
   EmptyState,
+  LoadingState,
   AlertBanner,
 } from "./layout";
 import { useI18n } from "./i18n";
 import { mergeAgentQuotaSnapshots } from "./agentQuota";
 import { loadCache, saveCache } from "./cache";
-import { useDataCache } from "./DataCache";
 
 interface Props {
   onBack: () => void;
@@ -56,23 +48,56 @@ interface Props {
 const COMPARE_AGENTS: AgentId[] = ["zai", "codex", "claude", "cursor"];
 const AGENT_META: Record<
   AgentId,
-  { label: string; brand: BrandIconName; color: string; remoteSource?: string }
+  { label: string; brand: BrandIconName; remoteSource?: string }
 > = {
-  zai: { label: "Z.ai", brand: "zai", color: "#0284c7", remoteSource: "zcode" },
-  codex: { label: "Codex", brand: "codex", color: "#059669", remoteSource: "codex" },
-  claude: { label: "Claude", brand: "claude", color: "#c2410c", remoteSource: "claude" },
-  cursor: { label: "Cursor", brand: "cursor", color: "#7c3aed" },
+  zai: { label: "Z.ai", brand: "zai", remoteSource: "zcode" },
+  codex: { label: "Codex", brand: "codex", remoteSource: "codex" },
+  claude: { label: "Claude", brand: "claude", remoteSource: "claude" },
+  cursor: { label: "Cursor", brand: "cursor" },
 };
 
-const COMPARE_CACHE_KEY = "zbar-compare-cache-v1";
+/** 各 Agent 参与对比的周额度窗口（Z.ai 走 QuotaSnapshot.weekly_pct，不走这里） */
+const AGENT_WINDOW_KEY: Partial<Record<AgentId, AgentQuotaWindowKey>> = {
+  codex: "weekly",
+  claude: "weekly",
+  cursor: "cursor_auto",
+};
+
+const DAY_MS = 86_400_000;
+/** 横轴展示的自然周数量（含本周） */
+const WEEK_COUNT = 12;
+/** 系列过多（多账号）时柱会过细，周数降档到 8 保证可读性 */
+const DENSE_WEEK_COUNT = 8;
+
+const COMPARE_CACHE_KEY = "zbar-compare-cache-v2";
+
+/** 一个自然周槽位（本地时区，周一 00:00 起，[startMs, endMs)） */
+interface WeekSlot {
+  startMs: number;
+  endMs: number;
+  isCurrent: boolean;
+}
+
+/** 图表中的一个额度数据系列：Z.ai 每账号一个，其余 Agent 各一个 */
+interface QuotaSeries {
+  id: string;
+  agent: AgentId;
+  /** Z.ai 账号指纹（旧快照无指纹时为 null） */
+  account: string | null;
+  label: string;
+  /** 无账号指纹的历史采样组（与真实账号系列并存时）：明细行悬停解释归属 */
+  legacy?: boolean;
+}
 
 interface CompareCacheEntry {
-  periods: WeeklyPeriod[];
+  weeks: { startMs: number; isCurrent: boolean }[];
+  series: QuotaSeries[];
+  /** 每系列每周峰值已用%（无采样为 null），下标与 weeks 对齐 */
+  peaks: Record<string, (number | null)[]>;
+  /** 每系列每周有效采样数，下标与 weeks 对齐 */
+  sampleCounts: Record<string, number[]>;
   tokens: WeeklyTokenBucket[];
   tokensByAgent: Partial<Record<AgentId, WeeklyTokenBucket[]>>;
-  /** 只缓存最新额度快照，历史原始采样不落 localStorage。 */
-  zaiSnapshots: QuotaSnapshot[];
-  agentSnapshots: AgentQuotaSnapshot[];
   ts: number;
 }
 
@@ -83,14 +108,28 @@ function readCompareCache(scope: string): CompareCacheEntry | null {
   const entry = store?.[scope];
   if (
     !entry ||
-    !Array.isArray(entry.periods) ||
+    !Array.isArray(entry.weeks) ||
+    !Array.isArray(entry.series) ||
+    !entry.peaks ||
+    !entry.sampleCounts ||
     !Array.isArray(entry.tokens) ||
     !entry.tokensByAgent ||
-    !Array.isArray(entry.zaiSnapshots) ||
-    !Array.isArray(entry.agentSnapshots) ||
     !Number.isFinite(entry.ts)
   ) {
     return null;
+  }
+  // 每个系列的峰值/采样数组长度必须与周槽数一致，防止半截结构渲染越界
+  for (const item of entry.series) {
+    const peaks = entry.peaks[item.id];
+    const counts = entry.sampleCounts[item.id];
+    if (
+      !Array.isArray(peaks) ||
+      peaks.length !== entry.weeks.length ||
+      !Array.isArray(counts) ||
+      counts.length !== entry.weeks.length
+    ) {
+      return null;
+    }
   }
   return entry;
 }
@@ -108,62 +147,80 @@ function writeCompareCache(scope: string, entry: CompareCacheEntry): void {
   saveCache(COMPARE_CACHE_KEY, next);
 }
 
-function latestQuotaSnapshotsForCache(
-  zaiSnapshots: QuotaSnapshot[],
-  agentSnapshots: AgentQuotaSnapshot[]
-): Pick<CompareCacheEntry, "zaiSnapshots" | "agentSnapshots"> {
-  const sortedZai = [...zaiSnapshots].sort((a, b) => a.ts - b.ts);
-  const latestAgentBySource = new Map<
-    AgentQuotaSnapshot["source"],
-    Map<string, { snapshot: AgentQuotaSnapshot; window: AgentQuotaSnapshot["windows"][number] }>
-  >();
-  for (const snapshot of agentSnapshots) {
-    const source = snapshot.source;
-    const byWindow = latestAgentBySource.get(source) ?? new Map();
-    for (const window of snapshot.windows) {
-      const previous = byWindow.get(window.key);
-      if (!previous || snapshot.ts >= previous.snapshot.ts) {
-        byWindow.set(window.key, { snapshot, window });
-      }
-    }
-    latestAgentBySource.set(source, byWindow);
-  }
+/** 返回 ms 所在自然周（本地时区）的周一 0 点。 */
+function weekStartOf(ms: number): number {
+  const d = new Date(ms);
+  const day = d.getDay(); // 周日为 0，转换成周一基数
+  d.setDate(d.getDate() - (day === 0 ? 6 : day - 1));
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
 
-  const cachedAgents: AgentQuotaSnapshot[] = [];
-  for (const [source, byWindow] of latestAgentBySource) {
-    const windows = [...byWindow.values()];
-    if (windows.length === 0) continue;
-    const latest = windows.reduce((a, b) =>
-      a.snapshot.ts >= b.snapshot.ts ? a : b
-    );
-    cachedAgents.push({
-      source,
-      ts: Math.max(...windows.map((item) => item.snapshot.ts)),
-      plan_type: latest.snapshot.plan_type,
-      windows: windows.map((item) => ({ ...item.window })),
+/** 最近 WEEK_COUNT 个自然周（含本周），升序。
+ *  周边界不能用毫秒减法生成（DST 时区一周不一定 7*24h，会偏 1 小时）：
+ *  先按日期运算逐周回退再经 weekStartOf 归一到周一 0 点，相邻两两成槽。 */
+function buildWeekSlots(nowMs: number): WeekSlot[] {
+  const mondays: number[] = [];
+  // 多生成一个周一作为最后一周的结束锚点
+  for (let i = WEEK_COUNT; i >= 0; i--) {
+    const d = new Date(nowMs);
+    d.setDate(d.getDate() - i * 7);
+    mondays.push(weekStartOf(d.getTime()));
+  }
+  return slotsFromMondays(
+    mondays.slice(0, WEEK_COUNT),
+    weekStartOf(nowMs)
+  );
+}
+
+/** 由升序周一 0 点列表两两成槽；末槽结束点用归一化的"下周一"收口，
+ *  保证 endMs 永远是真实的周一 0 点（DST 下毫秒加减会偏 1 小时）。 */
+function slotsFromMondays(starts: number[], currentMonday: number): WeekSlot[] {
+  const slots: WeekSlot[] = [];
+  for (let i = 0; i < starts.length; i++) {
+    slots.push({
+      startMs: starts[i],
+      endMs:
+        i + 1 < starts.length
+          ? starts[i + 1]
+          : weekStartOf(starts[i] + 7 * DAY_MS),
+      isCurrent: starts[i] === currentMonday,
     });
   }
+  return slots;
+}
 
-  return {
-    zaiSnapshots: sortedZai.length ? [sortedZai[sortedZai.length - 1]] : [],
-    agentSnapshots: cachedAgents,
-  };
+/** 快照时间戳落在哪个周槽（-1 = 范围外）。 */
+function slotIndexOf(slots: WeekSlot[], ts: number): number {
+  for (let i = 0; i < slots.length; i++) {
+    if (ts >= slots[i].startMs && ts < slots[i].endMs) return i;
+  }
+  return -1;
+}
+
+/** 取系列颜色：单系列用品牌色，同一 Agent 的多账号系列取色阶档位。 */
+function seriesColorOf(series: QuotaSeries[], id: string): string {
+  const target = series.find((item) => item.id === id);
+  if (!target) return AGENT_COLOR.zai; // 找不到系列时的兜底，正常不可达
+  const scale = AGENT_COLOR_SCALE[target.agent];
+  const index = series
+    .filter((item) => item.agent === target.agent)
+    .indexOf(target);
+  return scale[Math.min(Math.max(index, 0), scale.length - 1)];
+}
+
+/** 快照百分比统一按 0-100 收敛；非法值视为无效采样。 */
+function clampUsedPct(value: number | null | undefined): number | null {
+  if (value == null || !Number.isFinite(value)) return null;
+  return Math.min(100, Math.max(0, value));
 }
 
 export function ComparePanel({ onBack, agentVisibility }: Props) {
   const { t } = useI18n();
-  const {
-    deviceFilter: cachedDeviceFilter,
-    quota: liveZaiQuota,
-    todayDelta: liveZaiTodayDelta,
-    agentQuotaDeltas,
-    codex: liveCodex,
-    claude: liveClaude,
-    cursor: liveCursor,
-  } = useDataCache();
-  const [periods, setPeriods] = useState<WeeklyPeriod[]>([]);
-  const [zaiQuotaSnapshots, setZaiQuotaSnapshots] = useState<QuotaSnapshot[]>([]);
-  const [agentQuotaSnapshots, setAgentQuotaSnapshots] = useState<AgentQuotaSnapshot[]>([]);
+  const [weekSlots, setWeekSlots] = useState<WeekSlot[]>([]);
+  const [series, setSeries] = useState<QuotaSeries[]>([]);
+  const [peaks, setPeaks] = useState<Record<string, (number | null)[]>>({});
+  const [sampleCounts, setSampleCounts] = useState<Record<string, number[]>>({});
   const [tokens, setTokens] = useState<WeeklyTokenBucket[]>([]);
   const [tokensByAgent, setTokensByAgent] = useState<
     Partial<Record<AgentId, WeeklyTokenBucket[]>>
@@ -182,38 +239,29 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
   const [deviceFilter, setDeviceFilter] = useState<string>("all");
   const syncEnabled = !!syncConfig?.enabled && !!syncConfig.device_token;
   const compareCacheScope = deviceFilter;
-  // DataCache 的实时额度只代表它当前选中的设备；具体设备筛选时不能把本机
-  // 实时值误显示到远端设备上。默认“全部”与全局缓存口径一致，可直接秒显。
-  const liveSubscriptionQuotas =
-    compareCacheScope === cachedDeviceFilter
-      ? buildLiveSubscriptionQuotas(
-          liveZaiQuota,
-          liveZaiTodayDelta,
-          agentQuotaDeltas,
-          liveCodex,
-          liveClaude,
-          liveCursor
-        )
-      : [];
-  const hasLiveSubscriptionQuota = liveSubscriptionQuotas.some(
-    (quota) => quota.windows.length > 0
-  );
-  const hasSubscriptionQuotaData =
-    zaiQuotaSnapshots.length > 0 ||
-    agentQuotaSnapshots.length > 0 ||
-    hasLiveSubscriptionQuota;
+
+  const hasData =
+    series.length > 0 ||
+    tokens.some((bucket) => bucket.total_tokens > 0 || bucket.requests > 0);
 
   const applyCompareCache = useCallback((entry: CompareCacheEntry) => {
-    setPeriods(entry.periods);
-    setZaiQuotaSnapshots(entry.zaiSnapshots);
-    setAgentQuotaSnapshots(entry.agentSnapshots);
+    // isCurrent 与周边界都按读取时刻重算：跨周缓存的"本周"会标错位置，
+    // 结束点用归一化的"下周一"收口避免 DST 偏差
+    const slots = slotsFromMondays(
+      entry.weeks.map((week) => week.startMs),
+      weekStartOf(Date.now())
+    );
+    setWeekSlots(slots);
+    setSeries(entry.series);
+    setPeaks(entry.peaks);
+    setSampleCounts(entry.sampleCounts);
     setTokens(entry.tokens);
     setTokensByAgent(entry.tokensByAgent);
     setSelectedIdx((previous) =>
-      entry.periods.length === 0
+      slots.length === 0
         ? null
-        : previous === null || previous >= entry.periods.length
-          ? entry.periods.length - 1
+        : previous === null || previous >= slots.length
+          ? slots.length - 1
           : previous
     );
   }, []);
@@ -226,9 +274,10 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
       setError(null);
       return;
     }
-    setPeriods([]);
-    setZaiQuotaSnapshots([]);
-    setAgentQuotaSnapshots([]);
+    setWeekSlots([]);
+    setSeries([]);
+    setPeaks({});
+    setSampleCounts({});
     setTokens([]);
     setTokensByAgent({});
     setSelectedIdx(null);
@@ -253,12 +302,12 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
     setLoading(true);
     setError(null);
     try {
-      // 数据来源：all=本地+远端(排除本机)；local=仅本地；具体id=仅远端该设备
-      const wantLocal = deviceFilter === "all" || deviceFilter === "local";
-      const wantRemote =
-        syncEnabled &&
-        (deviceFilter === "all" ||
-          (deviceFilter !== "local" && deviceFilter !== "all"));
+      // 数据来源：all=本地+远端(排除本机)；local=仅本地；具体id=仅远端该设备。
+      // 同步未启用时设备下拉不展示，但 deviceFilter 可能残留具体设备 id，
+      // 强制回退本地数据，避免什么都拉不到。
+      const wantLocal =
+        !syncEnabled || deviceFilter === "all" || deviceFilter === "local";
+      const wantRemote = syncEnabled && deviceFilter !== "local";
 
       const snapshotOpts =
         syncConfig &&
@@ -269,99 +318,105 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
         (agent) => agentVisibility[agent]
       );
 
-      // 周期必须由当前筛选范围内的快照决定。旧逻辑永远只解析本机历史，
-      // 导致远端设备没有历史时周期为空、或周期边界与远端 Token 不一致。
-      // 快照保留期为 90 天，与后端滚动清理保持一致。
+      // 横轴固定为最近 12 个自然周；查询起点再往前推一周（并归一到周一 0 点，
+      // 规避 DST 偏差），容纳快照时间戳与周边界之间的时区/写入延迟误差。
+      const weekSlots = buildWeekSlots(Date.now());
+      const fromMs = weekStartOf(weekSlots[0].startMs - 7 * DAY_MS);
       const nowMs = Date.now();
-      const historyFromMs = nowMs - 90 * 86_400_000;
+
       let localHistory: QuotaSnapshot[] = [];
       let remoteHistory: RemoteSnapshot[] = [];
       let localAgentHistory: AgentQuotaSnapshot[] = [];
       let remoteAgentHistory: RemoteAgentQuotaSnapshot[] = [];
+      let accounts: AccountMeta[] | null = null;
       const historyTasks: Promise<unknown>[] = [];
       if (wantLocal) {
+        // all=true：本机历史含全部账号的快照，按指纹分组正是要利用它
         historyTasks.push(
-          getQuotaHistory().then((history) => (localHistory = history))
+          getQuotaHistory(true, fromMs).then((history) => (localHistory = history))
         );
       }
       if (wantRemote && syncConfig && snapshotOpts) {
         historyTasks.push(
-          remoteSnapshots(historyFromMs, nowMs, snapshotOpts)
+          remoteSnapshots(fromMs, nowMs, snapshotOpts)
             .then((history) => (remoteHistory = history))
-              .catch((e) => {
-                // 汇总模式保留本机数据降级展示；具体设备筛选则明确提示失败。
-                if (deviceFilter !== "all") {
-                  throw new Error(
-                    t("compare.remoteHistoryFailed", { msg: String(e) })
-                  );
-                }
-              })
+            .catch((e) => {
+              // 汇总模式保留本机数据降级展示；具体设备筛选则明确提示失败。
+              if (deviceFilter !== "all") {
+                throw new Error(
+                  t("compare.remoteHistoryFailed", { msg: String(e) })
+                );
+              }
+            })
         );
       }
       if (wantLocal) {
         historyTasks.push(
-          getAgentQuotaHistory(historyFromMs, nowMs)
+          getAgentQuotaHistory(fromMs, nowMs)
             .then((history) => (localAgentHistory = history))
             .catch(() => {
-              // Agent 历史读取失败不应阻断原有 Z.ai 周额度对比。
+              // Agent 历史读取失败不应阻断其余订阅的对比。
             })
         );
       }
       if (wantRemote && syncConfig && snapshotOpts) {
         historyTasks.push(
-          remoteAgentQuotaSnapshots(historyFromMs, nowMs, snapshotOpts)
+          remoteAgentQuotaSnapshots(fromMs, nowMs, snapshotOpts)
             .then((history) => (remoteAgentHistory = history))
             .catch(() => {
               // 汇总页保留本机快照；指定设备没有远端快照时仍显示其他可用数据。
             })
         );
       }
+      if (enabledAgents.includes("zai")) {
+        historyTasks.push(
+          listAccounts()
+            .then((state) => (accounts = state.accounts))
+            .catch(() => {
+              // 账号列表读取失败时系列标签退化为指纹前 6 位。
+            })
+        );
+      }
       await Promise.all(historyTasks);
-      if (reqId !== loadReqId.current) return;
+      if (reqId !== loadReqId.current) return; // 已有更新的请求，丢弃旧响应
 
       const snapshots = mergeQuotaSnapshots(
         localHistory,
         remoteHistory.map(toQuotaSnapshot)
       );
-      setZaiQuotaSnapshots(snapshots);
       const mergedAgentSnapshots = mergeAgentQuotaSnapshots(
         localAgentHistory,
         remoteAgentHistory
       );
-      setAgentQuotaSnapshots(mergedAgentSnapshots);
-      const ps = await getWeeklyCompareForSnapshots(snapshots);
-      if (reqId !== loadReqId.current) return; // 已有更新的请求，丢弃旧响应
-      setPeriods(ps);
+      const seriesData = buildQuotaSeries(
+        weekSlots,
+        snapshots,
+        mergedAgentSnapshots,
+        enabledAgents,
+        accounts,
+        t
+      );
 
-      if (ps.length === 0) {
-        setTokens([]);
-        setTokensByAgent({});
-        setSelectedIdx(null);
-        const latest = latestQuotaSnapshotsForCache(
-          snapshots,
-          mergedAgentSnapshots
-        );
-        writeCompareCache(compareCacheScope, {
-          periods: [],
-          tokens: [],
-          tokensByAgent: {},
-          ...latest,
-          ts: Date.now(),
-        });
-        return;
-      }
+      // 系列过多（Z.ai 多账号）时每根柱会过细，周数降档到 8；
+      // 周槽与各系列峰值/采样数组同步截尾，保持下标对齐
+      const cut = seriesData.series.length > 4
+        ? weekSlots.length - DENSE_WEEK_COUNT
+        : 0;
+      const slots = cut > 0 ? weekSlots.slice(cut) : weekSlots;
+      const cutSeriesArrays = <T,>(map: Record<string, T[]>): Record<string, T[]> =>
+        cut > 0
+          ? Object.fromEntries(
+              Object.entries(map).map(([id, arr]) => [id, arr.slice(cut)])
+            )
+          : map;
+      const seriesPeaks = cutSeriesArrays(seriesData.peaks);
+      const seriesSampleCounts = cutSeriesArrays(seriesData.sampleCounts);
 
-      // 周期区间
-      const periodPairs: [number, number][] = ps.map((p) => [
-        p.reset_at,
-        p.end_at,
-      ]);
-      const fromMs = ps[0].reset_at;
-      const toMs = ps[ps.length - 1].end_at;
-
-      // 所有已开启 Agent 分别聚合，再按周期相加。
-      // 本地 Codex/Claude 使用独立 SQLite 周期查询，Cursor 使用原始事件时间戳
-      // 聚合；远端三种可同步来源使用 ISO 小时桶归属周期。
+      // Token 口径沿用"按 Agent 实际用量"：本地按自然周区间聚合，
+      // 远端小时桶按真实时间戳归入所在自然周。
+      const weekPairs = slots.map(
+        (slot) => [slot.startMs, slot.endMs] as [number, number]
+      );
       const tasks: Promise<unknown>[] = [];
       const localByAgent: Partial<
         Record<AgentId, WeeklyTokenBucket[]>
@@ -373,19 +428,19 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
       if (wantLocal) {
         for (const agent of enabledAgents) {
           tasks.push(
-            getCompareTokensForAgent(agent, periodPairs)
+            getCompareTokensForAgent(agent, weekPairs)
               .then((buckets) => {
                 localByAgent[agent] = buckets;
               })
               .catch(() => {
                 // 可选 Agent 未安装、未登录或没有会话时按空数据处理。
-                localByAgent[agent] = emptyTokenBuckets(periodPairs);
+                localByAgent[agent] = emptyTokenBuckets(slots);
               })
           );
         }
       }
 
-      if (wantRemote && syncConfig && toMs > fromMs) {
+      if (wantRemote && syncConfig) {
         for (const agent of enabledAgents) {
           const source = AGENT_META[agent].remoteSource;
           if (!source) continue; // Cursor 目前只采集本机，未上传到同步服务
@@ -394,13 +449,18 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
               ? { excludeDevice: syncConfig.device_id, source }
               : { devices: deviceFilter, source };
           tasks.push(
-            remoteUsage(fromMs, toMs, "hour", usageOpts)
+            remoteUsage(
+              weekPairs[0][0],
+              slots[slots.length - 1].endMs,
+              "hour",
+              usageOpts
+            )
               .then((remote) => {
-                remoteByAgent[agent] = aggregateRemoteTokens(ps, remote);
+                remoteByAgent[agent] = aggregateRemoteTokens(slots, remote);
               })
               .catch(() => {
                 // 远端没有该来源或服务暂不可用时，不影响其他 Agent 展示。
-                remoteByAgent[agent] = emptyTokenBuckets(periodPairs);
+                remoteByAgent[agent] = emptyTokenBuckets(slots);
               })
           );
         }
@@ -413,11 +473,11 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
         Record<AgentId, WeeklyTokenBucket[]>
       > = {};
       for (const agent of enabledAgents) {
-        const local = localByAgent[agent] ?? emptyTokenBuckets(periodPairs);
-        const remote = remoteByAgent[agent] ?? emptyTokenBuckets(periodPairs);
-        mergedByAgent[agent] = periodPairs.map(([reset_at, end_at], index) => ({
-          reset_at,
-          end_at,
+        const local = localByAgent[agent] ?? emptyTokenBuckets(slots);
+        const remote = remoteByAgent[agent] ?? emptyTokenBuckets(slots);
+        mergedByAgent[agent] = slots.map((slot, index) => ({
+          reset_at: slot.startMs,
+          end_at: slot.endMs,
           total_tokens:
             (local[index]?.total_tokens ?? 0) +
             (remote[index]?.total_tokens ?? 0),
@@ -426,10 +486,10 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
         }));
       }
 
-      const mergedTokens: WeeklyTokenBucket[] = periodPairs.map(
-        ([reset_at, end_at], index) => ({
-          reset_at,
-          end_at,
+      const mergedTokens: WeeklyTokenBucket[] = slots.map(
+        (slot, index) => ({
+          reset_at: slot.startMs,
+          end_at: slot.endMs,
           total_tokens: enabledAgents.reduce(
             (sum, agent) =>
               sum + (mergedByAgent[agent]?.[index]?.total_tokens ?? 0),
@@ -441,28 +501,34 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
           ),
         })
       );
+      setWeekSlots(slots);
+      setSeries(seriesData.series);
+      setPeaks(seriesPeaks);
+      setSampleCounts(seriesSampleCounts);
       setTokens(mergedTokens);
       setTokensByAgent(mergedByAgent);
-      const latest = latestQuotaSnapshotsForCache(
-        snapshots,
-        mergedAgentSnapshots
-      );
       writeCompareCache(compareCacheScope, {
-        periods: ps,
+        weeks: slots.map((slot) => ({
+          startMs: slot.startMs,
+          isCurrent: slot.isCurrent,
+        })),
+        series: seriesData.series,
+        peaks: seriesPeaks,
+        sampleCounts: seriesSampleCounts,
         tokens: mergedTokens,
         tokensByAgent: mergedByAgent,
-        ...latest,
         ts: Date.now(),
       });
 
-      // 仅在用户未选中或选中索引超出新周期范围时才落到当前周期，
-      // 否则保持用户选择：60s 自动刷新不应把用户点选的历史周期静默跳回
+      // 仅在用户未选中或选中索引超出新周范围时才落到本周，
+      // 否则保持用户选择：60s 自动刷新不应把用户点选的历史周静默跳回
       setSelectedIdx((prev) =>
-        prev === null || prev >= ps.length ? ps.length - 1 : prev
+        prev === null || prev >= slots.length ? slots.length - 1 : prev
       );
     } catch (e) {
       if (reqId !== loadReqId.current) return; // 已有更新的请求，丢弃旧错误
-      setError(String(e));
+      // 取 Error.message，避免 "Error: 中文" 之类的混排前缀
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       // 只有最新请求才允许结束 loading，避免旧请求把新请求的加载态清掉
       if (reqId === loadReqId.current) setLoading(false);
@@ -525,54 +591,53 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
 
       {error && <div className="px-3 pt-2"><AlertBanner>{error}</AlertBanner></div>}
 
-      {periods.length === 0 && !hasSubscriptionQuotaData && !loading && !error && (
+      {/* 首次加载（无缓存可用）时显示加载占位，避免整块空白 */}
+      {!hasData && loading && !error && <LoadingState />}
+
+      {!hasData && !loading && !error && (
         <EmptyState title={t("compare.emptyTitle")} hint={t("compare.emptyHint")} />
       )}
 
-      {(periods.length > 0 || hasSubscriptionQuotaData) && (
+      {hasData && (
         <PageBody className="page-stack">
-          <SubscriptionQuotaPanel
-            zaiSnapshots={zaiQuotaSnapshots}
-            agentSnapshots={agentQuotaSnapshots}
-            liveQuotas={liveSubscriptionQuotas}
-            agentVisibility={agentVisibility}
-          />
-          {periods.length === 0 && (
-            <div className="text-[9px] text-slate-700/50 px-1">
-              {t("compare.noZaiHistory")}
-            </div>
-          )}
-          {/* 周额度百分比柱状图 */}
-          {periods.length > 0 && (
-            <PeriodChart
-              periods={periods}
+          {/* 各订阅周额度峰值分组柱状图 */}
+          {series.length > 0 && (
+            <WeekChart
+              weeks={weekSlots}
+              series={series}
+              peaks={peaks}
               selectedIdx={selectedIdx}
               onSelect={setSelectedIdx}
             />
           )}
 
-          {/* 选中周期明细 */}
-          {selectedIdx !== null && periods[selectedIdx] && (
-            <PeriodDetail
-              period={periods[selectedIdx]}
+          {/* 选中周明细 */}
+          {selectedIdx !== null && weekSlots[selectedIdx] && (
+            <WeekDetail
+              index={selectedIdx}
+              weeks={weekSlots}
+              series={series}
+              peaks={peaks}
+              sampleCounts={sampleCounts}
               token={tokens[selectedIdx]}
               tokensByAgent={tokensByAgent}
             />
           )}
 
-          {periods.length > 0 && (
+          {weekSlots.length > 0 && (
             <SectionCard title={t("compare.allPeriods")}>
-              <div className="space-y-0.5">
-                {periods
+              {/* 行数多时内部滚动（参照汇总页模型排行的做法），避免长列表把面板撑高 */}
+              <div className="max-h-48 overflow-y-auto overscroll-contain space-y-0.5">
+                {weekSlots
                   .slice()
                   .reverse()
-                  .map((p, ri) => {
-                    const realIdx = periods.length - 1 - ri;
+                  .map((week, ri) => {
+                    const realIdx = weekSlots.length - 1 - ri;
                     const isSel = realIdx === selectedIdx;
                     const tk = tokens[realIdx]?.total_tokens ?? 0;
                     return (
                       <button
-                        key={p.reset_at}
+                        key={week.startMs}
                         onClick={() => setSelectedIdx(realIdx)}
                         className={`w-full flex items-center justify-between text-xs py-1.5 px-2 -mx-2 rounded-lg transition-colors ${
                           isSel
@@ -581,20 +646,22 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
                         }`}
                       >
                         <div className="flex items-center gap-1.5 min-w-0">
-                          <span className="font-medium text-slate-900/90">
-                            {dateLabel(p.reset_at)}
+                          <span className="font-medium text-slate-900/90 num whitespace-nowrap truncate">
+                            {t("compare.weekRange", {
+                              from: dateLabel(week.startMs),
+                              to: dateLabel(week.endMs - 1),
+                            })}
                           </span>
-                          {p.is_current && (
-                            <span className="px-1 py-0 rounded text-[9px] font-semibold bg-sky-500/15 text-sky-700">
+                          {week.isCurrent && (
+                            <span className="px-1 py-0 rounded text-[9px] font-semibold bg-sky-500/15 text-sky-700 shrink-0">
                               {t("compare.thisWeek")}
                             </span>
                           )}
                         </div>
-                        <div className="flex items-center gap-2 text-slate-700/60 num shrink-0">
-                          <span>{formatTokens(tk)} {t("compare.tokenShort")}</span>
-                          <span className="text-slate-700/25">·</span>
-                          <span style={{ color: remainingTextColor(100 - p.pct_end) }}>
-                            {t("compare.endUsedShort", { pct: p.pct_end })}
+                        {/* 峰值%在明细卡里已有，这里只留 Token 总量，防止窄窗溢出 */}
+                        <div className="flex items-center gap-1 text-slate-700/60 num shrink-0">
+                          <span className="whitespace-nowrap">
+                            {formatTokens(tk)} {t("compare.tokenShort")}
                           </span>
                         </div>
                       </button>
@@ -613,433 +680,210 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
   );
 }
 
-interface SubscriptionQuotaWindow {
-  key: string;
-  usedPct: number;
-  resetAt: number | null;
-  sampledAt: number;
-  delta?: AgentQuotaDelta;
+interface QuotaSeriesData {
+  series: QuotaSeries[];
+  peaks: Record<string, (number | null)[]>;
+  sampleCounts: Record<string, number[]>;
 }
 
-interface SubscriptionQuotaGroup {
-  agent: AgentId;
-  planType: string | null;
-  sampledAt: number;
-  windows: SubscriptionQuotaWindow[];
+/** 从额度快照构建"每系列每周已用峰值"数据。
+ *  Z.ai 按账号指纹分组（每账号一个系列）；Codex/Claude/Cursor 各一个系列。
+ *  旧快照 account 为 null 的归入一个"Z.ai"系列；若同时存在带指纹系列则
+ *  标记为"Z.ai·历史"，避免与真实账号系列混淆。 */
+function buildQuotaSeries(
+  slots: WeekSlot[],
+  zaiSnapshots: QuotaSnapshot[],
+  agentSnapshots: AgentQuotaSnapshot[],
+  enabledAgents: AgentId[],
+  accounts: AccountMeta[] | null,
+  t: ReturnType<typeof useI18n>["t"]
+): QuotaSeriesData {
+  const series: QuotaSeries[] = [];
+  const peaks: Record<string, (number | null)[]> = {};
+  const sampleCounts: Record<string, number[]> = {};
+  const initSeries = (item: QuotaSeries) => {
+    series.push(item);
+    // null = 该周无采样（不画柱）；采样数只统计有效百分比
+    peaks[item.id] = slots.map(() => null);
+    sampleCounts[item.id] = slots.map(() => 0);
+  };
+  const applyPeak = (id: string, ts: number, pct: number | null) => {
+    if (pct == null) return;
+    const index = slotIndexOf(slots, ts);
+    if (index < 0) return;
+    const current = peaks[id][index];
+    peaks[id][index] = current == null ? pct : Math.max(current, pct);
+    sampleCounts[id][index] += 1;
+  };
+
+  if (enabledAgents.includes("zai")) {
+    const groups = new Map<string, QuotaSnapshot[]>();
+    for (const snapshot of zaiSnapshots) {
+      if (!Number.isFinite(snapshot.ts)) continue;
+      const key = snapshot.account ?? "";
+      const list = groups.get(key) ?? [];
+      list.push(snapshot);
+      groups.set(key, list);
+    }
+    const keys = [...groups.keys()];
+    const single = keys.length <= 1;
+    const hasFingerprint = keys.some((key) => key !== "");
+    // 指纹组在前（按指纹排序），无指纹的历史组最后
+    keys.sort((a, b) => {
+      if (a === "") return 1;
+      if (b === "") return -1;
+      return a.localeCompare(b);
+    });
+    for (const key of keys) {
+      const id = `zai:${key || "history"}`;
+      let label: string;
+      // 与真实账号系列并存的无指纹历史组，标记 legacy 供明细行悬停解释
+      const legacy = key === "" && !single && hasFingerprint;
+      if (key === "") {
+        label =
+          single || !hasFingerprint
+            ? AGENT_META.zai.label
+            : `${AGENT_META.zai.label}·${t("compare.legacyAccount")}`;
+      } else if (single) {
+        label = AGENT_META.zai.label;
+      } else {
+        const name = accounts
+          ?.find((account) => account.fingerprint === key)
+          ?.display_name?.trim();
+        label = `${AGENT_META.zai.label}·${name || key.slice(0, 6)}`;
+      }
+      initSeries({ id, agent: "zai", account: key || null, label, legacy });
+      for (const snapshot of groups.get(key) ?? []) {
+        applyPeak(id, snapshot.ts, clampUsedPct(snapshot.weekly_pct));
+      }
+    }
+  }
+
+  for (const agent of COMPARE_AGENTS) {
+    const windowKey = AGENT_WINDOW_KEY[agent];
+    if (!windowKey || !enabledAgents.includes(agent)) continue;
+    const snapshots = agentSnapshots.filter(
+      (snapshot) => snapshot.source === agent
+    );
+    if (snapshots.length === 0) continue; // 无采样的 Agent 不建空系列
+    initSeries({ id: agent, agent, account: null, label: AGENT_META[agent].label });
+    for (const snapshot of snapshots) {
+      const window = snapshot.windows.find((item) => item.key === windowKey);
+      if (!window) continue;
+      applyPeak(agent, snapshot.ts, clampUsedPct(window.used_pct));
+    }
+  }
+
+  return { series, peaks, sampleCounts };
 }
 
-interface LiveSubscriptionQuota {
-  agent: AgentId;
-  planType: string | null;
-  windows: SubscriptionQuotaWindow[];
-}
-
-/** 所有可获取订阅的最新额度：百分比统一解释为“已用”，进度条显示“剩余”。 */
-function SubscriptionQuotaPanel({
-  zaiSnapshots,
-  agentSnapshots,
-  liveQuotas,
-  agentVisibility,
+/** 分组柱状图：每周一组、每系列一根柱，高度 = 该周已用峰值百分比。 */
+function WeekChart({
+  weeks,
+  series,
+  peaks,
+  selectedIdx,
+  onSelect,
 }: {
-  zaiSnapshots: QuotaSnapshot[];
-  agentSnapshots: AgentQuotaSnapshot[];
-  liveQuotas: LiveSubscriptionQuota[];
-  agentVisibility: AgentVisibility;
+  weeks: WeekSlot[];
+  series: QuotaSeries[];
+  peaks: Record<string, (number | null)[]>;
+  selectedIdx: number | null;
+  onSelect: (i: number) => void;
 }) {
   const { t } = useI18n();
-  const [now, setNow] = useState(Date.now());
-
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, []);
-
-  const groups = buildSubscriptionQuotaGroups(
-    zaiSnapshots,
-    agentSnapshots,
-    liveQuotas,
-    agentVisibility
-  );
-  if (groups.length === 0) return null;
+  const n = weeks.length;
+  const barGap = n > 20 ? "gap-px" : n > 10 ? "gap-0.5" : "gap-1";
+  const labelStep = n <= 6 ? 1 : Math.max(2, Math.ceil(n / 5));
 
   return (
-    <SectionCard title={t("compare.subscriptionTitle")}>
-      <div className="text-[9px] text-slate-700/50 leading-relaxed mb-2">
-        {t("compare.subscriptionHint")}
+    <div className="card-base rounded-2xl px-2.5 py-2">
+      <div className="section-title mb-1">{t("compare.chartTitle")}</div>
+      <div className="text-[9px] text-slate-700/50 leading-relaxed">
+        {t("compare.chartHint")}
       </div>
-      <div className="space-y-2.5">
-        {groups.map((group) => (
-          <div key={group.agent}>
-            <div className="flex items-center gap-1.5">
-              <BrandIcon
-                brand={AGENT_META[group.agent].brand}
-                className="h-3.5 w-3.5"
-                style={{ color: AGENT_META[group.agent].color }}
-              />
-              <span className="text-[11px] font-semibold text-slate-900/85">
-                {AGENT_META[group.agent].label}
-              </span>
-              {group.planType && (
-                <span className="rounded bg-slate-900/6 px-1 py-0.5 text-[9px] text-slate-700/60 capitalize">
-                  {group.planType}
-                </span>
-              )}
-              {group.sampledAt > 0 && (
-                <span className="ml-auto text-[8px] text-slate-700/40 num">
-                  {t("compare.sampledAt", { time: timeLabel(group.sampledAt) })}
-                </span>
-              )}
-            </div>
-            {group.windows.length === 0 ? (
-              <div className="text-[9px] text-slate-700/45 mt-1.5">
-                {t("compare.noQuotaSnapshot")}
-              </div>
-            ) : (
-              <div className="space-y-1.5 mt-1.5">
-                {group.windows.map((window) => {
-                  const remaining = Math.max(0, 100 - window.usedPct);
-                  const showReset = window.resetAt != null && window.resetAt > now;
+
+      {/* 图例：各系列颜色（本周在图内用淡色底 + 轴标签高亮双重标识） */}
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-1.5 mb-2">
+        {series.map((item) => (
+          <span
+            key={item.id}
+            className="inline-flex items-center gap-1 text-[9px] text-slate-700/65 min-w-0"
+          >
+            <span
+              className="h-2 w-2 rounded-sm shrink-0"
+              style={{ background: seriesColorOf(series, item.id) }}
+            />
+            <span className="truncate">{item.label}</span>
+          </span>
+        ))}
+      </div>
+
+      {/* 柱区：每周一组按钮（本周淡色底），点击选中该周 */}
+      <div className={`flex ${barGap} h-16`}>
+        {weeks.map((week, i) => {
+          const isSel = i === selectedIdx;
+          return (
+            <button
+              key={week.startMs}
+              onClick={() => onSelect(i)}
+              className={`flex-1 h-full min-w-0 rounded-sm transition-colors ${
+                week.isCurrent ? "bg-sky-500/6" : ""
+              } ${isSel ? "ring-1 ring-sky-400/70" : "hover:bg-slate-900/5"}`}
+            >
+              <div
+                className={`flex ${series.length > 3 ? "gap-px" : "gap-0.5"} items-end h-full px-0.5`}
+              >
+                {series.map((item) => {
+                  const pct = peaks[item.id]?.[i] ?? null;
                   return (
-                    <div key={`${group.agent}:${window.key}`}>
-                      <div className="flex items-center gap-1.5 mb-0.5">
-                        <span className="text-[9px] text-slate-600 w-12 shrink-0">
-                          {quotaWindowLabel(window.key, t)}
-                        </span>
-                        {showReset && (
-                          <span className="text-[8px] text-slate-400 num">
-                            ↻ {formatCountdownCore(window.resetAt! - now)}
-                          </span>
-                        )}
-                        <span
-                          className="ml-auto text-[9px] num font-semibold whitespace-nowrap"
-                          style={{ color: remainingTextColor(remaining) }}
-                        >
-                          {t("compare.quotaUsed", { pct: Math.round(window.usedPct) })}
-                          <span className="font-normal text-slate-700/45 ml-1">
-                            {t("common.remaining", { pct: Math.round(remaining) })}
-                          </span>
-                        </span>
-                      </div>
-                      <ProgressBar
-                        pct={remaining / 100}
-                        height="h-1.5"
-                        gradient={remainingGradient(remaining)}
-                      />
-                      {window.delta && window.delta.samples >= 2 && window.delta.pct > 0 && (
-                        <div className="text-[9px] mt-0.5 num text-slate-700/50">
-                          {t("quota.todayDelta", { pct: Math.round(window.delta.pct) })}
-                        </div>
+                    <div
+                      key={item.id}
+                      className="flex-1 h-full flex items-end min-w-0"
+                      title={
+                        pct == null
+                          ? undefined
+                          : `${dateLabel(week.startMs)} ${item.label} ${t(
+                              "compare.peakUsedPct",
+                              { pct: Math.round(pct) }
+                            )}`
+                      }
+                    >
+                      {pct == null ? null : (
+                        <div
+                          className="w-full rounded-t-sm transition-all duration-300"
+                          style={{
+                            height: `${Math.max(pct, 2)}%`,
+                            background: seriesColorOf(series, item.id),
+                            opacity: isSel ? 1 : 0.85,
+                          }}
+                        />
                       )}
                     </div>
                   );
                 })}
               </div>
-            )}
-          </div>
-        ))}
-      </div>
-    </SectionCard>
-  );
-}
-
-function normalizeQuotaPct(value: number | null | undefined): number | null {
-  if (value == null || !Number.isFinite(value)) return null;
-  return Math.min(100, Math.max(0, value));
-}
-
-function normalizeResetAt(value: number | null | undefined): number | null {
-  return value != null && Number.isFinite(value) && value > 0 ? value : null;
-}
-
-function parseResetAt(value: string | null | undefined): number | null {
-  if (!value) return null;
-  const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : null;
-}
-
-/** 从 DataCache 的当前快照组装实时订阅额度，避免历史采样为空时只显示智谱。 */
-function buildLiveSubscriptionQuotas(
-  quota: QuotaResult | null,
-  zaiTodayDelta: [number, number] | null,
-  agentQuotaDeltas: AgentQuotaDeltaMap,
-  codex: CodexSnapshot | null,
-  claude: ClaudeSnapshot | null,
-  cursor: CursorSnapshot | null
-): LiveSubscriptionQuota[] {
-  const groups = new Map<AgentId, LiveSubscriptionQuota>();
-  const ensureGroup = (agent: AgentId, planType: string | null) => {
-    const existing = groups.get(agent);
-    if (existing) {
-      if (!existing.planType && planType) existing.planType = planType;
-      return existing;
-    }
-    const created: LiveSubscriptionQuota = { agent, planType, windows: [] };
-    groups.set(agent, created);
-    return created;
-  };
-  const addWindow = (
-    agent: AgentId,
-    planType: string | null,
-    key: string,
-    usedPct: number | null | undefined,
-    resetAt: number | null | undefined,
-    delta?: AgentQuotaDelta
-  ) => {
-    const pct = normalizeQuotaPct(usedPct);
-    if (pct == null) return;
-    ensureGroup(agent, planType).windows.push({
-      key,
-      usedPct: pct,
-      resetAt: normalizeResetAt(resetAt),
-      // 实时值不显示“采样时间”，历史快照只作为缺失窗口的兜底。
-      sampledAt: 0,
-      delta,
-    });
-  };
-
-  if (quota?.weekly) {
-    addWindow(
-      "zai",
-      quota.level || null,
-      "weekly",
-      quota.weekly.percentage,
-      quota.weekly.nextResetTime,
-      zaiTodayDelta
-        ? { pct: zaiTodayDelta[0], samples: zaiTodayDelta[1] }
-        : undefined
-    );
-  }
-
-  const addAgentRateLimits = (
-    agent: "codex" | "claude",
-    rate: CodexSnapshot["rate_limits"] | ClaudeSnapshot["rate_limits"]
-  ) => {
-    if (!rate) return;
-    addWindow(agent, rate.plan_type, "hour5", rate.primary_pct, rate.primary_reset_at);
-    addWindow(
-      agent,
-      rate.plan_type,
-      "weekly",
-      rate.secondary_pct,
-      rate.secondary_reset_at,
-      agentQuotaDeltas[agent]?.weekly
-    );
-  };
-  addAgentRateLimits("codex", codex?.rate_limits ?? null);
-  addAgentRateLimits("claude", claude?.rate_limits ?? null);
-
-  if (cursor?.plan) {
-    const resetAt = parseResetAt(cursor.billing_cycle_end);
-    addWindow(
-      "cursor",
-      cursor.membership_type,
-      "cursor_auto",
-      cursor.plan.auto_pct,
-      resetAt,
-      agentQuotaDeltas.cursor?.cursor_auto
-    );
-    addWindow(
-      "cursor",
-      cursor.membership_type,
-      "cursor_api",
-      cursor.plan.api_pct,
-      resetAt,
-      agentQuotaDeltas.cursor?.cursor_api
-    );
-  }
-
-  return COMPARE_AGENTS.map((agent) => groups.get(agent)).filter(
-    (group): group is LiveSubscriptionQuota => !!group && group.windows.length > 0
-  );
-}
-
-function buildSubscriptionQuotaGroups(
-  zaiSnapshots: QuotaSnapshot[],
-  agentSnapshots: AgentQuotaSnapshot[],
-  liveQuotas: LiveSubscriptionQuota[],
-  agentVisibility: AgentVisibility
-): SubscriptionQuotaGroup[] {
-  const groups = new Map<AgentId, SubscriptionQuotaGroup>();
-  const ensureGroup = (agent: AgentId): SubscriptionQuotaGroup => {
-    const existing = groups.get(agent);
-    if (existing) return existing;
-    const created: SubscriptionQuotaGroup = {
-      agent,
-      planType: null,
-      sampledAt: 0,
-      windows: [],
-    };
-    groups.set(agent, created);
-    return created;
-  };
-
-  for (const agent of COMPARE_AGENTS) {
-    if (agentVisibility[agent]) ensureGroup(agent);
-  }
-
-  const liveDeltas = new Map<string, AgentQuotaDelta>();
-  for (const live of liveQuotas) {
-    for (const window of live.windows) {
-      if (window.delta) liveDeltas.set(`${live.agent}:${window.key}`, window.delta);
-    }
-  }
-
-  if (agentVisibility.zai) {
-    const sorted = zaiSnapshots
-      .filter((snapshot) => Number.isFinite(snapshot.ts))
-      .sort((a, b) => a.ts - b.ts);
-    const latest = sorted[sorted.length - 1];
-    if (latest) {
-      const group = ensureGroup("zai");
-      group.planType = latest.level || null;
-      group.sampledAt = latest.ts;
-      group.windows.push({
-        key: "weekly",
-        usedPct: latest.weekly_pct,
-        resetAt: latest.weekly_reset,
-        sampledAt: latest.ts,
-        delta: liveDeltas.get("zai:weekly"),
-      });
-    }
-  }
-
-  for (const agent of COMPARE_AGENTS.filter((item) => item !== "zai")) {
-    if (!agentVisibility[agent]) continue;
-    const latestByWindow = new Map<string, SubscriptionQuotaWindow>();
-    let planType: string | null = null;
-    for (const snapshot of agentSnapshots) {
-      if (snapshot.source !== agent) continue;
-      for (const window of snapshot.windows) {
-        if (
-          !Number.isFinite(window.used_pct) ||
-          window.used_pct < 0 ||
-          window.used_pct > 100
-        ) continue;
-        const previous = latestByWindow.get(window.key);
-        if (!previous || snapshot.ts >= previous.sampledAt) {
-          latestByWindow.set(window.key, {
-            key: window.key,
-            usedPct: window.used_pct,
-            resetAt: window.reset_at,
-            sampledAt: snapshot.ts,
-            delta: liveDeltas.get(`${agent}:${window.key}`),
-          });
-        }
-        if (snapshot.plan_type) planType = snapshot.plan_type;
-      }
-    }
-    if (latestByWindow.size === 0) continue;
-    const group = ensureGroup(agent);
-    group.planType = planType;
-    group.sampledAt = Math.max(
-      ...[...latestByWindow.values()].map((window) => window.sampledAt)
-    );
-    group.windows = [...latestByWindow.values()].sort((a, b) =>
-      quotaWindowOrder(agent, a.key) - quotaWindowOrder(agent, b.key)
-    );
-  }
-
-  // 实时缓存优先；历史中没有对应窗口时也能直接显示当前额度。
-  for (const live of liveQuotas) {
-    if (!agentVisibility[live.agent]) continue;
-    const group = ensureGroup(live.agent);
-    if (live.planType) group.planType = live.planType;
-    const liveKeys = new Set(live.windows.map((window) => window.key));
-    group.windows = group.windows.filter((window) => !liveKeys.has(window.key));
-    group.windows.push(...live.windows);
-    group.windows.sort(
-      (a, b) => quotaWindowOrder(live.agent, a.key) - quotaWindowOrder(live.agent, b.key)
-    );
-    group.sampledAt = Math.max(
-      0,
-      ...group.windows.map((window) => window.sampledAt)
-    );
-  }
-
-  return COMPARE_AGENTS.map((agent) => groups.get(agent)).filter(
-    (group): group is SubscriptionQuotaGroup => !!group
-  );
-}
-
-function quotaWindowOrder(agent: AgentId, key: string): number {
-  if (agent === "cursor") return key === "cursor_auto" ? 0 : 1;
-  return key === "hour5" ? 0 : 1;
-}
-
-function quotaWindowLabel(
-  key: string,
-  t: ReturnType<typeof useI18n>["t"]
-): string {
-  if (key === "hour5") return t("common.hour5");
-  if (key === "weekly") return t("common.weekly");
-  if (key === "cursor_auto") return t("compare.cursorAuto");
-  if (key === "cursor_api") return t("compare.cursorApi");
-  return key;
-}
-
-/** 周期柱状图：每根柱=一个周期，高度=周期结束时的已用百分比 */
-function PeriodChart({
-  periods,
-  selectedIdx,
-  onSelect,
-}: {
-  periods: WeeklyPeriod[];
-  selectedIdx: number | null;
-  onSelect: (i: number) => void;
-}) {
-  const { t } = useI18n();
-  const n = periods.length;
-  const barGap = n > 20 ? "gap-px" : n > 10 ? "gap-0.5" : "gap-1";
-
-  return (
-    <div className="card-base rounded-2xl px-2.5 py-2">
-      <div className="flex items-center justify-between gap-2 mb-1">
-        <div className="section-title">{t("compare.chartTitle")}</div>
-        <span className="text-[9px] text-slate-700/45 shrink-0">
-          {t("compare.percentUnit")}
-        </span>
-      </div>
-      <div className="text-[9px] text-slate-700/50 leading-relaxed mb-2">
-        {t("compare.chartHint")}
-      </div>
-      <div className={`flex items-end ${barGap} h-16`}>
-        {periods.map((p, i) => {
-          const h = p.pct_end; // 0-100，避免峰值把历史周期夸大
-          const isSel = i === selectedIdx;
-          const bg = remainingGradient(100 - p.pct_end);
-          return (
-            <button
-              key={p.reset_at}
-              onClick={() => onSelect(i)}
-              className="flex-1 h-full flex items-end justify-center min-w-0 group"
-              title={t("compare.barTitle", {
-                date: dateLabel(p.reset_at),
-                end: p.pct_end,
-                peak: p.pct_peak,
-              })}
-            >
-              <div
-                className={`w-full rounded-t-sm transition-all duration-300 ${
-                  isSel ? "opacity-100 ring-1 ring-sky-400" : "opacity-70 group-hover:opacity-90"
-                }`}
-                style={{ height: `${Math.max(h, 2)}%`, background: bg }}
-              />
             </button>
           );
         })}
       </div>
+
+      {/* X 轴：每周周一日期 "MM-DD"，沿用旧的抽稀规则 */}
       <div className={`flex ${barGap} mt-1`}>
-        {periods.map((p, i) => {
-          const labelStep = n <= 6 ? 1 : Math.max(2, Math.ceil(n / 5));
+        {weeks.map((week, i) => {
           const showLabel = i === n - 1 || i % labelStep === 0;
           return (
             <span
-              key={p.reset_at}
+              key={week.startMs}
               className={`flex-1 text-center text-[8px] num min-w-0 ${
-                i === selectedIdx ? "text-sky-600/80 font-medium" : "text-slate-700/40"
+                i === selectedIdx
+                  ? "text-sky-600/80 font-medium"
+                  : week.isCurrent
+                    ? "text-sky-600/60"
+                    : "text-slate-700/40"
               } ${showLabel ? "" : "opacity-0"}`}
             >
-              {dateLabel(p.reset_at)}
+              {dateLabel(week.startMs)}
             </span>
           );
         })}
@@ -1048,88 +892,116 @@ function PeriodChart({
   );
 }
 
-/** 选中周期明细卡片 */
-function PeriodDetail({
-  period,
+/** 选中周明细：各系列峰值已用% + 采样数 + 按 Agent 汇总的实际 Token。 */
+function WeekDetail({
+  weeks,
+  index,
+  series,
+  peaks,
+  sampleCounts,
   token,
   tokensByAgent,
 }: {
-  period: WeeklyPeriod;
+  weeks: WeekSlot[];
+  index: number;
+  series: QuotaSeries[];
+  peaks: Record<string, (number | null)[]>;
+  sampleCounts: Record<string, number[]>;
   token?: WeeklyTokenBucket;
   tokensByAgent: Partial<Record<AgentId, WeeklyTokenBucket[]>>;
 }) {
   const { t } = useI18n();
+  const week = weeks[index];
   const totalTokens = token?.total_tokens ?? 0;
-  const sampleLow = period.sample_count < 10;
+  // endMs 是下周一 0 点，减 1ms 落回该周周日，保证区间右端显示为周日日期
+  const rangeLabel = t("compare.weekRange", {
+    from: dateLabel(week.startMs),
+    to: dateLabel(week.endMs - 1),
+  });
+  // Token 按 Agent 汇总（Z.ai 不按账号拆分：用量库没有账号维度）
   const breakdown = COMPARE_AGENTS.map((agent) => ({
     agent,
     bucket: tokensByAgent[agent]?.find(
-      (item) => item.reset_at === period.reset_at
+      (item) => item.reset_at === week.startMs
     ),
   })).filter((item) => (item.bucket?.total_tokens ?? 0) > 0);
 
-  const endLabel = period.is_current
-    ? t("compare.currentUsed", { pct: period.pct_end })
-    : t("compare.periodEndUsed", { pct: period.pct_end });
-
   return (
-    <SectionCard>
-      {/* 标题行 */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-1.5">
-          <BrandIcon
-            brand="zai"
-            className="h-3.5 w-3.5 text-sky-600"
-          />
-          <span className="text-[11px] font-semibold text-slate-900/90">
-            {t("compare.zaiWeeklyQuota")}
+    <SectionCard title={t("compare.selectedWeek")}>
+      {/* 标题行：周区间 + 本周徽标；右侧该周 Token 合计（Token 块内不再重复） */}
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className="text-[11px] font-semibold text-slate-900/90 num">
+            {rangeLabel}
           </span>
-          <span className="rounded bg-sky-500/10 px-1 py-0.5 text-[9px] text-sky-700/70">
-            {dateLabel(period.reset_at)}
-            {period.is_current
-              ? ` ${t("compare.ongoing")}`
-              : ` ~ ${dateLabel(period.end_at)}`}
-          </span>
+          {week.isCurrent && (
+            <span className="px-1 py-0 rounded text-[9px] font-semibold bg-sky-500/15 text-sky-700 shrink-0">
+              {t("compare.thisWeek")}
+            </span>
+          )}
         </div>
-        <span
-          className="text-[11px] num font-semibold"
-          style={{ color: remainingTextColor(100 - period.pct_end) }}
-        >
-          {endLabel}
+        <span className="num text-[11px] font-semibold text-slate-900/85 shrink-0">
+          {formatTokens(totalTokens)}
+          <span className="font-normal text-slate-700/45 ml-1">
+            {t("compare.tokenShort")}
+          </span>
         </span>
       </div>
 
-      <div className="text-[9px] text-slate-700/50 mt-1">
-        {t("compare.periodPercentHint")}
-      </div>
-
-      <div className="grid grid-cols-3 gap-1.5 mt-2">
-        {[
-          [t("compare.startUsed"), period.pct_start],
-          [t("compare.peakUsed"), period.pct_peak],
-          [
-            period.is_current
-              ? t("compare.currentUsedLabel")
-              : t("compare.periodEndUsedLabel"),
-            period.pct_end,
-          ],
-        ].map(([label, value]) => (
-          <div key={label} className="rounded-md bg-slate-900/4 px-1.5 py-1">
-            <div className="text-[9px] text-slate-700/50 truncate">{label}</div>
-            <div className="num text-[12px] font-semibold text-slate-900/80 mt-0.5">
-              {value}%
-            </div>
+      {/* 各额度系列：该周峰值已用% + 采样数（多账号 Z.ai 系列只显示额度，不显示 Token）。
+          峰值语义对用户并不自解释，块首补一行口径说明（见 seriesHint）。 */}
+      {series.length > 0 && (
+        <div className="space-y-1 mt-2">
+          <div className="text-[9px] text-slate-700/50">
+            {t("compare.seriesHint")}
           </div>
-        ))}
-      </div>
+          {series.map((item) => {
+            const pct = peaks[item.id]?.[index] ?? null;
+            const count = sampleCounts[item.id]?.[index] ?? 0;
+            return (
+              <div key={item.id} className="flex items-center gap-1.5">
+                <BrandIcon
+                  brand={AGENT_META[item.agent].brand}
+                  className="h-3 w-3 shrink-0"
+                  style={{ color: seriesColorOf(series, item.id) }}
+                />
+                <span
+                  className="text-[10px] text-slate-800/80 truncate"
+                  title={item.legacy ? t("compare.legacyAccountHint") : undefined}
+                >
+                  {item.label}
+                </span>
+                {pct == null ? (
+                  <span
+                    className="ml-auto text-[9px] text-slate-700/35 shrink-0"
+                    title={t("compare.noSample")}
+                  >
+                    {t("compare.noDataShort")}
+                  </span>
+                ) : (
+                  <span className="ml-auto flex items-baseline gap-1.5 shrink-0">
+                    <span className="text-[8px] text-slate-700/40 num">
+                      {t("compare.samples", { count })}
+                    </span>
+                    <span
+                      className="text-[11px] num font-semibold whitespace-nowrap"
+                      style={{ color: remainingTextColor(100 - pct) }}
+                    >
+                      {t("compare.peakShort")} {Math.round(pct)}%
+                    </span>
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
 
-      {/* token 统计 */}
-      <div className="rounded-md bg-surface/25 py-1.5 px-2">
+      {/* Token 部分：按 Agent 实际用量（与额度百分比是两个口径）。
+          总数已在标题行右侧展示，这里只保留口径说明与分 Agent 明细 */}
+      <div className="rounded-md bg-surface/25 py-1.5 px-2 mt-2">
         <div className="text-[9px] text-slate-700/55">
           {t("compare.tokensOfAgents")}
-        </div>
-        <div className="num text-[13px] font-semibold text-slate-900/85 mt-0.5">
-          {formatTokens(totalTokens)}
         </div>
         {token && (
           <div className="text-[9px] num text-slate-700/45 mt-0.5">
@@ -1137,22 +1009,24 @@ function PeriodDetail({
           </div>
         )}
         {breakdown.length > 0 && (
-          <div className="flex flex-wrap gap-1 mt-1.5">
+          <div className="space-y-0.5 mt-1.5">
             {breakdown.map(({ agent, bucket }) => (
-              <span
-                key={agent}
-                className="inline-flex items-center gap-1 rounded bg-slate-900/5 px-1 py-0.5 text-[9px] text-slate-700/60"
-              >
+              <div key={agent} className="flex items-center gap-1.5">
                 <BrandIcon
                   brand={AGENT_META[agent].brand}
-                  className="h-2.5 w-2.5"
-                  style={{ color: AGENT_META[agent].color }}
+                  className="h-2.5 w-2.5 shrink-0"
+                  style={{ color: AGENT_COLOR[agent] }}
                 />
-                <span>{AGENT_META[agent].label}</span>
-                <span className="num">
+                <span className="text-[9px] text-slate-700/70">
+                  {AGENT_META[agent].label}
+                </span>
+                <span className="ml-auto text-[9px] num text-slate-800/75">
                   {formatTokens(bucket?.total_tokens ?? 0)}
                 </span>
-              </span>
+                <span className="text-[8px] num text-slate-700/40">
+                  {t("compare.requestsCount", { count: bucket?.requests ?? 0 })}
+                </span>
+              </div>
             ))}
           </div>
         )}
@@ -1162,35 +1036,13 @@ function PeriodDetail({
           </div>
         )}
       </div>
-
-      {/* 百分比进度 + 采样可信度 */}
-      <div>
-        <div className="flex items-center justify-between text-[10px] mb-0.5">
-          <span className="text-slate-700/55">
-            {t("compare.progressLabel")}
-          </span>
-          <span className={`num ${sampleLow ? "text-amber-600/80" : "text-slate-700/45"}`}>
-            {t("compare.samples", { count: period.sample_count })}
-            {sampleLow ? t("compare.samplesLow") : ""}
-          </span>
-        </div>
-        <div className="h-1.5 rounded-full bg-slate-900/8 overflow-hidden">
-          <div
-            className="h-full rounded-full opacity-80"
-            style={{
-              width: `${period.pct_end}%`,
-              background: remainingGradient(100 - period.pct_end),
-            }}
-          />
-        </div>
-      </div>
     </SectionCard>
   );
 }
 
 // ===== 辅助 =====
 
-/** 远端快照去掉设备字段，转换为周期解析所需的本地结构。 */
+/** 远端快照去掉设备字段，转换为按指纹分组所需的本地结构。 */
 function toQuotaSnapshot(snapshot: RemoteSnapshot): QuotaSnapshot {
   const {
     device_id: _deviceId,
@@ -1199,57 +1051,54 @@ function toQuotaSnapshot(snapshot: RemoteSnapshot): QuotaSnapshot {
   return quotaSnapshot;
 }
 
-/** 合并本机与远端额度采样；同一毫秒多设备重复采样时只保留一条。 */
+/** 合并本机与远端额度采样；按"时间 + 账号指纹"去重，同一时刻多设备
+ *  重复采样时保留已用比例更高的一条，避免汇总视图低估额度峰值。 */
 function mergeQuotaSnapshots(
   local: QuotaSnapshot[],
   remote: QuotaSnapshot[]
 ): QuotaSnapshot[] {
-  const byTs = new Map<number, QuotaSnapshot>();
+  const byKey = new Map<string, QuotaSnapshot>();
   for (const snapshot of [...local, ...remote]) {
     if (!Number.isFinite(snapshot.ts)) continue;
-    const previous = byTs.get(snapshot.ts);
-    // 同一时刻应是同一账户状态；若多设备值略有差异，保留已用比例更高的
-    // 采样，避免汇总视图低估额度峰值。
+    const key = `${snapshot.ts}:${snapshot.account ?? ""}`;
+    const previous = byKey.get(key);
     if (
       !previous ||
       snapshot.weekly_pct > previous.weekly_pct ||
       (snapshot.weekly_pct === previous.weekly_pct &&
         snapshot.hour5_pct > previous.hour5_pct)
     ) {
-      byTs.set(snapshot.ts, snapshot);
+      byKey.set(key, snapshot);
     }
   }
-  return [...byTs.values()].sort((a, b) => a.ts - b.ts);
+  return [...byKey.values()].sort((a, b) => a.ts - b.ts);
 }
 
-function emptyTokenBuckets(
-  periods: Array<[number, number]>
-): WeeklyTokenBucket[] {
-  return periods.map(([reset_at, end_at]) => ({
-    reset_at,
-    end_at,
+function emptyTokenBuckets(slots: WeekSlot[]): WeeklyTokenBucket[] {
+  return slots.map(({ startMs, endMs }) => ({
+    reset_at: startMs,
+    end_at: endMs,
     total_tokens: 0,
     requests: 0,
   }));
 }
 
-/** 把远端指定来源的小时桶按真实时间戳分配到额度周期。 */
+/** 把远端指定来源的小时桶按真实时间戳分配到自然周槽。 */
 function aggregateRemoteTokens(
-  periods: WeeklyPeriod[],
+  slots: WeekSlot[],
   remote: RemoteUsage
 ): WeeklyTokenBucket[] {
-  const buckets = periods.map((period) => ({
-    reset_at: period.reset_at,
-    end_at: period.end_at,
+  const buckets = slots.map((slot) => ({
+    reset_at: slot.startMs,
+    end_at: slot.endMs,
     total_tokens: 0,
     requests: 0,
   }));
   for (const point of remote.trend) {
     const timestamp = parseTrendTimestamp(point.label);
     if (timestamp === null) continue;
-    const index = periods.findIndex(
-      (period) =>
-        timestamp >= period.reset_at && timestamp < period.end_at
+    const index = slots.findIndex(
+      (slot) => timestamp >= slot.startMs && timestamp < slot.endMs
     );
     if (index < 0) continue;
     buckets[index].total_tokens += point.total_tokens;
@@ -1258,7 +1107,9 @@ function aggregateRemoteTokens(
   return buckets;
 }
 
-/** 兼容远端服务返回的 ISO 时间、毫秒时间戳和秒时间戳。 */
+/** 兼容远端服务返回的 ISO 时间、毫秒时间戳和秒时间戳。
+ *  ISO 解析依赖服务端 label 携带 UTC 时区标记（"Z" 或 +00:00），
+ *  与 src/merge.ts 的 msToLocalLabel 是同一契约。 */
 function parseTrendTimestamp(label: string): number | null {
   const numeric = Number(label);
   if (Number.isFinite(numeric) && numeric > 0) {
@@ -1274,12 +1125,4 @@ function dateLabel(ms: number): string {
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   const dd = String(d.getDate()).padStart(2, "0");
   return `${mm}-${dd}`;
-}
-
-/** 毫秒 → "MM-DD HH:mm" label */
-function timeLabel(ms: number): string {
-  const d = new Date(ms);
-  const hh = String(d.getHours()).padStart(2, "0");
-  const mm = String(d.getMinutes()).padStart(2, "0");
-  return `${dateLabel(ms)} ${hh}:${mm}`;
 }

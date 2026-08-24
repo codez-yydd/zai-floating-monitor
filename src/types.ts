@@ -332,24 +332,6 @@ export type AgentQuotaDeltaMap = Partial<
   Record<AgentQuotaSource, Partial<Record<AgentQuotaWindowKey, AgentQuotaDelta>>>
 >;
 
-/** 一个"智谱重置周期"的汇总 */
-export interface WeeklyPeriod {
-  /** 周期开始（重置时间） */
-  reset_at: number;
-  /** 周期结束时间 */
-  end_at: number;
-  /** 是否当前未结束的周期 */
-  is_current: boolean;
-  /** 周期内 weekly 起始百分比 */
-  pct_start: number;
-  /** 周期内 weekly 峰值百分比 */
-  pct_peak: number;
-  /** 周期内 weekly 结束百分比 */
-  pct_end: number;
-  /** 周期内采样数 */
-  sample_count: number;
-}
-
 // ===== 远端额度快照（多设备跨设备支持）=====
 
 /** 远端额度快照（带 device_id，字段与 QuotaSnapshot 对齐 + device_id） */

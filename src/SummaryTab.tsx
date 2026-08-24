@@ -24,6 +24,7 @@ import { useDataCache } from "./DataCache";
 import { useEffect, useState } from "react";
 import { useI18n } from "./i18n";
 import type { AgentId, AgentVisibility } from "./agentVisibility";
+import { AGENT_COLOR } from "./agentVisibility";
 import { BrandIcon, type BrandIconName } from "./BrandIcon";
 import {
   SwitchAccountButton,
@@ -271,7 +272,7 @@ function buildModelRows(
       key: `zcode:${m.provider_id}:${m.model_id}`,
       name: m.model_id,
       source: "ZCode",
-      color: "#0ea5e9",
+      color: AGENT_COLOR.zai,
       barBg: "bg-sky-500/10",
       requests: m.requests,
       tokens: m.total_tokens,
@@ -288,7 +289,7 @@ function buildModelRows(
       key: `codex:${m.provider_id}:${m.model_id}`,
       name: m.model_id,
       source: "Codex",
-      color: "#10a37f",
+      color: AGENT_COLOR.codex,
       barBg: "bg-emerald-500/10",
       requests: m.requests,
       tokens: m.total_tokens,
@@ -313,7 +314,7 @@ function buildModelRows(
       key: `claude:${m.provider_id}:${m.model_id}`,
       name: m.model_id,
       source: "Claude",
-      color: "#d97757",
+      color: AGENT_COLOR.claude,
       barBg: "bg-orange-500/10",
       requests: m.requests,
       tokens: m.total_tokens,
@@ -335,7 +336,7 @@ function buildModelRows(
       key: `cursor:${m.model}`,
       name: m.model,
       source: "Cursor",
-      color: "#8b5cf6",
+      color: AGENT_COLOR.cursor,
       barBg: "bg-violet-500/10",
       requests: m.requests,
       tokens: m.total_tokens,
@@ -691,7 +692,7 @@ export function SummaryTab({
     {
       id: "zai",
       name: "ZCode",
-      color: "#0ea5e9",
+      color: AGENT_COLOR.zai,
       tintBg: "rgba(14, 165, 233, 0.07)",
       nameClass: "text-sky-700",
       badge: planBadge,
@@ -708,7 +709,7 @@ export function SummaryTab({
     {
       id: "codex",
       name: "Codex",
-      color: "#10a37f",
+      color: AGENT_COLOR.codex,
       tintBg: "rgba(16, 163, 127, 0.07)",
       nameClass: "text-emerald-700",
       badge: codexRate?.plan_type ?? null,
@@ -724,7 +725,7 @@ export function SummaryTab({
     {
       id: "claude",
       name: "Claude",
-      color: "#d97757",
+      color: AGENT_COLOR.claude,
       tintBg: "rgba(217, 119, 87, 0.07)",
       nameClass: "text-orange-700",
       badge: claudeRate?.plan_type ?? null,
@@ -740,7 +741,7 @@ export function SummaryTab({
     {
       id: "cursor",
       name: "Cursor",
-      color: "#8b5cf6",
+      color: AGENT_COLOR.cursor,
       tintBg: "rgba(139, 92, 246, 0.07)",
       nameClass: "text-violet-700",
       badge: cursor?.membership_type ?? null,

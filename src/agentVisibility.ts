@@ -5,6 +5,23 @@ export type AgentId = "zai" | "codex" | "claude" | "cursor";
 
 export type AgentVisibility = Record<AgentId, boolean>;
 
+/** 各 Agent 的品牌展示色（汇总页与对比页共用，保证跨页视觉一致）。 */
+export const AGENT_COLOR: Record<AgentId, string> = {
+  zai: "#0ea5e9",
+  codex: "#10a37f",
+  claude: "#d97757",
+  cursor: "#8b5cf6",
+};
+
+/** 同一 Agent 的多账号系列用同色系色阶区分（明度递增，4 档，超出取最末档）。
+ *  不用透明度方案：细柱上不可辨，且低透明度有"弱化"的语义误导。 */
+export const AGENT_COLOR_SCALE: Record<AgentId, readonly string[]> = {
+  zai: ["#0ea5e9", "#38bdf8", "#7dd3fc", "#bae6fd"],
+  codex: ["#10a37f", "#34d399", "#6ee7b7", "#a7f3d0"],
+  claude: ["#d97757", "#fb923c", "#fdba74", "#fed7aa"],
+  cursor: ["#8b5cf6", "#a78bfa", "#c4b5fd", "#ddd6fe"],
+};
+
 // 模式 A：label 是品牌名不进词典；description 存词典键，渲染时查（跟随 UI 语言）
 export const AGENT_VISIBILITY_OPTIONS: ReadonlyArray<{
   id: AgentId;
