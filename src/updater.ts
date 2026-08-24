@@ -1,6 +1,19 @@
 // 应用内更新：定时检查 + 后台下载 + 设置入口红点（下载完成后）+ 设置页重启安装。
-import { check, type Update } from "@tauri-apps/plugin-updater";
+import { Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { invoke } from "@tauri-apps/api/core";
+import { detectLocale, loadLocale } from "./i18n/locale";
+
+/** Rust check_update 命令返回的更新元数据（字段与官方 Update 构造器对齐） */
+interface UpdateCheckMeta {
+  rid: number;
+  currentVersion: string;
+  version: string;
+  /** Rust Option::None 序列化为 null */
+  date: string | null;
+  body: string | null;
+  rawJson: Record<string, unknown>;
+}
 
 /** localStorage：后台下载完成、待安装的版本号 */
 export const UPDATE_READY_KEY = "zbar.updateReady";
@@ -113,7 +126,18 @@ export async function checkAndDownloadInBackground(opts?: {
   setState({ phase: "checking", error: null });
 
   try {
-    const update = await check();
+    // 按界面语言选更新源（中文优先 Gitee，英文优先 GitHub，另一源兜底）：
+    // 官方 check() 的 endpoints 只能来自静态配置，改用自定义 Rust 命令动态注入顺序
+    const locale = loadLocale() ?? detectLocale();
+    const meta = await invoke<UpdateCheckMeta | null>("check_update", { locale });
+    // null（无日期/说明）归一为 undefined，对齐官方 UpdateMetadata 的可选字段类型
+    const update = meta
+      ? new Update({
+          ...meta,
+          date: meta.date ?? undefined,
+          body: meta.body ?? undefined,
+        })
+      : null;
     if (!update?.available) {
       await closePending();
       clearUpdateReady();

@@ -457,7 +457,7 @@ export const en: typeof zh = {
     "settings.updateFailed": "Update failed: {msg}",
     "settings.openDownloadPage": "Open download page",
     "settings.updateHint":
-      "Checks for updates every hour and downloads in the background; a red dot appears on Settings when ready. Updates are signature-verified; endpoints fall back between GitHub and Gitee automatically.",
+      "Checks for updates every hour and downloads in the background; a red dot appears on Settings when ready. Updates are signature-verified. The Chinese interface prefers the Gitee source and the English interface prefers GitHub, falling back to the other automatically on failure.",
 
     "settings.accountsCard": "ZCode account switch",
     "settings.accountsHint":

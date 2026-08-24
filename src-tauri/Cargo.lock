@@ -5976,6 +5976,7 @@ dependencies = [
  "tauri-plugin-positioner",
  "tauri-plugin-process",
  "tauri-plugin-updater",
+ "time",
  "ureq",
  "winreg 0.52.0",
 ]

@@ -28,6 +28,8 @@ serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 dirs = "5"
 chrono = { version = "0.4", features = ["serde"] }
+# 更新检查：发布日期按 RFC3339 格式化（与官方 updater 插件命令的写法一致）
+time = { version = "0.3", features = ["formatting"] }
 open = "5"
 ureq = { version = "2", features = ["json", "socks-proxy"] }
 base64 = "0.22"

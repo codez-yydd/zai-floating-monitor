@@ -23,6 +23,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, LogicalPosition, Manager, PhysicalSize, WindowEvent,
 };
+use tauri_plugin_updater::UpdaterExt;
 
 /// 计费所需的字段抽象。ModelStat 与 BucketModelStat 都实现它，
 /// 这样 cost_for 可同时服务 compute_cost 和 get_trend 等
@@ -1600,6 +1601,76 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+// ===== 应用内更新：按界面语言选择更新源（中文优先 Gitee，英文优先 GitHub） =====
+
+/// GitHub 更新源（与 tauri.conf.json plugins.updater.endpoints 保持同步，勿单独修改）
+const UPDATER_GITHUB_LATEST: &str =
+    "https://github.com/codez-yydd/zai-floating-monitor/releases/latest/download/latest.json";
+/// Gitee 更新源（与 tauri.conf.json plugins.updater.endpoints 保持同步，勿单独修改）
+const UPDATER_GITEE_LATEST: &str =
+    "https://gitee.com/codezwx/zai-floating-monitor/releases/download/latest/latest.json";
+
+/// check_update 命令的返回：字段与官方插件命令的 Metadata 对齐（camelCase 序列化），
+/// 前端 new Update(metadata) 构造后 download/install/close 原样可用。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateCheckMeta {
+    rid: tauri::ResourceId,
+    current_version: String,
+    version: String,
+    date: Option<String>,
+    body: Option<String>,
+    raw_json: serde_json::Value,
+}
+
+/// 检查更新：中文界面优先 Gitee 源（国内连通性好），英文界面优先 GitHub，另一源自动兜底。
+/// 官方 JS check() 的 endpoints 只能来自静态配置，这里通过 updater_builder 动态注入顺序。
+/// 入参用 Webview 而非 AppHandle：Update 必须存入 webview 级资源表，
+/// 官方插件的 download/install 命令在同一张表里按 rid 取回，存错表会 BadResourceId。
+#[tauri::command]
+async fn check_update(
+    webview: tauri::Webview,
+    locale: String,
+) -> Result<Option<UpdateCheckMeta>, String> {
+    let (primary, fallback) = if locale == "zh" {
+        (UPDATER_GITEE_LATEST, UPDATER_GITHUB_LATEST)
+    } else {
+        (UPDATER_GITHUB_LATEST, UPDATER_GITEE_LATEST)
+    };
+    let endpoints = [primary, fallback]
+        .iter()
+        .map(|s| tauri::Url::parse(s).map_err(|e| format!("更新源地址无效: {e}")))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let updater = webview
+        .updater_builder()
+        .endpoints(endpoints)
+        .map_err(|e| format!("更新源配置无效: {e}"))?
+        .build()
+        .map_err(|e| format!("更新器构建失败: {e}"))?;
+
+    match updater.check().await.map_err(|e| format!("检查更新失败: {e}"))? {
+        Some(update) => {
+            // 发布日期照官方命令的写法格式化为 RFC3339 字符串
+            let date = update
+                .date
+                .map(|d| d.format(&time::format_description::well_known::Rfc3339))
+                .transpose()
+                .map_err(|e| format!("更新发布时间格式化失败: {e}"))?;
+            Ok(Some(UpdateCheckMeta {
+                current_version: update.current_version.clone(),
+                version: update.version.clone(),
+                date,
+                body: update.body.clone(),
+                raw_json: update.raw_json.clone(),
+                // Update 存入 webview 级资源表拿到 rid，官方 download/install 命令凭 rid 取回
+                rid: webview.resources_table().add(update),
+            }))
+        }
+        None => Ok(None),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1731,7 +1802,8 @@ pub fn run() {
             switch_account,
             remove_account,
             rename_account,
-            account_quotas
+            account_quotas,
+            check_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

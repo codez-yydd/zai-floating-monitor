@@ -72,7 +72,7 @@ export const settings = {
   "settings.updateFailed": "更新失败：{msg}",
   "settings.openDownloadPage": "打开下载页",
   "settings.updateHint":
-    "每小时自动检查并在后台下载更新；下载完成后设置入口会显示红点。更新包带签名校验，更新源为 GitHub / Gitee 双仓库，自动依次尝试。",
+    "每小时自动检查并在后台下载更新；下载完成后设置入口会显示红点。更新包带签名校验。中文界面优先使用 Gitee 源，英文界面优先 GitHub，失败自动切换另一源。",
 
   // ===== 多智谱账号切换 =====
   "settings.accountsCard": "ZCode 账号切换",
