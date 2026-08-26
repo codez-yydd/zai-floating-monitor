@@ -13,6 +13,7 @@ import type {
   TrendBucket,
   TrendPoint,
 } from "./types";
+import { lookupPrice } from "./modelName";
 
 /** 单个模型的花费（按 input/output/cache_read 三段计价，价格表只存美元价）。
  * 人民币花费 = 美元花费 × fxRate（汇率每日自动更新，实时折算）。
@@ -39,11 +40,10 @@ export function modelCost(
   };
   const exact = pricing.usd[modelId];
   if (exact) return lookup(exact);
-  // 小写 + 点号归一兜底：与后端 cost_for 的兜底查找保持同一口径
-  const target = modelId.toLowerCase().replace(/\./g, "-");
-  for (const [k, p] of Object.entries(pricing.usd)) {
-    if (k.toLowerCase().replace(/\./g, "-") === target) return lookup(p);
-  }
+  // 兜底查找与 hasPositivePrice/PricingPanel 共用同一实现：小写+点号归一之外
+  // 还剔除不可见字符（身份折叠域同款），避免隐藏字符变体代表行查不到价
+  const hit = lookupPrice(pricing.usd, modelId);
+  if (hit) return lookup(hit);
   return 0;
 }
 

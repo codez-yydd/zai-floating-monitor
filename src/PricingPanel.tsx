@@ -15,6 +15,7 @@ import {
   getCursorConfig,
   savePricing,
 } from "./api";
+import { canonicalModelId, lookupPrice } from "./modelName";
 import {
   PageShell,
   PageHeader,
@@ -203,15 +204,22 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
       setPricing((prev) => {
         if (!prev) return prev;
         const cur = prev.usd ?? {};
+        // 表单按归一名去重只显示一行；写入时把同归一键（大小写/隐藏字符变体）
+        // 的残留条目合并掉，避免残留条目被兜底查找优先命中，让编辑看起来不生效。
+        // 合并域用 canonicalModelId（与表单行分组同域）：点号别名是两行可见条目，不在此折叠
+        const target = canonicalModelId(modelId);
+        const next: Record<string, ModelPrice> = {};
+        for (const [k, v] of Object.entries(cur)) {
+          if (k !== modelId && canonicalModelId(k) === target) continue;
+          next[k] = v;
+        }
+        next[modelId] = {
+          ...(cur[modelId] ?? lookupPrice(cur, modelId) ?? ZERO_PRICE),
+          [key]: num,
+        };
         return {
           ...prev,
-          usd: {
-            ...cur,
-            [modelId]: {
-              ...(cur[modelId] ?? ZERO_PRICE),
-              [key]: num,
-            },
-          },
+          usd: next,
         };
       });
     },
@@ -226,11 +234,32 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
     for (const [dk, raw] of Object.entries(draft)) {
       const [modelId, key] = dk.split("|") as [string, keyof ModelPrice];
       cur[modelId] = {
-        ...(cur[modelId] ?? { input: 0, output: 0, cache_read: 0 }),
+        // 与 commitDraft 同基底：优先沿用兜底命中的既有三元组，避免丢 output/cache_read
+        ...(cur[modelId] ??
+          lookupPrice(cur, modelId) ?? { input: 0, output: 0, cache_read: 0 }),
         [key]: parseDraft(raw),
       };
     }
-    merged.usd = cur;
+    // 与 commitDraft 同域（canonicalModelId）：只合并本次被编辑展示键的
+    // 大小写/隐藏字符残留写法；两者都未编辑的条目（含点号别名双行）保持原样，
+    // 不做静默折叠，避免无感知地删除用户已配置的价格
+    const edited = new Set(
+      Object.keys(draft).map((dk) => dk.split("|")[0])
+    );
+    const consolidated: Record<string, ModelPrice> = {};
+    for (const [k, v] of Object.entries(cur)) {
+      const target = canonicalModelId(k);
+      const kept = Object.keys(consolidated).find(
+        (c) => canonicalModelId(c) === target
+      );
+      if (kept === undefined) {
+        consolidated[k] = v;
+      } else if (edited.has(k) && !edited.has(kept)) {
+        consolidated[k] = v;
+        delete consolidated[kept];
+      }
+    }
+    merged.usd = consolidated;
 
     setSaving(true);
     setError(null);
@@ -249,15 +278,24 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
 
   // 合并：数据库里的模型 + 价格表里手动加的模型（记忆化，避免每次渲染重算集合与排序）。
   // 必须位于下方 if (!pricing) 早退之前：条件早退会跳过 hooks，导致前后渲染 hooks 数不一致而崩溃
-  const modelIds = useMemo(
-    () =>
-      pricing
-        ? Array.from(
-            new Set([...models.map((m) => m.model_id), ...Object.keys(pricing.usd)])
-          ).sort()
-        : [],
-    [models, pricing]
-  );
+  const modelIds = useMemo(() => {
+    if (!pricing) return [];
+    // 按归一化名去重：本地/远端库里仅大小写或隐藏字符不同的写法只保留一行，
+    // 首个原始写法作为展示名；另一变体的花费经「小写+点号归一」兜底仍能命中该价格
+    const seen = new Set<string>();
+    const ids: string[] = [];
+    for (const id of [
+      ...models.map((m) => m.model_id),
+      ...Object.keys(pricing.usd),
+    ]) {
+      const k = canonicalModelId(id);
+      if (!seen.has(k)) {
+        seen.add(k);
+        ids.push(id);
+      }
+    }
+    return ids.sort();
+  }, [models, pricing]);
 
   if (!pricing) {
     return <LoadingState text={t("pricing.loading")} />;
@@ -450,7 +488,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
           <ModelPriceRow
             key={id}
             id={id}
-            price={pricing.usd[id] ?? ZERO_PRICE}
+            price={lookupPrice(pricing.usd, id) ?? ZERO_PRICE}
             dIn={draft[`${id}|input`]}
             dOut={draft[`${id}|output`]}
             dCache={draft[`${id}|cache_read`]}

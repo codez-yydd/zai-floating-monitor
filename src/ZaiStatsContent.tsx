@@ -23,6 +23,11 @@ import {
   StatusBadge,
 } from "./layout";
 import { useI18n } from "./i18n";
+import {
+  canonicalModelId,
+  hasPositivePrice,
+  type FoldedModelStat,
+} from "./modelName";
 
 interface Props {
   stats: Stats | null;
@@ -172,15 +177,17 @@ function ModelRankList({
   sortBy: "cost" | "token" | "requests";
 }) {
   const { t } = useI18n();
+  // 花费按归一化模型名聚合：per_model 数组里可能仍含大小写/隐藏字符变体的多条目，
+  // 折叠后的行（DataCache 已 fold）要用同一归一键才能取到合计花费
   const costById = new Map<string, number>();
   perModelCost?.forEach((x) => {
-    costById.set(x.model_id, (costById.get(x.model_id) ?? 0) + x.cost);
+    const k = canonicalModelId(x.model_id);
+    costById.set(k, (costById.get(k) ?? 0) + x.cost);
   });
 
   const rows = stats.by_model.map((m) => {
-    const price = pricing.usd[m.model_id];
-    const hasPrice = Boolean(price && (price.input > 0 || price.output > 0));
-    const costVal = costById.get(m.model_id) ?? 0;
+    const hasPrice = hasPositivePrice(m.model_id, pricing);
+    const costVal = costById.get(canonicalModelId(m.model_id)) ?? 0;
     return {
       m,
       hasPrice,
@@ -197,6 +204,13 @@ function ModelRankList({
     <div className="space-y-1">
       {rows.map(({ m, hasPrice, costVal, sortVal }) => {
         const pct = maxVal > 0 ? Math.max(sortVal / maxVal, 0.02) : 0;
+        // 发生折叠时在 tooltip 里列出被合并的原始写法与请求份额，便于追溯
+        const variantTitle = (() => {
+          const vs = (m as FoldedModelStat).variants;
+          return vs && vs.length > 1
+            ? vs.map((v) => `${v.model_id} ×${v.requests}`).join(" · ")
+            : undefined;
+        })();
         return (
           <div
             key={m.provider_id + m.model_id}
@@ -208,7 +222,12 @@ function ModelRankList({
             />
             <div className="relative flex items-center justify-between text-xs min-w-0">
               <div className="flex items-center gap-1 min-w-0 flex-1">
-                <span className="font-medium text-slate-900/90 truncate text-[11px]">{m.model_id}</span>
+                <span
+                  className="font-medium text-slate-900/90 truncate text-[11px]"
+                  title={variantTitle}
+                >
+                  {m.model_id}
+                </span>
                 {!hasPrice && <span className="text-[10px] text-amber-600/90 shrink-0" title={t("common.noPrice")}>⚠</span>}
               </div>
               <div className="flex items-center gap-1 num shrink-0 text-[10px]">

@@ -38,6 +38,11 @@ import {
   remoteToStats,
 } from "./merge";
 import { BrandIcon, type BrandIconName } from "./BrandIcon";
+import {
+  foldCursorModelRows,
+  foldModelStatRows,
+  hasPositivePrice,
+} from "./modelName";
 import { type AgentId, type AgentVisibility } from "./agentVisibility";
 import { TrendChart, remainingGradient } from "./widgets";
 import {
@@ -196,14 +201,6 @@ function shortError(error: unknown): string {
   return text.length > 90 ? text.slice(0, 87) + "…" : text;
 }
 
-function isModelPriced(modelId: string, pricing: PricingConfig): boolean {
-  if (pricing.usd[modelId]) return true;
-  const target = modelId.toLowerCase().replace(/\./g, "-");
-  return Object.keys(pricing.usd).some(
-    (id) => id.toLowerCase().replace(/\./g, "-") === target
-  );
-}
-
 function makeAgent(
   id: AgentId,
   source: ReportSource,
@@ -211,7 +208,8 @@ function makeAgent(
   fxRate: number
 ): ReportAgent {
   const meta = AGENT_META[id];
-  const models = source.stats.by_model.map((model) => ({
+  // 报告数据由本组件自拉自合（不经 DataCache），折叠在此处收口
+  const models = foldModelStatRows(source.stats.by_model).map((model) => ({
     key: id + "|" + model.provider_id + "|" + model.model_id,
     agentId: id,
     model_id: model.model_id,
@@ -236,7 +234,7 @@ function makeAgent(
       "usd",
       fxRate
     ),
-    priced: isModelPriced(model.model_id, pricing),
+    priced: hasPositivePrice(model.model_id, pricing),
   }));
 
   return {
@@ -268,7 +266,8 @@ function makeCursorAgent(
     return null;
   }
 
-  const models: ReportModel[] = snapshot.by_model.map((model) => ({
+  // Cursor 数据同理由本组件自拉，折叠在此处收口
+  const models: ReportModel[] = foldCursorModelRows(snapshot.by_model).map((model) => ({
     key: "cursor|cursor|" + model.model,
     agentId: "cursor",
     model_id: model.model,

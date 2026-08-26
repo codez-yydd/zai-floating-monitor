@@ -70,6 +70,7 @@ import {
   mergeAgentQuotaSnapshots,
   todayStartMs,
 } from "./agentQuota";
+import { foldByModelStats, foldCursorModelRows } from "./modelName";
 
 /**
  * 全局数据缓存层（v2：按范围缓存 + 后台定时刷新 + 展示只读）。
@@ -1307,15 +1308,32 @@ export function DataProvider({ pricing, children }: ProviderProps) {
       setPreset,
       setCustom,
       setDeviceFilter,
-      stats: curZai.stats,
+      // 展示前把仅大小写/不可见字符/provider 差异的模型行折叠为一行（fold 幂等）。
+      // 必须在派生层做：本页数据含 localStorage 冷启动旧缓存，不经 mergeStats。
+      stats: foldByModelStats(curZai.stats),
       cost: curZai.cost,
       trend: curZai.trend,
       error: curZai.error,
-      codex: curCodex.snapshot,
+      codex: curCodex.snapshot
+        ? {
+            ...curCodex.snapshot,
+            stats: foldByModelStats(curCodex.snapshot.stats),
+          }
+        : curCodex.snapshot,
       codexError: curCodex.error,
-      claude: curClaude.snapshot,
+      claude: curClaude.snapshot
+        ? {
+            ...curClaude.snapshot,
+            stats: foldByModelStats(curClaude.snapshot.stats),
+          }
+        : curClaude.snapshot,
       claudeError: curClaude.error,
-      cursor: curCursor.snapshot,
+      cursor: curCursor.snapshot
+        ? {
+            ...curCursor.snapshot,
+            by_model: foldCursorModelRows(curCursor.snapshot.by_model),
+          }
+        : curCursor.snapshot,
       cursorError: curCursor.error,
       fxRate,
       quota,

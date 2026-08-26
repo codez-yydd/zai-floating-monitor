@@ -7,6 +7,7 @@ import type {
   CurrentModel,
   CursorSnapshot,
   Currency,
+  ModelStat,
   OverallStat,
   PricingConfig,
   Stats,
@@ -14,6 +15,11 @@ import type {
 } from "./types";
 import { formatCost, formatCountdownCore, formatMs, formatTokens, formatTps, levelLabel } from "./format";
 import { modelCost } from "./merge";
+import {
+  canonicalModelId,
+  hasPositivePrice,
+  type FoldedModelStat,
+} from "./modelName";
 import {
   ProgressBar,
   TrendChart,
@@ -243,6 +249,16 @@ interface ModelRankRow {
   tokens: number;
   cost: number;
   hasPrice: boolean;
+  /** 发生折叠合并时，被合并的原始写法明细（tooltip 用） */
+  mergedNote?: string;
+}
+
+/** 折叠行的被合并写法明细（tooltip 用）；未发生合并返回 undefined */
+function mergedNoteOf(m: ModelStat): string | undefined {
+  const vs = (m as FoldedModelStat).variants;
+  return vs && vs.length > 1
+    ? vs.map((v) => `${v.model_id} ×${v.requests}`).join(" · ")
+    : undefined;
 }
 
 function buildModelRows(
@@ -258,16 +274,18 @@ function buildModelRows(
 ): ModelRankRow[] {
   const rows: ModelRankRow[] = [];
 
+  // 花费按归一化模型名聚合：per_model 数组里可能仍含大小写/隐藏字符变体的多条目，
+  // 折叠后的行要用同一归一键才能取到合计花费
   const costById = new Map<string, number>();
   const perModel =
     currency === "cny" ? cost?.per_model_cny : cost?.per_model_usd;
   perModel?.forEach((x) => {
-    costById.set(x.model_id, (costById.get(x.model_id) ?? 0) + x.cost);
+    const k = canonicalModelId(x.model_id);
+    costById.set(k, (costById.get(k) ?? 0) + x.cost);
   });
 
   for (const m of agentVisibility.zai ? stats?.by_model ?? [] : []) {
-    const price = pricing.usd[m.model_id];
-    const hasPrice = Boolean(price && (price.input > 0 || price.output > 0));
+    const hasPrice = hasPositivePrice(m.model_id, pricing);
     rows.push({
       key: `zcode:${m.provider_id}:${m.model_id}`,
       name: m.model_id,
@@ -276,15 +294,15 @@ function buildModelRows(
       barBg: "bg-sky-500/10",
       requests: m.requests,
       tokens: m.total_tokens,
-      cost: costById.get(m.model_id) ?? 0,
+      cost: costById.get(canonicalModelId(m.model_id)) ?? 0,
       hasPrice,
+      mergedNote: mergedNoteOf(m),
     });
   }
 
   // Codex：后端无按模型花费命令，前端按价格表自算（与 zcode 行同款口径）
   for (const m of agentVisibility.codex ? codex?.stats.by_model ?? [] : []) {
-    const price = pricing.usd[m.model_id];
-    const hasPrice = Boolean(price && (price.input > 0 || price.output > 0));
+    const hasPrice = hasPositivePrice(m.model_id, pricing);
     rows.push({
       key: `codex:${m.provider_id}:${m.model_id}`,
       name: m.model_id,
@@ -303,13 +321,13 @@ function buildModelRows(
         fxRate
       ),
       hasPrice,
+      mergedNote: mergedNoteOf(m),
     });
   }
 
   // Claude：与 Codex 行同款（Anthropic 品牌橙）
   for (const m of agentVisibility.claude ? claude?.stats.by_model ?? [] : []) {
-    const price = pricing.usd[m.model_id];
-    const hasPrice = Boolean(price && (price.input > 0 || price.output > 0));
+    const hasPrice = hasPositivePrice(m.model_id, pricing);
     rows.push({
       key: `claude:${m.provider_id}:${m.model_id}`,
       name: m.model_id,
@@ -328,6 +346,7 @@ function buildModelRows(
         fxRate
       ),
       hasPrice,
+      mergedNote: mergedNoteOf(m),
     });
   }
 
@@ -1037,7 +1056,11 @@ export function SummaryTab({
                       />
                       <span
                         className="font-medium text-slate-900/90 truncate text-[11px]"
-                        title={`${m.source} · ${m.name}`}
+                        title={
+                          m.mergedNote
+                            ? `${m.source} · ${m.name}（${m.mergedNote}）`
+                            : `${m.source} · ${m.name}`
+                        }
                       >
                         {m.name}
                       </span>
