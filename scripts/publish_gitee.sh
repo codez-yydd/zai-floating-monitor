@@ -104,12 +104,16 @@ fi
 # 3. 创建新 release 并上传 payload（业务级重试）
 # ---------------------------------------------------------------------------
 echo '[3/4] 创建新 release 并上传附件'
-RESP=$(curl -sS --connect-timeout 20 --max-time 120 -w '\n%{http_code}' -X POST "$API" \
-  -F "$TOKEN_PARAM" \
-  -F 'tag_name=latest' \
-  -F 'target_commitish=master' \
-  -F "name=ZBar v${VERSION}（应用内更新源）" \
-  -F "body=ZBar v${VERSION} 自动更新通道，保持最新版即可。")
+# 创建请求体走 UTF-8 JSON 文件：Windows 的原生 curl 会把命令行里的中文按本地
+# 码页（GBK）转码发出，Gitee 报 invalid byte sequence in UTF-8；文件字节直传
+# 三端（macOS/Linux/Git Bash）行为一致，jq 解析兼作 UTF-8 编码自检
+cat > "$WORK/release.json" <<EOF
+{"tag_name":"latest","target_commitish":"master","name":"ZBar v${VERSION}（应用内更新源）","body":"ZBar v${VERSION} 自动更新通道，保持最新版即可。"}
+EOF
+jq -e . "$WORK/release.json" >/dev/null
+RESP=$(curl -sS --connect-timeout 20 --max-time 120 -w '\n%{http_code}' -X POST "$API?$TOKEN_PARAM" \
+  -H "Content-Type: application/json" \
+  --data-binary @"$WORK/release.json")
 CODE="${RESP##*$'\n'}"
 BODY="${RESP%$'\n'*}"
 [[ "$CODE" == 2* ]] || { echo "错误：创建 release 失败 HTTP ${CODE}：$(echo "$BODY" | head -c 300)"; exit 1; }
@@ -125,15 +129,19 @@ attachment_exists() { # $1=附件名
 }
 
 upload() { # $1=本地文件 $2=附件名
-  local file="$WORK/$1" name="$2" rc code resp i d max_time size
+  local file="$WORK/$1" name="$2" rc code resp i d max_time size upath
   size=$(wc -c < "$file")
   max_time=$(( size / 51200 + 90 )); (( max_time < 180 )) && max_time=180
+  # Git Bash 的 mingw64 curl 是原生 Windows 程序，读不了 MSYS 的 /tmp 路径
+  # （curl 错误 26 Failed to open/read local data）；有 cygpath 时转成
+  # Windows 真实路径，macOS/Linux 无 cygpath 则原样
+  if command -v cygpath >/dev/null 2>&1; then upath=$(cygpath -w "$file"); else upath="$file"; fi
   for i in 1 2 3 4; do
     echo "  上传 ${name}（第 $i/4 次，超时 ${max_time}s）"
     resp=$(curl -sS --connect-timeout 20 --max-time "$max_time" -w '\n%{http_code}' \
       -X POST "$API/$RELEASE_ID/attach_files" \
       -F "$TOKEN_PARAM" \
-      -F "file=@$file;filename=$name") && rc=0 || rc=$?
+      -F "file=@$upath;filename=$name") && rc=0 || rc=$?
     code="${resp##*$'\n'}"
     if [[ $rc -eq 0 && "$code" == 2* ]]; then echo "  $name 上传成功"; return 0; fi
     echo "  $name 未确认（rc=$rc HTTP=${code:-无}），查询服务端"
