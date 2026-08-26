@@ -147,7 +147,7 @@ jobs:
           gh release view "v$VERSION" >/dev/null 2>&1 && gh release delete "v$VERSION" --yes || true
           gh release create "v$VERSION" out/* \
             --title "ZBar v$VERSION" \
-            --notes "ZBar v$VERSION：修复多账号切换后今日用量百分比跨账号混算（各账号独立计算并显示）；全部账号显示各自独立的 MCP 额度与今日用量；今日增量支持多端同步合并（自建同步服务器需同步更新 server/ 模块，数据库自动迁移）。首次升级需手动下载安装，此后可在应用内一键更新。" \
+            --notes "ZBar v$VERSION：修复模型用量统计重复行——仅大小写不同（如 GLM-5.3-flash 与 GLM-5.3-Flash）、含不可见字符或 provider 不同的同名模型，现在合并为一行统计，悬浮模型名可查看被合并的原始写法与请求份额；修复模型名书写差异导致价格表误报无价格 ⚠ 的问题，价格设置页模型列表同步按归一化名称去重。" \
             --latest
 
       - name: 发布 Gitee 更新源（固定 tag latest）
