@@ -14,6 +14,8 @@ import type {
   CursorConfig,
   CursorSnapshot,
   DeviceInfo,
+  KimiConfig,
+  KimiSnapshot,
   MergeResult,
   ModelInfo,
   PricingConfig,
@@ -321,9 +323,9 @@ export async function clearQuotaHistory(): Promise<void> {
   await invoke("clear_quota_history");
 }
 
-/** 对比页：按指定 Agent 和周期聚合 Token（支持 zai/codex/claude/cursor） */
+/** 对比页：按指定 Agent 和周期聚合 Token（支持 zai/codex/claude/cursor/kimi） */
 export async function getCompareTokensForAgent(
-  source: "zai" | "codex" | "claude" | "cursor",
+  source: "zai" | "codex" | "claude" | "cursor" | "kimi",
   periods: [number, number][]
 ): Promise<WeeklyTokenBucket[]> {
   return invoke<WeeklyTokenBucket[]>("get_compare_tokens_for_agent", {
@@ -385,6 +387,30 @@ export async function fetchClaudeUsage(
   return invoke<ClaudeSnapshot>("get_claude_usage", {
     req: { from_ms: fromMs, to_ms: toMs, bucket },
   });
+}
+
+// ===== Kimi 用量统计 =====
+
+/** 拉取 Kimi 用量快照（stats + trend + 订阅额度）。
+ *  Kimi Code 未安装 / 无会话目录时后端返回 Err（中文提示），调用方需容错。 */
+export async function fetchKimiUsage(
+  fromMs: number,
+  toMs: number,
+  bucket: TrendBucket
+): Promise<KimiSnapshot> {
+  return invoke<KimiSnapshot>("get_kimi_usage", {
+    req: { from_ms: fromMs, to_ms: toMs, bucket },
+  });
+}
+
+/** 读取 Kimi 配置 */
+export async function getKimiConfig(): Promise<KimiConfig> {
+  return invoke<KimiConfig>("get_kimi_config");
+}
+
+/** 保存 Kimi 配置 */
+export async function setKimiConfig(config: KimiConfig): Promise<void> {
+  await invoke("set_kimi_config", { config });
 }
 
 // ===== 多智谱账号切换 =====

@@ -18,10 +18,13 @@ const AGENT_QUOTA_WINDOWS: Record<AgentQuotaSource, ReadonlySet<AgentQuotaWindow
   codex: new Set(["hour5", "weekly"]),
   claude: new Set(["hour5", "weekly"]),
   cursor: new Set(["cursor_auto", "cursor_api"]),
+  kimi: new Set(["hour5", "weekly"]),
 };
 
 function isAgentQuotaSource(value: string): value is AgentQuotaSource {
-  return value === "codex" || value === "claude" || value === "cursor";
+  return (
+    value === "codex" || value === "claude" || value === "cursor" || value === "kimi"
+  );
 }
 
 function isValidUsedPct(value: number): boolean {

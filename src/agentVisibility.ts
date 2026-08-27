@@ -1,7 +1,7 @@
 /** 统计页的 Agent 展示偏好，仅影响界面展示，不影响本地采集和同步。 */
 import type { MessageKey } from "./i18n";
 
-export type AgentId = "zai" | "codex" | "claude" | "cursor";
+export type AgentId = "zai" | "codex" | "claude" | "cursor" | "kimi";
 
 export type AgentVisibility = Record<AgentId, boolean>;
 
@@ -11,6 +11,7 @@ export const AGENT_COLOR: Record<AgentId, string> = {
   codex: "#10a37f",
   claude: "#d97757",
   cursor: "#8b5cf6",
+  kimi: "#4338ca",
 };
 
 /** 同一 Agent 的多账号系列用同色系色阶区分（明度递增，4 档，超出取最末档）。
@@ -20,6 +21,7 @@ export const AGENT_COLOR_SCALE: Record<AgentId, readonly string[]> = {
   codex: ["#10a37f", "#34d399", "#6ee7b7", "#a7f3d0"],
   claude: ["#d97757", "#fb923c", "#fdba74", "#fed7aa"],
   cursor: ["#8b5cf6", "#a78bfa", "#c4b5fd", "#ddd6fe"],
+  kimi: ["#4338ca", "#6366f1", "#818cf8", "#a5b4fc"],
 };
 
 // 模式 A：label 是品牌名不进词典；description 存词典键，渲染时查（跟随 UI 语言）
@@ -48,6 +50,11 @@ export const AGENT_VISIBILITY_OPTIONS: ReadonlyArray<{
     label: "Cursor",
     descriptionKey: "settings.agentCursorDesc",
   },
+  {
+    id: "kimi",
+    label: "Kimi",
+    descriptionKey: "settings.agentKimiDesc",
+  },
 ];
 
 const STORAGE_KEY = "zbar-agent-visibility";
@@ -57,6 +64,7 @@ const DEFAULT_VISIBILITY: AgentVisibility = {
   codex: true,
   claude: true,
   cursor: true,
+  kimi: true,
 };
 
 /** 读取展示偏好；缺失或损坏字段默认开启，保证升级后行为不变。 */
@@ -70,6 +78,7 @@ export function loadAgentVisibility(): AgentVisibility {
       codex: parsed.codex !== false,
       claude: parsed.claude !== false,
       cursor: parsed.cursor !== false,
+      kimi: parsed.kimi !== false,
     };
   } catch {
     return { ...DEFAULT_VISIBILITY };

@@ -132,6 +132,12 @@ export const en: typeof zh = {
     "stats.claudeNotFound": "No Claude Code detected",
     "stats.claudeNotFoundHint":
       "Install and run Claude Code to create local sessions\n(~/.claude/projects), then check back",
+    "stats.kimiNotFound": "No Kimi Code detected",
+    "stats.kimiNotFoundHint":
+      "Install and run Kimi Code CLI to create local sessions\n(~/.kimi-code/sessions), then check back",
+    "stats.boosterBalance": "Booster balance",
+    "stats.boosterMonthlyUsed": "Monthly used ¥{amount}",
+    "stats.kimiMonthlyQuota": "Monthly quota",
 
     // Cursor 面板
     "cursor.notLoggedIn": "Cursor not signed in",
@@ -423,6 +429,12 @@ export const en: typeof zh = {
     "settings.agentCodexDesc": "Codex CLI usage & quotas",
     "settings.agentClaudeDesc": "Claude Code usage & plan quotas",
     "settings.agentCursorDesc": "Cursor usage & plan quotas",
+    "settings.agentKimiDesc": "Kimi Code CLI usage & subscription quota",
+
+    "settings.kimiCard": "Kimi credential",
+    "settings.kimiKeyPh": "Paste API Key",
+    "settings.kimiKeyHint":
+      "If local credential detection fails or OAuth expires, paste an API Key created in the Kimi console here; leave empty to disable. Stored locally only (~/.zbar/kimi.json), never synced.",
 
     "settings.fxCard": "Exchange rate",
     "settings.fxAutoNote": "Auto-updating; uncheck to edit manually",

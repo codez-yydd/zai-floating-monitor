@@ -35,6 +35,13 @@ export const settings = {
   "settings.agentCodexDesc": "OpenAI Codex CLI 用量与额度",
   "settings.agentClaudeDesc": "Claude Code 用量与订阅额度",
   "settings.agentCursorDesc": "Cursor 编辑器用量与套餐额度",
+  "settings.agentKimiDesc": "Kimi Code CLI 用量与订阅额度",
+
+  // ===== Kimi 额度凭据 =====
+  "settings.kimiCard": "Kimi 额度凭据",
+  "settings.kimiKeyPh": "填入 API Key",
+  "settings.kimiKeyHint":
+    "本地凭据自动探测失败或 OAuth 过期时，可在此填入控制台创建的 API Key；留空表示不使用。仅存本机（~/.zbar/kimi.json），不参与同步。",
 
   // ===== 汇率 =====
   "settings.fxCard": "汇率",

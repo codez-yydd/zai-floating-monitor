@@ -16,6 +16,7 @@ import type {
   CodexSnapshot,
   CursorSnapshot,
   DeviceInfo,
+  KimiSnapshot,
   PricingConfig,
   QuotaResult,
   QuotaSnapshot,
@@ -32,6 +33,7 @@ import {
   fetchClaudeUsage,
   fetchCodexUsage,
   fetchCursorUsage,
+  fetchKimiUsage,
   fetchQuota,
   getAgentQuotaHistory,
   fetchStats,
@@ -135,6 +137,7 @@ const ZAI_STALE_MS = 60_000;
 const CURSOR_STALE_MS = 240_000;
 const CODEX_STALE_MS = 60_000;
 const CLAUDE_STALE_MS = 60_000;
+const KIMI_STALE_MS = 60_000;
 
 interface ZaiEntry {
   stats: Stats | null;
@@ -173,6 +176,15 @@ interface AgentEntry {
   ts: number;
 }
 
+/** Kimi 快照条目：与 AgentEntry 同款形状，但 snapshot 携带加油包余额与
+ *  额度失败原因（rate_limits_error），展示层需要这两个字段。 */
+interface KimiEntry {
+  snapshot: KimiSnapshot | null;
+  error: string | null;
+  refreshing: boolean;
+  ts: number;
+}
+
 const EMPTY_AGENT: AgentEntry = {
   snapshot: null,
   error: null,
@@ -198,6 +210,12 @@ const EMPTY_CURSOR: CursorEntry = {
 
 const EMPTY_CODEX: AgentEntry = EMPTY_AGENT;
 const EMPTY_CLAUDE: AgentEntry = EMPTY_AGENT;
+const EMPTY_KIMI: KimiEntry = {
+  snapshot: null,
+  error: null,
+  refreshing: false,
+  ts: 0,
+};
 
 /** 冷启动加载缓存时清掉可能被持久化的 refreshing 标志（崩溃恢复场景）。 */
 function stripRefreshing<T extends { refreshing: boolean }>(
@@ -232,6 +250,11 @@ export interface DataCacheValue {
   claude: ClaudeSnapshot | null;
   /** Claude 错误信息（如未安装，不阻塞其他来源展示） */
   claudeError: string | null;
+
+  // ===== Kimi 数据（当前范围，读缓存；stats/trend 与 z.ai 同构）=====
+  kimi: KimiSnapshot | null;
+  /** Kimi 错误信息（如未安装，不阻塞其他来源展示） */
+  kimiError: string | null;
 
   // ===== Cursor 数据（当前范围，读缓存）=====
   cursor: CursorSnapshot | null;
@@ -317,6 +340,9 @@ export function DataProvider({ pricing, children }: ProviderProps) {
   const [claudeCache, setClaudeCache] = useState<Record<string, AgentEntry>>(
     () => stripRefreshing(loadCache<Record<string, AgentEntry>>("zbar-claude-cache") ?? {})
   );
+  const [kimiCache, setKimiCache] = useState<Record<string, KimiEntry>>(
+    () => stripRefreshing(loadCache<Record<string, KimiEntry>>("zbar-kimi-cache") ?? {})
+  );
 
   // ===== 其他数据（持久化）=====
   const [fxRate, setFxRate] = useState<number>(
@@ -356,6 +382,7 @@ export function DataProvider({ pricing, children }: ProviderProps) {
   const cursorInflight = useRef<Set<string>>(new Set());
   const codexInflight = useRef<Set<string>>(new Set());
   const claudeInflight = useRef<Set<string>>(new Set());
+  const kimiInflight = useRef<Set<string>>(new Set());
   const quotaReqId = useRef(0);
   const accountQuotasInflight = useRef(false);
   // 两路额度数据各自的最近成功时刻：切换账号后 refreshQuota（live，读 ~/.zcode
@@ -410,6 +437,10 @@ export function DataProvider({ pricing, children }: ProviderProps) {
   useEffect(() => {
     claudeCacheRef.current = claudeCache;
   }, [claudeCache]);
+  const kimiCacheRef = useRef(kimiCache);
+  useEffect(() => {
+    kimiCacheRef.current = kimiCache;
+  }, [kimiCache]);
 
   // ===== refs：后台 tick 读取最新 preset/custom（用户停留在自定义视图时把当前
   //      custom 范围纳入刷新用）。经 ref 读取而不是列入定时器 effect 依赖，
@@ -774,6 +805,63 @@ export function DataProvider({ pricing, children }: ProviderProps) {
     [refreshAgentRange]
   );
 
+  /**
+   * 刷新单个 Kimi 范围：纯本地快照（首期无远端同步，不向远端 sync 发
+   * source="kimi" 请求），形态参照 refreshCursorRange（then/catch/finally），
+   * 签名与 Entry 对齐 claude（key 带 df 前缀，与 codex/claude 循环同款调用）。
+   * df 仅用于缓存 key 隔离，数据本身始终读本机 ~/.kimi-code 会话。
+   */
+  const refreshKimiRange = useCallback(
+    (
+      _df: string,
+      key: string,
+      from: number,
+      to: number,
+      bucket: TrendBucket
+    ) => {
+      if (kimiInflight.current.has(key)) return;
+      kimiInflight.current.add(key);
+      setKimiCache((prev) => ({
+        ...prev,
+        [key]: { ...(prev[key] ?? EMPTY_KIMI), refreshing: true },
+      }));
+
+      fetchKimiUsage(from, to, bucket)
+        .then((data) => {
+          setKimiCache((prev) =>
+            trimCustomEntries(
+              {
+                ...prev,
+                [key]: { snapshot: data, error: null, refreshing: false, ts: Date.now() },
+              },
+              MAX_CUSTOM_ENTRIES
+            )
+          );
+        })
+        .catch((e) => {
+          setKimiCache((prev) =>
+            trimCustomEntries(
+              {
+                ...prev,
+                [key]: {
+                  ...(prev[key] ?? EMPTY_KIMI),
+                  error: String(e),
+                  refreshing: false,
+                  ts: Date.now(),
+                },
+              },
+              MAX_CUSTOM_ENTRIES
+            )
+          );
+        })
+        .finally(() => {
+          kimiInflight.current.delete(key);
+          scheduleAgentQuotaReload();
+        });
+    },
+    [scheduleAgentQuotaReload]
+  );
+
   // Quota 数据加载（与范围无关，每次调用会采样写入 quota_history）。
   const loadQuota = useCallback(() => {
     const reqId = ++quotaReqId.current;
@@ -1040,6 +1128,7 @@ export function DataProvider({ pricing, children }: ProviderProps) {
         refreshZaiRange(df, `${df}|${p}`, f, t, bucketOf(p));
         refreshCodexRange(df, `${df}|${p}`, f, t, bucketOf(p));
         refreshClaudeRange(df, `${df}|${p}`, f, t, bucketOf(p));
+        refreshKimiRange(df, `${df}|${p}`, f, t, bucketOf(p));
       }
       // 自定义视图当前展示的范围纳入本轮刷新：custom 无法预缓存（日期区间任意），
       // 不顺带刷的话该视图只能靠按需补刷，lastUpdate 会长期显示旧时间
@@ -1049,6 +1138,7 @@ export function DataProvider({ pricing, children }: ProviderProps) {
         refreshZaiRange(df, key, f, t, bucketOf("custom"));
         refreshCodexRange(df, key, f, t, bucketOf("custom"));
         refreshClaudeRange(df, key, f, t, bucketOf("custom"));
+        refreshKimiRange(df, key, f, t, bucketOf("custom"));
       }
     };
     // 延后首刷（500ms）：WebView 重载（首次打开 / 长期隐藏后被系统回收）后，
@@ -1063,7 +1153,7 @@ export function DataProvider({ pricing, children }: ProviderProps) {
     // 故意不把 preset/custom 列入依赖：后台刷预设范围与二者无关（custom 仅在
     // 自定义视图时经 ref 顺带刷新），列入会导致每次切范围重建定时器
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deviceFilter, syncConfig, syncEnabled, pricing, refreshZaiRange, refreshCodexRange, refreshClaudeRange]);
+  }, [deviceFilter, syncConfig, syncEnabled, pricing, refreshZaiRange, refreshCodexRange, refreshClaudeRange, refreshKimiRange]);
 
   // ===== 后台定时刷新 Cursor：所有预设范围，降频 180s（网络慢，4 范围并行）。
   //      账号级，不受 deviceFilter 影响。汇率每 tick 只读一次（与范围循环解耦）。
@@ -1167,9 +1257,13 @@ export function DataProvider({ pricing, children }: ProviderProps) {
     if (!aEntry || Date.now() - aEntry.ts > CLAUDE_STALE_MS) {
       refreshClaudeRange(deviceFilter, zKey, f, t, trendBucket);
     }
+    const kEntry = kimiCacheRef.current[zKey];
+    if (!kEntry || Date.now() - kEntry.ts > KIMI_STALE_MS) {
+      refreshKimiRange(deviceFilter, zKey, f, t, trendBucket);
+    }
     // 仅在范围/设备/刷新函数变化时触发；不依赖 cache 内容（靠 ref 读最新值）
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [preset, custom, deviceFilter, trendBucket, refreshZaiRange, refreshCursorRange, refreshCodexRange, refreshClaudeRange]);
+  }, [preset, custom, deviceFilter, trendBucket, refreshZaiRange, refreshCursorRange, refreshCodexRange, refreshClaudeRange, refreshKimiRange]);
 
   // ===== 窗口恢复可见时主动补刷：隐藏期间 setInterval 常被节流，恢复后立即补齐
   //      当前 deviceFilter 的预设范围，保证"常驻新鲜"。
@@ -1183,6 +1277,7 @@ export function DataProvider({ pricing, children }: ProviderProps) {
         refreshZaiRange(df, `${df}|${p}`, f, t, bucketOf(p));
         refreshCodexRange(df, `${df}|${p}`, f, t, bucketOf(p));
         refreshClaudeRange(df, `${df}|${p}`, f, t, bucketOf(p));
+        refreshKimiRange(df, `${df}|${p}`, f, t, bucketOf(p));
         refreshCursorRange(p, f, t);
       }
       if (presetRef.current === "custom") {
@@ -1191,13 +1286,14 @@ export function DataProvider({ pricing, children }: ProviderProps) {
         refreshZaiRange(df, `${df}|${cKey}`, f, t, bucketOf("custom"));
         refreshCodexRange(df, `${df}|${cKey}`, f, t, bucketOf("custom"));
         refreshClaudeRange(df, `${df}|${cKey}`, f, t, bucketOf("custom"));
+        refreshKimiRange(df, `${df}|${cKey}`, f, t, bucketOf("custom"));
         refreshCursorRange(cKey, f, t);
       }
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => document.removeEventListener("visibilitychange", onVisible);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deviceFilter, refreshZaiRange, refreshCursorRange, refreshCodexRange, refreshClaudeRange]);
+  }, [deviceFilter, refreshZaiRange, refreshCursorRange, refreshCodexRange, refreshClaudeRange, refreshKimiRange]);
 
   // ===== 持久化：各 state 变化即落盘，供下次冷启动各范围秒显 =====
   useEffect(() => {
@@ -1222,6 +1318,9 @@ export function DataProvider({ pricing, children }: ProviderProps) {
     saveCache("zbar-claude-cache", claudeCache);
   }, [claudeCache]);
   useEffect(() => {
+    saveCache("zbar-kimi-cache", kimiCache);
+  }, [kimiCache]);
+  useEffect(() => {
     saveCache("zbar-fxrate", fxRate);
   }, [fxRate]);
   useEffect(() => {
@@ -1234,17 +1333,18 @@ export function DataProvider({ pricing, children }: ProviderProps) {
     saveCache("zbar-account-quotas", accountQuotas);
   }, [accountQuotas]);
 
-  // 手动刷新：刷新当前范围（z.ai + Codex + Claude + Cursor）一次
+  // 手动刷新：刷新当前范围（z.ai + Codex + Claude + Cursor + Kimi）一次
   const refresh = useCallback(() => {
     const [f, t] = resolveRange(preset, custom);
     const zKey = `${deviceFilter}|${rangeKey(preset, custom)}`;
     refreshZaiRange(deviceFilter, zKey, f, t, trendBucket);
     refreshCodexRange(deviceFilter, zKey, f, t, trendBucket);
     refreshClaudeRange(deviceFilter, zKey, f, t, trendBucket);
+    refreshKimiRange(deviceFilter, zKey, f, t, trendBucket);
     refreshCursorRange(rangeKey(preset, custom), f, t);
     // 额度采样由上述后台命令写入，稍后读取以覆盖本次手动刷新产生的快照。
     window.setTimeout(loadAgentQuotaDeltas, 1_000);
-  }, [preset, custom, deviceFilter, trendBucket, refreshZaiRange, refreshCodexRange, refreshClaudeRange, refreshCursorRange, loadAgentQuotaDeltas]);
+  }, [preset, custom, deviceFilter, trendBucket, refreshZaiRange, refreshCodexRange, refreshClaudeRange, refreshKimiRange, refreshCursorRange, loadAgentQuotaDeltas]);
 
   const refreshQuota = useCallback(() => loadQuota(), [loadQuota]);
   const refreshAccountQuotas = useCallback(
@@ -1259,14 +1359,23 @@ export function DataProvider({ pricing, children }: ProviderProps) {
   const curCursor = cursorCache[curCursorKey] ?? EMPTY_CURSOR;
   const curCodex = codexCache[curZaiKey] ?? EMPTY_CODEX;
   const curClaude = claudeCache[curZaiKey] ?? EMPTY_CLAUDE;
+  const curKimi = kimiCache[curZaiKey] ?? EMPTY_KIMI;
 
   // lastUpdate 取当前范围各数据源里最旧的成功时间（保守的新鲜度下限）
-  const updateTs = [curZai.ts, curCursor.ts, curCodex.ts, curClaude.ts].filter(
-    (t) => t > 0
-  );
+  const updateTs = [
+    curZai.ts,
+    curCursor.ts,
+    curCodex.ts,
+    curClaude.ts,
+    curKimi.ts,
+  ].filter((t) => t > 0);
   const lastUpdate = updateTs.length ? Math.min(...updateTs) : 0;
   const refreshing =
-    curZai.refreshing || curCursor.refreshing || curCodex.refreshing || curClaude.refreshing;
+    curZai.refreshing ||
+    curCursor.refreshing ||
+    curCodex.refreshing ||
+    curClaude.refreshing ||
+    curKimi.refreshing;
 
   // 展示派生 1：各账号今日增量优先用"本机+远端合并"计算值（多端同步，
   // 覆盖本机离线时段），未就绪时退回后端 account_quotas 的本机计算值。
@@ -1328,6 +1437,13 @@ export function DataProvider({ pricing, children }: ProviderProps) {
           }
         : curClaude.snapshot,
       claudeError: curClaude.error,
+      kimi: curKimi.snapshot
+        ? {
+            ...curKimi.snapshot,
+            stats: foldByModelStats(curKimi.snapshot.stats),
+          }
+        : curKimi.snapshot,
+      kimiError: curKimi.error,
       cursor: curCursor.snapshot
         ? {
             ...curCursor.snapshot,
@@ -1359,6 +1475,7 @@ export function DataProvider({ pricing, children }: ProviderProps) {
       curCodex,
       curClaude,
       curCursor,
+      curKimi,
       fxRate,
       quota,
       todayDeltaMerged,

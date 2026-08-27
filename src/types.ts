@@ -294,7 +294,7 @@ export interface QuotaSnapshot {
 
 // ===== Agent 额度快照（Codex / Claude / Cursor） =====
 
-export type AgentQuotaSource = "codex" | "claude" | "cursor";
+export type AgentQuotaSource = "codex" | "claude" | "cursor" | "kimi";
 
 /** Agent 额度窗口键。hour5/weekly 用于 Codex / Claude，cursor_* 用于 Cursor。 */
 export type AgentQuotaWindowKey =
@@ -489,8 +489,14 @@ export interface CursorSnapshot {
   current_model?: CurrentModel | null;
 }
 
-/** 主面板五标签 */
-export type StatsTab = "summary" | "zai" | "codex" | "claude" | "cursor";
+/** 主面板标签 */
+export type StatsTab =
+  | "summary"
+  | "zai"
+  | "codex"
+  | "claude"
+  | "cursor"
+  | "kimi";
 
 // ===== Codex 用量统计（与 Rust codex 模块结构一一对应）=====
 
@@ -540,6 +546,47 @@ export interface ClaudeSnapshot {
   trend: TrendPoint[];
   /** 订阅额度（未登录 claude.ai 订阅 / 第三方中转模式为 null） */
   rate_limits: ClaudeRateLimits | null;
+}
+
+// ===== Kimi 用量统计（与 Rust kimi 模块结构一一对应）=====
+
+/** Kimi（Kimi Code CLI）订阅额度（api.kimi.com 实时接口获取） */
+export interface KimiRateLimits {
+  /** 会员档位（usage.name） */
+  plan_type: string | null;
+  /** 5 小时窗口已用百分比（0-100） */
+  primary_pct: number | null;
+  /** 5 小时窗口重置时间（毫秒时间戳） */
+  primary_reset_at: number | null;
+  /** 周窗口已用百分比（0-100） */
+  secondary_pct: number | null;
+  /** 周窗口重置时间（毫秒时间戳） */
+  secondary_reset_at: number | null;
+  /** 加油包剩余额度（boosterWallet.balance.amountLeft） */
+  booster_balance: number | null;
+  /** 加油包本月已用（boosterWallet.monthlyUsed） */
+  booster_monthly_used: number | null;
+  /** 月总额度已用百分比（totalQuota；服务端当前普遍返回空对象，预埋，有值才显示） */
+  monthly_pct: number | null;
+  /** 月总额度重置时间（毫秒时间戳；同样来自 totalQuota，预埋） */
+  monthly_reset_at: number | null;
+}
+
+/** Kimi 用量快照（get_kimi_usage 返回）。
+ *  stats / trend 与 z.ai 同构；rate_limits 仅配置 API Key 且接口成功时有值，
+ *  额度获取失败不阻断统计（rate_limits_error 携带中文原因）。 */
+export interface KimiSnapshot {
+  stats: Stats;
+  trend: TrendPoint[];
+  /** 订阅额度（未配置 / 接口失败为 null，原因见 rate_limits_error） */
+  rate_limits: KimiRateLimits | null;
+  /** 额度接口失败原因（统计仍正常展示） */
+  rate_limits_error: string | null;
+}
+
+/** Kimi 配置（~/.zbar/kimi.json） */
+export interface KimiConfig {
+  api_key: string;
 }
 
 // ===== 多智谱账号切换（与 Rust accounts 模块结构一一对应）=====

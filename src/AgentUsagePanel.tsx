@@ -31,7 +31,8 @@ import {
 import { useI18n } from "./i18n";
 
 /** 通用快照形状：Codex / Claude 的快照结构一致（stats/trend 同构 +
- *  同款五字段速率限制），TS 结构化类型直接兼容。 */
+ *  同款五字段速率限制），TS 结构化类型直接兼容。monthly 两字段为 Kimi
+ *  专属预埋（totalQuota 有值才非空），可选不强制其余 Agent 提供。 */
 export interface AgentUsageSnapshot {
   stats: Stats;
   trend: TrendPoint[];
@@ -41,10 +42,14 @@ export interface AgentUsageSnapshot {
     primary_reset_at: number | null;
     secondary_pct: number | null;
     secondary_reset_at: number | null;
+    /** 月总额度已用百分比（仅 Kimi：会员月总额度 totalQuota） */
+    monthly_pct?: number | null;
+    /** 月总额度重置时间（毫秒时间戳，仅 Kimi） */
+    monthly_reset_at?: number | null;
   } | null;
 }
 
-/** 品牌主题（Tailwind 类名）：Codex 用 emerald、Claude 用 orange。 */
+/** 品牌主题（Tailwind 类名）：Codex 用 emerald、Claude 用 orange、Kimi 用 indigo。 */
 export interface AgentPanelTheme {
   /** 模型排行行底条 */
   rowBar: string;
@@ -53,7 +58,7 @@ export interface AgentPanelTheme {
   /** 套餐徽标 */
   badge: string;
   /** 英雄卡 accent */
-  accent: "sky" | "emerald" | "orange" | "violet";
+  accent: "sky" | "emerald" | "orange" | "violet" | "indigo";
 }
 
 /** 无数据空态文案（未安装对应 CLI 时展示）。
@@ -209,7 +214,11 @@ export function AgentUsagePanel({
         : 0;
 
   // 额度块渲染条件：至少一行有百分比数据（中转模式 rate_limits 为 null，不渲染）
-  const hasRateRow = rate && (rate.primary_pct != null || rate.secondary_pct != null);
+  const hasRateRow =
+    rate &&
+    (rate.primary_pct != null ||
+      rate.secondary_pct != null ||
+      rate.monthly_pct != null);
 
   return (
     <div className="flex-1 overflow-y-auto px-3 py-2.5 page-stack">
@@ -236,6 +245,15 @@ export function AgentUsagePanel({
                 resetAt={rate.secondary_reset_at}
                 now={now}
                 delta={agentQuotaDelta}
+              />
+            )}
+            {/* 月总额度（仅 Kimi 的 totalQuota 有值时出现，无今日增量口径） */}
+            {rate.monthly_pct != null && (
+              <AgentQuotaRow
+                label={t("stats.kimiMonthlyQuota")}
+                usedPct={rate.monthly_pct}
+                resetAt={rate.monthly_reset_at ?? null}
+                now={now}
               />
             )}
           </div>

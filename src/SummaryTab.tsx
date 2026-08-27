@@ -7,6 +7,7 @@ import type {
   CurrentModel,
   CursorSnapshot,
   Currency,
+  KimiSnapshot,
   ModelStat,
   OverallStat,
   PricingConfig,
@@ -52,6 +53,7 @@ interface Props {
   codex: CodexSnapshot | null;
   claude: ClaudeSnapshot | null;
   cursor: CursorSnapshot | null;
+  kimi: KimiSnapshot | null;
   currency: Currency;
   bucket: "hour" | "day";
   fxRate: number;
@@ -139,6 +141,7 @@ function AgentCostCard({
     codex: "codex",
     claude: "claude",
     cursor: "cursor",
+    kimi: "kimi",
   };
   const brand = brandMap[agent.id];
 
@@ -269,6 +272,7 @@ function buildModelRows(
   codex: CodexSnapshot | null,
   claude: ClaudeSnapshot | null,
   cursor: CursorSnapshot | null,
+  kimi: KimiSnapshot | null,
   pricing: PricingConfig,
   currency: Currency,
   fxRate: number,
@@ -363,6 +367,31 @@ function buildModelRows(
       tokens: m.total_tokens,
       cost: currency === "cny" ? m.cost_usd * fxRate : m.cost_usd,
       hasPrice: true,
+    });
+  }
+
+  // Kimi：与 Codex/Claude 行同款（indigo 品牌色）
+  for (const m of agentVisibility.kimi ? kimi?.stats.by_model ?? [] : []) {
+    const hasPrice = hasPositivePrice(m.model_id, pricing);
+    rows.push({
+      key: `kimi:${m.provider_id}:${m.model_id}`,
+      name: m.model_id,
+      source: "Kimi",
+      color: AGENT_COLOR.kimi,
+      barBg: "bg-indigo-500/10",
+      requests: m.requests,
+      tokens: m.total_tokens,
+      cost: modelCost(
+        m.model_id,
+        m.input_tokens,
+        m.output_tokens,
+        m.cache_read_tokens,
+        pricing,
+        currency,
+        fxRate
+      ),
+      hasPrice,
+      mergedNote: mergedNoteOf(m),
     });
   }
 
@@ -522,6 +551,7 @@ export function SummaryTab({
   codex,
   claude,
   cursor,
+  kimi,
   currency,
   bucket,
   fxRate,
@@ -546,6 +576,7 @@ export function SummaryTab({
     codexError,
     claudeError,
     cursorError,
+    kimiError,
     error: zaiError,
     agentQuotaDeltas,
     accountQuotas,
@@ -580,6 +611,14 @@ export function SummaryTab({
     0
   );
   const claudeTokens = claude?.stats.overall.total_tokens ?? 0;
+
+  // Kimi 花费 & token（与 Claude 同款口径）
+  const kimiRate = kimi?.rate_limits ?? null;
+  const kimiCostRaw = (kimi?.trend ?? []).reduce(
+    (s, p) => s + (currency === "cny" ? p.cost_cny : p.cost_usd),
+    0
+  );
+  const kimiTokens = kimi?.stats.overall.total_tokens ?? 0;
 
   // Cursor 花费 & token（events 口径）
   const cursorEvents = cursor?.events;
@@ -704,11 +743,57 @@ export function SummaryTab({
       : t("summary.loadFailed")
     : t("summary.noData");
 
+  // Kimi 额度：配置 API Key 且接口成功才有实时值（未配置/失败 rate_limits 为 null → 空 metrics 走文案）
+  const kimiMetrics =
+    kimiRate &&
+    (kimiRate.primary_pct != null ||
+      kimiRate.secondary_pct != null ||
+      kimiRate.monthly_pct != null)
+      ? [
+          ...(kimiRate.primary_pct != null
+            ? [
+                {
+                  label: t("common.hour5"),
+                  usedPct: kimiRate.primary_pct,
+                  resetAt: kimiRate.primary_reset_at,
+                },
+              ]
+            : []),
+          ...(kimiRate.secondary_pct != null
+            ? [
+                {
+                  label: t("common.weekly"),
+                  usedPct: kimiRate.secondary_pct,
+                  resetAt: kimiRate.secondary_reset_at,
+                  delta: agentQuotaDeltas.kimi?.weekly,
+                },
+              ]
+            : []),
+          // 月总额度（totalQuota）：服务端当前普遍返回空对象，有值才追加
+          ...(kimiRate.monthly_pct != null
+            ? [
+                {
+                  label: t("stats.kimiMonthlyQuota"),
+                  usedPct: kimiRate.monthly_pct,
+                  resetAt: kimiRate.monthly_reset_at,
+                },
+              ]
+            : []),
+        ]
+      : [];
+  // 注意：正则匹配 Rust 后端返回的中文错误串（未找到/未安装/会话目录），仅做布尔分支，不能翻译
+  const kimiEmpty = kimiError
+    ? /未找到|未安装|会话目录/i.test(kimiError)
+      ? t("stats.kimiNotFound")
+      : t("summary.loadFailed")
+    : t("summary.noData");
+
   // 各 Agent 缓存命中率（口径与各详情页一致）
   const zaiCacheHitPct = cacheHitPctIncluded(stats?.overall);
   const codexCacheHitPct = cacheHitPctIncluded(codex?.stats.overall);
   const claudeCacheHitPct = cacheHitPctSeparate(claude?.stats.overall);
   const cursorCacheHitPct = cacheHitPctCursor(cursorEvents);
+  const kimiCacheHitPct = cacheHitPctSeparate(kimi?.stats.overall);
 
   // 按 agent 组装。新增来源时在此追加，总览占比条 / 花费表 / 额度列表会一起跟上。
   const allAgents: AgentSummary[] = [
@@ -788,6 +873,25 @@ export function SummaryTab({
         ? cursor.billing_cycle_end.slice(0, 10)
         : null,
     },
+    {
+      id: "kimi",
+      name: "Kimi",
+      color: AGENT_COLOR.kimi,
+      tintBg: "rgba(67, 56, 202, 0.07)",
+      nameClass: "text-indigo-700",
+      badge: kimiRate?.plan_type ?? null,
+      badgeClass: "bg-indigo-500/12 text-indigo-700",
+      cost: kimiCostRaw,
+      tokens: kimiTokens,
+      // 有 error 说明已确认未安装/失败，允许被隐藏
+      loaded: kimi != null || kimiError != null,
+      currentModel: kimi?.stats.current_model ?? null,
+      avgTps: kimi?.stats.overall.avg_tps ?? null,
+      avgTtftMs: kimi?.stats.overall.avg_ttft_ms ?? null,
+      cacheHitPct: kimiCacheHitPct,
+      metrics: kimiMetrics,
+      empty: kimiEmpty,
+    },
   ];
 
   const agents = allAgents.filter((agent) => agentVisibility[agent.id]);
@@ -814,11 +918,13 @@ export function SummaryTab({
   });
   const zcodeTrendMap = new Map<string, TrendPoint>();
   trend.forEach((p) => zcodeTrendMap.set(p.label, p));
-  // Codex / Claude 趋势桶自带双货币花费，按 label 索引后直接相加（与 z.ai 桶格式一致）
+  // Codex / Claude / Kimi 趋势桶自带双货币花费，按 label 索引后直接相加（与 z.ai 桶格式一致）
   const codexTrendMap = new Map<string, TrendPoint>();
   (codex?.trend ?? []).forEach((p) => codexTrendMap.set(p.label, p));
   const claudeTrendMap = new Map<string, TrendPoint>();
   (claude?.trend ?? []).forEach((p) => claudeTrendMap.set(p.label, p));
+  const kimiTrendMap = new Map<string, TrendPoint>();
+  (kimi?.trend ?? []).forEach((p) => kimiTrendMap.set(p.label, p));
 
   const trendLabels: string[] = [];
   const trendLabelSet = new Set<string>();
@@ -835,6 +941,8 @@ export function SummaryTab({
     claudeTrendMap.forEach((_point, label) => addTrendLabel(label));
   if (agentVisibility.cursor)
     cursorDailyMap.forEach((_point, label) => addTrendLabel(label));
+  if (agentVisibility.kimi)
+    kimiTrendMap.forEach((_point, label) => addTrendLabel(label));
 
   const mergedTrend: TrendPoint[] = trendLabels.map((label) => {
     const p =
@@ -849,26 +957,31 @@ export function SummaryTab({
     const c = agentVisibility.cursor ? cursorDailyMap.get(label) : undefined;
     const x = agentVisibility.codex ? codexTrendMap.get(label) : undefined;
     const a = agentVisibility.claude ? claudeTrendMap.get(label) : undefined;
+    const k = agentVisibility.kimi ? kimiTrendMap.get(label) : undefined;
     return {
       label: p.label,
       total_tokens:
         (agentVisibility.zai ? p.total_tokens : 0) +
         (x?.total_tokens ?? 0) +
         (a?.total_tokens ?? 0) +
+        (k?.total_tokens ?? 0) +
         (c?.tokens ?? 0),
       requests:
         (agentVisibility.zai ? p.requests : 0) +
         (x?.requests ?? 0) +
-        (a?.requests ?? 0),
+        (a?.requests ?? 0) +
+        (k?.requests ?? 0),
       cost_cny:
         (agentVisibility.zai ? p.cost_cny : 0) +
         (x?.cost_cny ?? 0) +
         (a?.cost_cny ?? 0) +
+        (k?.cost_cny ?? 0) +
         (c?.costCny ?? 0),
       cost_usd:
         (agentVisibility.zai ? p.cost_usd : 0) +
         (x?.cost_usd ?? 0) +
         (a?.cost_usd ?? 0) +
+        (k?.cost_usd ?? 0) +
         (c?.costUsd ?? 0),
     };
   });
@@ -879,6 +992,7 @@ export function SummaryTab({
     codex,
     claude,
     cursor,
+    kimi,
     pricing,
     currency,
     fxRate,

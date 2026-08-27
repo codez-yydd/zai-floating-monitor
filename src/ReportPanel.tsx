@@ -5,6 +5,7 @@ import type {
   Currency,
   CursorSnapshot,
   DeviceInfo,
+  KimiSnapshot,
   PricingConfig,
   QuotaSnapshot,
   RangePreset,
@@ -19,6 +20,7 @@ import {
   fetchClaudeUsage,
   fetchCodexUsage,
   fetchCursorUsage,
+  fetchKimiUsage,
   fetchStats,
   fetchTrend,
   getCursorConfig,
@@ -141,6 +143,7 @@ const AGENT_META: Record<
   codex: { label: "Codex", brand: "codex", color: "#059669" },
   claude: { label: "Claude", brand: "claude", color: "#c2410c" },
   cursor: { label: "Cursor", brand: "cursor", color: "#7c3aed" },
+  kimi: { label: "Kimi", brand: "kimi", color: "#4338ca" },
 };
 
 /** 本地日期 YYYY-MM-DD，避免 UTC 偏移。 */
@@ -538,7 +541,7 @@ function makeZaiQuota(snapshots: QuotaSnapshot[]): ReportQuota | null {
 }
 
 function makeRateLimitQuota(
-  id: "codex" | "claude",
+  id: "codex" | "claude" | "kimi",
   rateLimits: {
     primary_pct: number | null;
     primary_reset_at: number | null;
@@ -719,6 +722,21 @@ export function ReportPanel({
       agentVisibility.cursor && wantLocal
         ? safe(() => fetchCursorUsage(fromMs, toMs))
         : Promise.resolve(null);
+    // Kimi 首期无远端同步，只读本机快照（未安装时 safe 兜底为 null）
+    const localKimiPromise: Promise<LoadedSource | null> =
+      agentVisibility.kimi && wantLocal
+        ? safe(async () => {
+            const snapshot: KimiSnapshot = await fetchKimiUsage(
+              fromMs,
+              toMs,
+              bucket
+            );
+            return {
+              source: { stats: snapshot.stats, trend: snapshot.trend },
+              quota: makeRateLimitQuota("kimi", snapshot.rate_limits),
+            };
+          })
+        : Promise.resolve(null);
 
     const remoteOptions = (source: string) =>
       deviceFilter === "all"
@@ -772,6 +790,7 @@ export function ReportPanel({
         localCodex,
         localClaude,
         localCursor,
+        localKimi,
         remoteZai,
         remoteCodex,
         remoteClaude,
@@ -783,6 +802,7 @@ export function ReportPanel({
         localCodexPromise,
         localClaudePromise,
         localCursorPromise,
+        localKimiPromise,
         remoteZaiPromise,
         remoteCodexPromise,
         remoteClaudePromise,
@@ -815,6 +835,8 @@ export function ReportPanel({
       addSourceAgent("zai", localZai, remoteZai);
       addSourceAgent("codex", localCodex?.source ?? null, remoteCodex);
       addSourceAgent("claude", localClaude?.source ?? null, remoteClaude);
+      // Kimi 无远端来源，只合并本机数据
+      addSourceAgent("kimi", localKimi?.source ?? null, null);
       const cursorAgent =
         agentVisibility.cursor && localCursor
           ? makeCursorAgent(localCursor, fromMs, toMs, fxRate)
@@ -866,6 +888,9 @@ export function ReportPanel({
       }
       if (agentVisibility.claude && localClaude?.quota) {
         agentQuotas.push(localClaude.quota);
+      }
+      if (agentVisibility.kimi && localKimi?.quota) {
+        agentQuotas.push(localKimi.quota);
       }
       if (agentVisibility.cursor && localCursor) {
         const cursorQuota = makeCursorQuota(localCursor);

@@ -6,6 +6,7 @@ mod claude;
 mod codex;
 mod cursor;
 mod db;
+mod kimi;
 mod pricing;
 mod quota;
 mod quota_history;
@@ -121,7 +122,7 @@ async fn get_stats(req: StatsRequest) -> Result<db::Stats, String> {
 }
 
 /// list_models：列出所有出现过的模型，价格设置页的配价表单数据源。
-/// 来源 = 本地 ZCode 库 ∪ Codex 导入库 ∪ Claude 导入库 ∪ 远端同步的全部设备模型
+/// 来源 = 本地 ZCode 库 ∪ Codex 导入库 ∪ Claude 导入库 ∪ Kimi 导入库 ∪ 远端同步的全部设备模型
 /// （让"其他设备在用、本机没有"的模型也能直接配价并参与价格更新检查）。
 /// 按 (provider_id, model_id) 去重、按 model_id 排序。
 /// 远端清单带 5 分钟缓存、失败静默降级为空；远端 HTTP 不能跑在主线程，
@@ -129,10 +130,11 @@ async fn get_stats(req: StatsRequest) -> Result<db::Stats, String> {
 #[tauri::command]
 async fn list_models() -> Result<Vec<db::ModelInfo>, String> {
     tauri::async_runtime::spawn_blocking(|| {
-        // zcode 本地库是主数据源，失败照常报错；codex/claude/远端为增量来源，静默降级
+        // zcode 本地库是主数据源，失败照常报错；codex/claude/kimi/远端为增量来源，静默降级
         let zcode = db::list_models()?;
         let codex_models = codex::list_models().unwrap_or_default();
         let claude_models = claude::list_models().unwrap_or_default();
+        let kimi_models = kimi::list_models().unwrap_or_default();
         let remote = sync::remote_models_cached()
             .into_iter()
             .map(|m| db::ModelInfo {
@@ -145,7 +147,7 @@ async fn list_models() -> Result<Vec<db::ModelInfo>, String> {
                 model_id: m.model_id,
             })
             .collect();
-        Ok(merge_model_lists(vec![zcode, codex_models, claude_models, remote]))
+        Ok(merge_model_lists(vec![zcode, codex_models, claude_models, kimi_models, remote]))
     })
     .await
     .map_err(|e| format!("模型列表查询任务失败: {e}"))?
@@ -216,6 +218,12 @@ async fn check_pricing_updates() -> Result<pricing::PricingDiff, String> {
         }
         // Claude 导入库同上
         if let Ok(models) = claude::list_models() {
+            models.into_iter().for_each(|m| {
+                relevant.insert(m.model_id);
+            });
+        }
+        // Kimi 导入库同上
+        if let Ok(models) = kimi::list_models() {
             models.into_iter().for_each(|m| {
                 relevant.insert(m.model_id);
             });
@@ -491,7 +499,7 @@ async fn get_compare_tokens(
 }
 
 /// 按 Agent 和指定周期聚合 Token。
-/// source: zai / codex / claude / cursor；周期区间统一使用 [reset_at, end_at)。
+/// source: zai / codex / claude / kimi / cursor；周期区间统一使用 [reset_at, end_at)。
 #[tauri::command]
 async fn get_compare_tokens_for_agent(
     source: String,
@@ -502,6 +510,7 @@ async fn get_compare_tokens_for_agent(
             "zai" => db::query_period_buckets(&periods),
             "codex" => codex::query_period_buckets(&periods),
             "claude" => claude::query_period_buckets(&periods),
+            "kimi" => kimi::query_period_buckets(&periods),
             "cursor" => {
                 let from_ms = periods.iter().map(|(from, _)| *from).min().unwrap_or(0);
                 let to_ms = periods.iter().map(|(_, to)| *to).max().unwrap_or(0);
@@ -794,6 +803,117 @@ async fn get_claude_debug() -> Result<claude::ClaudeDebugInfo, String> {
     tauri::async_runtime::spawn_blocking(claude::debug_info)
         .await
         .map_err(|e| format!("Claude 诊断任务失败: {e}"))?
+}
+
+// ===== Kimi 用量统计 =====
+
+/// get_kimi_usage 的入参：时间范围 + 分桶粒度（"hour" | "day"）
+#[derive(Debug, Deserialize)]
+struct KimiUsageRequest {
+    from_ms: i64,
+    to_ms: i64,
+    bucket: String,
+}
+
+/// get_kimi_usage 返回的 Kimi 快照：
+/// 本地导入库统计 + 趋势（含花费，与 get_trend 同款计算）+ 实时订阅额度。
+/// 额度失败（未配置凭据/网络不通）不阻断 stats/trend，中文原因单独返回。
+#[derive(Debug, Serialize)]
+struct KimiSnapshot {
+    stats: db::Stats,
+    trend: Vec<TrendBucket>,
+    rate_limits: Option<kimi::KimiRateLimits>,
+    /// 额度获取失败的中文原因（额度块不展示，用量统计不受影响）
+    rate_limits_error: Option<String>,
+}
+
+/// 拉取 Kimi 用量快照（本地 wire.jsonl 增量导入 + 聚合查询）。
+/// async + spawn_blocking：与 get_claude_usage 同款卸载到阻塞线程池。
+/// 额度只有实时来源（会话文件无 rate_limits）：usages 端点失败（未配置
+/// API Key/未登录 CLI/网络不通）降级为 rate_limits=None + 中文错误说明。
+#[tauri::command]
+async fn get_kimi_usage(req: KimiUsageRequest) -> Result<KimiSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let stats = kimi::query_stats(req.from_ms, req.to_ms)?;
+        let buckets = kimi::query_trend(req.from_ms, req.to_ms, &req.bucket)?;
+        let pricing = load_pricing().unwrap_or_default();
+
+        let live_rate_limits = kimi::fetch_live_rate_limits_with_freshness();
+        let (rate_limits, rate_limits_error) = match &live_rate_limits {
+            Ok((live, _)) => (live.clone(), None),
+            Err(e) => (None, Some(e.clone())),
+        };
+        // 只有实时接口成功返回的新鲜值才写入历史（缓存命中不重复采样）；
+        // booster 余额是充值余量而非周期额度，不进历史采样
+        if let Ok((Some(live), true)) = live_rate_limits {
+            let mut windows = Vec::new();
+            if let Some(used_pct) = live.primary_pct {
+                windows.push(agent_quota_history::AgentQuotaWindow {
+                    key: "hour5".into(),
+                    used_pct,
+                    reset_at: live.primary_reset_at,
+                });
+            }
+            if let Some(used_pct) = live.secondary_pct {
+                windows.push(agent_quota_history::AgentQuotaWindow {
+                    key: "weekly".into(),
+                    used_pct,
+                    reset_at: live.secondary_reset_at,
+                });
+            }
+            append_agent_quota_snapshot("kimi", live.plan_type.clone(), windows);
+        }
+
+        // 花费计算与 get_trend 完全同款：桶内按模型聚合后用 cost_for 求和。
+        // 只存美元价：人民币花费 = 美元花费 × 当前汇率（实时折算）
+        let fx = load_fx_rate();
+        let trend = buckets
+            .into_iter()
+            .map(|b| {
+                let cost_usd = b
+                    .by_model
+                    .iter()
+                    .map(|m| cost_for(m, &pricing.usd))
+                    .sum::<f64>();
+                TrendBucket {
+                    label: b.label,
+                    total_tokens: b.total_tokens,
+                    requests: b.requests,
+                    cost_cny: cost_usd * fx,
+                    cost_usd,
+                }
+            })
+            .collect();
+
+        Ok(KimiSnapshot {
+            stats,
+            trend,
+            rate_limits,
+            rate_limits_error,
+        })
+    })
+    .await
+    .map_err(|e| format!("Kimi 查询任务失败: {e}"))?
+}
+
+/// 诊断 Kimi 数据导入（排查"暂无数据"问题）
+#[tauri::command]
+async fn get_kimi_debug() -> Result<kimi::KimiDebugInfo, String> {
+    tauri::async_runtime::spawn_blocking(kimi::debug_info)
+        .await
+        .map_err(|e| format!("Kimi 诊断任务失败: {e}"))?
+}
+
+/// 读取 Kimi 配置
+#[tauri::command]
+fn get_kimi_config() -> Result<kimi::KimiConfig, String> {
+    kimi::load_kimi_config()
+}
+
+/// 保存 Kimi 配置
+#[tauri::command]
+fn set_kimi_config(config: kimi::KimiConfig) -> Result<(), String> {
+    kimi::save_kimi_config(&config)
 }
 
 fn append_agent_quota_snapshot(
@@ -1490,6 +1610,16 @@ fn today_tray_title(app: &AppHandle) -> String {
             .sum::<f64>();
     }
 
+    // Kimi：合并今日用量（本地导入库；未安装/失败静默降级，同上）
+    if let Ok(stats) = kimi::query_stats(today_start, now_ms) {
+        total += stats.overall.total_tokens;
+        cost += stats
+            .by_model
+            .iter()
+            .map(|m| cost_for(m, &pricing.usd))
+            .sum::<f64>();
+    }
+
     let _ = app; // 占位
     let sym = if is_usd { "$" } else { "¥" };
     if total > 0 {
@@ -1864,6 +1994,10 @@ pub fn run() {
             get_codex_debug,
             get_claude_usage,
             get_claude_debug,
+            get_kimi_usage,
+            get_kimi_debug,
+            get_kimi_config,
+            set_kimi_config,
             list_accounts,
             capture_account,
             switch_account,

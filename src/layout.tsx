@@ -183,7 +183,7 @@ export function HeroMetric({
 }: {
   label: string;
   value: string;
-  accent?: "sky" | "emerald" | "orange" | "violet";
+  accent?: "sky" | "emerald" | "orange" | "violet" | "indigo";
   badge?: ReactNode;
   footer?: ReactNode;
 }) {
@@ -192,12 +192,14 @@ export function HeroMetric({
     emerald: "hero-emerald",
     orange: "hero-orange",
     violet: "hero-violet",
+    indigo: "hero-indigo",
   };
   const valueColor = {
     sky: "text-sky-600",
     emerald: "text-emerald-600",
     orange: "text-orange-600",
     violet: "text-violet-600",
+    indigo: "text-indigo-600",
   };
   return (
     <div className={`${accentMap[accent]} rounded-2xl px-3.5 py-3`}>
@@ -270,13 +272,14 @@ export function SortToggle<T extends string>({
   options: { key: T; label: string }[];
   value: T;
   onChange: (v: T) => void;
-  accent?: "sky" | "emerald" | "orange" | "violet";
+  accent?: "sky" | "emerald" | "orange" | "violet" | "indigo";
 }) {
   const activeClass = {
     sky: "bg-sky-500/15 text-sky-700 font-medium",
     emerald: "bg-emerald-500/15 text-emerald-700 font-medium",
     orange: "bg-orange-500/15 text-orange-700 font-medium",
     violet: "bg-violet-500/15 text-violet-700 font-medium",
+    indigo: "bg-indigo-500/15 text-indigo-700 font-medium",
   };
   return (
     <div className="flex gap-0.5 p-0.5 rounded-lg bg-slate-900/4">

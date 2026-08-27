@@ -42,6 +42,12 @@ export const stats = {
   "stats.claudeNotFound": "未检测到 Claude Code",
   "stats.claudeNotFoundHint":
     "请安装并使用 Anthropic Claude Code 产生本地会话记录\n（~/.claude/projects）后再查看",
+  "stats.kimiNotFound": "未检测到 Kimi Code",
+  "stats.kimiNotFoundHint":
+    "请安装并使用 Kimi Code CLI 产生本地会话记录\n（~/.kimi-code/sessions）后再查看",
+  "stats.boosterBalance": "加油包余额",
+  "stats.boosterMonthlyUsed": "本月已用 ¥{amount}",
+  "stats.kimiMonthlyQuota": "月总额度",
 
   // ===== Cursor 面板 =====
   "cursor.notLoggedIn": "未检测到 Cursor 登录",

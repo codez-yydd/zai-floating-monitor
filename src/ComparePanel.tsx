@@ -45,7 +45,7 @@ interface Props {
   agentVisibility: AgentVisibility;
 }
 
-const COMPARE_AGENTS: AgentId[] = ["zai", "codex", "claude", "cursor"];
+const COMPARE_AGENTS: AgentId[] = ["zai", "codex", "claude", "cursor", "kimi"];
 const AGENT_META: Record<
   AgentId,
   { label: string; brand: BrandIconName; remoteSource?: string }
@@ -54,6 +54,7 @@ const AGENT_META: Record<
   codex: { label: "Codex", brand: "codex", remoteSource: "codex" },
   claude: { label: "Claude", brand: "claude", remoteSource: "claude" },
   cursor: { label: "Cursor", brand: "cursor" },
+  kimi: { label: "Kimi", brand: "kimi" },
 };
 
 /** 各 Agent 参与对比的周额度窗口（Z.ai 走 QuotaSnapshot.weekly_pct，不走这里） */
@@ -61,6 +62,7 @@ const AGENT_WINDOW_KEY: Partial<Record<AgentId, AgentQuotaWindowKey>> = {
   codex: "weekly",
   claude: "weekly",
   cursor: "cursor_auto",
+  kimi: "weekly",
 };
 
 const DAY_MS = 86_400_000;
@@ -443,7 +445,7 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
       if (wantRemote && syncConfig) {
         for (const agent of enabledAgents) {
           const source = AGENT_META[agent].remoteSource;
-          if (!source) continue; // Cursor 目前只采集本机，未上传到同步服务
+          if (!source) continue; // Cursor / Kimi 目前只采集本机，未上传到同步服务
           const usageOpts =
             deviceFilter === "all"
               ? { excludeDevice: syncConfig.device_id, source }

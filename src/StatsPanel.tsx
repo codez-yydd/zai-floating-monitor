@@ -10,6 +10,7 @@ import { ZaiStatsContent } from "./ZaiStatsContent";
 import { CodexPanel } from "./CodexPanel";
 import { ClaudePanel } from "./ClaudePanel";
 import { CursorPanel } from "./CursorPanel";
+import { KimiPanel } from "./KimiPanel";
 import { SummaryTab } from "./SummaryTab";
 import { BrandIcon, type BrandIconName } from "./BrandIcon";
 import {
@@ -39,7 +40,8 @@ function loadStatsTab(agentVisibility: AgentVisibility): StatsTab {
       saved === "zai" ||
       saved === "codex" ||
       saved === "claude" ||
-      saved === "cursor"
+      saved === "cursor" ||
+      saved === "kimi"
     ) {
       return agentVisibility[saved] ? saved : "summary";
     }
@@ -86,6 +88,8 @@ export function StatsPanel({
     claudeError,
     cursor,
     cursorError,
+    kimi,
+    kimiError,
     fxRate,
     syncConfig,
     remoteDevices,
@@ -298,6 +302,7 @@ export function StatsPanel({
                 cursor: "bg-violet-500/12 text-violet-700 shadow-sm",
                 claude: "bg-orange-500/12 text-orange-700 shadow-sm",
                 codex: "bg-emerald-500/12 text-emerald-700 shadow-sm",
+                kimi: "bg-indigo-500/12 text-indigo-700 shadow-sm",
                 zai: "bg-sky-500/12 text-sky-700 shadow-sm",
                 summary: "bg-sky-500/15 text-sky-700 shadow-sm",
               };
@@ -376,6 +381,17 @@ export function StatsPanel({
           autoQuotaDelta={agentQuotaDeltas.cursor?.cursor_auto}
           apiQuotaDelta={agentQuotaDeltas.cursor?.cursor_api}
         />
+      ) : tab === "kimi" ? (
+        <KimiPanel
+          snapshot={kimi}
+          loading={!kimi && !kimiError}
+          error={kimiError}
+          currency={currency}
+          fxRate={fxRate}
+          trendBucket={trendBucket}
+          pricing={pricing}
+          agentQuotaDelta={agentQuotaDeltas.kimi?.weekly}
+        />
       ) : (
         <SummaryTab
           stats={stats}
@@ -384,6 +400,7 @@ export function StatsPanel({
           codex={codex}
           claude={claude}
           cursor={cursor}
+          kimi={kimi}
           currency={currency}
           bucket={trendBucket}
           fxRate={fxRate}
