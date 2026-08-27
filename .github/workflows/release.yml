@@ -147,7 +147,7 @@ jobs:
           gh release view "v$VERSION" >/dev/null 2>&1 && gh release delete "v$VERSION" --yes || true
           gh release create "v$VERSION" out/* \
             --title "ZBar v$VERSION" \
-            --notes "ZBar v$VERSION：修复模型用量统计重复行——仅大小写不同（如 GLM-5.3-flash 与 GLM-5.3-Flash）、含不可见字符或 provider 不同的同名模型，现在合并为一行统计，悬浮模型名可查看被合并的原始写法与请求份额；修复模型名书写差异导致价格表误报无价格 ⚠ 的问题，价格设置页模型列表同步按归一化名称去重。" \
+            --notes "ZBar v0.6.0：新增 Kimi Code 数据源——自动解析本机 Kimi 会话统计模型用量与 Token 明细、输出速度；已登录 CLI 自动探测凭据并后台续期，实时拉取订阅额度（5 小时窗口 / 周期额度进度条、加油包余额、官方会员档位名）；汇总页自动隐藏零消耗的 Agent 卡片，来源计数与花费列表保持一致。" \
             --latest
 
       - name: 发布 Gitee 更新源（固定 tag latest）
