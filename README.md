@@ -41,13 +41,14 @@
 - **🖥 Cursor 用量统计** — 自动读取本机 Cursor 应用的登录凭据，统计 Pro / Auto / API 套餐额度与 Token 花费明细，美元花费按汇率折算后并入汇总视图。
 - **🟢 Codex 用量统计** — 解析本机 `~/.codex/sessions` 会话记录统计 Token 用量与花费；ChatGPT 订阅登录的机器上还可实时拉取 **5 小时 / 每周**额度进度条（API 中转模式自动隐藏额度块）。
 - **🟠 Claude 用量统计** — 解析本机 `~/.claude/projects` 会话记录统计 Token 用量与花费（含子代理会话，按 message 去重防重复计数）；claude.ai 订阅登录的机器上实时拉取 **5 小时会话 / 每周**额度（第三方中转模式自动隐藏额度块）。
+- **🌙 Kimi 用量统计** — 解析本机 `~/.kimi-code/sessions` 会话记录（`wire.jsonl`）统计 Token 用量、花费与 **Token 输出速度**；已登录 Kimi Code CLI 的机器上自动探测本地凭据（OAuth 过期时后台自动续期，无需配置），实时拉取订阅额度：**5 小时滚动窗口 / 周期额度**进度条与重置倒计时、加油包余额、官方会员档位名；也可在设置中手动配置 Kimi API Key。
 - **💱 汇率自动更新** — USD→CNY 汇率默认每日自动联网更新（也可改为手动填写），用于各服务的美元花费折算与人民币参考价换算。
-- **🧭 多服务汇总视图** — 「汇总 / Z.ai / Codex / Claude / Cursor」标签切换：多服务合计花费与 Token、订阅额度卡片、分时趋势图与模型排行。
+- **🧭 多服务汇总视图** — 「汇总 / Z.ai / Codex / Claude / Cursor / Kimi」标签切换：多服务合计花费与 Token、订阅额度卡片、分时趋势图与模型排行。
 - **⌨️ 全局快捷键** — 默认 `alt+shift+z` 唤起 / 隐藏面板，可在设置中自定义或停用。
 - **📈 周额度对比** — 基于本地额度快照（90 天滚动保留）对比每个重置周期的额度用量，支持跨设备合并。
 - **📝 日报 / 周报** — 一键生成 Markdown 日报（今日）/ 周报（近 7 天）并保存到本地。
 - **🔄 多设备同步** — 自托管同步服务（`server/`），让公司 / 家里等多台电脑汇总查看全量用量。明细增量上传 + `(device, rowid)` 去重，支持**设备筛选**（全部 / 本机 / 指定设备）和**数据清理**（按设备 / 按时间 / 全清 + 可配置自动定时清理）。详见 [server/README.md](./server/README.md)。
-- **⚡ 速度与首字延迟** — 基于调用耗时统计**平均输出速度（tok/s）**与**首字延迟（TTFT）**，含噪声过滤口径（整块下发识别、计时异常剔除）。ZCode / Claude 面板可用（Codex / Cursor 数据源无耗时字段，自动隐藏）。
+- **⚡ 速度与首字延迟** — 基于调用耗时统计**平均输出速度（tok/s）**与**首字延迟（TTFT）**，含噪声过滤口径（整块下发识别、计时异常剔除）。ZCode / Claude 面板可用；Kimi 面板可用 TPS（由请求耗时推算的输出速度口径、无 TTFT，首字延迟与 Claude 一样隐藏）；Codex / Cursor 数据源无耗时字段，自动隐藏。
 - **🎯 当前模型** — 各 Agent 面板显示「当前模型」（口径：最近一次调用使用的模型 + 相对时间），汇总页各服务分组同步展示。
 - **⬆️ 应用内自动更新** — 设置 →「关于与更新」检查 / 下载 / 静默安装新版本，更新源 **GitHub / Gitee 双仓库自动降级**，更新包签名校验；启动静默检查，有新版时设置入口亮红点。
 
@@ -77,6 +78,7 @@ zai-floating-monitor/
 │   ├── AgentUsagePanel.tsx   # 单 CLI Agent 通用用量面板（Codex / Claude 共用）
 │   ├── CodexPanel.tsx        # Codex 视图（AgentUsagePanel 品牌皮肤）
 │   ├── ClaudePanel.tsx       # Claude 视图（AgentUsagePanel 品牌皮肤）
+│   ├── KimiPanel.tsx         # Kimi 视图（AgentUsagePanel 品牌皮肤）
 │   ├── PricingPanel.tsx      # 价格配置面板
 │   ├── SettingsPanel.tsx     # 设置页（透明度 / 语言 / 开机自启 / 数据来源 / 汇率 / 快捷键）
 │   ├── QuotaPanel.tsx        # Coding Plan 额度监控
@@ -98,6 +100,7 @@ zai-floating-monitor/
 │   │   ├── cursor.rs         # Cursor 用量统计（自动凭据 / Cookie / API）
 │   │   ├── codex.rs          # Codex 用量统计（sessions 解析 + 实时订阅额度）
 │   │   ├── claude.rs         # Claude 用量统计（projects 解析 + OAuth 实时额度）
+│   │   ├── kimi.rs           # Kimi Code 用量统计（wire.jsonl 解析 + OAuth 内存续期额度）
 │   │   ├── shortcut.rs       # 全局快捷键配置
 │   │   ├── sync.rs           # 多设备同步（配置 / 增量上传 / 远端查询 / 清理）
 │   │   └── main.rs
@@ -258,6 +261,10 @@ ZBar 以 **只读** 方式访问 ZCode 的 SQLite 数据库，不会干扰 ZCode
 自动读取本机 Cursor 应用的本地登录凭据（需已安装并登录 Cursor），无需配置。
 
 **汇率**（设置 → 汇率）：USD→CNY 默认每日自动联网更新，也可取消勾选后手动填写；各服务的美元花费按此汇率折算成人民币。配置保存在 `~/.zbar/cursor.json`（仅存于本机）。
+
+### Kimi 统计
+
+解析本机 `~/.kimi-code/sessions` 会话记录（`wire.jsonl`）统计用量与速度，前置条件是已安装并登录 Kimi Code CLI 且产生过本地会话；订阅额度接口通过本地凭据自动拉取（OAuth 过期时后台自动续期，无需配置），也可在设置中手动配置 Kimi API Key。
 
 ### 周额度对比与报表
 

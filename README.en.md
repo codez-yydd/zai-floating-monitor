@@ -39,13 +39,14 @@ A lightweight menu-bar floating panel that tracks the Token usage and cost of th
 - **Auto refresh** — panel data is re-fetched every 30 seconds.
 - **Coding Plan quota monitor** — subscribers can view the **5-hour window**, **weekly quota** and **MCP monthly quota** progress bars at the top of the panel; the color escalates with usage (green → amber → red) and shows a reset countdown. Credentials and the API endpoint are read **automatically** from the local ZCode client's signed-in state (`~/.zcode/v2/config.json`) — zero configuration.
 - **🖥 Cursor usage stats** — reads the local Cursor app's login credentials automatically; tracks Pro / Auto / API plan quotas and per-model token costs, with USD costs converted at the FX rate and merged into the summary view.
+- **🌙 Kimi usage stats** — parses local `~/.kimi-code/sessions` session records (`wire.jsonl`) to tally token usage, cost and **token output speed (TPS)**; on machines signed in to the Kimi Code CLI, local credentials are detected automatically (OAuth expiry renewed in the background — no configuration needed) to fetch subscription quotas live: **5-hour rolling window / cycle quota** progress bars with reset countdowns, booster wallet balance and official membership tier name; a Kimi API Key can also be configured manually in settings.
 - **💱 Auto FX rate** — the USD→CNY rate is refreshed online daily by default (manual input supported); used to convert USD costs across services and for CNY reference prices.
-- **🧭 Multi-service summary view** — summary / Z.ai / Cursor tabs: total cost & tokens across services, subscription quota cards, hourly trend chart and model ranking.
+- **🧭 Multi-service summary view** — summary / Z.ai / Cursor / Kimi tabs: total cost & tokens across services, subscription quota cards, hourly trend chart and model ranking.
 - **⌨️ Global hotkey** — summon / hide the panel with `alt+shift+z` by default; customizable or disable-able in settings.
 - **📈 Weekly quota compare** — compare quota usage across reset cycles based on local quota snapshots (90-day rolling retention), with cross-device merge.
 - **📝 Daily / weekly reports** — one-click Markdown report (daily = today, weekly = last 7 days) saved locally.
 - **🔄 Multi-device sync** — self-hosted sync server (`server/`) to aggregate usage across machines (office / home). Incremental detail upload + `(device, rowid)` dedup, with **device filtering** (all / local / specific device) and **data cleanup** (by device / by time / all + configurable auto cleanup). See [server/README.md](./server/README.md).
-- **⚡ Speed & TTFT** — average output speed (tok/s) and first-token latency (TTFT) from per-call durations, with noise filtering (whole-block delivery detection, timing-outlier rejection). Available on ZCode / Claude panels (Codex / Cursor data sources carry no duration; columns auto-hide).
+- **⚡ Speed & TTFT** — average output speed (tok/s) and first-token latency (TTFT) from per-call durations, with noise filtering (whole-block delivery detection, timing-outlier rejection). Available on ZCode / Claude / Kimi panels (Kimi's tok/s is a TPS estimate derived from request durations with no TTFT, so first-token latency is hidden there just like Claude; Codex / Cursor data sources carry no duration and auto-hide these columns).
 - **🎯 Current model** — each agent panel shows the "current model" (latest model actually used + relative time); the summary page shows it per service group.
 - **⬆️ In-app auto update** — Settings → "About & update" to check / download / silently install new versions; endpoints fall back between **GitHub and Gitee** automatically, packages are signature-verified, and a silent startup check lights a red dot on the settings entry when a new version is available.
 
@@ -72,6 +73,7 @@ zai-floating-monitor/
 │   ├── StatsPanel.tsx        # Stats panel (device filter + local/remote merge)
 │   ├── SummaryTab.tsx        # Summary view (multi-service totals / trend / model ranking)
 │   ├── CursorPanel.tsx       # Cursor view (quotas + usage stats)
+│   ├── KimiPanel.tsx         # Kimi view (quotas + usage stats)
 │   ├── PricingPanel.tsx      # Pricing config panel
 │   ├── SettingsPanel.tsx     # Settings page (opacity / language / autostart / sources / FX rate / hotkey)
 │   ├── QuotaPanel.tsx        # Coding Plan quota monitor
@@ -91,6 +93,7 @@ zai-floating-monitor/
 │   │   ├── quota.rs          # Coding Plan quota queries (auto ZCode-client credentials; 5h / weekly / MCP)
 │   │   ├── quota_history.rs  # Quota snapshot history (JSONL, 90-day retention)
 │   │   ├── cursor.rs         # Cursor usage stats (auto credentials / cookie / API)
+│   │   ├── kimi.rs           # Kimi Code usage stats (wire.jsonl parsing + OAuth in-memory renewal for live quotas)
 │   │   ├── shortcut.rs       # Global hotkey config
 │   │   ├── sync.rs           # Multi-device sync (config / incremental upload / cleanup)
 │   │   └── main.rs
@@ -250,6 +253,10 @@ Summon / hide the panel with `alt+shift+z` by default; change or disable it unde
 Reads the local Cursor app's login credentials automatically (Cursor must be installed and signed in) — no configuration needed.
 
 **FX rate** (Settings → FX rate): USD→CNY refreshed online daily by default, or entered manually; USD costs across services are converted to CNY at this rate. The config is stored at `~/.zbar/cursor.json` (locally only).
+
+### Kimi Stats
+
+Parses local `~/.kimi-code/sessions` session records (`wire.jsonl`). Prerequisite: the Kimi Code CLI is installed, signed in, and has produced local sessions. Subscription quotas are fetched live via the locally detected credentials (renewed automatically in the background when OAuth expires), or you can configure a Kimi API Key manually in settings.
 
 ### Weekly Compare & Reports
 
