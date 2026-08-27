@@ -101,6 +101,8 @@ interface AgentSummary {
   badgeClass: string;
   cost: number;
   tokens: number;
+  /** 数据源已有结论（快照到达或确认报错）为 true，加载中为 false；用于隐藏零消耗卡片 */
+  loaded: boolean;
   /** 最近使用的模型（额度区标题行展示） */
   currentModel?: CurrentModel | null;
   /** 平均输出速度 tok/s（数据源带耗时的 Agent 才有：ZCode/Claude） */
@@ -543,6 +545,8 @@ export function SummaryTab({
     todayDelta,
     codexError,
     claudeError,
+    cursorError,
+    error: zaiError,
     agentQuotaDeltas,
     accountQuotas,
   } = useDataCache();
@@ -718,6 +722,8 @@ export function SummaryTab({
       badgeClass: "bg-sky-500/12 text-sky-700",
       cost: zaiCost,
       tokens: zaiTokens,
+      // null = 加载中或加载失败终态；有结论（数据或错误）即视为已加载
+      loaded: stats != null || zaiError != null,
       currentModel: stats?.current_model ?? null,
       avgTps: stats?.overall.avg_tps ?? null,
       avgTtftMs: stats?.overall.avg_ttft_ms ?? null,
@@ -735,6 +741,8 @@ export function SummaryTab({
       badgeClass: "bg-emerald-500/12 text-emerald-700",
       cost: codexCostRaw,
       tokens: codexTokens,
+      // 有 error 说明已确认未安装/失败，允许被隐藏
+      loaded: codex != null || codexError != null,
       currentModel: codex?.stats.current_model ?? null,
       avgTps: codex?.stats.overall.avg_tps ?? null,
       cacheHitPct: codexCacheHitPct,
@@ -751,6 +759,8 @@ export function SummaryTab({
       badgeClass: "bg-orange-500/12 text-orange-700 capitalize",
       cost: claudeCostRaw,
       tokens: claudeTokens,
+      // 有 error 说明已确认未安装/失败，允许被隐藏
+      loaded: claude != null || claudeError != null,
       currentModel: claude?.stats.current_model ?? null,
       avgTps: claude?.stats.overall.avg_tps ?? null,
       cacheHitPct: claudeCacheHitPct,
@@ -767,6 +777,8 @@ export function SummaryTab({
       badgeClass: "bg-violet-500/12 text-violet-700 capitalize",
       cost: cursorCost,
       tokens: cursorTokens,
+      // 有 error 说明已确认未配置/未登录/加载失败，允许被隐藏
+      loaded: cursor != null || cursorError != null,
       currentModel: cursor?.current_model ?? null,
       cacheHitPct: cursorCacheHitPct,
       metrics: cursorMetrics,
@@ -779,6 +791,11 @@ export function SummaryTab({
   ];
 
   const agents = allAgents.filter((agent) => agentVisibility[agent.id]);
+  // 花费卡片只展示"加载中或有实际消耗"的 agent：已加载完成且 cost/tokens 双零的没有参考价值。
+  // tokens>0 但 cost=0（缺价格）的必须保留。
+  const activeAgents = agents.filter(
+    (a) => !a.loaded || a.cost > 0 || a.tokens > 0
+  );
   const totalCost = agents.reduce((s, a) => s + a.cost, 0);
   const totalTokens = agents.reduce((s, a) => s + a.tokens, 0);
 
@@ -890,7 +907,7 @@ export function SummaryTab({
         accent="sky"
         badge={
           <StatusBadge color="emerald">
-            {t("summary.sources", { count: agents.length })}
+            {t("summary.sources", { count: activeAgents.length })}
           </StatusBadge>
         }
         footer={
@@ -901,9 +918,9 @@ export function SummaryTab({
         }
       />
 
-      {agents.length > 0 && (
+      {activeAgents.length > 0 && (
         <div className="flex flex-col gap-1.5 shrink-0">
-          {agents.map((a) => (
+          {activeAgents.map((a) => (
             <AgentCostCard
               key={a.id}
               agent={a}
