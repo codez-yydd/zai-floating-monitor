@@ -12,7 +12,7 @@
 
 use crate::agent_theme::store::ThemeParams;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// 注入块起止标记（head 与 body 两处各一个块，剥离时全部移除）
 pub const INJECT_BEGIN: &str = "<!--ZBAR-THEME-BEGIN-->";
@@ -27,9 +27,18 @@ pub const INJECT_END: &str = "<!--ZBAR-THEME-END-->";
 /// 旧版本文件由 ensure_theme_assets 自动覆盖升级；已是当前版本的文件
 /// （可能被实机调优过）不会被覆盖。
 pub const THEME_CSS: &str = r#"/* ============================================================
- * ZBAR-THEME-V10
+ * ZBAR-THEME-V11
  * ZBar Agent 动态壁纸主题样式（由 ZBar 落盘并随版本升级覆盖）
  * ============================================================
+ * V11 变更（透出 Windows 端全视口应用壳容器）：Windows 实机
+ * （ZCode 3.10.1.6272 / Electron 41）确认应用壳的全视口 flex 容器
+ * （div.flex.h-dvh.flex-col.overflow-hidden）自带不透明底色
+ * rgb(43 43 43)（浅色主题为对应浅色值），处于普通文档流层，会把
+ * 全部负 z-index 壁纸层（视频 -2 / 压暗遮罩 -1）整体盖住——这是
+ * Windows 端"不透明度等参数生效但壁纸永不显示"的直接原因。规则
+ * 见文件末尾"V11：透出全视口应用壳容器"；macOS 端该容器本就
+ * 透明（或不存在），规则无副作用。
+ *
  * 实机结论（解剖 ZCode 自身样式）：界面容器普遍通过工具类
  * （.bg-background / .bg-panel 等）消费设计 token
  * --color-background / --color-background-alt / --color-panel，
@@ -299,6 +308,14 @@ html.dark [data-pane-id]:not([data-pane-id="workspace-main"]):not([data-pane-id=
 html.dark .side-pane-open-tab-shell {
   text-shadow: 0 0 calc(3px + (var(--zbar-text-shadow, 0) * 5px))
     rgba(0, 0, 0, var(--zbar-text-shadow, 0));
+}
+
+/* ---- V11：透出全视口应用壳容器 ----
+ * 见文件头部 V11 变更说明。该容器铺满整窗且自带不透明底色，
+ * 置透明后负 z-index 的壁纸视频/压暗遮罩层按原设计垫底透出；
+ * 氛围底与面板半透明质感仍由上方既有 token/元素规则负责。 */
+div.flex.h-dvh.flex-col.overflow-hidden {
+  background: transparent !important;
 }
 "#;
 
@@ -623,11 +640,37 @@ pub fn percent_encode_path(path: &str) -> String {
     out
 }
 
-/// 绝对路径 → file:// URL（Unix 形如 file:///Users/…，Windows 形如 file:///C:/…）
+/// 剥离 Windows `Path::canonicalize` 返回的 verbatim 前缀：
+/// `\\?\C:\dir\…` → `C:\dir\…`，`\\?\UNC\server\share\…` → `\\server\share\…`；
+/// 非 Windows 或无前缀时原样返回。canonicalize 的结果统一过一遍，
+/// 避免 verbatim 路径流入 params.json 与 file:// URL（verbatim 斜杠化后
+/// 形如 `//?/C:/…`，Chromium 无法加载）。
+pub(crate) fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let text = path.as_os_str().to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest.to_string());
+        }
+        path
+    }
+    #[cfg(not(windows))]
+    {
+        path
+    }
+}
+
+/// 绝对路径 → file:// URL（Unix 形如 file:///Users/…，Windows 形如 file:///C:/…）。
+/// Windows 分支拼接前剥离可能残留的 `\\?\` verbatim 前缀，兜住历史脏数据。
 pub fn file_url(path: &Path) -> String {
     #[cfg(windows)]
     {
-        let unified = path.to_string_lossy().replace('\\', "/");
+        let unified = strip_verbatim_prefix(path.to_path_buf())
+            .to_string_lossy()
+            .replace('\\', "/");
         format!("file:///{}", percent_encode_path(&unified))
     }
     #[cfg(not(windows))]
@@ -866,6 +909,38 @@ mod tests {
         assert!(url.contains("%E6%88%91%E7%9A%84%E5%A3%81%E7%BA%B8.mp4"));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn verbatim前缀剥离_盘符UNC与无前缀形态() {
+        // 盘符 verbatim：\\?\C:\… → C:\…
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"\\?\C:\Users\z\w.mp4")),
+            PathBuf::from(r"C:\Users\z\w.mp4")
+        );
+        // UNC verbatim：\\?\UNC\srv\share → \\srv\share
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"\\?\UNC\srv\share\w.mp4")),
+            PathBuf::from(r"\\srv\share\w.mp4")
+        );
+        // 无前缀原样返回（普通绝对路径与相对文件名都不受影响）
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"C:\Users\z\w.mp4")),
+            PathBuf::from(r"C:\Users\z\w.mp4")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from("a.mp4")),
+            PathBuf::from("a.mp4")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_url_verbatim路径兜底剥前缀() {
+        // 历史 params.json 存过 \\?\C:\… 形态，重渲时必须自愈为合法 URL
+        let url = file_url(Path::new(r"\\?\C:\Users\z\wp\my wall.mp4"));
+        assert_eq!(url, "file:///C%3A/Users/z/wp/my%20wall.mp4");
+    }
+
     #[test]
     fn variables_css_渲染含全部变量与壁纸地址() {
         let params = ThemeParams::default();
@@ -924,7 +999,7 @@ mod tests {
         // 头部版本标记（store::ensure_versioned_template 的升级判据）：
         // theme.css 升 V10（文字可读性增强 + 氛围底可调），
         // effects.js V5（撤销 theme.css 每秒热重载 + poll 快照空值防御）
-        assert!(THEME_CSS.contains("ZBAR-THEME-V10"));
+        assert!(THEME_CSS.contains("ZBAR-THEME-V11"));
         assert!(!THEME_CSS.contains("ZBAR-THEME-V9"), "版本头应已升到 V10");
         assert!(EFFECTS_JS.contains("ZBAR-THEME-V5"));
         assert!(!EFFECTS_JS.contains("ZBAR-THEME-V4"), "版本头应已升到 V5");

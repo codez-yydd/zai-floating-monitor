@@ -254,9 +254,18 @@ pub fn load_params(app_id: &str) -> ThemeParams {
 }
 
 /// 从指定路径读参数（供单元测试复用）。失败返回 None。
+/// 读取时归一化 wallpaperFile 的 Windows verbatim 前缀：历史版本曾把
+/// canonicalize 产生的 `\\?\C:\…` 原样落盘，渲染成 Chromium 无法加载的
+/// 坏 URL；内存中剥前缀自愈，下一次落盘自然写回干净路径。
 pub(crate) fn read_params_file(path: &Path) -> Option<ThemeParams> {
     let text = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
+    let mut params: ThemeParams = serde_json::from_str(&text).ok()?;
+    if let Some(wp) = &mut params.wallpaper_file {
+        *wp = inject::strip_verbatim_prefix(PathBuf::from(wp.as_str()))
+            .to_string_lossy()
+            .to_string();
+    }
+    Some(params)
 }
 
 /// 保存参数：clamp 后原子性写入（先写临时文件再改名，避免半截 JSON）。
@@ -596,21 +605,28 @@ fn user_wallpaper_dir(dir: &Path) -> Option<PathBuf> {
     if raw.is_empty() {
         return None;
     }
-    Path::new(&raw).canonicalize().ok()
+    Path::new(&raw)
+        .canonicalize()
+        .ok()
+        .map(inject::strip_verbatim_prefix)
 }
 
 /// 壁纸库选择校验：路径必须位于 wallpapers/ 或用户壁纸目录内
 /// （canonicalize 后做前缀比对，防任意路径注入把 variables.css 指向
 /// 敏感文件），且必须是受支持类型的常规文件。
-/// 返回 canonicalize 后的绝对路径（存入 params.wallpaper_file）。
+/// 返回 canonicalize 并剥离 Windows verbatim 前缀的绝对路径
+/// （存入 params.wallpaper_file；verbatim 形态会被渲染成 Chromium
+/// 无法加载的坏 URL）。
 pub(crate) fn resolve_selectable_wallpaper_in(
     dir: &Path,
     wp_dir: &Path,
     raw: &str,
 ) -> Result<PathBuf, String> {
-    let canon = Path::new(raw)
-        .canonicalize()
-        .map_err(|_| format!("壁纸文件不存在：{raw}"))?;
+    let canon = inject::strip_verbatim_prefix(
+        Path::new(raw)
+            .canonicalize()
+            .map_err(|_| format!("壁纸文件不存在：{raw}"))?,
+    );
     if !canon.is_file() {
         return Err(format!("不是壁纸文件：{raw}"));
     }
@@ -619,10 +635,11 @@ pub(crate) fn resolve_selectable_wallpaper_in(
             "仅支持 mp4 / webm / mov 视频与 jpg / jpeg / png / webp 图片".into(),
         );
     }
-    // 白名单根：内置 wallpapers/ 目录 + 用户壁纸目录
+    // 白名单根：内置 wallpapers/ 目录 + 用户壁纸目录（同样剥前缀，
+    // 保证与 canon 的前缀比对口径一致）
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Ok(canon_wp) = wp_dir.canonicalize() {
-        roots.push(canon_wp);
+        roots.push(inject::strip_verbatim_prefix(canon_wp));
     }
     if let Some(user_dir) = user_wallpaper_dir(dir) {
         roots.push(user_dir);
@@ -706,7 +723,7 @@ pub fn set_wallpaper_dir(app_id: &str, dir: Option<String>) -> Result<(), String
 /// 重载窗口；并加空值防御——快照中任一 --zbar-* 变量读到空串视为
 /// 失效窗口，本轮直接返回，防止误判参数变化把滤镜/遮罩/壁纸重置
 /// 为默认值）
-pub const THEME_CSS_VERSION: u32 = 10;
+pub const THEME_CSS_VERSION: u32 = 11;
 pub const EFFECTS_JS_VERSION: u32 = 5;
 
 /// 版本标记的头部查找范围（字符数）：版本注释固定在文件头部，
@@ -1069,8 +1086,8 @@ mod tests {
         assert!(
             fs::read_to_string(dir.join(THEME_CSS))
                 .unwrap()
-                .contains("ZBAR-THEME-V10"),
-            "旧版 theme.css 应被升级覆盖到 V10"
+                .contains("ZBAR-THEME-V11"),
+            "旧版 theme.css 应被升级覆盖到 V11"
         );
         assert!(
             fs::read_to_string(dir.join(EFFECTS_JS))
@@ -1242,7 +1259,9 @@ mod tests {
         let inner = wp_dir.join("inner.mp4");
         select_wallpaper_in(&dir, &wp_dir, &inner.to_string_lossy()).unwrap();
         let params = read_params_file(&dir.join(PARAMS_FILE)).unwrap();
-        let expected_inner = inner.canonicalize().unwrap().to_string_lossy().to_string();
+        let expected_inner = inject::strip_verbatim_prefix(inner.canonicalize().unwrap())
+            .to_string_lossy()
+            .to_string();
         assert_eq!(params.wallpaper_file.as_deref(), Some(expected_inner.as_str()));
         let css = fs::read_to_string(dir.join(VARIABLES_CSS)).unwrap();
         assert!(css.contains("inner.mp4"), "variables.css 应指向选中壁纸：{css}");
