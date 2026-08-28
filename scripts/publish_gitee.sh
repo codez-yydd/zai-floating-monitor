@@ -7,8 +7,11 @@
 # 作为 Gitee 侧发布/补发的主力通道：GitHub Release 由流水线发布，产物
 # 从 GitHub 下载后直传 Gitee。
 #
-# 用法：scripts/publish_gitee.sh <版本号>
+# 用法：scripts/publish_gitee.sh <版本号> [发行说明]
 #   例：scripts/publish_gitee.sh 0.5.0
+#   例：scripts/publish_gitee.sh 0.7.0 "ZBar v0.7.0：新增……"
+#   发行说明（第二个参数）可选，缺省用"自动更新通道"默认文案；
+#   与 GitHub Release 说明保持一致时传入相同文本
 #
 # 令牌来源（按优先级，绝不写入仓库文件）：
 #   1. 环境变量 GITEE_TOKEN
@@ -17,7 +20,7 @@
 # GitHub 下载走代理（默认 http://127.0.0.1:33210，可用 GH_PROXY 覆盖，
 # 置空则直连）；Gitee 始终直连。
 #
-# 流程（与 release.yml 的 Gitee 步骤同款逻辑，幂等可重跑）：
+# 流程（原 release.yml Gitee 步骤的同款逻辑，幂等可重跑）：
 #   下载 GitHub Release 产物 → 删 Gitee 旧 latest release（仅 404 视为
 #   不存在）→ 创建新 release → payload 先传（失败查服务端、已存在跳过、
 #   退避重试）→ 完整性校验 → latest.json 最后提交 → 回读确认
@@ -25,7 +28,10 @@
 set -euo pipefail
 
 VERSION="${1:-}"
-[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "用法: $0 <版本号>，例: $0 0.5.0"; exit 1; }
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "用法: $0 <版本号> [发行说明]，例: $0 0.5.0"; exit 1; }
+# Gitee release 的发行说明：第二个参数可选，缺省沿用默认文案；
+# 与 GitHub Release 说明保持一致时传入相同文本
+RELEASE_BODY="${2:-ZBar v${VERSION} 自动更新通道，保持最新版即可。}"
 
 GH_REPO="codez-yydd/zai-floating-monitor"
 GITEE_REPO="codezwx/zai-floating-monitor"
@@ -108,7 +114,7 @@ echo '[3/4] 创建新 release 并上传附件'
 # 码页（GBK）转码发出，Gitee 报 invalid byte sequence in UTF-8；文件字节直传
 # 三端（macOS/Linux/Git Bash）行为一致，jq 解析兼作 UTF-8 编码自检
 cat > "$WORK/release.json" <<EOF
-{"tag_name":"latest","target_commitish":"master","name":"ZBar v${VERSION}（应用内更新源）","body":"ZBar v${VERSION} 自动更新通道，保持最新版即可。"}
+{"tag_name":"latest","target_commitish":"master","name":"ZBar v${VERSION}（应用内更新源）","body":"${RELEASE_BODY}"}
 EOF
 jq -e . "$WORK/release.json" >/dev/null
 RESP=$(curl -sS --connect-timeout 20 --max-time 120 -w '\n%{http_code}' -X POST "$API?$TOKEN_PARAM" \

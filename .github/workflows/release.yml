@@ -2,15 +2,14 @@
 # ZBar 发布流水线：推 v* tag 触发，云端构建 Windows + macOS 双平台安装包
 #
 # 流程：build（3 平台并行：签名构建 → 上传产物）→ release（生成双源
-# latest.json → GitHub Release → Gitee 固定 tag latest Release）
+# latest.json → GitHub Release）
 #
-# Gitee 发布顺序：程序附件先传 → 服务端完整性校验 → latest.json 最后提交
-# （manifest 后于 payload，保证更新入口发布的瞬间全部更新包已可下载）
+# Gitee 更新源不再由 CI 发布（大文件上传偶发挂起耗尽超时），改由本地
+# scripts/publish_gitee.sh 手动发布，见脚本头说明
 #
 # 仓库 Secrets（Settings → Secrets and variables → Actions）：
 #   TAURI_SIGNING_PRIVATE_KEY          更新签名私钥内容（~/.tauri/zbar-updater.key）
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD 私钥密码（生成时为空可不设置）
-#   GITEE_TOKEN                        Gitee 私人令牌（勾选 projects），缺失时跳过 Gitee 源
 #
 # 本地发布：改好版本号提交后 `git tag v0.2.0 && git push origin v0.2.0`
 # ============================================================================
@@ -104,12 +103,11 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: 发布双仓库
+    name: 发布 GitHub Release
     needs: build
     runs-on: ubuntu-latest
-    # 双仓库发布总限时：Gitee 附件接口偶发挂起，业务级重试下单文件最坏
-    # 可耗 4×(上传超时+查询超时)+退避≈20 分钟，网络持续劣化时 60 分钟可能
-    # 打满；超时整体失败可重跑（发布步骤幂等：双仓库均先删旧再建新），
+    # 发布总限时：只上传 GitHub Release，正常几分钟即可完成；超时整体失败
+    # 可重跑（发布步骤幂等：先删旧 release 再建新），
     # 早失败早重跑优于默认 6h 空等
     timeout-minutes: 60
     steps:
@@ -147,169 +145,7 @@ jobs:
           gh release view "v$VERSION" >/dev/null 2>&1 && gh release delete "v$VERSION" --yes || true
           gh release create "v$VERSION" out/* \
             --title "ZBar v$VERSION" \
-            --notes "ZBar v0.6.0：新增 Kimi Code 数据源——自动解析本机 Kimi 会话统计模型用量与 Token 明细、输出速度；已登录 CLI 自动探测凭据并后台续期，实时拉取订阅额度（5 小时窗口 / 周期额度进度条、加油包余额、官方会员档位名）；汇总页自动隐藏零消耗的 Agent 卡片，来源计数与花费列表保持一致。" \
+            --notes "ZBar v0.7.0：新增 Agent 动态壁纸——面板中一键为 ZCode 桌面端注入视频/图片壁纸：壁纸目录扫描与缩略图预览、拖拽导入、参数实时热生效；对话区/侧栏/右栏三区域独立透明度调节；自动备份官方原包、一键还原与升级检测；内置无缝流光默认壁纸；适配 macOS 与 Windows。" \
             --latest
 
-      - name: 发布 Gitee 更新源（固定 tag latest）
-        env:
-          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-          GITEE_REPO_NAME: codezwx/zai-floating-monitor
-        run: |
-          if [[ -z "${GITEE_TOKEN:-}" ]]; then
-            echo '::warning::未配置 GITEE_TOKEN secret，跳过 Gitee 更新源（配置后重跑本 job 即可补发）'
-            exit 0
-          fi
-          API="https://gitee.com/api/v5/repos/$GITEE_REPO_NAME/releases"
-          TOKEN="access_token=$GITEE_TOKEN"
-
-          command -v jq >/dev/null 2>&1 || { echo '::error::runner 缺少 jq，无法安全解析 JSON'; exit 1; }
-
-          # 删除旧 latest release（tag 复用）。仅 404 视为"确认不存在"；
-          # 查询失败必须中止（重跑可恢复）——若带着旧 release 继续创建，
-          # 可能产生同 tag 双 release 且流水线看似成功，更新源却停留在旧版本
-          OLD_RESP=$(curl -sS --connect-timeout 20 --max-time 60 -w '\n%{http_code}' "$API/tags/latest?$TOKEN") || true
-          OLD_CODE="${OLD_RESP##*$'\n'}"
-          OLD_BODY="${OLD_RESP%$'\n'*}"
-          if [[ "$OLD_CODE" == 404 ]]; then
-            echo '[Gitee] 无旧 latest release（404），跳过删除'
-          elif [[ "$OLD_CODE" == 2* ]]; then
-            OLD_ID=$(echo "$OLD_BODY" | jq -r '.id // empty')
-            if [[ -z "$OLD_ID" ]]; then
-              # Gitee 对"tag 存在但未挂 release"返回 200 + body null，视为不存在
-              echo '[Gitee] 无旧 latest release（tag 未挂载 release），跳过删除'
-            else
-              for i in 1 2; do
-                if curl -sf --connect-timeout 20 --max-time 60 -X DELETE "$API/$OLD_ID?$TOKEN" >/dev/null; then
-                  echo "[Gitee] 已删除旧 latest release (id=$OLD_ID)"
-                  break
-                fi
-                [[ $i -eq 2 ]] || { echo '[Gitee] 删除旧 release 未成功，10 秒后重试'; sleep 10; }
-              done
-            fi
-          else
-            echo "::error::查询旧 latest release 失败 HTTP ${OLD_CODE:-网络错误}，中止（重跑本 job 可恢复）"
-            exit 1
-          fi
-
-          # 先创建 release 拿 id，再逐个上传附件（Gitee 官方 gitee-release-cli
-          # 的用法：POST /releases/{id}/attach_files；创建时传 files 参数无效）
-          RESP=$(curl -sS --connect-timeout 20 --max-time 120 -w '\n%{http_code}' -X POST "$API" \
-            -F "$TOKEN" \
-            -F 'tag_name=latest' \
-            -F 'target_commitish=master' \
-            -F "name=ZBar v$VERSION（应用内更新源）" \
-            -F "body=ZBar v$VERSION 自动更新通道，保持最新版即可。")
-          CODE="${RESP##*$'\n'}"
-          BODY="${RESP%$'\n'*}"
-          if [[ "$CODE" != 2* ]]; then
-            echo "::error::Gitee release 创建失败 HTTP $CODE："
-            echo "$BODY" | head -c 300; echo
-            exit 1
-          fi
-          RELEASE_ID=$(echo "$BODY" | jq -r '.id // empty')
-          [[ -n "$RELEASE_ID" ]] || { echo '::error::未解析到 release id'; exit 1; }
-          echo "[Gitee] release 已创建 (id=$RELEASE_ID)，开始上传附件"
-
-          # 查询服务端附件列表（JSON 数组）；接口失败返回空，由调用方按"不存在"处理
-          attach_list() {
-            curl -sf --connect-timeout 20 --max-time 60 "$API/$RELEASE_ID/attach_files?$TOKEN" 2>/dev/null || echo '[]'
-          }
-
-          attachment_exists() { # $1=附件名
-            attach_list | jq -e --arg n "$1" 'map(.name) | index($n) != null' >/dev/null
-          }
-
-          # 业务级上传：POST 成功即返回；失败/超时先查服务端是否已收到附件
-          # （Gitee 偶发"文件已保存但响应丢失"，盲重传既浪费又可能重复），
-          # 确认未收到才退避重试，共 4 次尝试——替代 curl 内置 --retry 盲重传
-          upload() { # $1=本地文件 $2=附件名
-            local file="$1" name="$2" rc code resp i delay max_time size
-            # 上传超时按文件大小动态计算：50KB/s 底速 + 90s 处理余量，
-            # 下限 180s——既防"0 bytes 挂起"无限等待，也不误杀慢带宽健康传输
-            size=$(wc -c < "$file")
-            max_time=$(( size / 51200 + 90 ))
-            (( max_time < 180 )) && max_time=180
-            for i in 1 2 3 4; do
-              echo "[Gitee] 上传 $name（第 $i/4 次，超时 ${max_time}s）"
-              resp=$(curl -sS --connect-timeout 20 --max-time "$max_time" -w '\n%{http_code}' \
-                -X POST "$API/$RELEASE_ID/attach_files" \
-                -F "access_token=$GITEE_TOKEN" \
-                -F "file=@$file;filename=$name") && rc=0 || rc=$?
-              code="${resp##*$'\n'}"
-              if [[ $rc -eq 0 && "$code" == 2* ]]; then
-                echo "[Gitee] $name 上传成功（HTTP $code）"
-                return 0
-              fi
-              echo "[Gitee] $name 未确认（curl rc=$rc HTTP=${code:-无}），查询服务端附件状态"
-              [[ $rc -ne 0 ]] && { echo "[Gitee] 响应内容: $(echo "$resp" | head -c 200)"; }
-              if attachment_exists "$name"; then
-                echo "[Gitee] 服务端已存在 $name（响应丢失但已保存），判定成功"
-                return 0
-              fi
-              echo "[Gitee] 服务端不存在 $name"
-              case $i in 1) delay=5 ;; 2) delay=10 ;; 3) delay=20 ;; *) delay=0 ;; esac
-              [[ $i -lt 4 ]] && { echo "[Gitee] ${delay} 秒后重试"; sleep "$delay"; }
-            done
-            echo "::error::附件上传失败（4 次尝试均未确认）: $name"
-            return 1
-          }
-
-          # 上传顺序：payload（exe / tar.gz / sig / dmg）在前，manifest
-          # （latest.json）最后提交——latest.json 是应用内更新入口，必须等
-          # 全部程序附件就位后才发布，避免客户端检测到新版本却下载不到更新包
-          PAYLOAD=()
-          for f in out/*-setup.exe out/*-setup.exe.sig \
-                   out/*aarch64*.app.tar.gz out/*aarch64*.app.tar.gz.sig \
-                   out/*x64.app.tar.gz out/*x64.app.tar.gz.sig \
-                   out/*.dmg; do
-            [[ -f "$f" ]] && PAYLOAD+=("$f")
-          done
-          echo "[Gitee] 计划上传 ${#PAYLOAD[@]} 个程序附件 + latest.json"
-          [[ ${#PAYLOAD[@]} -gt 0 ]] || { echo '::error::未收集到任何程序附件'; exit 1; }
-          [[ ${#PAYLOAD[@]} -eq 8 ]] || echo "::warning::程序附件数量非预期（8 个），请核对构建产物"
-
-          for f in "${PAYLOAD[@]}"; do
-            upload "$f" "$(basename "$f")" || exit 1
-          done
-
-          # manifest 提交前的完整性校验：任一程序附件（含 dmg 与 .sig）在
-          # 服务端缺失即失败，宁可更新入口暂时 404 也不发布指向缺失文件的
-          # latest.json；失败后可直接重跑本 job（删旧建新自动恢复）。
-          # 列表查询带重试，查询失败（≠空列表）时明确报错而非误报全部缺失
-          echo '[Gitee] 程序附件完整性校验'
-          FINAL_LIST=''
-          for i in 1 2 3; do
-            if FINAL_LIST=$(curl -sf --connect-timeout 20 --max-time 60 "$API/$RELEASE_ID/attach_files?$TOKEN" 2>/dev/null); then
-              break
-            fi
-            FINAL_LIST=''
-            [[ $i -eq 3 ]] || { echo "[Gitee] 附件列表查询失败（第 $i/3 次），10 秒后重试"; sleep 10; }
-          done
-          if [[ -z "$FINAL_LIST" ]]; then
-            echo '::error::附件列表查询失败（3 次尝试），无法执行完整性校验，重跑本 job 自动恢复'
-            exit 1
-          fi
-          MISSING=0
-          for f in "${PAYLOAD[@]}"; do
-            n="$(basename "$f")"
-            if ! jq -e --arg n "$n" 'map(.name) | index($n) != null' <<<"$FINAL_LIST" >/dev/null; then
-              echo "::error::服务端附件缺失: $n"
-              MISSING=1
-            fi
-          done
-          if [[ $MISSING -ne 0 ]]; then
-            echo '::error::完整性校验失败，禁止上传 latest.json（重跑本 job 自动恢复）'
-            exit 1
-          fi
-          echo "[Gitee] 完整性校验通过：${#PAYLOAD[@]} 个程序附件全部就位"
-
-          # 最后提交 manifest，并回读确认
-          upload out/gitee-latest.json latest.json || { echo '::error::latest.json 上传失败'; exit 1; }
-          attachment_exists latest.json || { echo '::error::latest.json 未出现在服务端附件中'; exit 1; }
-
-          END_LIST=$(attach_list)
-          echo ''
-          echo "[Gitee] 发布成功：v$VERSION / release id=$RELEASE_ID / 附件 $(jq 'length' <<<"$END_LIST") 个"
-          jq -r '.[].name' <<<"$END_LIST" | sed 's/^/    /'
-          echo '[Gitee] 更新源地址：'
-          echo '  https://gitee.com/codezwx/zai-floating-monitor/releases/download/latest/latest.json'
+      # Gitee 更新源由本地 scripts/publish_gitee.sh 发布，见脚本头说明
