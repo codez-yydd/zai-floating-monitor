@@ -205,10 +205,11 @@ fn run_asar_in(cwd: Option<&Path>, args: &[&str]) -> Result<String, String> {
         .output()
         .map_err(|e| format!("主题处理工具调用失败（{e}），请确认 Node.js 安装正常"))?;
     if !output.status.success() {
-        let stderr = strip_npm_noise(&String::from_utf8_lossy(&output.stderr));
-        let stdout = strip_npm_noise(&String::from_utf8_lossy(&output.stdout));
+        let stderr_raw = String::from_utf8_lossy(&output.stderr);
+        let stdout_raw = String::from_utf8_lossy(&output.stdout);
         let sub = args.first().copied().unwrap_or("");
-        let detail = if stderr.is_empty() { stdout } else { stderr };
+        // 过滤 notice 提炼详情；过滤后为空时回退未过滤原文，详情保证非空
+        let detail = extract_failure_detail(&stderr_raw, &stdout_raw);
         // npx/electron 的原始输出仅进日志，不直接透传给用户可见层
         println!("[zbar] asar {sub} 原始输出：{detail}");
         // 用户可见错误保留简短中文原因，原始输出截断到 200 字符内附后辅助排查
@@ -221,17 +222,42 @@ fn run_asar_in(cwd: Option<&Path>, args: &[&str]) -> Result<String, String> {
 /// 过滤 npm 12 起 npx 运行时混入 stdout/stderr 的 `npm notice run ...`
 /// 提示行：不过滤会污染 list 的路径清单解析、挤占错误详情的 200 字符
 /// 截断窗口（真实错误被 notice 行淹没，用户只看到 npm 输出无法排查）。
+/// `npm error` 行不在此过滤：npx 层失败（如网络断开导致下载
+/// @electron/asar 遇 E404/ENOTFOUND）时 stderr 往往只剩 error 行，
+/// 其中错误码、域名是仅有的诊断信息，剔除会让错误详情变空、无法排查。
 /// 纯函数，便于单测。
 fn strip_npm_noise(text: &str) -> String {
     text.lines()
         .filter(|l| {
             let t = l.trim_start();
-            !(t.starts_with("npm notice") || t.starts_with("npm error"))
+            !t.starts_with("npm notice")
         })
         .collect::<Vec<_>>()
         .join("\n")
         .trim()
         .to_string()
+}
+
+/// 失败详情提炼：优先取过滤 notice 后的 stderr，为空再取 stdout；
+/// 两者过滤后均为空时回退未过滤原文（trim 后）——防御层，保证任何
+/// 情况下错误详情不为空（如输出全为 notice 行时仍能看到 npm 原始输出）。
+/// 纯函数，便于单测。
+fn extract_failure_detail(stderr_raw: &str, stdout_raw: &str) -> String {
+    let filtered_stderr = strip_npm_noise(stderr_raw);
+    let detail = if filtered_stderr.is_empty() {
+        strip_npm_noise(stdout_raw)
+    } else {
+        filtered_stderr
+    };
+    if !detail.is_empty() {
+        return detail;
+    }
+    // 回退未过滤原文：保留 notice 等行里仅存的原始诊断信息
+    if !stderr_raw.trim().is_empty() {
+        stderr_raw.trim().to_string()
+    } else {
+        stdout_raw.trim().to_string()
+    }
 }
 
 /// 解包 asar 到目标目录（extract）。
@@ -355,10 +381,10 @@ pub fn asar_list(asar: &Path) -> Result<Vec<String>, String> {
 mod tests {
     use super::*;
 
-    /// npm 12 噪音过滤（strip_npm_noise）：notice/error 行剔除，
-    /// asar 真实输出与空行以外的内容保留。
+    /// npm 12 噪音过滤（strip_npm_noise）：notice 行剔除，npm error 行
+    /// 作为诊断信息保留，asar 真实输出与空行以外的内容保留。
     #[test]
-    fn npm噪音过滤_剔除notice保留真实输出() {
+    fn npm噪音过滤_剔除notice保留error与真实输出() {
         // v4 Windows 真机错误形态：notice 行 + 真实错误行混杂
         let mixed = "npm notice run npx\nnpm notice run asar extract-file a.asar out/renderer/index.html\nfile:///C:/npm-cache/_npx/\nError: \"x\" was not found in this archive";
         let stripped = strip_npm_noise(mixed);
@@ -369,8 +395,43 @@ mod tests {
         assert_eq!(strip_npm_noise("npm notice run npx\nnpm notice run asar list a"), "");
         // 无噪音输出原样（仅 trim）
         assert_eq!(strip_npm_noise("v4.3.0\n"), "v4.3.0");
-        // npm error 行同样剔除
-        assert_eq!(strip_npm_noise("npm error code E404\nreal"), "real");
+        // npm error 行是诊断信息（错误码等），保留不过滤
+        assert_eq!(
+            strip_npm_noise("npm error code E404\nreal"),
+            "npm error code E404\nreal"
+        );
+    }
+
+    /// 失败详情提炼（extract_failure_detail）：npx 层失败（如网络断开
+    /// 导致下载 @electron/asar 遇 E404/ENOTFOUND）时 stderr 全为
+    /// npm error 行，这些诊断行（错误码、域名等）应原样进入详情。
+    #[test]
+    fn 失败详情_stderr全error行时保留诊断信息() {
+        let stderr_raw = "npm error code ENOTFOUND\nnpm error syscall getaddrinfo\nnpm error registry.npmjs.org";
+        let detail = extract_failure_detail(stderr_raw, "");
+        assert!(detail.contains("ENOTFOUND"), "错误码应保留：{detail}");
+        assert!(detail.contains("registry.npmjs.org"), "域名应保留：{detail}");
+        // stderr 过滤后为空时取 stdout 的过滤结果
+        assert_eq!(extract_failure_detail("", "npm notice run npx\nError: ENOENT"), "Error: ENOENT");
+    }
+
+    /// 失败详情提炼（extract_failure_detail）防御层：过滤后为空
+    /// （如输出全为 notice 行）时回退未过滤原文，保证详情不为空。
+    #[test]
+    fn 失败详情_过滤后为空回退未过滤原文() {
+        // 全 notice 输出：过滤后为空，回退 stderr 原文（trim 后）
+        let stderr_raw = "npm notice run npx\nnpm notice run asar list a\n";
+        assert_eq!(
+            extract_failure_detail(stderr_raw, "npm notice from stdout"),
+            stderr_raw.trim(),
+            "应回退未过滤的 stderr 原文"
+        );
+        // stderr 原文为空白时回退 stdout 原文
+        assert_eq!(
+            extract_failure_detail("  \n", "npm notice from stdout\n"),
+            "npm notice from stdout",
+            "stderr 原文空白时应回退 stdout 原文"
+        );
     }
 
     /// list 行归一化（normalize_list_line）：v4 Windows 反斜杠与 v3 POSIX
