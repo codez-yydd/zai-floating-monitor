@@ -10,6 +10,7 @@ import { sync } from "./dicts/sync";
 import { compare } from "./dicts/compare";
 import { report } from "./dicts/report";
 import { settings } from "./dicts/settings";
+import { theme } from "./dicts/theme";
 
 export const zh = {
   ...common,
@@ -21,4 +22,5 @@ export const zh = {
   ...compare,
   ...report,
   ...settings,
+  ...theme,
 };

@@ -22,6 +22,7 @@
     "clipboard-manager:allow-write-text",
     "autostart:default",
     "updater:default",
-    "process:allow-restart"
+    "process:allow-restart",
+    "dialog:default"
   ]
 }

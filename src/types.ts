@@ -645,3 +645,77 @@ export interface AccountQuotaEntry {
   /** 查询失败原因（不含 token，后端原样透传） */
   error: string | null;
 }
+
+// ===== Agent 动态壁纸（Rust agent_theme 模块 serde camelCase 一一对应）=====
+
+/** 目标 Agent 应用的动态壁纸安装状态（get_agent_theme_state 返回） */
+export interface AgentThemeState {
+  appId: string;
+  installed: boolean;
+  appBundlePath: string | null;
+  appVersion: string | null;
+  /** ZCode 升级后主题失效，需重新安装 */
+  needsReinstall: boolean;
+  /** 原版备份缺失（还原不可用） */
+  backupMissing: boolean;
+  /** 目标应用当前是否在运行（安装/还原时 Rust 会先退出它） */
+  targetRunning: boolean;
+  /** Node.js 是否可用（注入工具链依赖） */
+  nodeAvailable: boolean;
+  detail: string | null;
+}
+
+/**
+ * 动态壁纸效果参数（get/set_agent_theme_params 请求体，字段 camelCase）。
+ *
+ * 注意存储单位：亮度/饱和/遮罩/不透明度类字段存小数（0.4~1.1 等，
+ * 与 CSS filter 数值一致），面板滑块的百分比刻度（40~110 等）由前端
+ * ÷100/×100 换算（见 ThemePanel 的 toScale/fromScale），不直接落盘。
+ */
+export interface ThemeParams {
+  /** 壁纸亮度（0.4~1.1 小数，前端滑块刻度 40~110） */
+  wpBrightness: number;
+  /** 壁纸饱和度（0.4~1.4 小数，前端滑块刻度 40~140） */
+  wpSaturate: number;
+  /** 背景模糊（0~20，px） */
+  wpBlur: number;
+  /** 遮罩浓度（0~0.9 小数，前端滑块刻度 0~90） */
+  maskStrength: number;
+  /** 对话区不透明度（0~1 小数，前端滑块刻度 0~100） */
+  panelOpacity: number;
+  /** 侧栏不透明度（0~1 小数，前端滑块刻度 0~100） */
+  sidebarOpacity: number;
+  /** 右栏不透明度（0~1 小数，前端滑块刻度 0~100）：#content 内
+   *  除对话列外的全部 data-panel-id 面板 */
+  sidebarRightOpacity: number;
+  /** 播放速度（0.5~2.0，倍速；仅视频壁纸有意义） */
+  playbackRate: number;
+  /** 当前壁纸指向（未设置为 null）。相对文件名 = wallpapers/ 目录内
+   *  文件（如 "default.mp4"）；绝对路径 = 直接引用该文件 */
+  wallpaperFile: string | null;
+  /** 用户壁纸目录（壁纸库扫描来源之一，绝对路径；未设置为 null） */
+  wallpaperDir: string | null;
+}
+
+/** 壁纸库条目（list_agent_wallpapers 返回） */
+export interface WallpaperEntry {
+  /** 唯一标识：默认项为 "default"，其余为绝对路径
+   *  （select_agent_wallpaper 的入参口径） */
+  path: string;
+  /** 文件名（默认项为 default.mp4，展示用专属词条） */
+  fileName: string;
+  /** "video" | "image" */
+  kind: "video" | "image";
+  /** 预览源绝对路径：默认项指向 wallpapers/ 的 default.mp4，其余等于
+   *  path；经 convertFileSrc 转 asset:// 供预览卡加载（Rust 侧已放行） */
+  previewPath: string;
+}
+
+/** 安装/还原进度事件负载（zbar://agent-theme-progress） */
+export interface AgentThemeProgress {
+  appId: string;
+  /** precheck/quit/extract/inject/pack/verify/backup/replace/sign/launch/cleanup/done/error */
+  stage: string;
+  percent: number;
+  detail: string | null;
+}

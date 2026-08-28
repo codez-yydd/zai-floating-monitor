@@ -5,6 +5,7 @@ import { SettingsPanel } from "./SettingsPanel";
 import { SyncPanel } from "./SyncPanel";
 import { ComparePanel } from "./ComparePanel";
 import { ReportPanel } from "./ReportPanel";
+import { ThemePanel } from "./ThemePanel";
 import { DataProvider } from "./DataCache";
 import { fetchPricing, saveCurrency } from "./api";
 import { startUpdateScheduler } from "./updater";
@@ -17,7 +18,7 @@ import {
   type AgentVisibility,
 } from "./agentVisibility";
 
-type View = "stats" | "pricing" | "sync" | "compare" | "report" | "settings";
+type View = "stats" | "pricing" | "sync" | "compare" | "report" | "theme" | "settings";
 
 export default function App() {
   const { locale } = useI18n();
@@ -101,6 +102,7 @@ export default function App() {
             onGoSync={() => setView("sync")}
             onGoCompare={() => setView("compare")}
             onGoReport={() => setView("report")}
+            onGoTheme={() => setView("theme")}
             onGoSettings={() => setView("settings")}
           />
         ) : view === "pricing" ? (
@@ -121,6 +123,8 @@ export default function App() {
             currency={currency}
             agentVisibility={agentVisibility}
           />
+        ) : view === "theme" ? (
+          <ThemePanel onBack={backToStats} />
         ) : view === "settings" ? (
           <SettingsPanel
             onBack={backToStats}

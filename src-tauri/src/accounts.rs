@@ -800,8 +800,9 @@ pub fn account_quotas() -> Result<Vec<AccountQuotaEntry>, String> {
 const ZCODE_APP_NAME: &str = "ZCode";
 
 /// ZCode 桌面应用是否在运行（pgrep -x 精确匹配进程名）。
+/// pub(crate)：agent_theme（动态壁纸注入）复用。
 #[cfg(target_os = "macos")]
-fn zcode_running() -> bool {
+pub(crate) fn zcode_running() -> bool {
     std::process::Command::new("pgrep")
         .args(["-x", ZCODE_APP_NAME])
         .output()
@@ -812,8 +813,9 @@ fn zcode_running() -> bool {
 /// 退出 ZCode：osascript 优雅退出 → 轮询 5s → pkill 兜底 → 再轮询 3s。
 /// osascript 自身失败（如未授予 Automation 权限）静默降级 pkill。
 /// 未运行直接返回 Ok。
+/// pub(crate)：agent_theme（动态壁纸注入）复用。
 #[cfg(target_os = "macos")]
-fn quit_zcode() -> Result<(), String> {
+pub(crate) fn quit_zcode() -> Result<(), String> {
     if !zcode_running() {
         return Ok(());
     }
@@ -839,8 +841,9 @@ fn quit_zcode() -> Result<(), String> {
 }
 
 /// 启动 ZCode 桌面应用（open -a）。返回是否成功。
+/// pub(crate)：agent_theme（动态壁纸注入）复用。
 #[cfg(target_os = "macos")]
-fn launch_zcode() -> bool {
+pub(crate) fn launch_zcode() -> bool {
     std::process::Command::new("open")
         .args(["-a", ZCODE_APP_NAME])
         .output()
@@ -880,8 +883,9 @@ pub(crate) fn run_hidden(program: &str, args: &[&str]) -> Option<std::process::O
 
 /// ZCode 桌面应用是否在运行（tasklist 按镜像名过滤；CSV + /NH 避开
 /// 本地化表头，未命中时输出 "INFO: ..." 行也不含镜像名，不会误判）。
+/// pub(crate)：agent_theme（动态壁纸注入）复用。
 #[cfg(windows)]
-fn zcode_running() -> bool {
+pub(crate) fn zcode_running() -> bool {
     let filter = format!("IMAGENAME eq {ZCODE_EXE_NAME}.exe");
     match run_hidden("tasklist", &["/FI", &filter, "/FO", "CSV", "/NH"]) {
         Some(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
@@ -914,8 +918,9 @@ fn capture_zcode_exe_path() -> Option<PathBuf> {
 /// 优雅退出 → 轮询 5s → taskkill /F 强杀 → 再轮询 3s。未运行直接返回 Ok。
 /// 只匹配 ZCode.exe 镜像，CLI 会话进程（node.exe）不受影响，与 macOS
 /// pkill -x 的边界一致。
+/// pub(crate)：agent_theme（动态壁纸注入）复用。
 #[cfg(windows)]
-fn quit_zcode() -> Result<(), String> {
+pub(crate) fn quit_zcode() -> Result<(), String> {
     if !zcode_running() {
         return Ok(());
     }
@@ -948,8 +953,9 @@ fn quit_zcode() -> Result<(), String> {
 
 /// 启动 ZCode 桌面应用：优先退出时缓存的 exe 路径，其次常见安装位置；
 /// open::that_detached 分离启动，不随本面板退出而终止。
+/// pub(crate)：agent_theme（动态壁纸注入）复用。
 #[cfg(windows)]
-fn launch_zcode() -> bool {
+pub(crate) fn launch_zcode() -> bool {
     let exe_suffix = format!("{}.exe", ZCODE_EXE_NAME).to_lowercase();
     let mut candidates: Vec<PathBuf> = vec![];
     if let Ok(cache) = zcode_exe_cache_path() {

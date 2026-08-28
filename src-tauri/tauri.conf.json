@@ -32,7 +32,11 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": []
+      }
     },
     "macOSPrivateApi": true
   },
@@ -40,6 +44,7 @@
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": true,
+    "resources": ["wallpapers/*"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

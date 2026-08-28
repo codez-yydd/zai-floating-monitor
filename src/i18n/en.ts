@@ -12,6 +12,7 @@ import { sync } from "./dicts/sync";
 import { compare } from "./dicts/compare";
 import { report } from "./dicts/report";
 import { settings } from "./dicts/settings";
+import { theme } from "./dicts/theme";
 import { zh } from "./zh";
 
 export const en: typeof zh = {
@@ -521,4 +522,115 @@ export const en: typeof zh = {
     "settings.accountsAutoLinuxUnsupported":
       "Account switching is not supported on this platform",
   } satisfies typeof settings),
+
+  ...({
+    "theme.title": "Live Wallpaper",
+    "theme.toolbarEntry": "Live wallpaper",
+    "theme.loading": "Loading wallpaper state…",
+
+    "theme.cardTitle": "ZCode Live Wallpaper",
+    "theme.cardHint":
+      "Inject a live video wallpaper into the ZCode desktop app as the chat background. The original app is backed up before installing and can be restored anytime.",
+    "theme.version": "Version {v}",
+
+    "theme.statusInstalled": "Installed",
+    "theme.statusNotInstalled": "Not installed",
+    "theme.statusNeedsReinstall": "Reinstall needed",
+
+    "theme.install": "Install live wallpaper",
+    "theme.reinstall": "Reinstall",
+    "theme.uninstall": "Restore original",
+
+    "theme.confirmInstallTitle": "Install live wallpaper",
+    "theme.confirmInstallDesc":
+      "About to inject a live wallpaper into the ZCode desktop app:\n· ZCode app files will be modified; the first time, allow ZBar to modify ZCode in the system prompt (an administrator password is usually not required; only certain install locations may ask for one)\n· The original app is backed up automatically first and can be restored anytime\n· ZCode updates invalidate the theme and require a reinstall\nMake sure you understand the risks before continuing.",
+    "theme.confirmUninstallTitle": "Restore original",
+    "theme.confirmUninstallDesc":
+      "ZCode will be replaced with the backup taken before installation; the live wallpaper and its parameters will be removed, restoring the official original.\nThis action may also show the system confirmation prompt (allow ZBar to modify ZCode).",
+    "theme.confirmQuitNote":
+      "ZCode is running and will quit automatically — save your conversations first.",
+    // macOS-only update impact note in the confirm dialog (not shown on Windows)
+    "theme.confirmMacUpdateNote":
+      "Note: On macOS, after modifying the app, ZCode's built-in updater will no longer work (restoring the original won't bring it back). To update ZCode, please re-download it from the official website:",
+    "theme.zcodeOfficialSite": "ZCode official site (zcode.z.ai)",
+
+    "theme.needsReinstallBanner":
+      "ZCode was updated and the live wallpaper no longer matches; reinstalling is recommended.",
+    "theme.nodeMissingBanner":
+      "Node.js was not found — injection depends on it. Install Node.js first (run `brew install node`, or download from nodejs.org), then retry.",
+    "theme.backupMissingBanner":
+      "The original backup is missing, so restore is unavailable; reinstall ZCode to recover.",
+
+    "theme.installing": "Installing live wallpaper",
+    "theme.uninstalling": "Restoring original",
+    "theme.stage.precheck": "Prechecking",
+    "theme.stage.quit": "Quitting app",
+    "theme.stage.extract": "Extracting",
+    "theme.stage.inject": "Injecting theme",
+    "theme.stage.pack": "Repacking",
+    "theme.stage.verify": "Verifying",
+    "theme.stage.backup": "Backing up original",
+    "theme.stage.replace": "Replacing files",
+    "theme.stage.sign": "Re-signing",
+    "theme.stage.launch": "Launch check",
+    "theme.stage.cleanup": "Cleaning up",
+    "theme.stage.done": "Done",
+    "theme.stage.error": "Failed",
+
+    "theme.paramsTitle": "Effects",
+    "theme.paramsHint":
+      "Saved as you drag and applied live within ~1s — no restart needed. Chat, sidebar and right-panel sliders work independently; all other areas keep a fixed ambient opacity.",
+    "theme.paramWpBrightness": "Wallpaper brightness",
+    "theme.paramWpSaturate": "Saturation",
+    "theme.paramWpBlur": "Background blur",
+    "theme.paramMaskStrength": "Mask strength",
+    "theme.paramPanelOpacity": "Chat opacity",
+    "theme.paramSidebarOpacity": "Sidebar opacity",
+    "theme.paramSidebarRightOpacity": "Right panel opacity",
+    "theme.paramPlaybackRate": "Playback speed",
+    "theme.currentWallpaper": "Current wallpaper",
+    "theme.noWallpaper": "No wallpaper selected",
+    "theme.resetParams": "Reset to defaults",
+    "theme.paramsSavedFlash": "Saved ✓",
+
+    "theme.libraryTitle": "Wallpaper Library",
+    "theme.libraryHint":
+      "Click a wallpaper to apply it instantly (live within ~1s). Videos and images supported.",
+    "theme.libraryDirLabel": "Wallpaper folder",
+    "theme.libraryDirEmpty":
+      "Not set. Drop a folder onto the zone below to set it as the wallpaper folder.",
+    "theme.libraryClearDir": "Clear folder",
+    "theme.libraryEmpty":
+      "No wallpapers yet. Drop video / image files to import, or set a wallpaper folder to scan automatically.",
+    "theme.libraryLoading": "Loading wallpapers…",
+    "theme.libraryKindVideo": "Video",
+    "theme.libraryKindImage": "Image",
+    "theme.defaultWallpaperName": "Default Aurora",
+    "theme.selecting": "Switching…",
+    // Preview card: placeholder when the media file fails to load
+    "theme.previewUnavailable": "Preview unavailable",
+
+    // Drop zone (wallpaper / folder entry: the native file dialog is invisible
+    // on dockless Accessory apps)
+    "theme.dropWallpaperHint":
+      "Drop a video / image file to change the wallpaper (mp4 / webm / mov / jpg / png / webp), or drop a folder to set the wallpaper folder",
+    "theme.dropWallpaperBusy": "Processing dropped item…",
+
+    "theme.installDone": "Live wallpaper installed ✓",
+    "theme.uninstallDone": "ZCode restored to original ✓",
+    "theme.wallpaperSet": "Wallpaper set to {name} ✓",
+    "theme.wallpaperDirSet": "Wallpaper folder set: {path} ✓",
+    "theme.wallpaperDirCleared": "Wallpaper folder cleared ✓",
+
+    "theme.loadStateFail": "Failed to load wallpaper state: {msg}",
+    "theme.loadParamsFail": "Failed to load effects: {msg}",
+    "theme.setParamsFail": "Failed to save parameters: {msg}",
+    "theme.setWallpaperFail": "Failed to set wallpaper: {msg}",
+    "theme.selectWallpaperFail": "Failed to switch wallpaper: {msg}",
+    "theme.setWallpaperDirFail": "Failed to set wallpaper folder: {msg}",
+    "theme.listWallpapersFail": "Failed to load wallpapers: {msg}",
+    "theme.resetParamsFail": "Failed to reset parameters: {msg}",
+    "theme.installFail": "Install failed: {msg}",
+    "theme.uninstallFail": "Restore failed: {msg}",
+  } satisfies typeof theme),
 };

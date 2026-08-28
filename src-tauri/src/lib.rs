@@ -2,6 +2,7 @@
 
 mod accounts;
 mod agent_quota_history;
+mod agent_theme;
 mod claude;
 mod codex;
 mod cursor;
@@ -1168,6 +1169,24 @@ fn set_pin(enabled: bool, app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+// ===== 面板粘滞（皮肤页等需要跨窗口协作的场景临时驻留）=====
+
+/// 面板粘滞标志：true 时失焦不自动隐藏面板。
+/// 仅供皮肤页等页面打开期间临时驻留使用（拖文件到面板、看安装进度、
+/// 处理系统授权弹窗时需要切到其他窗口）。仅存内存，不持久化，
+/// 与 pin.json / set_pin / get_pin 的置顶常驻逻辑互不影响。
+static PANEL_STICKY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// set_panel_sticky：设置面板粘滞标志（仅内存，重启即失效，不写 pin.json）。
+#[tauri::command]
+fn set_panel_sticky(sticky: bool) -> Result<(), String> {
+    PANEL_STICKY.store(
+        sticky,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    Ok(())
+}
+
 // ===== 多设备同步命令 =====
 
 use sync::{
@@ -1875,13 +1894,18 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_dialog::init())
         .on_window_event(|window, event| {
             // 失焦时自动隐藏面板（保留窗口本身，不销毁）
             if let WindowEvent::Focused(false) = event {
                 if window.label() == "panel" {
-                    // Windows 置顶常驻模式：读取持久化的 pin 状态，
-                    // 若已置顶则跳过隐藏，让面板持续可见不被其它窗口遮挡。
-                    if load_pin().unwrap_or(false) {
+                    // 跳过隐藏的两种情况：
+                    // 1. pin 置顶常驻（持久化状态，Windows 常驻模式）；
+                    // 2. 面板粘滞（内存标志，皮肤页打开期间临时驻留，
+                    //    供拖文件/看进度/处理授权弹窗时切窗不隐藏）。
+                    if load_pin().unwrap_or(false)
+                        || PANEL_STICKY.load(std::sync::atomic::Ordering::Relaxed)
+                    {
                         return;
                     }
                     let _ = window.hide();
@@ -1978,6 +2002,7 @@ pub fn run() {
             pending_upload_count,
             get_pin,
             set_pin,
+            set_panel_sticky,
             get_quota_history,
             get_weekly_compare,
             get_weekly_compare_for_snapshots,
@@ -2005,7 +2030,17 @@ pub fn run() {
             rename_account,
             account_quotas,
             check_update,
-            show_notification
+            show_notification,
+            agent_theme::get_agent_theme_state,
+            agent_theme::install_agent_theme,
+            agent_theme::uninstall_agent_theme,
+            agent_theme::get_agent_theme_params,
+            agent_theme::set_agent_theme_params,
+            agent_theme::set_agent_wallpaper,
+            agent_theme::list_agent_wallpapers,
+            agent_theme::select_agent_wallpaper,
+            agent_theme::set_agent_wallpaper_dir,
+            agent_theme::restart_target_app
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

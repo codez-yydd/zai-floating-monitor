@@ -3,6 +3,8 @@ import type {
   AccountsState,
   AccountMeta,
   AccountQuotaEntry,
+  AgentThemeState,
+  AgentQuotaSnapshot,
   AutoCleanupConfig,
   CaptureOutcome,
   CleanupResult,
@@ -21,7 +23,6 @@ import type {
   PricingConfig,
   PricingDiff,
   ApplyPriceItem,
-  AgentQuotaSnapshot,
   QuotaResult,
   QuotaSnapshot,
   RegisterRequest,
@@ -34,8 +35,10 @@ import type {
   SwitchOutcome,
   SyncConfig,
   SyncOutcome,
+  ThemeParams,
   TrendBucket,
   TrendPoint,
+  WallpaperEntry,
   WeeklyTokenBucket,
 } from "./types";
 
@@ -298,6 +301,12 @@ export async function setPin(enabled: boolean): Promise<void> {
   await invoke("set_pin", { enabled });
 }
 
+/** 设置面板粘滞标志：true 时失焦不自动隐藏（皮肤页等跨窗口协作场景临时驻留，
+ *  仅存内存不持久化，与置顶常驻 pin 逻辑互不影响） */
+export async function setPanelSticky(sticky: boolean): Promise<void> {
+  await invoke("set_panel_sticky", { sticky });
+}
+
 // ===== 周额度追踪 / 对比页 =====
 
 /** 读取额度快照历史（按 ts 升序）。默认当前账号视角；all=true 返回
@@ -464,4 +473,71 @@ export async function showNotification(
   body: string
 ): Promise<void> {
   await invoke("show_notification", { title, body });
+}
+
+// ===== Agent 桌面动态壁纸 =====
+// invoke 参数名固定 appId/srcPath/params（camelCase 序列化），与 Rust 侧约定一致；
+// 安装/还原的实时进度由 Rust 侧经 "zbar://agent-theme-progress" 事件推送
+// （见 ThemePanel 的 listen 订阅），此处接口仅返回最终结果。
+
+/** 查询目标 Agent 应用的动态壁纸安装状态 */
+export async function getAgentThemeState(appId: string): Promise<AgentThemeState> {
+  return invoke<AgentThemeState>("get_agent_theme_state", { appId });
+}
+
+/** 安装（注入）动态壁纸。过程耗时较长，进度经事件推送；失败抛错 */
+export async function installAgentTheme(appId: string): Promise<void> {
+  await invoke("install_agent_theme", { appId });
+}
+
+/** 卸载动态壁纸，用备份还原原版应用。进度经事件推送；失败抛错 */
+export async function uninstallAgentTheme(appId: string): Promise<void> {
+  await invoke("uninstall_agent_theme", { appId });
+}
+
+/** 读取动态壁纸效果参数 */
+export async function getAgentThemeParams(appId: string): Promise<ThemeParams> {
+  return invoke<ThemeParams>("get_agent_theme_params", { appId });
+}
+
+/** 保存动态壁纸效果参数（滑块防抖后整体落盘） */
+export async function setAgentThemeParams(
+  appId: string,
+  params: ThemeParams
+): Promise<void> {
+  await invoke("set_agent_theme_params", { appId, params });
+}
+
+/** 导入壁纸文件（视频或图片）到主题资源目录，返回实际生效的文件名 */
+export async function setAgentWallpaper(
+  appId: string,
+  srcPath: string
+): Promise<{ fileName: string }> {
+  return invoke<{ fileName: string }>("set_agent_wallpaper", {
+    appId,
+    srcPath,
+  });
+}
+
+/** 列出壁纸库全部可选项（内置默认项固定第一，其余按文件名排序） */
+export async function listAgentWallpapers(
+  appId: string
+): Promise<WallpaperEntry[]> {
+  return invoke<WallpaperEntry[]>("list_agent_wallpapers", { appId });
+}
+
+/** 从壁纸库选中壁纸（热重载约 1 秒生效；path 口径同 WallpaperEntry.path） */
+export async function selectAgentWallpaper(
+  appId: string,
+  path: string
+): Promise<void> {
+  await invoke("select_agent_wallpaper", { appId, path });
+}
+
+/** 设置用户壁纸目录（空串 = 清除；目录不存在时后端报错） */
+export async function setAgentWallpaperDir(
+  appId: string,
+  dir: string
+): Promise<void> {
+  await invoke("set_agent_wallpaper_dir", { appId, dir });
 }
