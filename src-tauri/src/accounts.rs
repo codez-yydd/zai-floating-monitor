@@ -879,9 +879,24 @@ const ZCODE_EXE_NAME: &str = "ZCode";
 /// exe 路径缓存文件（~/.zbar/.zcode-exe-path）。ZCode 可装在任意盘符
 /// （如 D:\app\ZCode），切换时趁进程存活捕获一次，之后 ZCode 未运行的
 /// 切换也能自动重启。
+/// pub(crate)：agent_theme 的 Windows 安装目录探测复用同一缓存，避免
+/// 两个模块各自维护一套安装位置发现逻辑。
 #[cfg(windows)]
-fn zcode_exe_cache_path() -> Result<PathBuf, String> {
+pub(crate) fn zcode_exe_cache_path() -> Result<PathBuf, String> {
     Ok(config_dir()?.join(".zcode-exe-path"))
+}
+
+/// 将 exe 完整路径写入缓存。写失败静默（缓存是优化不是依赖）。
+/// pub(crate)：agent_theme 皮肤页探测时的现场捕获复用（捕获时机从
+/// "仅退出 ZCode 时"扩展到"缓存缺失且进程在运行时"）。
+#[cfg(windows)]
+pub(crate) fn cache_zcode_exe_path(exe: &Path) {
+    if let Ok(cache) = zcode_exe_cache_path() {
+        if let Some(parent) = cache.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(&cache, exe.to_string_lossy().as_bytes());
+    }
 }
 
 /// 静默执行外部命令（CREATE_NO_WINDOW，GUI 进程下不闪控制台黑窗）。
@@ -914,8 +929,10 @@ pub(crate) fn zcode_running() -> bool {
 /// 捕获运行中 ZCode 进程的 exe 完整路径（PowerShell Get-Process；
 /// 强制 UTF-8 输出——管道重定向下 5.1 默认按 OEM 代码页编码，中文安装
 /// 路径会变乱码；失败返回 None，不阻塞退出流程）。
+/// pub(crate)：agent_theme 的 Windows 安装目录探测复用（皮肤页探测时
+/// 现场捕获，见 cache_or_captured_install_candidates）。
 #[cfg(windows)]
-fn capture_zcode_exe_path() -> Option<PathBuf> {
+pub(crate) fn capture_zcode_exe_path() -> Option<PathBuf> {
     let script = format!(
         "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; \
           (Get-Process -Name {ZCODE_EXE_NAME} -ErrorAction SilentlyContinue \
@@ -930,6 +947,23 @@ fn capture_zcode_exe_path() -> Option<PathBuf> {
     }
 }
 
+/// 读取并校验缓存的 exe 路径：只信任指向 ZCode.exe 且真实存在的内容，
+/// 防篡改后借本面板拉起任意程序。无效/缺失返回 None。
+/// pub(crate)：agent_theme 的 Windows 安装目录探测复用（取父目录作为
+/// 安装根候选），launch_zcode 亦复用，校验逻辑只此一处。
+#[cfg(windows)]
+pub(crate) fn zcode_exe_cached() -> Option<PathBuf> {
+    let cache = zcode_exe_cache_path().ok()?;
+    let s = fs::read_to_string(cache).ok()?;
+    let s = s.trim();
+    let exe_suffix = format!("{}.exe", ZCODE_EXE_NAME).to_lowercase();
+    if s.is_empty() || !s.to_lowercase().ends_with(&exe_suffix) {
+        return None;
+    }
+    let exe = PathBuf::from(s);
+    exe.is_file().then_some(exe)
+}
+
 /// 退出 ZCode：先捕获并缓存 exe 路径（供重启用）→ taskkill 发送 WM_CLOSE
 /// 优雅退出 → 轮询 5s → taskkill /F 强杀 → 再轮询 3s。未运行直接返回 Ok。
 /// 只匹配 ZCode.exe 镜像，CLI 会话进程（node.exe）不受影响，与 macOS
@@ -942,12 +976,7 @@ pub(crate) fn quit_zcode() -> Result<(), String> {
     }
     // 趁进程还活着记下安装位置；捕获失败不阻塞（重启退回常见路径探测）
     if let Some(exe) = capture_zcode_exe_path().filter(|p| p.is_file()) {
-        if let Ok(cache) = zcode_exe_cache_path() {
-            if let Some(parent) = cache.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            let _ = fs::write(&cache, exe.to_string_lossy().as_bytes());
-        }
+        cache_zcode_exe_path(&exe);
     }
     let image = format!("{ZCODE_EXE_NAME}.exe");
     let _ = run_hidden("taskkill", &["/IM", image.as_str()]);
@@ -972,16 +1001,10 @@ pub(crate) fn quit_zcode() -> Result<(), String> {
 /// pub(crate)：agent_theme（动态壁纸注入）复用。
 #[cfg(windows)]
 pub(crate) fn launch_zcode() -> bool {
-    let exe_suffix = format!("{}.exe", ZCODE_EXE_NAME).to_lowercase();
     let mut candidates: Vec<PathBuf> = vec![];
-    if let Ok(cache) = zcode_exe_cache_path() {
-        if let Ok(s) = fs::read_to_string(&cache) {
-            // 缓存只信任指向 ZCode.exe 的内容，防篡改后借本面板拉起任意程序
-            let s = s.trim();
-            if !s.is_empty() && s.to_lowercase().ends_with(&exe_suffix) {
-                candidates.push(PathBuf::from(s));
-            }
-        }
+    // 缓存只信任指向 ZCode.exe 的内容，校验与防篡改见 zcode_exe_cached
+    if let Some(exe) = zcode_exe_cached() {
+        candidates.push(exe);
     }
     if let Some(base) = std::env::var_os("LOCALAPPDATA") {
         candidates.push(
