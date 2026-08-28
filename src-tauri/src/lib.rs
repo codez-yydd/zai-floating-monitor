@@ -9,11 +9,13 @@ mod cursor;
 mod db;
 mod kimi;
 mod pricing;
+mod projects;
 mod quota;
 mod quota_history;
 mod shortcut;
 mod sync;
 mod zcode_crypto;
+mod zcode_sessions;
 
 use pricing::{load_pricing, save_pricing, ModelPrice, PricingConfig};
 use quota::QuotaResult;
@@ -1102,6 +1104,43 @@ fn save_report(content: String, filename: String) -> Result<String, String> {
     Ok(path.display().to_string())
 }
 
+/// 分享图片保存：前端把 PNG 序列化为字节数组传入，弹出系统保存对话框
+/// （plugin-dialog 选保存路径），用户确认后写文件并打开所在目录。
+/// png_bytes: PNG 文件字节；suggested_name: 建议文件名（如 "周报-08-28.png"）。
+/// 用户取消返回 Ok(None)；成功返回保存路径。
+/// async + spawn_blocking：blocking_save_file 不允许在主线程执行（对话框
+/// 需要主线程事件循环配合），与含磁盘 IO 的命令一并卸载到阻塞线程池。
+#[tauri::command]
+async fn save_share_image(
+    app: AppHandle,
+    png_bytes: Vec<u8>,
+    suggested_name: String,
+) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri_plugin_dialog::DialogExt;
+        let file_path = app
+            .dialog()
+            .file()
+            .add_filter("PNG 图片", &["png"])
+            .set_file_name(&suggested_name)
+            .blocking_save_file();
+        let Some(file_path) = file_path else {
+            return Ok(None); // 用户取消
+        };
+        let path = file_path
+            .into_path()
+            .map_err(|e| format!("解析保存路径失败: {e}"))?;
+        std::fs::write(&path, &png_bytes).map_err(|e| format!("写入图片失败: {e}"))?;
+        // 打开所在目录（而非文件本身），与 save_report 行为一致
+        if let Some(dir) = path.parent() {
+            open::that(dir).map_err(|e| format!("打开目录失败: {e}"))?;
+        }
+        Ok(Some(path.display().to_string()))
+    })
+    .await
+    .map_err(|e| format!("保存图片任务失败: {e}"))?
+}
+
 // ===== 窗口置顶常驻（仅 Windows）=====
 
 /// 置顶状态配置文件路径：~/.zbar/pin.json
@@ -2026,6 +2065,9 @@ pub fn run() {
             account_quotas,
             check_update,
             show_notification,
+            projects::get_projects,
+            projects::get_project_sessions,
+            save_share_image,
             agent_theme::get_agent_theme_state,
             agent_theme::install_agent_theme,
             agent_theme::uninstall_agent_theme,

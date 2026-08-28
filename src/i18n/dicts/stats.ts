@@ -6,8 +6,7 @@
 export const stats = {
   // ===== 统计面板顶栏 =====
   "stats.tab.summary": "汇总",
-  "stats.compare": "周额度对比",
-  "stats.report": "用量报告",
+  "stats.reports": "报表",
   "stats.syncOn": "设备同步",
   "stats.syncOff": "配置设备同步",
   "stats.settings": "设置",

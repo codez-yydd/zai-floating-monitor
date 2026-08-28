@@ -22,6 +22,7 @@ import type {
   PricingConfig,
   PricingDiff,
   ApplyPriceItem,
+  ProjectSummary,
   QuotaResult,
   QuotaSnapshot,
   RegisterRequest,
@@ -29,6 +30,7 @@ import type {
   RemoteSnapshot,
   RemoteAgentQuotaSnapshot,
   RemoteUsage,
+  SessionsPage,
   ShortcutConfig,
   Stats,
   SwitchOutcome,
@@ -537,4 +539,45 @@ export async function restartZcode(
   appId: string
 ): Promise<{ restarted: boolean }> {
   return invoke<{ restarted: boolean }>("restart_zcode", { appId });
+}
+
+// ===== 项目 / 会话浏览器 =====
+// invoke 参数名统一 camelCase（fromMs/projectKey/pngBytes 等），
+// 与 Tauri v2 对 Rust snake_case 命令参数的默认匹配约定一致。
+
+/** 按时间范围聚合项目用量列表（未知项目 key 固定 "__unknown__"） */
+export async function getProjects(
+  fromMs: number,
+  toMs: number
+): Promise<ProjectSummary[]> {
+  return invoke<ProjectSummary[]>("get_projects", { fromMs, toMs });
+}
+
+/** 分页拉取某项目的会话列表。source 传 null 表示不过滤 Agent 来源 */
+export async function getProjectSessions(
+  projectKey: string,
+  fromMs: number,
+  toMs: number,
+  source: string | null,
+  offset: number,
+  limit: number
+): Promise<SessionsPage> {
+  return invoke<SessionsPage>("get_project_sessions", {
+    projectKey,
+    fromMs,
+    toMs,
+    source,
+    offset,
+    limit,
+  });
+}
+
+// ===== 花费分享卡片 =====
+
+/** 弹系统保存对话框并把 PNG 写盘，返回保存路径；用户取消返回 null */
+export async function saveShareImage(
+  pngBytes: number[],
+  suggestedName: string
+): Promise<string | null> {
+  return invoke<string | null>("save_share_image", { pngBytes, suggestedName });
 }

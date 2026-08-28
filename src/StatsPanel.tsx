@@ -12,6 +12,7 @@ import { ClaudePanel } from "./ClaudePanel";
 import { CursorPanel } from "./CursorPanel";
 import { KimiPanel } from "./KimiPanel";
 import { SummaryTab } from "./SummaryTab";
+import { ProjectsPanel } from "./ProjectsPanel";
 import { BrandIcon, type BrandIconName } from "./BrandIcon";
 import {
   AGENT_VISIBILITY_OPTIONS,
@@ -27,8 +28,7 @@ interface Props {
   agentVisibility: AgentVisibility;
   onGoPricing: () => void;
   onGoSync: () => void;
-  onGoCompare: () => void;
-  onGoReport: () => void;
+  onGoReports: () => void;
   onGoTheme: () => void;
   onGoSettings: () => void;
 }
@@ -37,6 +37,7 @@ function loadStatsTab(agentVisibility: AgentVisibility): StatsTab {
   try {
     const saved = localStorage.getItem("zbar-tab");
     if (saved === "summary") return saved;
+    if (saved === "projects") return saved;
     if (
       saved === "zai" ||
       saved === "codex" ||
@@ -65,8 +66,7 @@ export function StatsPanel({
   agentVisibility,
   onGoPricing,
   onGoSync,
-  onGoCompare,
-  onGoReport,
+  onGoReports,
   onGoTheme,
   onGoSettings,
 }: Props) {
@@ -108,17 +108,22 @@ export function StatsPanel({
   );
 
   useEffect(() => {
-    if (tab !== "summary" && !agentVisibility[tab]) {
+    if (
+      tab !== "summary" &&
+      tab !== "projects" &&
+      !agentVisibility[tab]
+    ) {
       setTab("summary");
     }
   }, [agentVisibility, tab]);
 
-  // 模式 C：「汇总」标签走词典（其余是品牌名），语言切换时随 t 重建
+  // 模式 C：「汇总」/「项目」标签走词典（其余是品牌名），语言切换时随 t 重建
   const statTabs = useMemo<
     ReadonlyArray<{ id: StatsTab; label: string; brand?: BrandIconName }>
   >(
     () => [
       { id: "summary", label: t("stats.tab.summary") },
+      { id: "projects", label: t("projects.tab") },
       ...AGENT_VISIBILITY_OPTIONS.map((agent) => ({
         id: agent.id,
         label: agent.label,
@@ -129,7 +134,9 @@ export function StatsPanel({
   );
 
   const visibleTabs = statTabs.filter((item) =>
-    item.id === "summary" ? true : agentVisibility[item.id]
+    item.id === "summary" || item.id === "projects"
+      ? true
+      : agentVisibility[item.id]
   );
 
   // ===== 窗口置顶常驻（仅 Windows）=====
@@ -200,18 +207,11 @@ export function StatsPanel({
           </div>
           <div className="flex items-center gap-0.5">
             <button
-              onClick={onGoCompare}
+              onClick={onGoReports}
               className="toolbar-btn"
-              title={t("stats.compare")}
+              title={t("stats.reports")}
             >
               📊
-            </button>
-            <button
-              onClick={onGoReport}
-              className="toolbar-btn"
-              title={t("stats.report")}
-            >
-              📄
             </button>
             <button
               onClick={onGoSync}
@@ -318,6 +318,7 @@ export function StatsPanel({
                 kimi: "bg-indigo-500/12 text-indigo-700 shadow-sm",
                 zai: "bg-sky-500/12 text-sky-700 shadow-sm",
                 summary: "bg-sky-500/15 text-sky-700 shadow-sm",
+                projects: "bg-amber-500/12 text-amber-700 shadow-sm",
               };
               return (
                 <button
@@ -404,6 +405,13 @@ export function StatsPanel({
           trendBucket={trendBucket}
           pricing={pricing}
           agentQuotaDelta={agentQuotaDeltas.kimi?.weekly}
+        />
+      ) : tab === "projects" ? (
+        <ProjectsPanel
+          preset={preset}
+          custom={custom}
+          currency={currency}
+          fxRate={fxRate}
         />
       ) : (
         <SummaryTab

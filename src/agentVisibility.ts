@@ -93,3 +93,25 @@ export function saveAgentVisibility(visibility: AgentVisibility): void {
     // 隐私模式或存储配额不足不应阻断设置页操作。
   }
 }
+
+// ============================================================
+// 数据来源字符串（后端 source 字段："zcode" | "codex" | ...）的展示元数据。
+// 项目浏览器等按 source 字符串工作的界面使用，保证与
+// AGENT_COLOR / AGENT_VISIBILITY_OPTIONS 的品牌色与名称一致。
+// ============================================================
+
+/** 未知来源的兜底展示：中性灰 */
+const UNKNOWN_SOURCE_META = { label: "Unknown", color: "#94a3b8" };
+
+const SOURCE_META: Record<string, { label: string; color: string }> = {
+  zcode: { label: "Z.ai", color: AGENT_COLOR.zai },
+  codex: { label: "Codex", color: AGENT_COLOR.codex },
+  claude: { label: "Claude", color: AGENT_COLOR.claude },
+  cursor: { label: "Cursor", color: AGENT_COLOR.cursor },
+  kimi: { label: "Kimi", color: AGENT_COLOR.kimi },
+};
+
+/** source 字符串 → 品牌名 + 品牌色（未知来源回退中性灰，不抛错） */
+export function sourceMeta(source: string): { label: string; color: string } {
+  return SOURCE_META[source] ?? UNKNOWN_SOURCE_META;
+}

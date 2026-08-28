@@ -48,8 +48,6 @@ import {
 import { type AgentId, type AgentVisibility } from "./agentVisibility";
 import { TrendChart, remainingGradient } from "./widgets";
 import {
-  PageShell,
-  PageHeader,
   PageBody,
   PageFooter,
   SectionCard,
@@ -59,12 +57,12 @@ import {
   LoadingState,
 } from "./layout";
 import { RangePicker, resolveRange } from "./RangePicker";
+import { ShareCardModal } from "./ShareCard";
 import { useI18n, type MessageKey, type TFn } from "./i18n";
 import { dateLocale, type Locale } from "./i18n/locale";
 import { loadResetDisplay, useResetDisplay, type ResetDisplay } from "./resetDisplay";
 
 interface Props {
-  onBack: () => void;
   pricing: PricingConfig;
   currency: Currency;
   agentVisibility: AgentVisibility;
@@ -638,8 +636,12 @@ function makeCursorQuota(snapshot: CursorSnapshot): ReportQuota | null {
   };
 }
 
-export function ReportPanel({
-  onBack,
+/**
+ * 用量报告内容区：供 ReportsPanel 壳按标签复用，页面外壳（返回/标题栏）
+ * 由壳统一渲染，此处保留工具区（范围选择 + 设备筛选 + 分享/刷新）、
+ * 报表主体与底部导出操作栏。
+ */
+export function ReportContent({
   pricing,
   currency,
   agentVisibility,
@@ -656,6 +658,8 @@ export function ReportPanel({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [doneFlash, setDoneFlash] = useState<string | null>(null);
+  // 分享卡片弹层（默认生成近 7 天卡片，数据由弹层自拉）
+  const [shareOpen, setShareOpen] = useState(false);
 
   const [syncConfig, setSyncConfig] = useState<SyncConfig | null>(null);
   const [remoteDevices, setRemoteDevices] = useState<DeviceInfo[]>([]);
@@ -1060,48 +1064,57 @@ export function ReportPanel({
   };
 
   return (
-    <PageShell>
-      <PageHeader
-        title={t("report.title")}
-        onBack={onBack}
-        right={<button onClick={load} disabled={loading} className="toolbar-btn" title={t("report.refresh")}>↻</button>}
-        subtitle={
-          <div className="space-y-2">
-            <RangePicker
-              preset={preset}
-              custom={custom}
-              min={offsetLocalDateStr(Date.now(), -89)}
-              onChange={(nextPreset, nextCustom) => {
-                setPreset(nextPreset);
-                setCustom(nextCustom);
-              }}
-            />
-            {syncEnabled && (
-              <select
-                value={deviceFilter}
-                onChange={(event) => setDeviceFilter(event.target.value)}
-                className="input-box num w-full min-w-0 text-[10px] py-1"
-                title={t("stats.deviceFilter")}
-              >
-                <option value="all">{t("report.allDevices")}</option>
-                <option value="local">
-                  {syncConfig?.device_name
-                    ? t("stats.deviceLocalName", { name: syncConfig.device_name })
-                    : t("stats.deviceLocal")}
+    <>
+      {/* 工具区：范围选择 + 设备筛选 + 分享/刷新（原页面级 PageHeader 的操作区，
+          页面外壳上移 ReportsPanel 后保留在此） */}
+      <div className="px-3 pt-2.5 pb-2 border-b border-slate-900/8 shrink-0 space-y-2">
+        <RangePicker
+          preset={preset}
+          custom={custom}
+          min={offsetLocalDateStr(Date.now(), -89)}
+          onChange={(nextPreset, nextCustom) => {
+            setPreset(nextPreset);
+            setCustom(nextCustom);
+          }}
+        />
+        <div className="flex items-center justify-between gap-2">
+          {syncEnabled ? (
+            <select
+              value={deviceFilter}
+              onChange={(event) => setDeviceFilter(event.target.value)}
+              className="input-box num flex-1 min-w-0 text-[10px] py-1"
+              title={t("stats.deviceFilter")}
+            >
+              <option value="all">{t("report.allDevices")}</option>
+              <option value="local">
+                {syncConfig?.device_name
+                  ? t("stats.deviceLocalName", { name: syncConfig.device_name })
+                  : t("stats.deviceLocal")}
+              </option>
+              {remoteDevices.filter((device) => device.device_id !== syncConfig?.device_id).map((device) => (
+                <option key={device.device_id} value={device.device_id}>
+                  {t("common.deviceOption", {
+                    name: device.device_name,
+                    id: device.device_id.slice(0, 6),
+                  })}
                 </option>
-                {remoteDevices.filter((device) => device.device_id !== syncConfig?.device_id).map((device) => (
-                  <option key={device.device_id} value={device.device_id}>
-                    {t("common.deviceOption", {
-                      name: device.device_name,
-                      id: device.device_id.slice(0, 6),
-                    })}
-                  </option>
-                ))}
-              </select>
-            )}
+              ))}
+            </select>
+          ) : (
+            <span />
+          )}
+          <div className="flex items-center gap-0.5 shrink-0">
+            <button
+              onClick={() => setShareOpen(true)}
+              className="toolbar-btn"
+              title={t("share.button")}
+            >
+              ✦
+            </button>
+            <button onClick={load} disabled={loading} className="toolbar-btn" title={t("report.refresh")}>↻</button>
           </div>
-        }
-      />
+        </div>
+      </div>
 
       {(error || (report?.warnings.length ?? 0) > 0) && (
         <div className="px-3 pt-2 space-y-1">
@@ -1258,7 +1271,16 @@ export function ReportPanel({
           <BtnPrimary onClick={handleSave} disabled={!report || loading}>{t("common.save")}</BtnPrimary>
         </div>
       </PageFooter>
-    </PageShell>
+
+      {/* 生成分享卡片弹层（近 7 天卡片，Canvas 实时预览） */}
+      {shareOpen && (
+        <ShareCardModal
+          onClose={() => setShareOpen(false)}
+          pricing={pricing}
+          agentVisibility={agentVisibility}
+        />
+      )}
+    </>
   );
 }
 

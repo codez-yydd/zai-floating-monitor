@@ -129,10 +129,17 @@ fn open_kimi_db_at(path: &Path) -> Result<Connection, String> {
          );
          CREATE INDEX IF NOT EXISTS idx_kimi_model_usage_started ON model_usage(started_at);
          CREATE INDEX IF NOT EXISTS idx_kimi_model_usage_updated ON model_usage(updated_at);
+         CREATE INDEX IF NOT EXISTS idx_kimi_mu_session ON model_usage(session_id);
          CREATE TABLE IF NOT EXISTS file_progress (
             path   TEXT    PRIMARY KEY,
             offset INTEGER NOT NULL,
             size   INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS session_meta (
+            session_id  TEXT PRIMARY KEY,
+            cwd         TEXT,
+            project_key TEXT,
+            captured_at INTEGER
          );",
     )
     .map_err(|e| format!("初始化 Kimi 导入库失败: {e}"))?;
@@ -222,6 +229,58 @@ fn session_id_from_path(path: &Path, sessions_root: &Path) -> String {
         }
     }
     path.to_string_lossy().to_string()
+}
+
+/// 读取 wire.jsonl 前 N 行，取首个含 environmentDisclosure.cwd 的行。
+/// 该字段挂在文件头部的环境披露事件上（实测在第 3 行左右，位置不保证），
+/// 用宽松的 serde_json::Value 解析（行 type 不固定，不强校验）。
+fn read_wire_cwd(path: &Path, max_lines: usize) -> Option<String> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).ok()?;
+    for line in std::io::BufReader::new(file).lines().take(max_lines).flatten() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if let Some(cwd) = value
+            .get("environmentDisclosure")
+            .and_then(|env| env.get("cwd"))
+            .and_then(|c| c.as_str())
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        {
+            return Some(cwd.to_string());
+        }
+    }
+    None
+}
+
+/// 写入/补齐会话的项目维度记录（幂等，与 codex.rs upsert_session_meta 同款）。
+/// - 首次：直接插入（cwd 缺失时 project_key 存 NULL，作哨兵防止重复扫描）；
+/// - 冲突：仅当库内 project_key 仍为 NULL 且新值非 NULL 时补上（同一 session
+///   后续 agent 文件带 cwd 时可自愈早期哨兵行），已有值绝不覆盖。
+fn upsert_session_meta(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    cwd_raw: Option<&str>,
+) -> Result<(), String> {
+    let project_key = cwd_raw.and_then(crate::projects::normalize_cwd);
+    tx.execute(
+        "INSERT INTO session_meta (session_id, cwd, project_key, captured_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(session_id) DO UPDATE SET
+            cwd = COALESCE(excluded.cwd, session_meta.cwd),
+            project_key = COALESCE(excluded.project_key, session_meta.project_key),
+            captured_at = excluded.captured_at
+         WHERE session_meta.project_key IS NULL AND excluded.project_key IS NOT NULL",
+        rusqlite::params![
+            session_id,
+            cwd_raw,
+            project_key,
+            chrono::Local::now().timestamp_millis()
+        ],
+    )
+    .map_err(|e| format!("写入 Kimi 会话项目维度失败: {e}"))?;
+    Ok(())
 }
 
 // ===== 增量导入 =====
@@ -340,7 +399,98 @@ fn import_incremental_into(dir: &Path, db_path: &Path) -> Result<(), String> {
             );
         }
     }
+
+    // 存量会话项目维度回填（节流 + 每批限量，幂等说明见函数注释）。
+    // 仅生产路径触发；测试注入的临时目录/临时库不走回填（不触碰真实
+    // sessions 目录，保持单测隔离）。
+    if db_path == kimi_db_path()?.as_path() {
+        if let Err(e) = backfill_session_meta_locked(&mut conn, dir) {
+            eprintln!("[zbar-kimi] 会话项目维度回填失败（下次重试）: {e}");
+        }
+    }
     Ok(())
+}
+
+/// 上次会话项目维度回填时间（节流用）。
+static LAST_SESSION_META_BACKFILL_AT: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::new();
+
+/// 存量会话项目维度回填（调用方必须已持有 import_lock）。
+///
+/// 幂等性保证（重复调用不重复读文件）：
+/// - 只选 model_usage 中存在、session_meta 中完全缺失的会话（LEFT JOIN NULL
+///   过滤），已回填过的会话天然不在候选集里；
+/// - 每个候选会话无论是否找到 cwd 都写入 session_meta（找不到时 project_key
+///   为 NULL 的哨兵行），下一轮候选查询即把它排除，同一会话只做一次头部扫描；
+/// - upsert 的冲突分支仅在「库内 project_key 为 NULL 且新值非空」时补值，
+///   重复执行不会覆盖已回填的值；
+/// - 30 秒节流 + 每批最多 500 个会话，量大时靠多轮调用分批消化。
+fn backfill_session_meta_locked(conn: &mut Connection, sessions_root: &Path) -> Result<usize, String> {
+    {
+        let mut last = LAST_SESSION_META_BACKFILL_AT
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if last.map(|t| t.elapsed() < std::time::Duration::from_secs(30)) == Some(true) {
+            return Ok(0);
+        }
+        *last = Some(std::time::Instant::now());
+    }
+
+    let missing: Vec<String> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT mu.session_id
+                 FROM model_usage mu
+                 LEFT JOIN session_meta sm ON sm.session_id = mu.session_id
+                 WHERE sm.session_id IS NULL
+                 LIMIT 500",
+            )
+            .map_err(|e| format!("查询待回填 Kimi 会话失败: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("查询待回填 Kimi 会话失败: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("查询待回填 Kimi 会话失败: {e}"))?;
+        rows
+    };
+    if missing.is_empty() {
+        return Ok(0);
+    }
+
+    // session_id → 源文件映射（session_id_from_path 的两种形态都覆盖：
+    // 标准布局取 sessionId 目录名，非标准布局兜底为文件全路径）。
+    let mut files = Vec::new();
+    collect_session_files(sessions_root, 6, &mut files);
+    let mut by_session: HashMap<String, &Path> = HashMap::new();
+    for path in &files {
+        by_session
+            .entry(session_id_from_path(path, sessions_root))
+            .or_insert(path);
+    }
+
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("开启 Kimi 回填事务失败: {e}"))?;
+    for session_id in &missing {
+        let cwd = by_session
+            .get(session_id.as_str())
+            .and_then(|path| read_wire_cwd(path, 50));
+        upsert_session_meta(&tx, session_id, cwd.as_deref())?;
+    }
+    tx.commit()
+        .map_err(|e| format!("提交 Kimi 回填事务失败: {e}"))?;
+    Ok(missing.len())
+}
+
+/// 存量会话项目维度回填（公开入口，项目浏览器查询前调用）。
+/// 与增量导入共用 IMPORT_LOCK 串行；内部自带节流与分批限量。
+pub fn backfill_session_meta() -> Result<usize, String> {
+    let _guard = import_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let dir = sessions_dir()?;
+    let mut conn = open_kimi_db()?;
+    backfill_session_meta_locked(&mut conn, &dir)
 }
 
 /// 解析单个 wire.jsonl 的增量部分。known = 上次记录的 (offset, size)；
@@ -376,6 +526,22 @@ fn import_one_file(
     let tx = conn
         .transaction()
         .map_err(|e| format!("开启导入事务失败: {e}"))?;
+
+    // 项目维度：该会话尚无有效 project_key 时，单独读文件前 50 行找
+    // environmentDisclosure.cwd（找到后 upsert 冲突分支不再触发；同一 session
+    // 找不到 cwd 的后续 agent 文件每次导入最多重扫 50 行头部，量小可接受）。
+    let has_project_key: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_meta
+                          WHERE session_id = ?1 AND project_key IS NOT NULL)",
+            rusqlite::params![session_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !has_project_key {
+        let cwd = read_wire_cwd(path, 50);
+        upsert_session_meta(&tx, &session_id, cwd.as_deref())?;
+    }
 
     let mut pos = start_offset;
     let mut last_complete_end = start_offset;
@@ -718,7 +884,8 @@ pub fn query_trend(
 }
 
 /// 查询 id > since 的明细记录（同步上传预留，首期 sync.rs 不接入 kimi）。
-/// source 固定 "kimi"，local_rowid = id。
+/// source 固定 "kimi"，local_rowid = id。proto 5 字段预留：kimi 的项目
+/// 维度在 session_meta 表，接入同步时再 join 填充，当前恒 None。
 #[allow(dead_code)]
 pub fn query_since(since: i64, limit: usize) -> Result<Vec<db::UsageRow>, String> {
     import_incremental()?;
@@ -727,7 +894,8 @@ pub fn query_since(since: i64, limit: usize) -> Result<Vec<db::UsageRow>, String
         .prepare(
             "SELECT id, started_at, model_id, provider_id,
                     input_tokens, output_tokens, cache_read_input_tokens,
-                    cache_creation_input_tokens, reasoning_tokens, computed_total_tokens
+                    cache_creation_input_tokens, reasoning_tokens, computed_total_tokens,
+                    session_id
              FROM model_usage
              WHERE id > ?1
              ORDER BY id ASC
@@ -748,6 +916,9 @@ pub fn query_since(since: i64, limit: usize) -> Result<Vec<db::UsageRow>, String
                 reasoning_tokens: row.get(8)?,
                 computed_total_tokens: row.get(9)?,
                 source: "kimi".into(),
+                session_id: row.get(10)?,
+                project_key: None,
+                project_display: None,
             })
         })
         .map_err(|e| format!("读取 Kimi 增量记录失败: {e}"))?
@@ -785,7 +956,8 @@ pub fn query_revised_since(
         .prepare(
             "SELECT id, started_at, model_id, provider_id,
                     input_tokens, output_tokens, cache_read_input_tokens,
-                    cache_creation_input_tokens, reasoning_tokens, computed_total_tokens
+                    cache_creation_input_tokens, reasoning_tokens, computed_total_tokens,
+                    session_id
              FROM model_usage
              WHERE updated_at > ?1 AND id > ?2
              ORDER BY id ASC
@@ -806,6 +978,9 @@ pub fn query_revised_since(
                 reasoning_tokens: row.get(8)?,
                 computed_total_tokens: row.get(9)?,
                 source: "kimi".into(),
+                session_id: row.get(10)?,
+                project_key: None,
+                project_display: None,
             })
         })
         .map_err(|e| format!("读取 Kimi 修订记录失败: {e}"))?
@@ -872,6 +1047,194 @@ pub fn query_period_buckets(
         });
     }
     Ok(out)
+}
+
+// ===== 项目/会话维度查询（项目浏览器用，cwd 归一化见 projects.rs）=====
+
+/// 按项目 × 模型聚合 [from_ms, to_ms) 的用量（SQL 侧 GROUP BY，不逐行加载）。
+/// project_key 缺失（无 environmentDisclosure 的会话）归入 unknown 哨兵键。
+pub fn query_project_model_rows(
+    from_ms: i64,
+    to_ms: i64,
+) -> Result<Vec<crate::projects::ProjectModelRow>, String> {
+    import_incremental()?;
+    let conn = open_kimi_db()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT COALESCE(sm.project_key, ?1),
+                    mu.model_id,
+                    COUNT(*),
+                    COALESCE(SUM(mu.input_tokens),0),
+                    COALESCE(SUM(mu.output_tokens),0),
+                    COALESCE(SUM(mu.cache_read_input_tokens),0),
+                    COALESCE(SUM(mu.computed_total_tokens),0)
+             FROM model_usage mu
+             LEFT JOIN session_meta sm ON sm.session_id = mu.session_id
+             WHERE mu.started_at >= ?2 AND mu.started_at < ?3
+             GROUP BY 1, 2",
+        )
+        .map_err(|e| format!("准备 Kimi 项目聚合查询失败: {e}"))?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![crate::projects::UNKNOWN_PROJECT, from_ms, to_ms],
+            |row| {
+                Ok(crate::projects::ProjectModelRow {
+                    project_key: row.get(0)?,
+                    model_id: row.get(1)?,
+                    requests: row.get(2)?,
+                    input_tokens: row.get(3)?,
+                    output_tokens: row.get(4)?,
+                    cache_read_tokens: row.get(5)?,
+                    total_tokens: row.get(6)?,
+                })
+            },
+        )
+        .map_err(|e| format!("读取 Kimi 项目聚合失败: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("读取 Kimi 项目聚合失败: {e}"))?;
+    Ok(rows)
+}
+
+/// 按项目统计 [from_ms, to_ms) 内的会话数（COUNT(DISTINCT session_id)）。
+pub fn query_project_session_counts(
+    from_ms: i64,
+    to_ms: i64,
+) -> Result<Vec<(String, i64)>, String> {
+    import_incremental()?;
+    let conn = open_kimi_db()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT COALESCE(sm.project_key, ?1), COUNT(DISTINCT mu.session_id)
+             FROM model_usage mu
+             LEFT JOIN session_meta sm ON sm.session_id = mu.session_id
+             WHERE mu.started_at >= ?2 AND mu.started_at < ?3
+             GROUP BY 1",
+        )
+        .map_err(|e| format!("准备 Kimi 项目会话统计失败: {e}"))?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![crate::projects::UNKNOWN_PROJECT, from_ms, to_ms],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| format!("读取 Kimi 项目会话统计失败: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("读取 Kimi 项目会话统计失败: {e}"))?;
+    Ok(rows)
+}
+
+/// 项目键 → 原始形态 cwd（保留大小写，取字典序最小者做代表）。
+pub fn query_project_display_paths() -> Result<Vec<(String, String)>, String> {
+    let conn = open_kimi_db()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT project_key, MIN(cwd)
+             FROM session_meta
+             WHERE project_key IS NOT NULL AND cwd IS NOT NULL AND cwd != ''
+             GROUP BY project_key",
+        )
+        .map_err(|e| format!("准备 Kimi 项目路径查询失败: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|e| format!("读取 Kimi 项目路径失败: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("读取 Kimi 项目路径失败: {e}"))?;
+    Ok(rows)
+}
+
+/// 分页查询指定项目的会话明细（按会话最后活跃时间降序）。
+/// 返回 (匹配会话总数, 按会话 × 模型聚合的行)；offset/limit 作用在会话粒度。
+/// project_key 传 UNKNOWN_PROJECT 时匹配 project_key 为 NULL 的会话。
+pub fn query_project_sessions(
+    project_key: &str,
+    from_ms: i64,
+    to_ms: i64,
+    offset: u32,
+    limit: u32,
+) -> Result<(u32, Vec<crate::projects::ProjectSessionModelRow>), String> {
+    import_incremental()?;
+    let conn = open_kimi_db()?;
+    let total: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM (
+                SELECT DISTINCT mu.session_id
+                FROM model_usage mu
+                LEFT JOIN session_meta sm ON sm.session_id = mu.session_id
+                WHERE mu.started_at >= ?1 AND mu.started_at < ?2
+                  AND COALESCE(sm.project_key, ?3) = ?4
+            )",
+            rusqlite::params![from_ms, to_ms, crate::projects::UNKNOWN_PROJECT, project_key],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("查询 Kimi 项目会话总数失败: {e}"))?;
+
+    // 会话级速度聚合（口径与 query_stats 的面板统计完全一致；duration_ms 为
+    // 事件时间差推算、无 TTFT 列 → ttft 恒 None；传 SUM/COUNT 供会话级跨模型
+    // 合并，避免二次平均偏差。表达式引用的耗时/token 列仅 mu 表持有，与
+    // session_meta JOIN 无同名列歧义）
+    let speed = db::session_speed_agg_columns(
+        db::has_column(&conn, "model_usage", "duration_ms"),
+        false,
+    );
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT mu.session_id, mu.model_id,
+                    MIN(mu.started_at), MAX(mu.started_at), COUNT(*),
+                    COALESCE(SUM(mu.input_tokens),0),
+                    COALESCE(SUM(mu.output_tokens),0),
+                    COALESCE(SUM(mu.cache_read_input_tokens),0),
+                    COALESCE(SUM(mu.cache_creation_input_tokens),0)
+                    {speed}
+             FROM model_usage mu
+             LEFT JOIN session_meta sm ON sm.session_id = mu.session_id
+             WHERE mu.started_at >= ?1 AND mu.started_at < ?2
+               AND COALESCE(sm.project_key, ?3) = ?4
+               AND mu.session_id IN (
+                   SELECT session_id FROM (
+                       SELECT mu2.session_id AS session_id
+                       FROM model_usage mu2
+                       LEFT JOIN session_meta sm2 ON sm2.session_id = mu2.session_id
+                       WHERE mu2.started_at >= ?1 AND mu2.started_at < ?2
+                         AND COALESCE(sm2.project_key, ?3) = ?4
+                       GROUP BY mu2.session_id
+                       ORDER BY MAX(mu2.started_at) DESC
+                       LIMIT ?5 OFFSET ?6
+                   )
+               )
+             GROUP BY mu.session_id, mu.model_id"
+        ))
+        .map_err(|e| format!("准备 Kimi 项目会话查询失败: {e}"))?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![
+                from_ms,
+                to_ms,
+                crate::projects::UNKNOWN_PROJECT,
+                project_key,
+                limit as i64,
+                offset as i64
+            ],
+            |row| {
+                Ok(crate::projects::ProjectSessionModelRow {
+                    session_id: row.get(0)?,
+                    model_id: row.get(1)?,
+                    first_at: row.get(2)?,
+                    last_at: row.get(3)?,
+                    requests: row.get(4)?,
+                    input_tokens: row.get(5)?,
+                    output_tokens: row.get(6)?,
+                    cache_read_tokens: row.get(7)?,
+                    cache_write_tokens: row.get(8)?,
+                    tps_sum: row.get(9)?,
+                    tps_count: row.get(10)?,
+                    ttft_sum: row.get(11)?,
+                    ttft_count: row.get(12)?,
+                })
+            },
+        )
+        .map_err(|e| format!("读取 Kimi 项目会话失败: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("读取 Kimi 项目会话失败: {e}"))?;
+    Ok((total.max(0) as u32, rows))
 }
 
 // ===== 实时额度（api.kimi.com coding usages 端点）=====

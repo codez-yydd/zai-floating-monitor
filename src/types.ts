@@ -492,6 +492,7 @@ export interface CursorSnapshot {
 /** 主面板标签 */
 export type StatsTab =
   | "summary"
+  | "projects"
   | "zai"
   | "codex"
   | "claude"
@@ -719,4 +720,58 @@ export interface AgentThemeProgress {
   stage: string;
   percent: number;
   detail: string | null;
+}
+
+// ===== 项目 / 会话浏览器（与后端 projects 模块结构一一对应）=====
+
+/** 项目内单个 Agent 来源的用量分解 */
+export interface AgentBreakdown {
+  /** 数据来源："zcode" | "codex" | "claude" | "cursor" | "kimi" */
+  source: string;
+  tokens: number;
+  requests: number;
+  cost_usd: number;
+  sessions: number;
+}
+
+/** 单个项目聚合（get_projects 返回项）。key 为项目标识（未知项目固定 "__unknown__"） */
+export interface ProjectSummary {
+  key: string;
+  /** 展示路径（未知项目为 null，前端回退 i18n 文案） */
+  display_path: string | null;
+  is_unknown: boolean;
+  total_tokens: number;
+  requests: number;
+  cost_usd: number;
+  sessions: number;
+  by_agent: AgentBreakdown[];
+}
+
+/** 单个会话摘要（get_project_sessions 返回项） */
+export interface SessionSummary {
+  session_id: string;
+  source: string;
+  /** 起止毫秒时间戳 */
+  first_at: number;
+  last_at: number;
+  /** 墙钟时长（毫秒，可能为 0 = 无法解析） */
+  wall_duration_ms: number;
+  /** 会话内出现过的模型 id 列表 */
+  models: string[];
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  requests: number;
+  cost_usd: number;
+  /** 会话级平均输出速度 tok/s（源无耗时数据为 null，如 codex） */
+  speed_tps: number | null;
+  /** 会话级平均首字延迟 ms（仅 zcode 有 TTFT 数据，其余源为 null） */
+  ttft_ms: number | null;
+}
+
+/** 会话分页结果 */
+export interface SessionsPage {
+  total: number;
+  items: SessionSummary[];
 }

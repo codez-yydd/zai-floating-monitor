@@ -28,8 +28,6 @@ import { formatTokens } from "./format";
 import { remainingTextColor } from "./widgets";
 import { BrandIcon, type BrandIconName } from "./BrandIcon";
 import {
-  PageShell,
-  PageHeader,
   PageBody,
   SectionCard,
   EmptyState,
@@ -41,7 +39,6 @@ import { mergeAgentQuotaSnapshots } from "./agentQuota";
 import { loadCache, saveCache } from "./cache";
 
 interface Props {
-  onBack: () => void;
   agentVisibility: AgentVisibility;
 }
 
@@ -217,7 +214,11 @@ function clampUsedPct(value: number | null | undefined): number | null {
   return Math.min(100, Math.max(0, value));
 }
 
-export function ComparePanel({ onBack, agentVisibility }: Props) {
+/**
+ * 周额度对比内容区：供 ReportsPanel 壳按标签复用，页面外壳（返回/标题栏）
+ * 由壳统一渲染，此处只保留工具行（设备筛选 + 刷新）与图表主体。
+ */
+export function CompareContent({ agentVisibility }: Props) {
   const { t } = useI18n();
   const [weekSlots, setWeekSlots] = useState<WeekSlot[]>([]);
   const [series, setSeries] = useState<QuotaSeries[]>([]);
@@ -555,41 +556,39 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
   }, [load]);
 
   return (
-    <PageShell>
-      <PageHeader
-        title={t("compare.title")}
-        onBack={onBack}
-        right={
-          <button onClick={load} disabled={loading} className="toolbar-btn" title={t("common.refresh")}>↻</button>
-        }
-        subtitle={
-          syncEnabled ? (
-            <div className="flex items-center gap-1.5">
-              <span className="text-[10px] text-slate-500 shrink-0">{t("compare.device")}</span>
-              <select
-                value={deviceFilter}
-                onChange={(e) => setDeviceFilter(e.target.value)}
-                className="input-box flex-1 text-[10px] py-1"
-              >
-                <option value="all">{t("compare.all")}</option>
-                <option value="local">
-                  {syncConfig?.device_name
-                    ? t("stats.deviceLocalName", { name: syncConfig.device_name })
-                    : t("stats.deviceLocal")}
+    <>
+      {/* 工具行：设备筛选 + 手动刷新（原页面级 PageHeader 的操作区，
+          页面外壳上移 ReportsPanel 后保留在此） */}
+      <div className="px-3 pt-2.5 pb-2 border-b border-slate-900/8 shrink-0 flex items-center justify-between gap-2">
+        {syncEnabled ? (
+          <div className="flex items-center gap-1.5 flex-1 min-w-0">
+            <span className="text-[10px] text-slate-500 shrink-0">{t("compare.device")}</span>
+            <select
+              value={deviceFilter}
+              onChange={(e) => setDeviceFilter(e.target.value)}
+              className="input-box flex-1 text-[10px] py-1"
+            >
+              <option value="all">{t("compare.all")}</option>
+              <option value="local">
+                {syncConfig?.device_name
+                  ? t("stats.deviceLocalName", { name: syncConfig.device_name })
+                  : t("stats.deviceLocal")}
+              </option>
+              {remoteDevices.filter((d) => d.device_id !== syncConfig?.device_id).map((d) => (
+                <option key={d.device_id} value={d.device_id}>
+                  {t("common.deviceOption", {
+                    name: d.device_name,
+                    id: d.device_id.slice(0, 6),
+                  })}
                 </option>
-                {remoteDevices.filter((d) => d.device_id !== syncConfig?.device_id).map((d) => (
-                  <option key={d.device_id} value={d.device_id}>
-                    {t("common.deviceOption", {
-                      name: d.device_name,
-                      id: d.device_id.slice(0, 6),
-                    })}
-                  </option>
-                ))}
-              </select>
-            </div>
-          ) : undefined
-        }
-      />
+              ))}
+            </select>
+          </div>
+        ) : (
+          <span />
+        )}
+        <button onClick={load} disabled={loading} className="toolbar-btn shrink-0" title={t("common.refresh")}>↻</button>
+      </div>
 
       {error && <div className="px-3 pt-2"><AlertBanner>{error}</AlertBanner></div>}
 
@@ -678,7 +677,7 @@ export function ComparePanel({ onBack, agentVisibility }: Props) {
       <div className="px-3 py-1.5 border-t border-slate-900/8 text-[9px] text-slate-500 leading-relaxed shrink-0">
         {t("compare.footer")}
       </div>
-    </PageShell>
+    </>
   );
 }
 

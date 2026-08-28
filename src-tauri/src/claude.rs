@@ -139,10 +139,13 @@ fn open_claude_db() -> Result<Connection, String> {
             computed_total_tokens INTEGER NOT NULL DEFAULT 0,
             duration_ms REAL,
             updated_at INTEGER NOT NULL DEFAULT 0,
+            cwd TEXT,
+            project_key TEXT,
             UNIQUE(dedupe_key)
          );
          CREATE INDEX IF NOT EXISTS idx_claude_model_usage_started ON model_usage(started_at);
          CREATE INDEX IF NOT EXISTS idx_claude_model_usage_updated ON model_usage(updated_at);
+         CREATE INDEX IF NOT EXISTS idx_claude_mu_session ON model_usage(session_id);
          CREATE TABLE IF NOT EXISTS file_progress (
             path   TEXT    PRIMARY KEY,
             offset INTEGER NOT NULL,
@@ -150,12 +153,35 @@ fn open_claude_db() -> Result<Connection, String> {
          );",
     )
     .map_err(|e| format!("初始化 Claude 导入库失败: {e}"))?;
+    ensure_project_columns(&conn)?;
     Ok(conn)
+}
+
+/// 进程内串行化补列迁移（kimi.rs ENSURE_DURATION_LOCK 同款）：
+/// 升级后首次启动多个查询命令并发 open，避免同时判缺列 + 交错重复 ALTER。
+static ENSURE_PROJECT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+/// 项目维度补列迁移：升级前创建的旧库 model_usage 无 cwd / project_key 列时
+/// ALTER TABLE ADD COLUMN 补加（允许 NULL，旧行自然为 NULL，由存量回填补齐）。
+/// 先 PRAGMA table_info 检查再 ALTER，幂等；新库已由 CREATE TABLE 直接带列。
+fn ensure_project_columns(conn: &Connection) -> Result<(), String> {
+    let lock = ENSURE_PROJECT_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    for column in ["cwd", "project_key"] {
+        if db::has_column(conn, "model_usage", column) {
+            continue;
+        }
+        conn.execute_batch(&format!("ALTER TABLE model_usage ADD COLUMN {column} TEXT"))
+            .map_err(|e| format!("迁移 Claude 导入库（补 {column} 列）失败: {e}"))?;
+    }
+    Ok(())
 }
 
 // ===== jsonl 行解析结构（未知字段自动忽略，巨大的 content 数组不会物化）=====
 
 /// jsonl 单行事件。只取关心的时间戳/类型/message。
+/// cwd 为行内顶层字段（会话的工作目录，user/assistant 行均携带），
+/// 供项目维度聚合使用；旧行/无 cwd 的行为 None。
 #[derive(Debug, Deserialize)]
 struct TranscriptLine {
     #[serde(default)]
@@ -164,6 +190,8 @@ struct TranscriptLine {
     line_type: Option<String>,
     #[serde(default)]
     message: Option<AssistantMessage>,
+    #[serde(default)]
+    cwd: Option<String>,
 }
 
 /// assistant 行的 message 对象（content 不取，serde 忽略未知字段）。
@@ -318,7 +346,129 @@ pub fn import_incremental_force() -> Result<(), String> {
             );
         }
     }
+
+    // 存量行项目维度回填（节流 + 每批限量，幂等说明见函数注释）
+    if let Err(e) = backfill_project_keys_locked(&mut conn) {
+        eprintln!("[zbar-claude] 项目维度回填失败（下次重试）: {e}");
+    }
     Ok(())
+}
+
+/// 上次项目维度回填时间（节流用）。
+static LAST_PROJECT_BACKFILL_AT: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::new();
+
+/// 读取会话文件前 N 行，找首个非空 cwd（旧行无行内 cwd 时回填用）。
+fn read_first_cwd(path: &Path, max_lines: usize) -> Option<String> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).ok()?;
+    for line in std::io::BufReader::new(file).lines().take(max_lines).flatten() {
+        if let Ok(line) = serde_json::from_str::<TranscriptLine>(&line) {
+            if let Some(cwd) = line
+                .cwd
+                .as_deref()
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+            {
+                return Some(cwd.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 存量行项目维度回填（调用方必须已持有 import_lock）。
+///
+/// 幂等性保证（重复调用不重复读文件）：
+/// - 只选 project_key 仍为 NULL 的会话（升级前的旧行 / 行内无 cwd 的新行），
+///   回填后（含找不到 cwd 而标成 UNKNOWN 哨兵的）不再进入候选集；
+/// - 每个候选会话只读一次源文件的前 20 行；找不到 cwd 时把该会话全部
+///   NULL 行直接置为 UNKNOWN 哨兵，下一轮候选查询即排除，不会重复 IO；
+/// - UPDATE 带 `AND project_key IS NULL` 条件，与增量导入写入的值不冲突；
+/// - 30 秒节流 + 每批最多 500 个会话，量大时靠多轮调用分批消化。
+fn backfill_project_keys_locked(conn: &mut Connection) -> Result<usize, String> {
+    {
+        let mut last = LAST_PROJECT_BACKFILL_AT
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if last.map(|t| t.elapsed() < std::time::Duration::from_secs(30)) == Some(true) {
+            return Ok(0);
+        }
+        *last = Some(std::time::Instant::now());
+    }
+
+    let missing: Vec<String> = {
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT session_id FROM model_usage WHERE project_key IS NULL LIMIT 500")
+            .map_err(|e| format!("查询待回填 Claude 会话失败: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("查询待回填 Claude 会话失败: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("查询待回填 Claude 会话失败: {e}"))?;
+        rows
+    };
+    if missing.is_empty() {
+        return Ok(0);
+    }
+
+    // session_id → 源文件映射（文件名主干即会话 uuid；目录已消失/文件被删
+    // 的会话直接落 UNKNOWN 哨兵）
+    let dir = projects_dir_path();
+    let mut files = Vec::new();
+    if dir.is_dir() {
+        collect_session_files(&dir, 5, &mut files);
+    }
+    let mut by_session: HashMap<String, &Path> = HashMap::new();
+    for path in &files {
+        by_session
+            .entry(session_id_from_filename(path))
+            .or_insert(path);
+    }
+
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("开启 Claude 回填事务失败: {e}"))?;
+    for session_id in &missing {
+        let cwd = by_session
+            .get(session_id.as_str())
+            .and_then(|path| read_first_cwd(path, 20));
+        match cwd.and_then(|c| {
+            crate::projects::normalize_cwd(&c)
+                .map(|key| (c, key))
+        }) {
+            Some((raw, key)) => {
+                tx.execute(
+                    "UPDATE model_usage SET cwd = ?1, project_key = ?2
+                     WHERE session_id = ?3 AND project_key IS NULL",
+                    rusqlite::params![raw, key, session_id],
+                )
+                .map_err(|e| format!("回填 Claude 项目维度失败: {e}"))?;
+            }
+            None => {
+                // 找不到 cwd（文件被删/前 20 行无 cwd）：置哨兵防止重复扫描
+                tx.execute(
+                    "UPDATE model_usage SET project_key = ?1
+                     WHERE session_id = ?2 AND project_key IS NULL",
+                    rusqlite::params![crate::projects::UNKNOWN_PROJECT, session_id],
+                )
+                .map_err(|e| format!("回填 Claude 项目维度哨兵失败: {e}"))?;
+            }
+        }
+    }
+    tx.commit()
+        .map_err(|e| format!("提交 Claude 回填事务失败: {e}"))?;
+    Ok(missing.len())
+}
+
+/// 存量行项目维度回填（公开入口，项目浏览器查询前调用）。
+/// 与增量导入共用 IMPORT_LOCK 串行；内部自带节流与分批限量。
+pub fn backfill_project_keys() -> Result<usize, String> {
+    let _guard = import_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut conn = open_claude_db()?;
+    backfill_project_keys_locked(&mut conn)
 }
 
 /// 解析单个会话文件的增量部分。known = 上次记录的 (offset, size)。
@@ -360,6 +510,11 @@ fn import_one_file(
     // - 重解析（文件变短被重写）：从 0 重计，重放行与旧行撞相同键，
     //   靠"总量更大者胜"幂等去重（与 codex.rs 的 seq 语义一致）。
     let mut line_seq: i64 = 0;
+    // 项目维度：行内顶层 cwd（user/assistant 行均携带），任一行出现即刷新，
+    // 后续 token 用量行继承当前值（同文件 cwd 一致）；解析到则归一化落库，
+    // 整个文件都无 cwd 时保持 NULL（存量回填/查询侧归未知项目）。
+    let mut current_cwd: Option<String> = None;
+    let mut current_project: Option<String> = None;
     if !reparse {
         let prefix = format!("{session_id}|");
         let keys: Vec<String> = {
@@ -386,6 +541,22 @@ fn import_one_file(
             .max()
             .unwrap_or(0);
     }
+    // 项目上下文恢复：续读窗口内可能没有 cwd 行（在上次已读部分），从该会话
+    // 已入库行恢复，避免新增行 project_key 退化为 NULL；重解析路径从文件头
+    // 重读，cwd 行自然重建上下文。
+    if !reparse {
+        let _ = tx.query_row(
+            "SELECT cwd, project_key FROM model_usage
+             WHERE session_id = ?1 AND project_key IS NOT NULL
+             LIMIT 1",
+            rusqlite::params![session_id],
+            |row| {
+                current_cwd = row.get(0)?;
+                current_project = row.get(1)?;
+                Ok(())
+            },
+        );
+    }
     // 修订时间：同一 message.id 的终值晚于中间值落盘，覆盖已入库行时打上
     // 修订标记（同步层据此把修正后的值补传到服务端）
     let now_ms = chrono::Local::now().timestamp_millis();
@@ -410,6 +581,19 @@ fn import_one_file(
         let Ok(line) = serde_json::from_slice::<TranscriptLine>(&buf) else {
             continue;
         };
+        // 任何携带 cwd 的行都刷新项目上下文（不限于 assistant 行）
+        if let Some(cwd) = line
+            .cwd
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        {
+            let cwd = cwd.to_string();
+            if let Some(project) = crate::projects::normalize_cwd(&cwd) {
+                current_project = Some(project);
+            }
+            current_cwd = Some(cwd);
+        }
         if line.line_type.as_deref() != Some("assistant") {
             continue;
         }
@@ -448,13 +632,14 @@ fn import_one_file(
         // 同一 message.id 的多行 usage 为累计口径（末行即终值）：后写覆盖先写；
         // 仅当新行总量更大时覆盖，防御末行意外回退为小值的脏数据。
         // 覆盖不改变自增 id（上传 rowid 稳定），但打上 updated_at 修订标记。
+        // 项目维度列不参与覆盖更新（fork 复制历史时行归属首个项目，保持稳定）。
         tx.execute(
             "INSERT INTO model_usage
                 (session_id, dedupe_key, started_at, model_id, provider_id,
                  input_tokens, output_tokens, cache_read_input_tokens,
                  cache_creation_input_tokens, reasoning_tokens, computed_total_tokens,
-                 duration_ms, updated_at)
-             VALUES (?1, ?2, ?3, ?4, 'claude', ?5, ?6, ?7, ?8, 0, ?9, ?10, ?11)
+                 duration_ms, updated_at, cwd, project_key)
+             VALUES (?1, ?2, ?3, ?4, 'claude', ?5, ?6, ?7, ?8, 0, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(dedupe_key) DO UPDATE SET
                 started_at = excluded.started_at,
                 model_id = excluded.model_id,
@@ -478,6 +663,8 @@ fn import_one_file(
                 total,
                 msg.duration_ms,
                 now_ms,
+                current_cwd,
+                current_project,
             ],
         )
         .map_err(|e| format!("写入用量记录失败: {e}"))?;
@@ -669,6 +856,8 @@ pub fn query_trend(
 }
 
 /// 查询 id > since 的明细记录（同步上传用）。source 固定 "claude"，local_rowid = id。
+/// proto 5：附带会话 id 与项目维度（project_key / 原始 cwd 为行内列，
+/// 未回填的旧行两字段为 None，服务端落 NULL）。
 pub fn query_since(since: i64, limit: usize) -> Result<Vec<db::UsageRow>, String> {
     import_incremental()?;
     let conn = open_claude_db()?;
@@ -676,7 +865,8 @@ pub fn query_since(since: i64, limit: usize) -> Result<Vec<db::UsageRow>, String
         .prepare(
             "SELECT id, started_at, model_id, provider_id,
                     input_tokens, output_tokens, cache_read_input_tokens,
-                    cache_creation_input_tokens, reasoning_tokens, computed_total_tokens
+                    cache_creation_input_tokens, reasoning_tokens, computed_total_tokens,
+                    session_id, project_key, cwd
              FROM model_usage
              WHERE id > ?1
              ORDER BY id ASC
@@ -697,6 +887,9 @@ pub fn query_since(since: i64, limit: usize) -> Result<Vec<db::UsageRow>, String
                 reasoning_tokens: row.get(8)?,
                 computed_total_tokens: row.get(9)?,
                 source: "claude".into(),
+                session_id: row.get(10)?,
+                project_key: row.get(11)?,
+                project_display: row.get(12)?,
             })
         })
         .map_err(|e| format!("读取 Claude 增量记录失败: {e}"))?
@@ -734,7 +927,8 @@ pub fn query_revised_since(
         .prepare(
             "SELECT id, started_at, model_id, provider_id,
                     input_tokens, output_tokens, cache_read_input_tokens,
-                    cache_creation_input_tokens, reasoning_tokens, computed_total_tokens
+                    cache_creation_input_tokens, reasoning_tokens, computed_total_tokens,
+                    session_id, project_key, cwd
              FROM model_usage
              WHERE updated_at > ?1 AND id > ?2
              ORDER BY id ASC
@@ -755,6 +949,9 @@ pub fn query_revised_since(
                 reasoning_tokens: row.get(8)?,
                 computed_total_tokens: row.get(9)?,
                 source: "claude".into(),
+                session_id: row.get(10)?,
+                project_key: row.get(11)?,
+                project_display: row.get(12)?,
             })
         })
         .map_err(|e| format!("读取 Claude 修订记录失败: {e}"))?
@@ -821,6 +1018,190 @@ pub fn query_period_buckets(
         });
     }
     Ok(out)
+}
+
+// ===== 项目/会话维度查询（项目浏览器用，cwd 归一化见 projects.rs）=====
+
+/// 按项目 × 模型聚合 [from_ms, to_ms) 的用量（SQL 侧 GROUP BY，不逐行加载）。
+/// project_key 为 NULL/空串（未回填或无 cwd）归入 unknown 哨兵键。
+pub fn query_project_model_rows(
+    from_ms: i64,
+    to_ms: i64,
+) -> Result<Vec<crate::projects::ProjectModelRow>, String> {
+    import_incremental()?;
+    let conn = open_claude_db()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT COALESCE(NULLIF(project_key, ''), ?1),
+                    model_id,
+                    COUNT(*),
+                    COALESCE(SUM(input_tokens),0),
+                    COALESCE(SUM(output_tokens),0),
+                    COALESCE(SUM(cache_read_input_tokens),0),
+                    COALESCE(SUM(computed_total_tokens),0)
+             FROM model_usage
+             WHERE started_at >= ?2 AND started_at < ?3
+             GROUP BY 1, 2",
+        )
+        .map_err(|e| format!("准备 Claude 项目聚合查询失败: {e}"))?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![crate::projects::UNKNOWN_PROJECT, from_ms, to_ms],
+            |row| {
+                Ok(crate::projects::ProjectModelRow {
+                    project_key: row.get(0)?,
+                    model_id: row.get(1)?,
+                    requests: row.get(2)?,
+                    input_tokens: row.get(3)?,
+                    output_tokens: row.get(4)?,
+                    cache_read_tokens: row.get(5)?,
+                    total_tokens: row.get(6)?,
+                })
+            },
+        )
+        .map_err(|e| format!("读取 Claude 项目聚合失败: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("读取 Claude 项目聚合失败: {e}"))?;
+    Ok(rows)
+}
+
+/// 按项目统计 [from_ms, to_ms) 内的会话数（COUNT(DISTINCT session_id)）。
+pub fn query_project_session_counts(
+    from_ms: i64,
+    to_ms: i64,
+) -> Result<Vec<(String, i64)>, String> {
+    import_incremental()?;
+    let conn = open_claude_db()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT COALESCE(NULLIF(project_key, ''), ?1), COUNT(DISTINCT session_id)
+             FROM model_usage
+             WHERE started_at >= ?2 AND started_at < ?3
+             GROUP BY 1",
+        )
+        .map_err(|e| format!("准备 Claude 项目会话统计失败: {e}"))?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![crate::projects::UNKNOWN_PROJECT, from_ms, to_ms],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| format!("读取 Claude 项目会话统计失败: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("读取 Claude 项目会话统计失败: {e}"))?;
+    Ok(rows)
+}
+
+/// 项目键 → 原始形态 cwd（保留大小写，取字典序最小者做代表）。
+pub fn query_project_display_paths() -> Result<Vec<(String, String)>, String> {
+    let conn = open_claude_db()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT project_key, MIN(cwd)
+             FROM model_usage
+             WHERE project_key IS NOT NULL AND project_key != ?1
+               AND cwd IS NOT NULL AND cwd != ''
+             GROUP BY project_key",
+        )
+        .map_err(|e| format!("准备 Claude 项目路径查询失败: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params![crate::projects::UNKNOWN_PROJECT], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .map_err(|e| format!("读取 Claude 项目路径失败: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("读取 Claude 项目路径失败: {e}"))?;
+    Ok(rows)
+}
+
+/// 分页查询指定项目的会话明细（按会话最后活跃时间降序）。
+/// 返回 (匹配会话总数, 按会话 × 模型聚合的行)；offset/limit 作用在会话粒度。
+/// project_key 传 UNKNOWN_PROJECT 时匹配 NULL/空串/哨兵的会话。
+pub fn query_project_sessions(
+    project_key: &str,
+    from_ms: i64,
+    to_ms: i64,
+    offset: u32,
+    limit: u32,
+) -> Result<(u32, Vec<crate::projects::ProjectSessionModelRow>), String> {
+    import_incremental()?;
+    let conn = open_claude_db()?;
+    let total: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM (
+                SELECT DISTINCT session_id
+                FROM model_usage
+                WHERE started_at >= ?1 AND started_at < ?2
+                  AND COALESCE(NULLIF(project_key, ''), ?3) = ?4
+            )",
+            rusqlite::params![from_ms, to_ms, crate::projects::UNKNOWN_PROJECT, project_key],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("查询 Claude 项目会话总数失败: {e}"))?;
+
+    // 会话级速度聚合（口径与 query_stats 的面板统计完全一致，无 TTFT 列 →
+    // ttft 恒 None；传 SUM/COUNT 供会话级跨模型合并，避免二次平均偏差）
+    let speed = db::session_speed_agg_columns(
+        db::has_column(&conn, "model_usage", "duration_ms"),
+        false,
+    );
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT session_id, model_id,
+                    MIN(started_at), MAX(started_at), COUNT(*),
+                    COALESCE(SUM(input_tokens),0),
+                    COALESCE(SUM(output_tokens),0),
+                    COALESCE(SUM(cache_read_input_tokens),0),
+                    COALESCE(SUM(cache_creation_input_tokens),0)
+                    {speed}
+             FROM model_usage
+             WHERE started_at >= ?1 AND started_at < ?2
+               AND COALESCE(NULLIF(project_key, ''), ?3) = ?4
+               AND session_id IN (
+                   SELECT session_id FROM (
+                       SELECT session_id
+                       FROM model_usage
+                       WHERE started_at >= ?1 AND started_at < ?2
+                         AND COALESCE(NULLIF(project_key, ''), ?3) = ?4
+                       GROUP BY session_id
+                       ORDER BY MAX(started_at) DESC
+                       LIMIT ?5 OFFSET ?6
+                   )
+               )
+             GROUP BY session_id, model_id"
+        ))
+        .map_err(|e| format!("准备 Claude 项目会话查询失败: {e}"))?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![
+                from_ms,
+                to_ms,
+                crate::projects::UNKNOWN_PROJECT,
+                project_key,
+                limit as i64,
+                offset as i64
+            ],
+            |row| {
+                Ok(crate::projects::ProjectSessionModelRow {
+                    session_id: row.get(0)?,
+                    model_id: row.get(1)?,
+                    first_at: row.get(2)?,
+                    last_at: row.get(3)?,
+                    requests: row.get(4)?,
+                    input_tokens: row.get(5)?,
+                    output_tokens: row.get(6)?,
+                    cache_read_tokens: row.get(7)?,
+                    cache_write_tokens: row.get(8)?,
+                    tps_sum: row.get(9)?,
+                    tps_count: row.get(10)?,
+                    ttft_sum: row.get(11)?,
+                    ttft_count: row.get(12)?,
+                })
+            },
+        )
+        .map_err(|e| format!("读取 Claude 项目会话失败: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("读取 Claude 项目会话失败: {e}"))?;
+    Ok((total.max(0) as u32, rows))
 }
 
 // ===== 实时额度（Anthropic OAuth 端点，参照 CodexBar 的实现）=====

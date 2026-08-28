@@ -89,10 +89,17 @@ fn open_codex_db() -> Result<Connection, String> {
             UNIQUE(session_id, event_seq)
          );
          CREATE INDEX IF NOT EXISTS idx_codex_model_usage_started ON model_usage(started_at);
+         CREATE INDEX IF NOT EXISTS idx_codex_mu_session ON model_usage(session_id);
          CREATE TABLE IF NOT EXISTS file_progress (
             path   TEXT    PRIMARY KEY,
             offset INTEGER NOT NULL,
             size   INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS session_meta (
+            session_id  TEXT PRIMARY KEY,
+            cwd         TEXT,
+            project_key TEXT,
+            captured_at INTEGER
          );
          CREATE TABLE IF NOT EXISTS rate_limits_state (
             id                 INTEGER PRIMARY KEY CHECK (id = 1),
@@ -226,6 +233,71 @@ struct RateWindowPayload {
 struct TurnContextPayload {
     #[serde(default)]
     model: Option<String>,
+}
+
+/// session_meta 事件 payload（会话首行，含 cwd 项目目录）
+#[derive(Debug, Deserialize)]
+struct SessionMetaPayload {
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+/// 从一行 session_meta 事件中取出非空 cwd（项目维度数据源）。
+fn cwd_from_session_meta(line: &RolloutLine) -> Option<String> {
+    if line.line_type.as_deref() != Some("session_meta") {
+        return None;
+    }
+    let value = line.payload.as_ref()?;
+    serde_json::from_value::<SessionMetaPayload>(value.clone())
+        .ok()?
+        .cwd
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+}
+
+/// 单独打开文件读首行，解析 session_meta 事件的 cwd。
+/// 续读偏移已越过首行的老文件靠这条路径补齐项目维度（不做 fs::canonicalize，
+/// 源目录可能已被删除）。
+fn read_first_line_cwd(path: &Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut buf = Vec::with_capacity(4096);
+    use std::io::BufRead;
+    let n = reader.read_until(b'\n', &mut buf).ok()?;
+    if n == 0 {
+        return None;
+    }
+    let line = serde_json::from_slice::<RolloutLine>(&buf).ok()?;
+    cwd_from_session_meta(&line)
+}
+
+/// 写入/补齐会话的项目维度记录（幂等）。
+/// - 首次：直接插入（cwd 缺失时 project_key 存 NULL，作哨兵防止重复扫描）；
+/// - 冲突：仅当库内 project_key 仍为 NULL 且新值非 NULL 时补上（自愈早期
+///   无 cwd 的哨兵行），已有值绝不覆盖。
+fn upsert_session_meta(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    cwd_raw: Option<&str>,
+) -> Result<(), String> {
+    let project_key = cwd_raw.and_then(crate::projects::normalize_cwd);
+    tx.execute(
+        "INSERT INTO session_meta (session_id, cwd, project_key, captured_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(session_id) DO UPDATE SET
+            cwd = COALESCE(excluded.cwd, session_meta.cwd),
+            project_key = COALESCE(excluded.project_key, session_meta.project_key),
+            captured_at = excluded.captured_at
+         WHERE session_meta.project_key IS NULL AND excluded.project_key IS NOT NULL",
+        rusqlite::params![
+            session_id,
+            cwd_raw,
+            project_key,
+            chrono::Local::now().timestamp_millis()
+        ],
+    )
+    .map_err(|e| format!("写入 Codex 会话项目维度失败: {e}"))?;
+    Ok(())
 }
 
 /// 从一行 turn_context 中取出非空模型名。
@@ -508,7 +580,94 @@ pub fn import_incremental_force() -> Result<(), String> {
             );
         }
     }
+
+    // 存量会话的项目维度回填（节流 + 每批限量，幂等说明见函数注释）
+    if let Err(e) = backfill_session_meta_locked(&mut conn) {
+        eprintln!("[zbar-codex] 会话项目维度回填失败（下次重试）: {e}");
+    }
     Ok(())
+}
+
+/// 上次会话项目维度回填时间（节流用）。
+static LAST_SESSION_META_BACKFILL_AT: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::new();
+
+/// 存量会话项目维度回填（调用方必须已持有 import_lock）。
+///
+/// 幂等性保证（重复调用不重复读文件）：
+/// - 只选 model_usage 中存在、session_meta 中完全缺失的会话（LEFT JOIN NULL
+///   过滤），已回填过的会话天然不在候选集里；
+/// - 每个候选会话无论是否找到 cwd 都写入 session_meta（找不到时 project_key
+///   为 NULL 的哨兵行），下一轮候选查询即把它排除，同一会话只做一次首行 IO；
+/// - upsert 的冲突分支仅在「库内 project_key 为 NULL 且新值非空」时补值，
+///   重复执行不会覆盖已回填的值；
+/// - 30 秒节流 + 每批最多 500 个会话：前端 30s 轮询不会放大成持续文件 IO，
+///   量大时靠多轮调用分批消化，避免卡 UI。
+fn backfill_session_meta_locked(conn: &mut Connection) -> Result<usize, String> {
+    {
+        let mut last = LAST_SESSION_META_BACKFILL_AT
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if last.map(|t| t.elapsed() < std::time::Duration::from_secs(30)) == Some(true) {
+            return Ok(0);
+        }
+        *last = Some(std::time::Instant::now());
+    }
+
+    let missing: Vec<String> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT mu.session_id
+                 FROM model_usage mu
+                 LEFT JOIN session_meta sm ON sm.session_id = mu.session_id
+                 WHERE sm.session_id IS NULL
+                 LIMIT 500",
+            )
+            .map_err(|e| format!("查询待回填 Codex 会话失败: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("查询待回填 Codex 会话失败: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("查询待回填 Codex 会话失败: {e}"))?;
+        rows
+    };
+    if missing.is_empty() {
+        return Ok(0);
+    }
+
+    // session_id → 源文件映射（目录已消失/文件被删的会话落 NULL 哨兵）
+    let dir = sessions_dir_path();
+    let mut files = Vec::new();
+    if dir.is_dir() {
+        collect_session_files(&dir, 3, &mut files);
+    }
+    let mut by_session: HashMap<String, &Path> = HashMap::new();
+    for path in &files {
+        by_session.entry(session_id_from_filename(path)).or_insert(path);
+    }
+
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("开启回填事务失败: {e}"))?;
+    for session_id in &missing {
+        let cwd = by_session
+            .get(session_id.as_str())
+            .and_then(|path| read_first_line_cwd(path));
+        upsert_session_meta(&tx, session_id, cwd.as_deref())?;
+    }
+    tx.commit()
+        .map_err(|e| format!("提交回填事务失败: {e}"))?;
+    Ok(missing.len())
+}
+
+/// 存量会话项目维度回填（公开入口，项目浏览器查询前调用）。
+/// 与增量导入共用 IMPORT_LOCK 串行；内部自带节流与分批限量。
+pub fn backfill_session_meta() -> Result<usize, String> {
+    let _guard = import_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut conn = open_codex_db()?;
+    backfill_session_meta_locked(&mut conn)
 }
 
 /// 把今天 Codex CLI 会话中已经记录的有效额度快照补入 Agent 历史。
@@ -674,6 +833,22 @@ fn import_one_file(
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|e| format!("开启导入事务失败: {e}"))?;
+
+    // 项目维度：该会话尚无有效 project_key 时，单独读文件首行的 session_meta
+    // 事件提取 cwd（每会话仅一次首行 IO；找到后 upsert 的冲突分支不再触发，
+    // 找不到也落 NULL 哨兵行，重复导入不会重复读）。
+    let has_project_key: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_meta
+                          WHERE session_id = ?1 AND project_key IS NOT NULL)",
+            rusqlite::params![session_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !has_project_key {
+        let cwd = read_first_line_cwd(path);
+        upsert_session_meta(&tx, &session_id, cwd.as_deref())?;
+    }
 
     let mut pos = start_offset;
     let mut last_complete_end = start_offset;
@@ -1013,17 +1188,21 @@ pub fn query_trend(
 }
 
 /// 查询 id > since 的明细记录（同步上传用）。source 固定 "codex"，local_rowid = id。
+/// proto 5：附带会话 id 与项目维度（project_key / 原始 cwd 来自 session_meta，
+/// 未回填的会话两字段为 None，服务端落 NULL）。
 pub fn query_since(since: i64, limit: usize) -> Result<Vec<db::UsageRow>, String> {
     import_incremental()?;
     let conn = open_codex_db()?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, started_at, model_id, provider_id,
-                    input_tokens, output_tokens, cache_read_input_tokens,
-                    cache_creation_input_tokens, reasoning_tokens, computed_total_tokens
-             FROM model_usage
-             WHERE id > ?1
-             ORDER BY id ASC
+            "SELECT mu.id, mu.started_at, mu.model_id, mu.provider_id,
+                    mu.input_tokens, mu.output_tokens, mu.cache_read_input_tokens,
+                    mu.cache_creation_input_tokens, mu.reasoning_tokens, mu.computed_total_tokens,
+                    mu.session_id, sm.project_key, sm.cwd
+             FROM model_usage mu
+             LEFT JOIN session_meta sm ON sm.session_id = mu.session_id
+             WHERE mu.id > ?1
+             ORDER BY mu.id ASC
              LIMIT ?2",
         )
         .map_err(|e| format!("准备 Codex 增量查询失败: {e}"))?;
@@ -1041,6 +1220,9 @@ pub fn query_since(since: i64, limit: usize) -> Result<Vec<db::UsageRow>, String
                 reasoning_tokens: row.get(8)?,
                 computed_total_tokens: row.get(9)?,
                 source: "codex".into(),
+                session_id: row.get(10)?,
+                project_key: row.get(11)?,
+                project_display: row.get(12)?,
             })
         })
         .map_err(|e| format!("读取 Codex 增量记录失败: {e}"))?
@@ -1069,15 +1251,16 @@ pub fn query_model_revised_since(
     let conn = open_codex_db()?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, started_at, model_id, provider_id,
-                    input_tokens, output_tokens, cache_read_input_tokens,
-                    cache_creation_input_tokens, reasoning_tokens, computed_total_tokens,
-                    model_revision_at
-             FROM model_usage
-             WHERE (model_revision_at > ?1
-                    OR (model_revision_at = ?1 AND id > ?2))
-               AND model_id != ''
-             ORDER BY model_revision_at ASC, id ASC
+            "SELECT mu.id, mu.started_at, mu.model_id, mu.provider_id,
+                    mu.input_tokens, mu.output_tokens, mu.cache_read_input_tokens,
+                    mu.cache_creation_input_tokens, mu.reasoning_tokens, mu.computed_total_tokens,
+                    mu.model_revision_at, mu.session_id, sm.project_key, sm.cwd
+             FROM model_usage mu
+             LEFT JOIN session_meta sm ON sm.session_id = mu.session_id
+             WHERE (mu.model_revision_at > ?1
+                    OR (mu.model_revision_at = ?1 AND mu.id > ?2))
+               AND mu.model_id != ''
+             ORDER BY mu.model_revision_at ASC, mu.id ASC
              LIMIT ?3",
         )
         .map_err(|e| format!("准备 Codex 模型修订查询失败: {e}"))?;
@@ -1096,6 +1279,9 @@ pub fn query_model_revised_since(
                     reasoning_tokens: row.get(8)?,
                     computed_total_tokens: row.get(9)?,
                     source: "codex".into(),
+                    session_id: row.get(12)?,
+                    project_key: row.get(13)?,
+                    project_display: row.get(14)?,
                 },
                 revision_at: row.get(10)?,
             })
@@ -1226,6 +1412,189 @@ pub fn query_period_buckets(
         });
     }
     Ok(out)
+}
+
+// ===== 项目/会话维度查询（项目浏览器用，cwd 归一化见 projects.rs）=====
+
+/// 按项目 × 模型聚合 [from_ms, to_ms) 的用量（SQL 侧 GROUP BY，不逐行加载）。
+/// project_key 缺失（无 cwd 的会话）归入调用方传入的 unknown 哨兵键。
+pub fn query_project_model_rows(
+    from_ms: i64,
+    to_ms: i64,
+) -> Result<Vec<crate::projects::ProjectModelRow>, String> {
+    import_incremental()?;
+    let conn = open_codex_db()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT COALESCE(sm.project_key, ?1),
+                    mu.model_id,
+                    COUNT(*),
+                    COALESCE(SUM(mu.input_tokens),0),
+                    COALESCE(SUM(mu.output_tokens),0),
+                    COALESCE(SUM(mu.cache_read_input_tokens),0),
+                    COALESCE(SUM(mu.computed_total_tokens),0)
+             FROM model_usage mu
+             LEFT JOIN session_meta sm ON sm.session_id = mu.session_id
+             WHERE mu.started_at >= ?2 AND mu.started_at < ?3
+             GROUP BY 1, 2",
+        )
+        .map_err(|e| format!("准备 Codex 项目聚合查询失败: {e}"))?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![crate::projects::UNKNOWN_PROJECT, from_ms, to_ms],
+            |row| {
+                Ok(crate::projects::ProjectModelRow {
+                    project_key: row.get(0)?,
+                    model_id: row.get(1)?,
+                    requests: row.get(2)?,
+                    input_tokens: row.get(3)?,
+                    output_tokens: row.get(4)?,
+                    cache_read_tokens: row.get(5)?,
+                    total_tokens: row.get(6)?,
+                })
+            },
+        )
+        .map_err(|e| format!("读取 Codex 项目聚合失败: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("读取 Codex 项目聚合失败: {e}"))?;
+    Ok(rows)
+}
+
+/// 按项目统计 [from_ms, to_ms) 内的会话数（COUNT(DISTINCT session_id)）。
+pub fn query_project_session_counts(
+    from_ms: i64,
+    to_ms: i64,
+) -> Result<Vec<(String, i64)>, String> {
+    import_incremental()?;
+    let conn = open_codex_db()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT COALESCE(sm.project_key, ?1), COUNT(DISTINCT mu.session_id)
+             FROM model_usage mu
+             LEFT JOIN session_meta sm ON sm.session_id = mu.session_id
+             WHERE mu.started_at >= ?2 AND mu.started_at < ?3
+             GROUP BY 1",
+        )
+        .map_err(|e| format!("准备 Codex 项目会话统计失败: {e}"))?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![crate::projects::UNKNOWN_PROJECT, from_ms, to_ms],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| format!("读取 Codex 项目会话统计失败: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("读取 Codex 项目会话统计失败: {e}"))?;
+    Ok(rows)
+}
+
+/// 项目键 → 原始形态 cwd（保留大小写，取字典序最小者做代表）。
+pub fn query_project_display_paths() -> Result<Vec<(String, String)>, String> {
+    let conn = open_codex_db()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT project_key, MIN(cwd)
+             FROM session_meta
+             WHERE project_key IS NOT NULL AND cwd IS NOT NULL AND cwd != ''
+             GROUP BY project_key",
+        )
+        .map_err(|e| format!("准备 Codex 项目路径查询失败: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|e| format!("读取 Codex 项目路径失败: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("读取 Codex 项目路径失败: {e}"))?;
+    Ok(rows)
+}
+
+/// 分页查询指定项目的会话明细（按会话最后活跃时间降序）。
+/// 返回 (匹配会话总数, 按会话 × 模型聚合的行)；offset/limit 作用在会话粒度。
+/// project_key 传 UNKNOWN_PROJECT 时匹配 project_key 为 NULL 的会话。
+pub fn query_project_sessions(
+    project_key: &str,
+    from_ms: i64,
+    to_ms: i64,
+    offset: u32,
+    limit: u32,
+) -> Result<(u32, Vec<crate::projects::ProjectSessionModelRow>), String> {
+    import_incremental()?;
+    let conn = open_codex_db()?;
+    let total: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM (
+                SELECT DISTINCT mu.session_id
+                FROM model_usage mu
+                LEFT JOIN session_meta sm ON sm.session_id = mu.session_id
+                WHERE mu.started_at >= ?1 AND mu.started_at < ?2
+                  AND COALESCE(sm.project_key, ?3) = ?4
+            )",
+            rusqlite::params![from_ms, to_ms, crate::projects::UNKNOWN_PROJECT, project_key],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("查询 Codex 项目会话总数失败: {e}"))?;
+
+    // Codex 库 model_usage 无耗时列（DDL 固定，见建表语句），速度/TTFT 恒
+    // 占位 NULL/0 → 会话级两指标为 None（前端隐藏）；仍走统一片段保持四源同构
+    let speed = db::session_speed_agg_columns(false, false);
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT mu.session_id, mu.model_id,
+                    MIN(mu.started_at), MAX(mu.started_at), COUNT(*),
+                    COALESCE(SUM(mu.input_tokens),0),
+                    COALESCE(SUM(mu.output_tokens),0),
+                    COALESCE(SUM(mu.cache_read_input_tokens),0),
+                    COALESCE(SUM(mu.cache_creation_input_tokens),0)
+                    {speed}
+             FROM model_usage mu
+             LEFT JOIN session_meta sm ON sm.session_id = mu.session_id
+             WHERE mu.started_at >= ?1 AND mu.started_at < ?2
+               AND COALESCE(sm.project_key, ?3) = ?4
+               AND mu.session_id IN (
+                   SELECT session_id FROM (
+                       SELECT mu2.session_id AS session_id
+                       FROM model_usage mu2
+                       LEFT JOIN session_meta sm2 ON sm2.session_id = mu2.session_id
+                       WHERE mu2.started_at >= ?1 AND mu2.started_at < ?2
+                         AND COALESCE(sm2.project_key, ?3) = ?4
+                       GROUP BY mu2.session_id
+                       ORDER BY MAX(mu2.started_at) DESC
+                       LIMIT ?5 OFFSET ?6
+                   )
+               )
+             GROUP BY mu.session_id, mu.model_id"
+        ))
+        .map_err(|e| format!("准备 Codex 项目会话查询失败: {e}"))?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![
+                from_ms,
+                to_ms,
+                crate::projects::UNKNOWN_PROJECT,
+                project_key,
+                limit as i64,
+                offset as i64
+            ],
+            |row| {
+                Ok(crate::projects::ProjectSessionModelRow {
+                    session_id: row.get(0)?,
+                    model_id: row.get(1)?,
+                    first_at: row.get(2)?,
+                    last_at: row.get(3)?,
+                    requests: row.get(4)?,
+                    input_tokens: row.get(5)?,
+                    output_tokens: row.get(6)?,
+                    cache_read_tokens: row.get(7)?,
+                    cache_write_tokens: row.get(8)?,
+                    tps_sum: row.get(9)?,
+                    tps_count: row.get(10)?,
+                    ttft_sum: row.get(11)?,
+                    ttft_count: row.get(12)?,
+                })
+            },
+        )
+        .map_err(|e| format!("读取 Codex 项目会话失败: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("读取 Codex 项目会话失败: {e}"))?;
+    Ok((total.max(0) as u32, rows))
 }
 
 // ===== 实时额度（ChatGPT backend-api，参照 CodexBar 的实现）=====

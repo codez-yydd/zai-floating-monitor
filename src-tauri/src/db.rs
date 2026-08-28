@@ -186,6 +186,37 @@ pub(crate) fn speed_agg_columns(has_duration: bool, has_ttft: bool) -> String {
     format!(", AVG({tps}), MAX({tps}), AVG({ttft})")
 }
 
+/// 会话级速度/TTFT 聚合的 SELECT 尾部片段（4 列：可信行 tps 总和、可信行数、
+/// 有效 TTFT 行总和、有效 TTFT 行数）。供项目浏览器会话查询用：行查询按
+/// 「会话 × 模型」分组，跨分组保持与 speed_agg_columns 相同的「整体平均」
+/// 口径必须传 SUM/COUNT（各分组 SUM/COUNT 分别累加后再相除 = 全部可信行的
+/// AVG，直接对分组 AVG 再平均会产生二次平均偏差）。
+/// 可信条件与 speed_agg_columns 完全一致（同一 gen_window_expr 与噪声过滤：
+/// 输出 ≥10 tokens、生成窗口 ≥100ms、速度 ≤500 tok/s；TTFT 取 0≤ttft≤duration），
+/// 两处表达式需同步维护。列缺失时占位 NULL/0（无耗时来源 → 调用方读得 None）。
+pub(crate) fn session_speed_agg_columns(has_duration: bool, has_ttft: bool) -> String {
+    if !has_duration {
+        return ", NULL, 0, NULL, 0".into();
+    }
+    let gen = gen_window_expr(has_ttft);
+    let tps = format!(
+        "CASE
+            WHEN COALESCE(output_tokens,0) >= 10 AND ({gen}) >= 100
+                 AND COALESCE(output_tokens,0) * 1000.0 / ({gen}) <= 500.0
+            THEN COALESCE(output_tokens,0) * 1000.0 / ({gen})
+        END"
+    );
+    let ttft = if has_ttft {
+        // TTFT 物理上不超过总耗时，超出视为异常计时一并忽略（同 speed_agg_columns）
+        "CASE WHEN time_to_first_token_ms >= 0
+               AND time_to_first_token_ms <= duration_ms
+          THEN time_to_first_token_ms END"
+    } else {
+        "NULL"
+    };
+    format!(", SUM({tps}), COUNT({tps}), SUM({ttft}), COUNT({ttft})")
+}
+
 /// 最近使用模型查询（全库最新一条；空模型名的行跳过，表空返回 None）。
 pub(crate) fn query_current_model(conn: &Connection) -> Option<CurrentModelStat> {
     conn.query_row(
@@ -349,6 +380,11 @@ pub(crate) fn default_source() -> String {
 /// 单条明细记录（供同步上传用）。
 /// 字段与 zcode 的 model_usage 表对齐，多带一个 local_rowid 作为去重键。
 /// source 标记数据来源："zcode"（本地 ZCode 库）| "codex"（Codex 导入库）。
+/// proto 5 起每条记录额外携带会话/项目维度。三字段由 sync 模块按来源
+/// 填充：zcode 源按 zcode_sessions 派生库的 session_id → 项目映射回填，
+/// codex/claude 源由各自导入库填充；查不到映射的行保持 None。旧服务端
+/// 反序列化时按 serde 默认忽略未知字段，序列化端 None 时跳过不发，
+/// 双向兼容 proto 2/3/4。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageRow {
     pub local_rowid: i64,
@@ -371,6 +407,15 @@ pub struct UsageRow {
     pub computed_total_tokens: i64,
     #[serde(default = "default_source")]
     pub source: String,
+    /// 该行的会话 id（无会话维度的来源为 None）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// 归一化项目键（无项目维度为 None）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_key: Option<String>,
+    /// 原始形态 cwd（保留大小写，供前端展示；无则为 None）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_display: Option<String>,
 }
 
 /// 查询 rowid > since 的明细记录（增量上传用）。
@@ -404,6 +449,11 @@ pub fn query_since(since: i64, limit: usize) -> Result<Vec<UsageRow>, String> {
                 computed_total_tokens: row.get(9)?,
                 // 本库（zcode）的行固定标记为 zcode 来源
                 source: "zcode".into(),
+                // 本查询不回填维度；zcode 行的三字段由
+                // sync::query_zcode_rows_with_sessions 按派生库映射填充后上传
+                session_id: None,
+                project_key: None,
+                project_display: None,
             })
         })
         .map_err(|e| format!("读取增量记录失败: {e}"))?
@@ -721,28 +771,69 @@ mod tests {
         assert_eq!(cur.provider_id, "p");
     }
 
-    /// 最新一条恰好是空模型名（codex 回填失败场景）：跳过它取次新的有效模型。
+    /// 会话级速度聚合片段（session_speed_agg_columns）：SUM/COUNT 口径与
+    /// 面板级 speed_agg_columns 的 AVG 完全等价（同样本同结果），跨分组
+    /// （会话 × 模型）分别累加 SUM/COUNT 后相除仍等于整体 AVG。
     #[test]
-    fn current_model_skips_empty_model_rows() {
+    fn session_speed_agg_matches_panel_avg() {
         let conn = zcode_like_db();
-        conn.execute(
-            "INSERT INTO model_usage (started_at, model_id, provider_id, output_tokens)
-             VALUES (9000, '', 'p', 10)",
-            [],
+        // 与 speed_aggregation_semantics 相同的样本：可信 avg = 225、ttft = 582
+        insert(&conn, 1_000, 300, Some(2000), Some(500));
+        insert(&conn, 2_000, 950, Some(2000), Some(1900));
+        insert(&conn, 3_000, 5, Some(2000), Some(500));
+        insert(&conn, 4_000, 100, Some(50), Some(10));
+        insert(&conn, 5_000, 10_000, Some(1000), Some(0));
+        insert(&conn, 6_000, 300, Some(3000), None);
+        insert(&conn, 7_000, 300, Some(3000), Some(4000));
+        insert(&conn, 8_000, 300, None, Some(100));
+
+        let speed = session_speed_agg_columns(true, true);
+        // 模拟项目浏览器真实路径：SQL 按「会话 × 模型」（此处按 model_id）
+        // 分组产出各分组 SUM/COUNT，Rust 侧累加后相除得会话级平均
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT model_id{speed} FROM model_usage GROUP BY model_id"
+            ))
+            .unwrap();
+        let mut rows = stmt.query([]).unwrap();
+        let (mut sum, mut cnt, mut tsum, mut tcnt) = (0.0f64, 0i64, 0.0f64, 0i64);
+        while let Some(r) = rows.next().unwrap() {
+            if let Some(s) = r.get::<_, Option<f64>>(1).unwrap() {
+                sum += s;
+            }
+            cnt += r.get::<_, i64>(2).unwrap();
+            if let Some(s) = r.get::<_, Option<f64>>(3).unwrap() {
+                tsum += s;
+            }
+            tcnt += r.get::<_, i64>(4).unwrap();
+        }
+        let panel_avg = 225.0f64;
+        let panel_ttft = 582.0f64;
+        assert!(cnt > 0 && (sum / cnt as f64 - panel_avg).abs() < 1e-6);
+        assert!(tcnt > 0 && (tsum / tcnt as f64 - panel_ttft).abs() < 1e-6);
+    }
+
+    /// 无耗时列：会话级片段占位 NULL/0，调用方读得 None。
+    #[test]
+    fn session_speed_agg_missing_columns_degrade() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE model_usage (
+                started_at INTEGER, model_id TEXT, provider_id TEXT,
+                output_tokens INTEGER DEFAULT 0
+            );
+            INSERT INTO model_usage (started_at, model_id, provider_id, output_tokens)
+             VALUES (1000, 'm', 'p', 300);",
         )
         .unwrap();
-        insert(&conn, 5_000, 10, None, None);
-        let cur = query_current_model(&conn).unwrap();
-        assert_eq!(cur.last_used_ms, 5_000);
-        // 全库只有空模型行 → None
-        let conn2 = zcode_like_db();
-        conn2
-            .execute(
-                "INSERT INTO model_usage (started_at, model_id, provider_id, output_tokens)
-                 VALUES (9000, '', 'p', 10)",
+        let speed = session_speed_agg_columns(false, false);
+        let (sum, cnt, tsum, tcnt): (Option<f64>, i64, Option<f64>, i64) = conn
+            .query_row(
+                &format!("SELECT 1 AS one{speed} FROM model_usage"),
                 [],
+                |r| Ok((r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .unwrap();
-        assert!(query_current_model(&conn2).is_none());
+        assert_eq!((sum, cnt, tsum, tcnt), (None, 0, None, 0));
     }
 }

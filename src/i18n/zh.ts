@@ -11,6 +11,8 @@ import { compare } from "./dicts/compare";
 import { report } from "./dicts/report";
 import { settings } from "./dicts/settings";
 import { theme } from "./dicts/theme";
+import { projects } from "./dicts/projects";
+import { share } from "./dicts/share";
 
 export const zh = {
   ...common,
@@ -23,4 +25,6 @@ export const zh = {
   ...report,
   ...settings,
   ...theme,
+  ...projects,
+  ...share,
 };
