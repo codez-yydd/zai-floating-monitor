@@ -66,6 +66,10 @@ pub const PROGRESS_EVENT: &str = "zbar://agent-theme-progress";
 const MIN_FREE_BYTES: u64 = 1_288_490_188;
 /// 启动后存活验证轮数（20 × 250ms = 5s）
 const LAUNCH_POLL_COUNT: usize = 20;
+/// 重启时退出确认轮数（20 × 250ms = 5s，与 LAUNCH_POLL_COUNT 同口径）。
+/// quit 内部已含"优雅退出 → 轮询等待 → 强杀兜底 → 再轮询"完整序列并自带
+/// 超时报错，此处轮询仅做二次确认，避免旧进程尚未完全退场就抢先拉起
+const QUIT_POLL_COUNT: usize = 20;
 
 // ============================================================
 // 目标应用抽象
@@ -1079,10 +1083,11 @@ fn state_impl(app_id: &str) -> Result<AgentThemeStateDto, String> {
         return Err(format!("未知应用：{app_id}"));
     };
     // 模板版本升级检查（廉价文件读比对）：皮肤页每次查询状态时顺带把
-    // 旧版 theme.css / effects.js 升级到当前内置版本，外部文件升级后由
-    // 注入的 effects.js 热重载即时应用——旧 asar 注入行（无 data 标记）
-    // 无需重装主题。资源壁纸只在安装主流程拷贝（此处传 None）；
-    // 升级失败不阻断状态查询（面板可用性优先）。
+    // 旧版 theme.css / effects.js 升级到当前内置版本。variables.css
+    // 参数变化由注入的 effects.js 每秒热重载即时应用；模板文件本身的
+    // 升级（theme.css / effects.js）经面板"重启 ZCode"冷启动完全重载
+    // 生效。旧 asar 注入行（无 data 标记）无需重装主题。升级失败不
+    // 阻断状态查询（面板可用性优先）。
     let _ = store::ensure_theme_assets(app.id(), None);
     let bundle = app.app_bundle_path();
     let bundle_exists = bundle.is_dir();
@@ -1898,6 +1903,49 @@ pub async fn restart_target_app(app_id: String) -> Result<(), String> {
         } else {
             Err(format!("启动{}失败", app.display_name()))
         }
+    })
+    .await
+    .map_err(|e| format!("重启任务失败：{e}"))?
+}
+
+/// restart_zcode 返回结构：restarted = 是否执行了完整重启（false =
+/// 目标原本未在运行，仅直接拉起，前端按两种结果分别提示）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestartResultDto {
+    pub restarted: bool,
+}
+
+/// 重启 ZCode 桌面应用：注入的 theme.css / effects.js 依赖应用冷启动加载，
+/// 参数热重载（variables.css 每秒轮询）覆盖不到注入文件本身的改动（如用户
+/// 手动编辑过注入文件、模板大版本升级），需要整进程重启才能完全重载。
+/// 未运行时直接拉起；运行中退出（quit 内部含优雅退出与强杀兜底，失败直接
+/// 报错）→ 轮询二次确认退出 → 拉起。
+#[tauri::command]
+pub async fn restart_zcode(app_id: String) -> Result<RestartResultDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // 注册表白名单（与安装/卸载一致）：未知应用直接报错，不走文件路径
+        let Some(app) = find_app(&app_id) else {
+            return Err(format!("未知应用：{app_id}"));
+        };
+        let name = app.display_name();
+        if !app.running() {
+            if app.launch() {
+                return Ok(RestartResultDto { restarted: false });
+            }
+            return Err(format!("启动{name}失败"));
+        }
+        app.quit().map_err(|e| format!("退出{name}失败：{e}"))?;
+        for _ in 0..QUIT_POLL_COUNT {
+            if !app.running() {
+                if app.launch() {
+                    return Ok(RestartResultDto { restarted: true });
+                }
+                return Err(format!("启动{name}失败"));
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        Err(format!("等待{name}退出超时，请手动退出后重试"))
     })
     .await
     .map_err(|e| format!("重启任务失败：{e}"))?

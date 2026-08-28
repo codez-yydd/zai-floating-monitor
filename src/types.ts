@@ -674,8 +674,14 @@ export interface ThemeParams {
   wpSaturate: number;
   /** 背景模糊（0~20，px） */
   wpBlur: number;
+  /** 全局氛围底不透明度（0~1 小数，前端滑块刻度 0~100，默认 0.25）：
+   *  在壁纸之上垫一层主题色半透明底，提升亮壁纸下的文字可读性，热重载生效 */
+  baseAlpha: number;
   /** 遮罩浓度（0~0.9 小数，前端滑块刻度 0~90） */
   maskStrength: number;
+  /** 文字描边强度（0~1 小数，前端滑块刻度 0~100，默认 0 = 关闭）：
+   *  给界面文字补一圈柔和描边增强对比，热重载生效 */
+  textShadow: number;
   /** 对话区不透明度（0~1 小数，前端滑块刻度 0~100） */
   panelOpacity: number;
   /** 侧栏不透明度（0~1 小数，前端滑块刻度 0~100） */

@@ -799,14 +799,27 @@ pub fn account_quotas() -> Result<Vec<AccountQuotaEntry>, String> {
 #[cfg(target_os = "macos")]
 const ZCODE_APP_NAME: &str = "ZCode";
 
-/// ZCode 桌面应用是否在运行（pgrep -x 精确匹配进程名）。
+/// ZCode 桌面应用是否在运行（osascript 查询 LaunchServices，与 open -a
+/// 同源）。stdout trim 后等于 "true" 才算运行中；命令执行失败按原语义
+/// 返回 false。
+/// 历史教训（勿回退为 pgrep）：真实 ZCode 主进程 argv[0]="ZCode"、是
+/// launchd 直接子进程，macOS pgrep 的任何匹配形式（-x / 子串 / -f 全量
+/// 命令行）都看不到它（pgrep 数据源与 ps comm 不一致的典型案例），用
+/// pgrep -x 会永远误判"未运行"——restart_zcode 因此只 open -a 聚焦不
+/// 重启、安装流程"② 退出目标应用"被整体跳过。osascript
+/// `application "ZCode" is running` 走 LaunchServices，实测对运行中的
+/// ZCode 返回 "true"，可靠。
+/// 不加 TTL 缓存：全部调用点为低频用户操作（状态查询/安装/卸载/重启）
+/// 或退出、启动等待循环（250ms 间隔，循环本身即节流），且等待循环依赖
+/// 实时结论——缓存会延迟退出/启动确认，与流程正确性冲突。
 /// pub(crate)：agent_theme（动态壁纸注入）复用。
 #[cfg(target_os = "macos")]
 pub(crate) fn zcode_running() -> bool {
-    std::process::Command::new("pgrep")
-        .args(["-x", ZCODE_APP_NAME])
+    let script = format!("application \"{}\" is running", ZCODE_APP_NAME);
+    std::process::Command::new("osascript")
+        .args(["-e", &script])
         .output()
-        .map(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
         .unwrap_or(false)
 }
 
@@ -828,6 +841,9 @@ pub(crate) fn quit_zcode() -> Result<(), String> {
         }
         std::thread::sleep(Duration::from_millis(250));
     }
+    // pkill 与 pgrep 同数据源，大概率杀不到 ZCode 主进程（见
+    // zcode_running 注释）——保留作最后手段，不强求命中；osascript
+    // quit 主路径走 AppleScript 事件，可靠性高，正常到此步前已退出
     let _ = std::process::Command::new("pkill")
         .args(["-x", ZCODE_APP_NAME])
         .output();

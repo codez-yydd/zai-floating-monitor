@@ -8,6 +8,7 @@ import {
   getAgentThemeState,
   installAgentTheme,
   listAgentWallpapers,
+  restartZcode,
   selectAgentWallpaper,
   setAgentThemeParams,
   setAgentWallpaper,
@@ -77,6 +78,8 @@ const STAGE_KEYS: Record<string, MessageKey> = {
 const SLIDERS: ReadonlyArray<{
   key: keyof Omit<ThemeParams, "wallpaperFile" | "wallpaperDir">;
   labelKey: MessageKey;
+  /** 可选滑块说明（渲染在滑块下方的小字；仅部分参数提供） */
+  hintKey?: MessageKey;
   min: number;
   max: number;
   step: number;
@@ -111,11 +114,35 @@ const SLIDERS: ReadonlyArray<{
     format: (v) => `${v}px`,
   },
   {
+    // 氛围底（可读性增强）：壁纸之上的主题色半透明底，存储 0~1、步进 0.05，
+    // 换算为百分比刻度 0~100、步进 5
+    key: "baseAlpha",
+    labelKey: "theme.paramBaseAlpha",
+    hintKey: "theme.paramBaseAlphaHint",
+    min: 0,
+    max: 100,
+    step: 5,
+    scale: 100,
+    format: (v) => `${v}%`,
+  },
+  {
     key: "maskStrength",
     labelKey: "theme.paramMaskStrength",
     min: 0,
     max: 90,
     step: 1,
+    scale: 100,
+    format: (v) => `${v}%`,
+  },
+  {
+    // 文字描边（可读性增强）：存储 0~1、步进 0.05，换算为百分比刻度
+    // 0~100、步进 5（0 = 关闭）
+    key: "textShadow",
+    labelKey: "theme.paramTextShadow",
+    hintKey: "theme.paramTextShadowHint",
+    min: 0,
+    max: 100,
+    step: 5,
     scale: 100,
     format: (v) => `${v}%`,
   },
@@ -168,16 +195,18 @@ const fromScale = (v: number, scale?: number) => (scale ? v / scale : v);
 /**
  * 效果参数出厂默认（与 Rust 侧 ThemeParams::default 一致；"恢复默认参数"
  * 按钮与新增安装的初始观感都以此为准：亮度/饱和度拉满、无模糊遮罩、
- * 面板与侧栏全透明（V5 分层后滑块各管各的容器、互不牵连；V6 起右栏
- * 亦有独立滑块，同样默认全透明；其余区域由固定氛围透明度兜底）、
- * 原速播放）
+ * 氛围底保持基础垫底（0.25）且文字描边关闭、面板与侧栏全透明（V5 分层
+ * 后滑块各管各的容器、互不牵连；V6 起右栏亦有独立滑块，同样默认全透明；
+ * 其余区域由固定氛围透明度兜底）、原速播放）
  */
 const DEFAULT_EFFECT_PARAMS: Pick<
   ThemeParams,
   | "wpBrightness"
   | "wpSaturate"
   | "wpBlur"
+  | "baseAlpha"
   | "maskStrength"
+  | "textShadow"
   | "panelOpacity"
   | "sidebarOpacity"
   | "sidebarRightOpacity"
@@ -186,11 +215,27 @@ const DEFAULT_EFFECT_PARAMS: Pick<
   wpBrightness: 1.1,
   wpSaturate: 1.4,
   wpBlur: 0,
+  baseAlpha: 0.25,
   maskStrength: 0,
+  textShadow: 0,
   panelOpacity: 0,
   sidebarOpacity: 0,
   sidebarRightOpacity: 0,
   playbackRate: 1,
+};
+
+/**
+ * 亮色壁纸适配预设：亮色壁纸下暗色主题文字可读性的推荐参数组合。
+ * 只覆盖这四项（氛围底/遮罩/壁纸亮度/文字描边），其余参数保持用户当前值。
+ */
+const LIGHT_WALLPAPER_PRESET: Pick<
+  ThemeParams,
+  "baseAlpha" | "maskStrength" | "wpBrightness" | "textShadow"
+> = {
+  baseAlpha: 0.55,
+  maskStrength: 0.35,
+  wpBrightness: 0.6,
+  textShadow: 0.6,
 };
 
 /** 拖放导入的壁纸文件白名单（与 Rust 侧扩展名白名单一致，大小写不敏感） */
@@ -241,6 +286,9 @@ export function ThemePanel({ onBack }: Props) {
   const [busy, setBusy] = useState<ConfirmAction | null>(null);
   const [progress, setProgress] = useState<AgentThemeProgress | null>(null);
   const [confirm, setConfirm] = useState<ConfirmAction | null>(null);
+  // 重启 ZCode：二次确认展示中 / 执行中（执行时按钮禁用并切换文案）
+  const [confirmRestart, setConfirmRestart] = useState(false);
+  const [restarting, setRestarting] = useState(false);
   const [changingWallpaper, setChangingWallpaper] = useState(false);
   // 壁纸库：列表数据与加载/切换/设目录的中间态
   const [wallpapers, setWallpapers] = useState<WallpaperEntry[] | null>(null);
@@ -550,12 +598,46 @@ export function ThemePanel({ onBack }: Props) {
   };
 
   /**
+   * 亮色壁纸适配：一键写入亮色壁纸下的推荐参数（只覆盖氛围底/遮罩/壁纸
+   * 亮度/文字描边四项，其余保持用户当前值）。保存管道与恢复默认一致：
+   * 本地即时反馈 + 落盘 set_agent_theme_params（Rust 侧热重载约 1 秒生效）；
+   * 写入前先取消未触发的滑块保存防抖，避免旧值稍后覆盖预设；失败时
+   * 回滚为后端实际值。
+   */
+  const handleLightWallpaperPreset = async () => {
+    const cur = paramsRef.current;
+    if (!cur || busy !== null) return;
+    if (saveTimer.current !== undefined) {
+      window.clearTimeout(saveTimer.current);
+      saveTimer.current = undefined;
+    }
+    const next: ThemeParams = { ...cur, ...LIGHT_WALLPAPER_PRESET };
+    setParams(next);
+    setError(null);
+    try {
+      await setAgentThemeParams("zcode", next);
+      setParamsSavedFlash(true);
+      window.setTimeout(() => setParamsSavedFlash(false), 1500);
+    } catch (e) {
+      setError(t("theme.lightWallpaperPresetFail", { msg: String(e) }));
+      getAgentThemeParams("zcode")
+        .then(setParams)
+        .catch(() => {});
+    }
+  };
+
+  /**
    * 恢复默认参数：把全部效果滑块重置为出厂默认（保留当前壁纸指向与
-   * 壁纸目录），本地即时反馈 + 落盘；失败时回滚为后端实际值。
+   * 壁纸目录），本地即时反馈 + 落盘；写入前先取消未触发的滑块保存
+   * 防抖，避免拖动旧值稍后覆盖重置结果；失败时回滚为后端实际值。
    */
   const handleResetParams = async () => {
     const cur = paramsRef.current;
     if (!cur || busy !== null) return;
+    if (saveTimer.current !== undefined) {
+      window.clearTimeout(saveTimer.current);
+      saveTimer.current = undefined;
+    }
     const next: ThemeParams = { ...cur, ...DEFAULT_EFFECT_PARAMS };
     setParams(next);
     setError(null);
@@ -568,6 +650,29 @@ export function ThemePanel({ onBack }: Props) {
       getAgentThemeParams("zcode")
         .then(setParams)
         .catch(() => {});
+    }
+  };
+
+  /**
+   * 重启 ZCode：注入的 theme.css / effects.js 依赖应用冷启动加载，手动改过
+   * 注入文件等场景热重载覆盖不到，重启后完全重载。经确认浮层后执行：
+   * 未运行时后端直接拉起，运行中退出（含强杀兜底与超时报错）后重新启动；
+   * 成功用绿色横幅反馈，失败进 AlertBanner（restart 返回 restarted=false
+   * 表示原本未在运行、仅直接启动，按两种结果分别提示）。
+   */
+  const handleRestartZcode = async () => {
+    setConfirmRestart(false);
+    if (restarting) return;
+    setRestarting(true);
+    setError(null);
+    setFlash(null);
+    try {
+      const { restarted } = await restartZcode("zcode");
+      showFlash(t(restarted ? "theme.launchDone" : "theme.restartDone"));
+    } catch (e) {
+      setError(t("theme.restartFail", { msg: String(e) }));
+    } finally {
+      setRestarting(false);
     }
   };
 
@@ -603,8 +708,8 @@ export function ThemePanel({ onBack }: Props) {
     );
   }
 
-  // 按钮统一禁用：安装/还原进行中（需求：进行中全部按钮禁用）
-  const actionsDisabled = busy !== null;
+  // 按钮统一禁用：安装/还原进行中 + 重启 ZCode 进行中（进行中全部按钮禁用）
+  const actionsDisabled = busy !== null || restarting;
   // Node.js 缺失时注入必然失败：安装/重装入口置灰，横幅引导先装 Node
   const installDisabled = actionsDisabled || !state.nodeAvailable;
 
@@ -868,6 +973,7 @@ export function ThemePanel({ onBack }: Props) {
                   <ParamSlider
                     key={s.key}
                     label={t(s.labelKey)}
+                    hint={s.hintKey ? t(s.hintKey) : undefined}
                     value={toScale(params[s.key], s.scale)}
                     min={s.min}
                     max={s.max}
@@ -896,12 +1002,32 @@ export function ThemePanel({ onBack }: Props) {
                   </div>
                 </div>
 
-                <BtnSecondary
-                  onClick={handleResetParams}
-                  disabled={actionsDisabled}
-                >
-                  {t("theme.resetParams")}
-                </BtnSecondary>
+                {/* 一键预设与恢复默认并排，重启 ZCode 居右：亮色壁纸适配只
+                    覆盖四项推荐值，恢复默认重置全部滑块（均保留壁纸指向与
+                    壁纸目录）；重启让注入资产完全重载（确认浮层保护） */}
+                <div className="flex gap-1.5">
+                  <BtnSecondary
+                    onClick={handleLightWallpaperPreset}
+                    disabled={actionsDisabled}
+                  >
+                    {t("theme.lightWallpaperPreset")}
+                  </BtnSecondary>
+                  <BtnSecondary
+                    onClick={handleResetParams}
+                    disabled={actionsDisabled}
+                  >
+                    {t("theme.resetParams")}
+                  </BtnSecondary>
+                  <BtnSecondary
+                    onClick={() => setConfirmRestart(true)}
+                    disabled={actionsDisabled}
+                  >
+                    {restarting ? t("theme.restarting") : t("theme.restartZcode")}
+                  </BtnSecondary>
+                </div>
+                <p className="text-[9px] text-slate-500 leading-relaxed">
+                  {t("theme.lightWallpaperPresetDesc")}
+                </p>
               </div>
             </SettingsCard>
           )}
@@ -924,6 +1050,19 @@ export function ThemePanel({ onBack }: Props) {
           showMacUpdateNote={isMac}
           onCancel={() => setConfirm(null)}
           onConfirm={() => runAction(confirm)}
+        />
+      )}
+
+      {/* 重启 ZCode 二次确认浮层（同款样式，非危险操作走蓝色确认键；
+          重启会退出 ZCode，需提示先保存进行中的对话） */}
+      {confirmRestart && !busy && !restarting && (
+        <ConfirmDialog
+          title={t("theme.confirmRestartTitle")}
+          desc={t("theme.confirmRestartDesc")}
+          confirmText={t("theme.restartZcode")}
+          danger={false}
+          onCancel={() => setConfirmRestart(false)}
+          onConfirm={handleRestartZcode}
         />
       )}
     </div>
@@ -1051,9 +1190,11 @@ function WallpaperCard({
   );
 }
 
-/** 单个效果参数滑块：标签 + 当前值 + range（样式对齐设置页透明度滑块） */
+/** 单个效果参数滑块：标签 + 当前值 + range（样式对齐设置页透明度滑块）；
+ *  hint 为可选的滑块下方小字说明（仅部分可读性参数提供） */
 function ParamSlider({
   label,
+  hint,
   value,
   min,
   max,
@@ -1063,6 +1204,7 @@ function ParamSlider({
   onChange,
 }: {
   label: string;
+  hint?: string;
   value: number;
   min: number;
   max: number;
@@ -1089,6 +1231,11 @@ function ParamSlider({
         onChange={(e) => onChange(parseFloat(e.target.value))}
         className="accent-sky-500 w-full disabled:opacity-40"
       />
+      {hint && (
+        <div className="text-[9px] text-slate-500 leading-relaxed mt-0.5">
+          {hint}
+        </div>
+      )}
     </label>
   );
 }

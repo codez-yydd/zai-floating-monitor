@@ -530,3 +530,11 @@ export async function setAgentWallpaperDir(
 ): Promise<void> {
   await invoke("set_agent_wallpaper_dir", { appId, dir });
 }
+
+/** 重启 ZCode 桌面应用，让注入的主题资产完全重载（未运行时直接拉起）。
+ *  返回是否执行了完整重启（false = 原本未在运行，仅直接启动） */
+export async function restartZcode(
+  appId: string
+): Promise<{ restarted: boolean }> {
+  return invoke<{ restarted: boolean }>("restart_zcode", { appId });
+}

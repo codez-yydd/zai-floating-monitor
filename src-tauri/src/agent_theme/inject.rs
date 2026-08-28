@@ -10,7 +10,7 @@
 //! 整段引用包裹在 <!--ZBAR-THEME-BEGIN--> … <!--ZBAR-THEME-END--> 标记内，
 //! 重复安装时先剥离旧标记块再插入新块，保证幂等。
 
-use crate::agent_theme::store::{BASE_ALPHA, ThemeParams};
+use crate::agent_theme::store::ThemeParams;
 use std::fs;
 use std::path::Path;
 
@@ -27,7 +27,7 @@ pub const INJECT_END: &str = "<!--ZBAR-THEME-END-->";
 /// 旧版本文件由 ensure_theme_assets 自动覆盖升级；已是当前版本的文件
 /// （可能被实机调优过）不会被覆盖。
 pub const THEME_CSS: &str = r#"/* ============================================================
- * ZBAR-THEME-V9
+ * ZBAR-THEME-V10
  * ZBar Agent 动态壁纸主题样式（由 ZBar 落盘并随版本升级覆盖）
  * ============================================================
  * 实机结论（解剖 ZCode 自身样式）：界面容器普遍通过工具类
@@ -91,6 +91,16 @@ pub const THEME_CSS: &str = r#"/* ==============================================
  * :not 链同步排除这四个面板值；右栏"打开标签页"空态选择面板
  * 无面板属性（容器类 side-pane-open-tab-shell），单独并入右栏
  * 作用区，三区域归属彻底归位。
+ *
+ * V10 变更（文字可读性增强 + 氛围底可调）：--zbar-base-alpha 由
+ * 固定常量升级为用户可调参数 base_alpha（variables.css 按参数渲染
+ * 真值并随热重载即时生效，本文件中原有的 0.25 兜底写法保留，作
+ * 旧 variables.css 的容错）；新增文字描边强度参数 text_shadow，
+ * 消费变量 --zbar-text-shadow，文件末尾追加三区域主容器（与上方
+ * 主区域背景规则同批选择器）的前景文字描边规则——深色主题补黑色
+ * 描边、浅色主题补白色描边，把文字从过亮/过暗的壁纸里托出来；
+ * 强度 0 时 alpha 为 0 描边自然不可见，默认观感与 V9 完全一致。
+ * 既有 V9 选择器与规则一字未动。
  *
  * 生效前提：本文件 link 晚于 ZCode 自身样式（</head> 前注入，
  * 源顺序占优）；壁纸视频层与压暗遮罩层由 effects.js 挂载。
@@ -251,16 +261,55 @@ html.dark .side-pane-open-tab-shell {
  * 深色壁纸上浅色文字发虚时，优先在 ZBar 面板调大遮罩强度
  * （--zbar-mask-strength，遮罩层由 effects.js 挂载并热重载更新），
  * 压暗壁纸提升前景对比度。
- * TODO: 若调大遮罩仍不满足，可在此追加与 --zbar-mask-strength
- * 联动的 text-shadow。 */
+ * V10：已追加独立于遮罩的文字描边能力（强度变量 --zbar-text-shadow，
+ * 用户可调），规则见文件末尾"文字可读性：壁纸过亮/过暗时给前景
+ * 文字补描边"块。 */
+
+/* ---- 文字可读性：壁纸过亮/过暗时给前景文字补描边（V10） ----
+ * 壁纸以氛围底透出后，亮色壁纸配深色主题时白色文字、深色壁纸配
+ * 浅色主题时深色文字都可能失去对比度；遮罩强度只能整体压暗/提亮，
+ * 这里按主题方向对称补描边，把文字从背景里"托"出来：
+ * - 深色主题（html.dark）给三区域主容器补黑色描边，浅色主题对称
+ *   补白色描边；
+ * - 强度全部消费 --zbar-text-shadow（用户可调 0~1，0=关闭；
+ *   variables.css 按参数渲染真值并随热重载即时生效），alpha=0 时
+ *   描边自然不可见，无需条件分支；
+ * - 模糊半径随强度温和缩放（3px 起步，最高 +5px），低强度下边缘
+ *   柔和不产生图标毛边；
+ * - 选择器组与上方主区域背景规则同批（侧栏容器 + 对话区四面板组
+ *   + 右栏其余面板与空态选择面板），描边设在容器上由文字继承，
+ *   与背景三区域分层一一对应，不影响任何 V9 规则。 */
+#sidebar,
+[data-pane-id="workspace-main"],
+[data-pane-id="conversation-column"],
+[data-pane-id="conversation"],
+[data-pane-id="terminal"],
+[data-pane-id]:not([data-pane-id="workspace-main"]):not([data-pane-id="conversation-column"]):not([data-pane-id="conversation"]):not([data-pane-id="terminal"]),
+.side-pane-open-tab-shell {
+  text-shadow: 0 0 calc(3px + (var(--zbar-text-shadow, 0) * 5px))
+    rgba(255, 255, 255, var(--zbar-text-shadow, 0));
+}
+
+html.dark #sidebar,
+html.dark [data-pane-id="workspace-main"],
+html.dark [data-pane-id="conversation-column"],
+html.dark [data-pane-id="conversation"],
+html.dark [data-pane-id="terminal"],
+html.dark [data-pane-id]:not([data-pane-id="workspace-main"]):not([data-pane-id="conversation-column"]):not([data-pane-id="conversation"]):not([data-pane-id="terminal"]),
+html.dark .side-pane-open-tab-shell {
+  text-shadow: 0 0 calc(3px + (var(--zbar-text-shadow, 0) * 5px))
+    rgba(0, 0, 0, var(--zbar-text-shadow, 0));
+}
 "#;
 
 /// 壁纸运行时脚本模板：读取 --zbar-* CSS 变量，在 body 上挂黑底占位层、
 /// 壁纸媒体层（视频或图片，按壁纸扩展名二选一）与压暗遮罩层，并每秒
 /// 热重载 variables.css——ZBar 面板改参数/换壁纸无需重启 ZCode 即时生效。
+/// theme.css 为静态 link 不做周期热重载（模板升级场景由面板"重启 ZCode"
+/// 按钮冷启动完全重载，见模板内 V5 说明）。
 /// 版本化落盘（头部 ZBAR-THEME-V 标记，见 store::ensure_versioned_template）。
 pub const EFFECTS_JS: &str = r#"// ============================================================
-// ZBAR-THEME-V3
+// ZBAR-THEME-V5
 // ZBar Agent 动态壁纸运行时（由 ZBar 落盘并随版本升级覆盖）
 // ============================================================
 // 读取 variables.css 注入的 --zbar-* CSS 变量，在 body 上创建：
@@ -276,6 +325,11 @@ pub const EFFECTS_JS: &str = r#"// =============================================
 // 热重载：每 1000ms 强制重读 variables.css（link href 追加时间戳，
 // Chromium 对 file:// 的常用强制重读手段），比对 --zbar-* 变量快照，
 // 壁纸 URL / 滤镜三参 / 播放速率 / 遮罩强度变化即时应用。
+// theme.css 不做周期热重载（V4 曾与 variables.css 同款每秒 cache-bust，
+// V5 撤销）：样式表 href 变更会经历"旧样式表卸载失效 → 异步加载解析
+// → 恢复"窗口，失效窗口内三区域背景/文字描边规则整体失效，背景闪回
+// ZCode 原生底色，系统忙时窗口拉长到肉眼可见的周期性闪烁。theme.css
+// 模板升级（版本化覆盖落盘）改由面板"重启 ZCode"按钮冷启动完全重载。
 // 兼容：定位 variables.css 优先 link[data-zbar-variables]（新版注入行），
 // 旧版注入行（无 data 属性）回退按 href 含 "variables.css" 匹配——
 // 旧 asar 注入无需重装主题也能热重载。
@@ -511,8 +565,22 @@ pub const EFFECTS_JS: &str = r#"// =============================================
         setWallpaper(currentUrl);
         return;
       }
-      reloadVarsLink();
+      /* 先取快照，后重读 variables.css：reloadVarsLink() 改 href 会让
+       * 样式表立即进入"卸载失效 → 异步加载解析 → 恢复"窗口。若沿用
+       * 旧顺序（先重读后快照），快照正好撞上本轮重载的失效窗口读到
+       * 空值；先取快照则读到的恒为上一轮重载稳定后的值（距本轮 href
+       * 变更已隔一个轮询周期）。 */
       var now = snapshotOf();
+      /* 空值防御：任一变量读到空串，说明 variables.css 仍处于上一轮
+       * href 变更的重载窗口（旧样式表已卸载、新规则未解析完），或页面
+       * 初载样式表尚未首次解析完成——本轮快照不可信，视为失效窗口直接
+       * 返回：不 diff、不应用滤镜/遮罩、不切壁纸，避免把全部变量误判为
+       * "被重置为默认值"而清掉用户参数。正常落盘的 variables.css 恒定
+       * 渲染全部变量，空串只会出现在失效窗口，判定无歧义。 */
+      for (var i = 0; i < VAR_NAMES.length; i++) {
+        if (now[VAR_NAMES[i]] === "") return;
+      }
+      reloadVarsLink();
       if (sameSnapshot(snapshot, now)) return;
       snapshot = now;
       var url = urlOf(now["--zbar-wallpaper-url"]);
@@ -574,8 +642,12 @@ pub fn file_url(path: &Path) -> String {
 
 /// 由主题参数渲染 variables.css 内容。
 /// 壁纸 URL 为 file:// 绝对地址（已 percent-encoding）。
-/// --zbar-base-alpha 为固定氛围透明度（BASE_ALPHA，非用户参数）：
-/// theme.css V5 起全部全局底色 token 由它驱动，与滑块解绑。
+/// --zbar-base-alpha 为全局氛围底透明度（V10 起由用户参数 base_alpha
+/// 渲染真值，默认 0.25）：theme.css V5 起全部全局底色 token 由它驱动，
+/// 与滑块解绑。
+/// --zbar-text-shadow 为文字描边强度（V10 新增，由用户参数
+/// text_shadow 渲染真值，0=关闭）：theme.css V10 起三区域主容器的
+/// 前景文字描边由它驱动。两者均随 variables.css 每秒热重载即时生效。
 pub fn render_variables_css(params: &ThemeParams, wallpaper_url: &str) -> String {
     format!(
         "/* ZBar 自动生成的主题变量，请勿手工编辑 */\n\
@@ -589,7 +661,8 @@ pub fn render_variables_css(params: &ThemeParams, wallpaper_url: &str) -> String
          \x20 --zbar-panel-opacity: {panel};\n\
          \x20 --zbar-sidebar-opacity: {sidebar};\n\
          \x20 --zbar-sidebar-right-opacity: {sidebar_right};\n\
-         \x20 --zbar-base-alpha: {base};\n\
+         \x20 --zbar-base-alpha: {base_alpha};\n\
+         \x20 --zbar-text-shadow: {text_shadow};\n\
          \x20 --zbar-playback-rate: {rate};\n\
          }}\n",
         url = wallpaper_url,
@@ -600,7 +673,8 @@ pub fn render_variables_css(params: &ThemeParams, wallpaper_url: &str) -> String
         panel = params.panel_opacity,
         sidebar = params.sidebar_opacity,
         sidebar_right = params.sidebar_right_opacity,
-        base = BASE_ALPHA,
+        base_alpha = params.base_alpha,
+        text_shadow = params.text_shadow,
         rate = params.playback_rate,
     )
 }
@@ -807,6 +881,7 @@ mod tests {
             "--zbar-sidebar-opacity",
             "--zbar-sidebar-right-opacity",
             "--zbar-base-alpha",
+            "--zbar-text-shadow",
             "--zbar-playback-rate",
         ] {
             assert!(css.contains(var), "variables.css 缺少变量 {var}");
@@ -814,7 +889,7 @@ mod tests {
         // 壁纸地址以 url("…") 形式写入
         assert!(css.contains(&format!("url(\"{url}\")")));
         // 默认参数值渲染（V6 默认：亮度/饱和度拉满、对话列/侧栏/右栏
-        // 归零、固定氛围值 0.25、速率 1）
+        // 归零、氛围底默认 0.25、V10 描边默认关闭、速率 1）
         assert!(css.contains("--zbar-wp-brightness: 1.1;"));
         assert!(css.contains("--zbar-wp-saturate: 1.4;"));
         assert!(css.contains("--zbar-wp-blur: 0px;"));
@@ -823,9 +898,19 @@ mod tests {
         assert!(css.contains("--zbar-sidebar-opacity: 0;"));
         assert!(css.contains("--zbar-sidebar-right-opacity: 0;"));
         assert!(css.contains("--zbar-base-alpha: 0.25;"));
+        assert!(css.contains("--zbar-text-shadow: 0;"));
         assert!(css.contains("--zbar-playback-rate: 1;"));
         // 非 ASCII 壁纸名在 url 里必须已编码（不出现裸中文）
         assert!(!css.contains("我的壁纸"));
+
+        // V10：两个新参数按参数渲染真值（不再写死常量），改参后
+        // variables.css 跟随变化（热重载即时生效的前提）
+        let mut p = ThemeParams::default();
+        p.base_alpha = 0.4;
+        p.text_shadow = 0.8;
+        let css = render_variables_css(&p, url);
+        assert!(css.contains("--zbar-base-alpha: 0.4;"), "{css}");
+        assert!(css.contains("--zbar-text-shadow: 0.8;"), "{css}");
     }
 
     #[test]
@@ -837,10 +922,12 @@ mod tests {
     #[test]
     fn 模板_版本头与token覆盖与图片支持() {
         // 头部版本标记（store::ensure_versioned_template 的升级判据）：
-        // theme.css 升 V9（运行时实测选择器终版修正），
-        // effects.js V3（图片壁纸支持）
-        assert!(THEME_CSS.contains("ZBAR-THEME-V9"));
-        assert!(EFFECTS_JS.contains("ZBAR-THEME-V3"));
+        // theme.css 升 V10（文字可读性增强 + 氛围底可调），
+        // effects.js V5（撤销 theme.css 每秒热重载 + poll 快照空值防御）
+        assert!(THEME_CSS.contains("ZBAR-THEME-V10"));
+        assert!(!THEME_CSS.contains("ZBAR-THEME-V9"), "版本头应已升到 V10");
+        assert!(EFFECTS_JS.contains("ZBAR-THEME-V5"));
+        assert!(!EFFECTS_JS.contains("ZBAR-THEME-V4"), "版本头应已升到 V5");
 
         // token 半透明化：浅色 :root 与深色 .dark 两套均定义
         // background / background-alt / panel 三个 token
@@ -928,16 +1015,13 @@ mod tests {
         );
         assert!(THEME_CSS.contains("var(--color-neutral-950)"));
 
-        // V9 主区域元素级规则：侧栏容器在浅色、深色各一条；对话区
-        // 四面板组（常驻 workspace-main + 多面板视图的对话列三面板
-        // 组）在浅色、深色各一条；右栏其余面板（:not 链排除四面板）
-        // 与右栏空态选择面板容器类在浅色、深色各一条（html.dark 前
-        // 缀形态也含选择器子串，计数即规则数；注释中不出现选择器
-        // 字面量，不影响计数）
+        // V9 主区域元素级规则 + V10 描边规则（选择器同批复用）：
+        // 侧栏容器浅色、深色各 2 条（背景 1 + 描边 1）；对话区四面板
+        // 组与右栏组同理
         assert_eq!(
             THEME_CSS.matches("#sidebar").count(),
-            2,
-            "侧栏容器元素规则应在浅色与深色各一条"
+            4,
+            "侧栏容器应在浅深各 2 条规则（V9 背景 + V10 描边）"
         );
         // V6 修正：#content 实为"对话列 + 右侧面板"整体容器，其元素规则
         // 已删除，对话区滑块不再作用其上
@@ -946,8 +1030,9 @@ mod tests {
             0,
             "#content 元素规则应已移除（否则会牵连右侧面板）"
         );
-        // V9 对话区四面板组：四个面板值各出现 4 次——对话区规则浅深
-        // 各 1 次 + 右栏 :not 链浅深各 1 次（缺一即归属串味）
+        // V9 对话区四面板组：四个面板值各出现 8 次——V9 对话区规则
+        // 浅深各 1 次 + V9 右栏 :not 链浅深各 1 次 + V10 描边规则
+        // （对话区段与 :not 链同批复用）浅深各 2 次（缺一即归属串味）
         for pane in [
             "workspace-main",
             "conversation-column",
@@ -957,13 +1042,13 @@ mod tests {
             let needle = format!("{pane}\"]");
             assert_eq!(
                 THEME_CSS.matches(&needle).count(),
-                4,
-                "面板值 {pane} 应在对话区规则与右栏 :not 链中各出现浅深 2 次"
+                8,
+                "面板值 {pane} 应在 V9 背景规则、右栏 :not 链与 V10 描边规则中浅深共 8 次"
             );
         }
         // 对话区规则与右栏规则以各自选择器末段形态区分：后跟 " {" 的
-        // terminal 选择器是对话区组末段，右栏组末段是空态选择面板
-        // 容器类（后跟 " {"）
+        // terminal 选择器是对话区组末段（V10 描边组中 terminal 后随
+        // 逗号、不新增该形态），右栏组末段是空态选择面板容器类
         assert_eq!(
             THEME_CSS.matches("terminal\"] {").count(),
             2,
@@ -971,8 +1056,8 @@ mod tests {
         );
         assert_eq!(
             THEME_CSS.matches(".side-pane-open-tab-shell {").count(),
-            2,
-            "右栏元素规则（:not 链 + 空态选择面板容器类）应在浅色与深色各一条"
+            4,
+            "右栏元素规则应在浅深各 2 条（V9 背景 + V10 描边，:not 链 + 空态选择面板容器类）"
         );
         // V7 修正：选择器属性名为 data-pane-id（按带括号的选择器形态
         // 计数，注释中的裸属性名不影响结果），旧写法须在选择器中归零
@@ -983,8 +1068,8 @@ mod tests {
         );
         assert_eq!(
             THEME_CSS.matches("[data-pane-id").count(),
-            18,
-            "对话区 2 条规则各 4 次（四面板组）+ 右栏 2 条规则各 5 次（本体 + 四段 :not）"
+            36,
+            "V9 对话区 2 条规则各 4 次 + 右栏 2 条规则各 5 次 = 18；V10 描边浅深两组结构相同再 +18"
         );
         assert!(THEME_CSS.contains("html.dark #sidebar"));
         assert!(THEME_CSS.contains("html.dark [data-pane-id=\"workspace-main\"]"));
@@ -1033,10 +1118,76 @@ mod tests {
             }
         }
 
+        // V10 文字描边：浅深两套各一条容器级规则（描边由文字继承，
+        // 选择器组与 V9 主区域背景规则同批），强度全部消费
+        // --zbar-text-shadow（variables.css 渲染真值 + 热重载；兜底
+        // 0 仅作旧 variables.css 容错，0=关闭时 alpha 为 0 不可见）
+        assert_eq!(
+            THEME_CSS.matches("text-shadow:").count(),
+            2,
+            "文字描边规则应在浅色与深色各一条"
+        );
+        assert_eq!(
+            THEME_CSS.matches("var(--zbar-text-shadow").count(),
+            4,
+            "每条描边规则的模糊半径与 alpha 各消费一次强度变量"
+        );
+        // 深色黑描边 / 浅色白描边对称，模糊半径随强度温和缩放
+        assert!(
+            THEME_CSS.contains("rgba(0, 0, 0, var(--zbar-text-shadow, 0))"),
+            "深色主题应为黑色描边"
+        );
+        assert!(
+            THEME_CSS.contains("rgba(255, 255, 255, var(--zbar-text-shadow, 0))"),
+            "浅色主题应为白色描边"
+        );
+        assert_eq!(
+            THEME_CSS.matches("calc(3px + (var(--zbar-text-shadow, 0) * 5px))").count(),
+            2,
+            "模糊半径应随强度缩放且浅深各消费一次"
+        );
+        // 描边规则必须位于全部 V9 规则之后（文件末尾追加，V9 规则
+        // 未被改写移动）：V9 最后一条规则（深色右栏背景）先于 V10 注释头
+        let v9_last = THEME_CSS
+            .find("html.dark .side-pane-open-tab-shell {\n  background-color:")
+            .expect("V9 深色右栏背景规则应存在");
+        let v10_block = THEME_CSS
+            .find("文字可读性：壁纸过亮/过暗时给前景文字补描边")
+            .expect("V10 描边注释头应存在");
+        assert!(
+            v9_last < v10_block,
+            "V10 规则只能追加在 V9 规则之后，不得改写或移动既有规则"
+        );
+
         // 热重载核心逻辑特征：data 标记定位 + href 兜底匹配 + 时间戳重读
         assert!(EFFECTS_JS.contains("link[data-zbar-variables]"));
         assert!(EFFECTS_JS.contains("link[href*=\"variables.css\"]"));
         assert!(EFFECTS_JS.contains("?t=\" + Date.now()"));
+        // V5 撤销 theme.css 每秒 cache-bust：样式表 href 变更存在
+        // "卸载失效 → 异步加载 → 恢复"窗口，失效窗口内三区域背景/文字
+        // 描边规则整体失效，背景闪回原生底色形成周期闪烁；theme.css
+        // 模板升级改由面板"重启 ZCode"冷启动完全重载
+        assert!(
+            !EFFECTS_JS.contains("reloadThemeLink") && !EFFECTS_JS.contains("findThemeLink"),
+            "theme.css 热重载函数应已整体删除"
+        );
+        // poll 竞态防御：先快照后重读（避免快照撞上本轮重载失效窗口）+
+        // 空值防御（任一变量读到空串视为失效窗口，本轮直接返回）
+        assert!(
+            EFFECTS_JS.contains("视为失效窗口"),
+            "poll 空值防御注释应存在"
+        );
+        assert!(
+            EFFECTS_JS.contains("now[VAR_NAMES[i]] === \"\""),
+            "poll 变量空串检查应存在"
+        );
+        // 先快照后重读的顺序：reloadVarsLink() 调用（仅 poll 中一处）
+        // 必须位于 snapshotOf() 快照语句之后
+        assert!(
+            EFFECTS_JS.find("var now = snapshotOf();")
+                < EFFECTS_JS.find("reloadVarsLink();"),
+            "poll 应先取快照再重读 variables.css"
+        );
         // 换源淡入（可重复调用）与遮罩层
         assert!(EFFECTS_JS.contains("transition:opacity"));
         assert!(EFFECTS_JS.contains("rgba(0,0,0,"));

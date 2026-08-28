@@ -65,7 +65,8 @@ pub const DEFAULT_WALLPAPER_FILE: &str = "default.mp4";
 /// 默认值常量：各参数的出厂默认（见 ThemeParams::default）
 /// V3 起默认观感为"壁纸原样透出"：亮度/饱和度拉满、无模糊遮罩；
 /// V5 主题分层后对话区与侧栏两个滑块各管各的容器、互不牵连，
-/// 面板与侧栏均可安心默认全透明（其余区域由 BASE_ALPHA 固定氛围值兜底）；
+/// 面板与侧栏均可安心默认全透明（其余区域由全局氛围底 base_alpha
+/// 的默认值兜底）；
 /// V6 新增右栏独立滑块，同样默认全透明
 pub const DEFAULT_WP_BRIGHTNESS: f64 = 1.1;
 pub const DEFAULT_WP_SATURATE: f64 = 1.4;
@@ -75,6 +76,22 @@ pub const DEFAULT_PANEL_OPACITY: f64 = 0.0;
 pub const DEFAULT_SIDEBAR_OPACITY: f64 = 0.0;
 pub const DEFAULT_SIDEBAR_RIGHT_OPACITY: f64 = 0.0;
 pub const DEFAULT_PLAYBACK_RATE: f64 = 1.0;
+/// 全局氛围底不透明度默认值（用户可调参数 base_alpha，0~1）：
+/// theme.css V5 起所有全局底色 token（:root 与 .dark 的
+/// --color-background / -alt / --color-panel / --color-sidebar 共 8 条）
+/// 统一由 --zbar-base-alpha 驱动，让顶栏、右侧面板、内容卡片等区域
+/// 隐约透出壁纸的氛围底，同时与对话区/侧栏两个滑块彻底解绑——
+/// 拖任一滑块只影响自己的主容器，不再牵连其余区域。
+/// V10 起由固定常量（原 BASE_ALPHA）升级为用户可调参数：
+/// variables.css 按参数渲染真值（热重载即时生效），theme.css 模板内
+/// 的 0.25 兜底仅作旧 variables.css 的容错。
+pub const DEFAULT_BASE_ALPHA: f64 = 0.25;
+/// 文字描边强度默认值（用户可调参数 text_shadow，0~1，0=关闭）：
+/// theme.css V10 起三区域主容器（侧栏 / 对话区 / 右栏）的前景文字
+/// 按深浅主题补黑色/白色 text-shadow，强度消费 --zbar-text-shadow
+/// （variables.css 渲染真值并随热重载即时生效），默认关闭不改变
+/// 既有观感
+pub const DEFAULT_TEXT_SHADOW: f64 = 0.0;
 
 /// 参数范围常量：(最小, 最大)
 pub const WP_BRIGHTNESS_RANGE: (f64, f64) = (0.4, 1.1);
@@ -85,14 +102,8 @@ pub const PANEL_OPACITY_RANGE: (f64, f64) = (0.0, 1.0);
 pub const SIDEBAR_OPACITY_RANGE: (f64, f64) = (0.0, 1.0);
 pub const SIDEBAR_RIGHT_OPACITY_RANGE: (f64, f64) = (0.0, 1.0);
 pub const PLAYBACK_RATE_RANGE: (f64, f64) = (0.5, 2.0);
-
-/// 全局底色固定氛围透明度（非用户参数，variables.css 恒定输出该值）：
-/// theme.css V5 起所有全局底色 token（:root 与 .dark 的
-/// --color-background / -alt / --color-panel / --color-sidebar 共 8 条）
-/// 统一由 --zbar-base-alpha 驱动，让顶栏、右侧面板、内容卡片等区域
-/// 隐约透出壁纸的氛围底，同时与对话区/侧栏两个滑块彻底解绑——
-/// 拖任一滑块只影响自己的主容器，不再牵连其余区域。后续可做成可调项。
-pub const BASE_ALPHA: f64 = 0.25;
+pub const BASE_ALPHA_RANGE: (f64, f64) = (0.0, 1.0);
+pub const TEXT_SHADOW_RANGE: (f64, f64) = (0.0, 1.0);
 
 /// 动态壁纸主题参数（前端皮肤页的滑杆/表单数据）。
 /// serde camelCase：与前端契约字段（wpBrightness / wallpaperFile 等）一一对应。
@@ -122,6 +133,15 @@ pub struct ThemeParams {
     pub sidebar_right_opacity: f64,
     /// 视频播放速率（0.5~2.0）
     pub playback_rate: f64,
+    /// 全局氛围底不透明度（0~1，默认 0.25）：theme.css V5 起全部全局
+    /// 底色 token 由 --zbar-base-alpha 驱动（语义详见
+    /// DEFAULT_BASE_ALPHA 注释），V10 起由固定常量升级为本可调参数
+    pub base_alpha: f64,
+    /// 文字描边强度（0~1，0=关闭）：theme.css V10 起三区域主容器
+    /// （侧栏 / 对话区 / 右栏）的前景文字按深浅主题补黑色/白色
+    /// text-shadow，强度消费 --zbar-text-shadow，壁纸过亮/过暗时
+    /// 把文字从背景里托出来，热重载即时生效
+    pub text_shadow: f64,
     /// 当前壁纸指向。语义（V3 起扩展）：
     /// - 绝对路径（以 / 或 Windows 盘符开头）→ 直接引用该文件
     /// - 相对文件名 → wallpapers/ 目录下的文件（如 "default.mp4"）
@@ -142,6 +162,8 @@ impl Default for ThemeParams {
             sidebar_opacity: DEFAULT_SIDEBAR_OPACITY,
             sidebar_right_opacity: DEFAULT_SIDEBAR_RIGHT_OPACITY,
             playback_rate: DEFAULT_PLAYBACK_RATE,
+            base_alpha: DEFAULT_BASE_ALPHA,
+            text_shadow: DEFAULT_TEXT_SHADOW,
             wallpaper_file: Some(DEFAULT_WALLPAPER_FILE.to_string()),
             wallpaper_dir: None,
         }
@@ -163,6 +185,8 @@ impl ThemeParams {
         self.sidebar_opacity = clamp(self.sidebar_opacity, SIDEBAR_OPACITY_RANGE);
         self.sidebar_right_opacity = clamp(self.sidebar_right_opacity, SIDEBAR_RIGHT_OPACITY_RANGE);
         self.playback_rate = clamp(self.playback_rate, PLAYBACK_RATE_RANGE);
+        self.base_alpha = clamp(self.base_alpha, BASE_ALPHA_RANGE);
+        self.text_shadow = clamp(self.text_shadow, TEXT_SHADOW_RANGE);
         if !self.wallpaper_file.as_deref().is_some_and(|s| !s.trim().is_empty()) {
             self.wallpaper_file = Some(DEFAULT_WALLPAPER_FILE.to_string());
         }
@@ -642,8 +666,9 @@ pub fn set_wallpaper_dir(app_id: &str, dir: Option<String>) -> Result<(), String
 /// 低于对应内置版本时由 ensure_theme_assets 用内置模板覆盖升级；
 /// 等于则视为用户实机调优过的版本，不动。
 /// 升级只触碰这两个模板文件，用户的 params.json / wallpapers /
-/// variables.css 不受影响——外部文件升级后由注入的 effects.js
-/// 热重载即时应用，旧 asar 注入行（无 data 标记）无需重装主题。
+/// variables.css 不受影响——参数变化经 variables.css 每秒热重载即时
+/// 生效；模板文件本身的升级经面板"重启 ZCode"冷启动完全重载生效，
+/// 旧 asar 注入行（无 data 标记）无需重装主题。
 /// theme.css V6（对话区作用区修正 + 右栏独立滑块：实测 #content 是
 /// "对话列 + 右侧面板"的整体容器，V5 把对话区规则刷在 #content 上会
 /// 牵连右侧面板；V6 删除 #content 元素规则，改按 react-resizable-panels
@@ -660,9 +685,29 @@ pub fn set_wallpaper_dir(app_id: &str, dir: Option<String>) -> Result<(), String
 /// 作用区扩为四面板组（workspace-main + 对话列三面板组），右栏
 /// :not 链同步排除四个面板值，无面板属性的右栏"打开标签页"空态
 /// 选择面板（容器类 side-pane-open-tab-shell）并入右栏作用区）；
-/// effects.js V3（图片壁纸支持）
-pub const THEME_CSS_VERSION: u32 = 9;
-pub const EFFECTS_JS_VERSION: u32 = 3;
+/// theme.css V10（文字可读性增强：--zbar-base-alpha 由固定常量改为
+/// 用户可调参数 base_alpha、新增文字描边参数 text_shadow 消费
+/// --zbar-text-shadow，文件末尾追加三区域主容器的前景文字描边规则——
+/// 深色主题黑描边、浅色主题白描边，强度 0 时 alpha 为 0 不可见；
+/// 既有 V9 选择器与规则一字未动，仅文件末尾追加）；
+/// effects.js V3（图片壁纸支持）；
+/// effects.js V4（theme.css 纳入每秒 cache-bust 热重载：theme.css 是
+/// 静态 link 不随参数热更新，已装用户磁盘模板升级后运行中的 ZCode
+/// 页面仍持旧样式——如 V10 新增的文字描边滑块拖动零反馈；与
+/// variables.css 同款 href 时间戳强制重读后免重启换用新样式，按
+/// data-zbar-theme 定位注入行，找不到时静默跳过）；
+/// effects.js V5（撤销 V4 的 theme.css 每秒热重载 + poll 竞态防御：
+/// 样式表 href 变更会经历"旧样式表卸载失效 → 异步加载解析 → 恢复"
+/// 窗口，失效窗口内 theme.css 的三区域背景/文字描边规则整体失效，
+/// 背景闪回 ZCode 原生底色，系统忙时窗口拉长到肉眼可见的周期性
+/// 闪烁，故删除 reloadThemeLink；theme.css 模板升级改由面板"重启
+/// ZCode"按钮冷启动完全重载闭环。同时 poll 调整为"先 snapshotOf
+/// 取快照、后 reloadVarsLink 重读"，避免快照撞上本轮 variables.css
+/// 重载窗口；并加空值防御——快照中任一 --zbar-* 变量读到空串视为
+/// 失效窗口，本轮直接返回，防止误判参数变化把滤镜/遮罩/壁纸重置
+/// 为默认值）
+pub const THEME_CSS_VERSION: u32 = 10;
+pub const EFFECTS_JS_VERSION: u32 = 5;
 
 /// 版本标记的头部查找范围（字符数）：版本注释固定在文件头部，
 /// 限定查找范围避免误匹配正文中的同名字样。
@@ -714,8 +759,9 @@ pub(crate) fn ensure_versioned_template(
 /// - 默认壁纸：wallpapers/ 无 default.mp4 且应用打包资源里有则拷入
 ///
 /// 调用时机：安装主流程（携带打包资源壁纸）；皮肤页状态查询与参数/
-/// 壁纸保存入口（传 None，仅做廉价的版本升级检查与重渲）——外部模板
-/// 升级后由 effects.js 热重载即时应用。
+/// 壁纸保存入口（传 None，仅做廉价的版本升级检查与重渲）——参数变化
+/// 经 variables.css 每秒热重载即时生效，模板文件升级经"重启 ZCode"
+/// 完全重载生效。
 pub fn ensure_theme_assets(app_id: &str, resource_wallpapers: Option<&Path>) -> Result<(), String> {
     let dir = app_dir(app_id)?;
     let wp_dir = wallpapers_dir(app_id)?;
@@ -812,6 +858,8 @@ mod tests {
             DEFAULT_SIDEBAR_RIGHT_OPACITY
         );
         assert_eq!(default.playback_rate, DEFAULT_PLAYBACK_RATE);
+        assert_eq!(default.base_alpha, DEFAULT_BASE_ALPHA);
+        assert_eq!(default.text_shadow, DEFAULT_TEXT_SHADOW);
         assert_eq!(default.wallpaper_file.as_deref(), Some(DEFAULT_WALLPAPER_FILE));
         assert_eq!(default.wallpaper_dir, None);
 
@@ -823,7 +871,8 @@ mod tests {
         for key in [
             "wpBrightness", "wpSaturate", "wpBlur", "maskStrength",
             "panelOpacity", "sidebarOpacity", "sidebarRightOpacity",
-            "playbackRate", "wallpaperFile", "wallpaperDir",
+            "playbackRate", "baseAlpha", "textShadow",
+            "wallpaperFile", "wallpaperDir",
         ] {
             assert!(text.contains(key), "params.json 缺少字段 {key}");
         }
@@ -851,6 +900,9 @@ mod tests {
         assert_eq!(p.mask_strength, DEFAULT_MASK_STRENGTH);
         assert_eq!(p.sidebar_right_opacity, DEFAULT_SIDEBAR_RIGHT_OPACITY);
         assert_eq!(p.playback_rate, DEFAULT_PLAYBACK_RATE);
+        // V10 新增参数：旧版文件缺字段同样按默认补齐
+        assert_eq!(p.base_alpha, DEFAULT_BASE_ALPHA);
+        assert_eq!(p.text_shadow, DEFAULT_TEXT_SHADOW);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -866,6 +918,8 @@ mod tests {
             sidebar_opacity: -3.0,
             sidebar_right_opacity: 9.0,
             playback_rate: 10.0,
+            base_alpha: 2.0,
+            text_shadow: -1.0,
             wallpaper_file: Some("  ".into()),
             wallpaper_dir: None,
         }
@@ -878,6 +932,8 @@ mod tests {
         assert_eq!(p.sidebar_opacity, SIDEBAR_OPACITY_RANGE.0);
         assert_eq!(p.sidebar_right_opacity, SIDEBAR_RIGHT_OPACITY_RANGE.1);
         assert_eq!(p.playback_rate, PLAYBACK_RATE_RANGE.1);
+        assert_eq!(p.base_alpha, BASE_ALPHA_RANGE.1);
+        assert_eq!(p.text_shadow, TEXT_SHADOW_RANGE.0);
         // 空白文件名回默认
         assert_eq!(p.wallpaper_name(), DEFAULT_WALLPAPER_FILE);
         p.wallpaper_file = None;
@@ -1006,32 +1062,37 @@ mod tests {
         fs::create_dir_all(&wp_dir).unwrap();
         fs::write(wp_dir.join("mine.mp4"), b"mine-video").unwrap();
 
-        // 场景一：旧版模板（无版本头）→ theme.css 升 V9、effects.js 升 V3
+        // 场景一：旧版模板（无版本头）→ theme.css 升 V10、effects.js 升 V5
         fs::write(dir.join(THEME_CSS), "/* 旧版 theme，无版本头 */").unwrap();
         fs::write(dir.join(EFFECTS_JS), "// 旧版 effects，无版本头").unwrap();
         ensure_theme_assets_in(&dir, &wp_dir, None).unwrap();
         assert!(
             fs::read_to_string(dir.join(THEME_CSS))
                 .unwrap()
-                .contains("ZBAR-THEME-V9"),
-            "旧版 theme.css 应被升级覆盖到 V9"
+                .contains("ZBAR-THEME-V10"),
+            "旧版 theme.css 应被升级覆盖到 V10"
         );
         assert!(
             fs::read_to_string(dir.join(EFFECTS_JS))
                 .unwrap()
-                .contains("ZBAR-THEME-V3"),
-            "旧版 effects.js 应被升级覆盖到 V3"
+                .contains("ZBAR-THEME-V5"),
+            "旧版 effects.js 应被升级覆盖到 V5"
         );
 
-        // 场景二：effects.js 为 V2（已装用户的真实升级路径）→ 仅它升 V3
+        // 场景二：effects.js 为 V3（已装用户的真实升级路径，V3/V4 旧版
+        // 均应升到当前版本）→ 仅它升 V5
         fs::write(dir.join(THEME_CSS), inject::THEME_CSS).unwrap();
-        fs::write(dir.join(EFFECTS_JS), "// ZBAR-THEME-V2 旧版无图片支持\n").unwrap();
+        fs::write(
+            dir.join(EFFECTS_JS),
+            "// ZBAR-THEME-V3 旧版无 theme.css 热重载\n",
+        )
+        .unwrap();
         ensure_theme_assets_in(&dir, &wp_dir, None).unwrap();
         assert!(
             fs::read_to_string(dir.join(EFFECTS_JS))
                 .unwrap()
-                .contains("ZBAR-THEME-V3"),
-            "V2 effects.js 应被升级到 V3"
+                .contains("ZBAR-THEME-V5"),
+            "V3 effects.js 应被升级到 V5"
         );
 
         // 场景三：已是当前版本（用户实机调优过，头部追加了自定义内容）→ 不覆盖

@@ -604,13 +604,23 @@ export const en: typeof zh = {
     "theme.paramWpBrightness": "Wallpaper brightness",
     "theme.paramWpSaturate": "Saturation",
     "theme.paramWpBlur": "Background blur",
+    "theme.paramBaseAlpha": "Ambient tint",
+    "theme.paramBaseAlphaHint":
+      "Adds a semi-transparent theme-colored layer over the wallpaper to improve overall text readability; 50%+ recommended for light wallpapers.",
     "theme.paramMaskStrength": "Mask strength",
+    "theme.paramTextShadow": "Text outline",
+    "theme.paramTextShadowHint":
+      "Adds a soft outline around UI text for better contrast; raise it for dark themes on light wallpapers, 0 disables it.",
     "theme.paramPanelOpacity": "Chat opacity",
     "theme.paramSidebarOpacity": "Sidebar opacity",
     "theme.paramSidebarRightOpacity": "Right panel opacity",
     "theme.paramPlaybackRate": "Playback speed",
     "theme.currentWallpaper": "Current wallpaper",
     "theme.noWallpaper": "No wallpaper selected",
+    "theme.lightWallpaperPreset": "Light wallpaper fit",
+    "theme.lightWallpaperPresetDesc":
+      "One click to apply the recommended values for light wallpapers (ambient tint 55%, mask 35%, brightness 60%, text outline 60%).",
+    "theme.lightWallpaperPresetFail": "Failed to apply light wallpaper preset: {msg}",
     "theme.resetParams": "Reset to defaults",
     "theme.paramsSavedFlash": "Saved ✓",
 
@@ -653,5 +663,15 @@ export const en: typeof zh = {
     "theme.resetParamsFail": "Failed to reset parameters: {msg}",
     "theme.installFail": "Install failed: {msg}",
     "theme.uninstallFail": "Restore failed: {msg}",
+
+    // Restart ZCode (full reload of injected theme assets)
+    "theme.restartZcode": "Restart ZCode",
+    "theme.restarting": "Restarting…",
+    "theme.confirmRestartTitle": "Restart ZCode",
+    "theme.confirmRestartDesc":
+      "ZCode will quit and relaunch (takes a few seconds) so the injected live wallpaper assets fully reload. If ZCode isn't running, it will simply be launched.\nSave any conversations in progress first.",
+    "theme.restartDone": "ZCode restarted — injected assets fully reloaded ✓",
+    "theme.launchDone": "ZCode wasn't running — launched directly ✓",
+    "theme.restartFail": "Failed to restart ZCode: {msg}",
   } satisfies typeof theme),
 };

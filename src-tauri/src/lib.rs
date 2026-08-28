@@ -2035,7 +2035,8 @@ pub fn run() {
             agent_theme::list_agent_wallpapers,
             agent_theme::select_agent_wallpaper,
             agent_theme::set_agent_wallpaper_dir,
-            agent_theme::restart_target_app
+            agent_theme::restart_target_app,
+            agent_theme::restart_zcode
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

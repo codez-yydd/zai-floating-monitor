@@ -74,15 +74,37 @@ export const theme = {
   "theme.paramWpBrightness": "壁纸亮度",
   "theme.paramWpSaturate": "饱和度",
   "theme.paramWpBlur": "背景模糊",
+  "theme.paramBaseAlpha": "氛围底",
+  "theme.paramBaseAlphaHint":
+    "在壁纸之上垫一层主题色半透明底，提升全局文字可读性；亮色壁纸建议 50% 以上",
   "theme.paramMaskStrength": "遮罩浓度",
+  "theme.paramTextShadow": "文字描边",
+  "theme.paramTextShadowHint":
+    "给界面文字补一圈柔和描边增强对比；亮壁纸配暗色主题时适当调高，0 为关闭",
   "theme.paramPanelOpacity": "对话区不透明度",
   "theme.paramSidebarOpacity": "侧栏不透明度",
   "theme.paramSidebarRightOpacity": "右栏不透明度",
   "theme.paramPlaybackRate": "播放速度",
   "theme.currentWallpaper": "当前壁纸",
   "theme.noWallpaper": "未选择壁纸",
+  "theme.lightWallpaperPreset": "亮色壁纸适配",
+  "theme.lightWallpaperPresetDesc":
+    "一键调整为亮色壁纸推荐参数（氛围底 55%、遮罩 35%、壁纸亮度 60%、文字描边 60%）",
+  "theme.lightWallpaperPresetFail": "亮色壁纸适配失败：{msg}",
   "theme.resetParams": "恢复默认参数",
   "theme.paramsSavedFlash": "参数已保存 ✓",
+
+  // ===== 重启 ZCode =====
+  // 注入的 theme.css / effects.js 依赖应用冷启动加载，手动改过注入文件等
+  // 场景参数热重载覆盖不到，提供一键重启入口让注入资产完全重载
+  "theme.restartZcode": "重启 ZCode",
+  "theme.restarting": "重启中…",
+  "theme.confirmRestartTitle": "重启 ZCode",
+  "theme.confirmRestartDesc":
+    "将退出并重新启动 ZCode 桌面应用（约需数秒），让注入的动态壁纸资产完全重载；ZCode 未在运行时会直接启动。\n请先保存 ZCode 中进行中的对话。",
+  "theme.restartDone": "已重启 ZCode，注入资产已完全重载 ✓",
+  "theme.launchDone": "ZCode 未在运行，已直接启动 ✓",
+  "theme.restartFail": "重启 ZCode 失败：{msg}",
 
   // ===== 壁纸库 =====
   "theme.libraryTitle": "壁纸库",
