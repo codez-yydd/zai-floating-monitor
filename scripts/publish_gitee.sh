@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# 本地直发 Gitee 更新源（国内网络直连，秒级完成）
+# 本地直发 Gitee：正式版 release + latest 更新源（国内网络直连，秒级完成）
 #
 # 背景：CI（GitHub 海外 runner）调 Gitee 附件接口对大文件偶发持续挂起
 # （v0.5.0 实测同一文件 6 次重试全超时），而本机直连 Gitee 秒传。本脚本
@@ -21,10 +21,18 @@
 # GitHub 下载走代理（默认 http://127.0.0.1:33210，可用 GH_PROXY 覆盖，
 # 置空则直连）；Gitee 始终直连。
 #
-# 流程（原 release.yml Gitee 步骤的同款逻辑，幂等可重跑）：
-#   下载 GitHub Release 产物 → 删 Gitee 旧 latest release（仅 404 视为
-#   不存在）→ 创建新 release → payload 先传（失败查服务端、已存在跳过、
+# 流程（原 release.yml Gitee 步骤的同款逻辑，幂等可重跑，5 步）：
+#   下载 GitHub Release 产物 → 创建/复用正式版 release（tag=v版本，上传
+#   全部程序附件）→ 删 Gitee 旧 latest release（仅 404 视为不存在）→
+#   创建新 latest release → payload 先传（失败查服务端、已存在跳过、
 #   退避重试）→ 完整性校验 → latest.json 最后提交 → 回读确认
+#
+# 正式版 release 永不删除，累积保留版本历史；latest 为滚动更新源，删旧
+# 重建不触碰版本 tag。背景：脚本原逻辑只维护一个滚动复用的 latest release
+# （应用内更新源，URL releases/download/latest/latest.json 被已发布的应用
+# 写死依赖，必须保持），删旧建新——导致 Gitee 上从无正式版 release、无
+# 版本 tag 历史，老版本无法回溯；自 v0.8.1 起改造为每次发布同时创建正式版
+# release（tag=v版本），任何 release 均不删除。
 # ============================================================================
 set -euo pipefail
 
@@ -71,9 +79,43 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/zbar-gitee.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 
 # ---------------------------------------------------------------------------
+# 附件辅助函数：均以 release id 为第一个参数，正式版与 latest 两处复用
+# ---------------------------------------------------------------------------
+attach_list() { # $1=release id
+  curl -sf --connect-timeout 20 --max-time 60 "$API/$1/attach_files?$TOKEN_PARAM" 2>/dev/null || echo '[]'
+}
+attachment_exists() { # $1=release id $2=附件名
+  attach_list "$1" | jq -e --arg n "$2" 'map(.name) | index($n) != null' >/dev/null
+}
+
+upload() { # $1=release id $2=本地文件 $3=附件名
+  local rid="$1" file="$WORK/$2" name="$3" rc code resp i d max_time size upath
+  size=$(wc -c < "$file")
+  max_time=$(( size / 51200 + 90 )); (( max_time < 180 )) && max_time=180
+  # Git Bash 的 mingw64 curl 是原生 Windows 程序，读不了 MSYS 的 /tmp 路径
+  # （curl 错误 26 Failed to open/read local data）；有 cygpath 时转成
+  # Windows 真实路径，macOS/Linux 无 cygpath 则原样
+  if command -v cygpath >/dev/null 2>&1; then upath=$(cygpath -w "$file"); else upath="$file"; fi
+  for i in 1 2 3 4; do
+    echo "  上传 ${name}（第 $i/4 次，超时 ${max_time}s）"
+    resp=$(curl -sS --connect-timeout 20 --max-time "$max_time" -w '\n%{http_code}' \
+      -X POST "$API/$rid/attach_files" \
+      -F "$TOKEN_PARAM" \
+      -F "file=@$upath;filename=$name") && rc=0 || rc=$?
+    code="${resp##*$'\n'}"
+    if [[ $rc -eq 0 && "$code" == 2* ]]; then echo "  $name 上传成功"; return 0; fi
+    echo "  $name 未确认（rc=$rc HTTP=${code:-无}），查询服务端"
+    if attachment_exists "$rid" "$name"; then echo "  服务端已存在 ${name}，判定成功"; return 0; fi
+    case $i in 1) d=5 ;; 2) d=10 ;; 3) d=20 ;; *) d=0 ;; esac
+    [[ $i -lt 4 ]] && { echo "  ${d}s 后重试"; sleep "$d"; }
+  done
+  echo "错误：上传失败 $name"; return 1
+}
+
+# ---------------------------------------------------------------------------
 # 1. 从 GitHub Release 下载产物（payload 8 个 + gitee-latest.json）
 # ---------------------------------------------------------------------------
-echo "[1/4] 下载 GitHub Release v$VERSION 产物"
+echo "[1/5] 下载 GitHub Release v$VERSION 产物"
 DL_BASE="https://github.com/$GH_REPO/releases/download/v$VERSION"
 ASSETS=$(gh_curl -fsSL --max-time 120 "https://api.github.com/repos/$GH_REPO/releases/tags/v$VERSION" \
   | jq -r '.assets[].name' | grep -E '(-setup\.exe(\.sig)?|aarch64.*\.app\.tar\.gz(\.sig)?|x64\.app\.tar\.gz(\.sig)?|\.dmg|^gitee-latest\.json$)' || true)
@@ -91,9 +133,47 @@ done <<< "$ASSETS"
 [[ -f "$WORK/gitee-latest.json" ]] || { echo '错误：缺少 gitee-latest.json（由 Release 流水线生成）'; exit 1; }
 
 # ---------------------------------------------------------------------------
-# 2. 删除旧 latest release（仅 404 视为不存在）
+# 2. 创建/复用正式版 release（tag=v版本）：正式版永不删除，累积保留版本
+#    历史；latest.json 是更新器专用文件，不上传到正式版
 # ---------------------------------------------------------------------------
-echo '[2/4] 清理 Gitee 旧 latest release'
+echo "[2/5] 创建/复用正式版 release（tag=v$VERSION）"
+OFFICIAL_ID=''
+OFF_RESP=$(curl -sS --connect-timeout 20 --max-time 60 -w '\n%{http_code}' "$API/tags/v$VERSION?$TOKEN_PARAM") || true
+OFF_CODE="${OFF_RESP##*$'\n'}"
+OFF_BODY="${OFF_RESP%$'\n'*}"
+if [[ "$OFF_CODE" == 2* ]]; then
+  OFFICIAL_ID=$(echo "$OFF_BODY" | jq -r '.id // empty')
+  if [[ -n "$OFFICIAL_ID" ]]; then
+    echo "  正式版 release 已存在，复用补传 (id=$OFFICIAL_ID)"
+  fi
+  # Gitee 对"tag 存在但未挂 release"返回 200 + body null，与 404 一样走创建
+elif [[ "$OFF_CODE" != 404 ]]; then
+  echo "错误：查询正式版 release 失败 HTTP ${OFF_CODE:-网络错误}"; exit 1
+fi
+if [[ -z "$OFFICIAL_ID" ]]; then
+  # 创建请求体走 UTF-8 JSON 文件 + jq 自检（同 latest release 的既有模式）
+  cat > "$WORK/official.json" <<EOF
+{"tag_name":"v${VERSION}","target_commitish":"master","name":"ZBar v${VERSION}","body":"${RELEASE_BODY}"}
+EOF
+  jq -e . "$WORK/official.json" >/dev/null
+  OFF_CREATE=$(curl -sS --connect-timeout 20 --max-time 120 -w '\n%{http_code}' -X POST "$API?$TOKEN_PARAM" \
+    -H "Content-Type: application/json" \
+    --data-binary @"$WORK/official.json")
+  OFF_CREATE_CODE="${OFF_CREATE##*$'\n'}"
+  OFF_CREATE_BODY="${OFF_CREATE%$'\n'*}"
+  [[ "$OFF_CREATE_CODE" == 2* ]] || { echo "错误：创建正式版 release 失败 HTTP ${OFF_CREATE_CODE}：$(echo "$OFF_CREATE_BODY" | head -c 300)"; exit 1; }
+  OFFICIAL_ID=$(echo "$OFF_CREATE_BODY" | jq -r '.id // empty')
+  [[ -n "$OFFICIAL_ID" ]] || { echo '错误：未解析到正式版 release id'; exit 1; }
+  echo "  正式版 release 已创建 (id=$OFFICIAL_ID)"
+fi
+for name in "${PAYLOAD[@]}"; do
+  upload "$OFFICIAL_ID" "$name" "$name" || exit 1
+done
+
+# ---------------------------------------------------------------------------
+# 3. 删除旧 latest release（仅 404 视为不存在）
+# ---------------------------------------------------------------------------
+echo '[3/5] 清理 Gitee 旧 latest release'
 OLD_RESP=$(curl -sS --connect-timeout 20 --max-time 60 -w '\n%{http_code}' "$API/tags/latest?$TOKEN_PARAM") || true
 OLD_CODE="${OLD_RESP##*$'\n'}"
 OLD_BODY="${OLD_RESP%$'\n'*}"
@@ -114,9 +194,9 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3. 创建新 release 并上传 payload（业务级重试）
+# 4. 创建新 latest release 并上传 payload（业务级重试）
 # ---------------------------------------------------------------------------
-echo '[3/4] 创建新 release 并上传附件'
+echo '[4/5] 创建新 latest release 并上传附件'
 # 创建请求体走 UTF-8 JSON 文件：Windows 的原生 curl 会把命令行里的中文按本地
 # 码页（GBK）转码发出，Gitee 报 invalid byte sequence in UTF-8；文件字节直传
 # 三端（macOS/Linux/Git Bash）行为一致，jq 解析兼作 UTF-8 编码自检
@@ -130,52 +210,21 @@ RESP=$(curl -sS --connect-timeout 20 --max-time 120 -w '\n%{http_code}' -X POST 
 CODE="${RESP##*$'\n'}"
 BODY="${RESP%$'\n'*}"
 [[ "$CODE" == 2* ]] || { echo "错误：创建 release 失败 HTTP ${CODE}：$(echo "$BODY" | head -c 300)"; exit 1; }
-RELEASE_ID=$(echo "$BODY" | jq -r '.id // empty')
-[[ -n "$RELEASE_ID" ]] || { echo '错误：未解析到 release id'; exit 1; }
-echo "  release 已创建 (id=$RELEASE_ID)"
-
-attach_list() {
-  curl -sf --connect-timeout 20 --max-time 60 "$API/$RELEASE_ID/attach_files?$TOKEN_PARAM" 2>/dev/null || echo '[]'
-}
-attachment_exists() { # $1=附件名
-  attach_list | jq -e --arg n "$1" 'map(.name) | index($n) != null' >/dev/null
-}
-
-upload() { # $1=本地文件 $2=附件名
-  local file="$WORK/$1" name="$2" rc code resp i d max_time size upath
-  size=$(wc -c < "$file")
-  max_time=$(( size / 51200 + 90 )); (( max_time < 180 )) && max_time=180
-  # Git Bash 的 mingw64 curl 是原生 Windows 程序，读不了 MSYS 的 /tmp 路径
-  # （curl 错误 26 Failed to open/read local data）；有 cygpath 时转成
-  # Windows 真实路径，macOS/Linux 无 cygpath 则原样
-  if command -v cygpath >/dev/null 2>&1; then upath=$(cygpath -w "$file"); else upath="$file"; fi
-  for i in 1 2 3 4; do
-    echo "  上传 ${name}（第 $i/4 次，超时 ${max_time}s）"
-    resp=$(curl -sS --connect-timeout 20 --max-time "$max_time" -w '\n%{http_code}' \
-      -X POST "$API/$RELEASE_ID/attach_files" \
-      -F "$TOKEN_PARAM" \
-      -F "file=@$upath;filename=$name") && rc=0 || rc=$?
-    code="${resp##*$'\n'}"
-    if [[ $rc -eq 0 && "$code" == 2* ]]; then echo "  $name 上传成功"; return 0; fi
-    echo "  $name 未确认（rc=$rc HTTP=${code:-无}），查询服务端"
-    if attachment_exists "$name"; then echo "  服务端已存在 ${name}，判定成功"; return 0; fi
-    case $i in 1) d=5 ;; 2) d=10 ;; 3) d=20 ;; *) d=0 ;; esac
-    [[ $i -lt 4 ]] && { echo "  ${d}s 后重试"; sleep "$d"; }
-  done
-  echo "错误：上传失败 $name"; return 1
-}
+LATEST_ID=$(echo "$BODY" | jq -r '.id // empty')
+[[ -n "$LATEST_ID" ]] || { echo '错误：未解析到 latest release id'; exit 1; }
+echo "  latest release 已创建 (id=$LATEST_ID)"
 
 for name in "${PAYLOAD[@]}"; do
-  upload "$name" "$name" || exit 1
+  upload "$LATEST_ID" "$name" "$name" || exit 1
 done
 
 # ---------------------------------------------------------------------------
-# 4. 完整性校验 → latest.json 最后提交 → 回读确认
+# 5. 完整性校验 → latest.json 最后提交 → 回读确认
 # ---------------------------------------------------------------------------
-echo '[4/4] 完整性校验并提交 latest.json'
+echo '[5/5] 完整性校验并提交 latest.json'
 FINAL_LIST=''
 for i in 1 2 3; do
-  if FINAL_LIST=$(curl -sf --connect-timeout 20 --max-time 60 "$API/$RELEASE_ID/attach_files?$TOKEN_PARAM" 2>/dev/null); then
+  if FINAL_LIST=$(curl -sf --connect-timeout 20 --max-time 60 "$API/$LATEST_ID/attach_files?$TOKEN_PARAM" 2>/dev/null); then
     break
   fi
   FINAL_LIST=''
@@ -190,10 +239,12 @@ done
 [[ $MISSING -eq 0 ]] || { echo '错误：完整性校验失败，不提交 latest.json（重跑本脚本恢复）'; exit 1; }
 echo "  校验通过：${#PAYLOAD[@]} 个程序附件全部就位"
 
-upload gitee-latest.json latest.json || { echo '错误：latest.json 上传失败'; exit 1; }
-attachment_exists latest.json || { echo '错误：latest.json 未确认'; exit 1; }
+upload "$LATEST_ID" gitee-latest.json latest.json || { echo '错误：latest.json 上传失败'; exit 1; }
+attachment_exists "$LATEST_ID" latest.json || { echo '错误：latest.json 未确认'; exit 1; }
 
 echo ''
-echo "发布成功：v$VERSION / release id=$RELEASE_ID / 附件 $(attach_list | jq 'length') 个"
-attach_list | jq -r '.[].name' | sed 's/^/    /'
+echo "发布成功：v$VERSION"
+echo "  正式版 release：id=$OFFICIAL_ID / https://gitee.com/$GITEE_REPO/releases/tag/v$VERSION"
+echo "  latest 更新源：id=$LATEST_ID / 附件 $(attach_list "$LATEST_ID" | jq 'length') 个"
+attach_list "$LATEST_ID" | jq -r '.[].name' | sed 's/^/    /'
 echo '更新源：https://gitee.com/codezwx/zai-floating-monitor/releases/download/latest/latest.json'
