@@ -136,7 +136,7 @@ done <<< "$ASSETS"
 # 2. 创建/复用正式版 release（tag=v版本）：正式版永不删除，累积保留版本
 #    历史；latest.json 是更新器专用文件，不上传到正式版
 # ---------------------------------------------------------------------------
-echo "[2/5] 创建/复用正式版 release（tag=v$VERSION）"
+echo "[2/5] 创建/复用正式版 release（tag=v${VERSION}）"
 OFFICIAL_ID=''
 OFF_RESP=$(curl -sS --connect-timeout 20 --max-time 60 -w '\n%{http_code}' "$API/tags/v$VERSION?$TOKEN_PARAM") || true
 OFF_CODE="${OFF_RESP##*$'\n'}"
