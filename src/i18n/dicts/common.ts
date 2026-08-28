@@ -25,6 +25,7 @@ export const common = {
   "common.cacheHit": "缓存命中 {pct}",
   "common.hour5": "5小时",
   "common.weekly": "本周",
+  "common.resetAt": "重置于 {time}",
 
   // 用量页通用指标
   "common.totalCost": "总花费",

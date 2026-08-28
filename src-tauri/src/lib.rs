@@ -1509,8 +1509,17 @@ fn toggle_panel(app: &AppHandle, click_pos: Option<(f64, f64)>) {
     let _ = window.set_focus();
     // WKWebView 已知问题：长期隐藏的窗口 show 后首帧可能不立即重绘（白屏）。
     // 微调窗口尺寸强制触发 layer 重新提交（Tauri 社区验证的解法，见 issue #5170）。
+    // 偏移方向动态选择：窗口高已达 maxHeight 760（与 tauri.conf.json 一致）时
+    // +1 会被 clamp 回 760，两次 set_size 相同、重绘 hack 失效；此时改用 -1
+    // （760-1=759 仍大于 minHeight 430，不会被 clamp），保证微调恒有实际
+    // 变化、重绘 hack 恒有效。
     if let Ok(size) = window.outer_size() {
-        let _ = window.set_size(PhysicalSize::new(size.width, size.height + 1));
+        const MAX_HEIGHT_PX: u32 = 760;
+        let offset: i32 = if size.height >= MAX_HEIGHT_PX - 1 { -1 } else { 1 };
+        let _ = window.set_size(PhysicalSize::new(
+            size.width,
+            (size.height as i32 + offset) as u32,
+        ));
         let _ = window.set_size(size);
     }
 }

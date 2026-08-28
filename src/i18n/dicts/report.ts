@@ -49,6 +49,9 @@ export const report = {
   "report.resetUnknown": "重置时间未知",
   "report.resetDays": "约 {n} 天后重置",
   "report.resetHours": "约 {n} 小时后重置",
+  // 双开展示的简短形态（后接 " · 重置于 MM-DD HH:mm"，避免"重置"措辞重复）
+  "report.resetInDays": "约 {n} 天后",
+  "report.resetInHours": "约 {n} 小时后",
 
   // 额度窗口标签（labelKey，渲染/导出时查词典）
   "report.q.weeklyCurrent": "周额度当前",

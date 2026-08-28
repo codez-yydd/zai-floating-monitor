@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { useDataCache } from "./DataCache";
-import { formatCountdownCore, levelLabel } from "./format";
+import { formatCountdownCore, formatResetStamp, levelLabel } from "./format";
 import { remainingGradient, remainingTextColor } from "./widgets";
 import { useI18n } from "./i18n";
+import { useResetDisplay } from "./resetDisplay";
 import {
   SwitchAccountButton,
   SwitchConfirmOverlay,
@@ -271,6 +272,35 @@ function AccountQuotaRow({
   );
 }
 
+/** 额度条中列的重置时间展示（QuotaBar / McpBar 共用）：
+ *  仅倒计时（默认）与历史渲染逐字一致；双开改纵向两行（次行时间点用更弱
+ *  前景色）；仅时间点在原位单行替换；双关留空占位保持 grid 列结构。 */
+function ResetSpan({ resetAt, now }: { resetAt: number; now: number }) {
+  const { t } = useI18n();
+  const display = useResetDisplay();
+  if (!display.countdown && !display.datetime) return <span />;
+  if (display.countdown && display.datetime) {
+    return (
+      <span className="flex flex-col items-end pr-1">
+        <span className="num text-slate-700/40 text-right whitespace-nowrap">
+          ↻ {t("common.refreshIn", { time: formatCountdownCore(resetAt - now) })}
+        </span>
+        <span className="num text-slate-700/30 text-right whitespace-nowrap">
+          {t("common.resetAt", { time: formatResetStamp(resetAt) })}
+        </span>
+      </span>
+    );
+  }
+  return (
+    <span className="num text-slate-700/40 text-right pr-1 whitespace-nowrap">
+      ↻{" "}
+      {display.datetime
+        ? t("common.resetAt", { time: formatResetStamp(resetAt) })
+        : t("common.refreshIn", { time: formatCountdownCore(resetAt - now) })}
+    </span>
+  );
+}
+
 /** 单条额度进度条（剩余版：填充剩余量，颜色随剩余渐变） */
 function QuotaBar({
   label,
@@ -301,9 +331,7 @@ function QuotaBar({
       <div className="grid grid-cols-[3.25rem_minmax(0,1fr)_3.25rem] items-center gap-2 text-[10px] mb-0.5">
         <span className="text-slate-700/60">{label}</span>
         {resetAt && resetAt > now ? (
-          <span className="num text-slate-700/40 text-right pr-1 whitespace-nowrap">
-            ↻ {t("common.refreshIn", { time: formatCountdownCore(resetAt - now) })}
-          </span>
+          <ResetSpan resetAt={resetAt} now={now} />
         ) : (
           <span />
         )}
@@ -366,9 +394,7 @@ function McpBar({
       <div className="grid grid-cols-[3.25rem_minmax(0,1fr)_3.25rem] items-center gap-2 text-[10px] mb-0.5">
         <span className="text-slate-700/60">MCP</span>
         {resetAt && resetAt > now ? (
-          <span className="num text-slate-700/40 text-right pr-1 whitespace-nowrap">
-            ↻ {t("common.refreshIn", { time: formatCountdownCore(resetAt - now) })}
-          </span>
+          <ResetSpan resetAt={resetAt} now={now} />
         ) : (
           <span />
         )}

@@ -37,6 +37,21 @@ export function formatCountdownCore(ms: number): string {
       : `${mins}m`;
 }
 
+/** 绝对时间戳 → 重置时间点短格式（"MM-DD HH:mm"，本地时区、24 小时制、不带年份）。
+ *  withTime=false 只出日期（Cursor 日期精度专用：billing_cycle_end 只有日期，
+ *  解析出的时分是假值，禁止展示）。无效时间戳返回空串。 */
+export function formatResetStamp(
+  ms: number,
+  opts?: { withTime?: boolean }
+): string {
+  if (!Number.isFinite(ms)) return "";
+  const d = new Date(ms);
+  const p = (n: number) => String(n).padStart(2, "0");
+  const date = `${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  if (opts?.withTime === false) return date;
+  return `${date} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 // ============================================================
 // Coding Plan 套餐等级 → 展示标签。
 // 原先在 QuotaPanel / SummaryTab 各有一份 LEVEL_LABEL，多账号额度

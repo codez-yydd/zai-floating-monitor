@@ -11,6 +11,21 @@ export const settings = {
   "settings.opacity": "透明度",
   "settings.opacityHint":
     "调整面板背景透明度，值越低毛玻璃越透；暗色主题建议保持 60% 以上，过低时文字可能不清晰",
+  "settings.fontSize": "字体大小",
+  "settings.fontSmall": "小",
+  "settings.fontStandard": "标准",
+  "settings.fontLarge": "大",
+  "settings.fontXl": "特大",
+  "settings.fontSizeHint":
+    "整体等比缩放面板内容（含字号、图标与间距）。放大字体后如内容变少，可拖大窗口查看更多。",
+  "settings.winSize": "窗口大小",
+  "settings.winSizeSmall": "小",
+  "settings.winSizeStandard": "标准",
+  "settings.winSizeLarge": "大",
+  "settings.winSizeXl": "特大",
+  "settings.winSizeCustom": "自定义",
+  "settings.winSizeHint":
+    "拖动面板边缘可自由调整大小，也可选择预设档位，调整结果会自动记忆。",
   "settings.language": "语言",
   "settings.langZh": "简体中文",
   "settings.langEn": "English",
@@ -36,6 +51,13 @@ export const settings = {
   "settings.agentClaudeDesc": "Claude Code 用量与订阅额度",
   "settings.agentCursorDesc": "Cursor 编辑器用量与套餐额度",
   "settings.agentKimiDesc": "Kimi Code CLI 用量与订阅额度",
+
+  // ===== 重置时间展示 =====
+  "settings.resetDisplay": "重置时间展示",
+  "settings.resetCountdown": "倒计时",
+  "settings.resetDatetime": "具体时间点",
+  "settings.resetDisplayHint":
+    "订阅额度的重置时间展示方式，两项可同时开启；时间点格式为 MM-DD HH:mm。",
 
   // ===== Kimi 额度凭据 =====
   "settings.kimiCard": "Kimi 额度凭据",

@@ -39,6 +39,7 @@ export const en: typeof zh = {
     "common.cacheHit": "Cache hit {pct}",
     "common.hour5": "5h",
     "common.weekly": "Week",
+    "common.resetAt": "Resets at {time}",
 
     // 用量页通用指标
     "common.totalCost": "Total cost",
@@ -363,6 +364,9 @@ export const en: typeof zh = {
     "report.resetUnknown": "Reset time unknown",
     "report.resetDays": "Resets in ~{n}d",
     "report.resetHours": "Resets in ~{n}h",
+    // Short forms for countdown + exact time combined display
+    "report.resetInDays": "in ~{n}d",
+    "report.resetInHours": "in ~{n}h",
 
     "report.q.weeklyCurrent": "This week",
     "report.q.hour5Current": "Past 5h",
@@ -431,6 +435,28 @@ export const en: typeof zh = {
     "settings.agentClaudeDesc": "Claude Code usage & plan quotas",
     "settings.agentCursorDesc": "Cursor usage & plan quotas",
     "settings.agentKimiDesc": "Kimi Code CLI usage & subscription quota",
+
+    "settings.resetDisplay": "Reset time display",
+    "settings.resetCountdown": "Countdown",
+    "settings.resetDatetime": "Exact time",
+    "settings.resetDisplayHint":
+      "How quota reset time is shown; both can be on at once. Exact times use MM-DD HH:mm.",
+
+    "settings.fontSize": "Font size",
+    "settings.fontSmall": "Small",
+    "settings.fontStandard": "Default",
+    "settings.fontLarge": "Large",
+    "settings.fontXl": "Larger",
+    "settings.fontSizeHint":
+      "Scales all panel content proportionally. If larger fonts show less, drag the window bigger to see more.",
+    "settings.winSize": "Window size",
+    "settings.winSizeSmall": "Small",
+    "settings.winSizeStandard": "Standard",
+    "settings.winSizeLarge": "Large",
+    "settings.winSizeXl": "XL",
+    "settings.winSizeCustom": "Custom",
+    "settings.winSizeHint":
+      "Drag the panel edges to resize freely, or pick a preset; your size is remembered.",
 
     "settings.kimiCard": "Kimi credential",
     "settings.kimiKeyPh": "Paste API Key",

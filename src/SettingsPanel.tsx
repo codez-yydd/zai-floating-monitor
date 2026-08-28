@@ -16,9 +16,28 @@ import {
 } from "@tauri-apps/plugin-autostart";
 import {
   applyPanelAlpha,
+  applyUiScale,
   loadPanelAlpha,
+  loadUiScale,
   persistPanelAlpha,
+  persistUiScale,
+  UI_SCALE_OPTIONS,
 } from "./appearance";
+import {
+  WIN_PRESETS,
+  BASE_PCT,
+  loadWinSizePct,
+  persistWinSizePct,
+  applyWindowPct,
+  type WinSizePct,
+} from "./windowSize";
+import { formatResetStamp } from "./format";
+import { WIN_SIZE_CHANGED_EVENT } from "./ResizeHandles";
+import {
+  loadResetDisplay,
+  saveResetDisplay,
+  type ResetDisplay,
+} from "./resetDisplay";
 import { BrandIcon } from "./BrandIcon";
 import { AccountsCard } from "./AccountsCard";
 import { UpdaterCard } from "./UpdaterCard";
@@ -45,13 +64,6 @@ interface Props {
   onAgentVisibilityChange: (id: AgentId, visible: boolean) => void;
 }
 
-/// 汇率最近获取时间的显示格式：MM-DD HH:mm（本地时区）
-function fmtFxTime(ms: number): string {
-  const d = new Date(ms);
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-}
-
 /**
  * 设置页：面板透明度 + 从价格设置页搬来的非价格配置
  * （开机自启 / 汇率 / 全局快捷键）。
@@ -70,6 +82,20 @@ export function SettingsPanel({
 
   // ===== 外观：面板透明度（localStorage 持久化，改完即时生效）=====
   const [alpha, setAlpha] = useState<number>(() => loadPanelAlpha());
+  // ===== 外观：字体大小（整体缩放，档位见 UI_SCALE_OPTIONS，改完即时生效即存）=====
+  const [uiScale, setUiScale] = useState<string>(loadUiScale);
+  // ===== 外观：窗口大小（工作区百分比，档位见 WIN_PRESETS；null = 从未调整过，视同标准档）=====
+  const [winPct, setWinPct] = useState<WinSizePct | null>(loadWinSizePct);
+  // 边缘拖拽在设置页可见时落盘后同步档位胶囊：ResizeHandles 每次成功
+  // 落盘会广播该事件，这里重读 localStorage 刷新高亮 / 自定义态
+  useEffect(() => {
+    const onWinSizeChanged = () => setWinPct(loadWinSizePct());
+    window.addEventListener(WIN_SIZE_CHANGED_EVENT, onWinSizeChanged);
+    return () =>
+      window.removeEventListener(WIN_SIZE_CHANGED_EVENT, onWinSizeChanged);
+  }, []);
+  // ===== 重置时间展示（localStorage 持久化，改完即时生效）=====
+  const [resetDisplay, setResetDisplay] = useState<ResetDisplay>(loadResetDisplay);
   // ===== 开机自启 =====
   const [autostartEnabled, setAutostartEnabled] = useState(false);
   const [autostartLoaded, setAutostartLoaded] = useState(false);
@@ -255,6 +281,13 @@ export function SettingsPanel({
     }
   };
 
+  // 窗口大小档位匹配：winPct 与「BASE_PCT × scale」的 w/h 差值均在容差内即视为该档位
+  // （拖拽落盘与理论档位存在像素圆整误差，0.005 容差覆盖 4 位小数存储精度）
+  const matchesPreset = (pct: WinSizePct | null, scale: number): boolean =>
+    pct !== null &&
+    Math.abs(pct.w - BASE_PCT.w * scale) <= 0.005 &&
+    Math.abs(pct.h - BASE_PCT.h * scale) <= 0.005;
+
   return (
     <PageShell>
       <PageHeader title={t("settings.title")} onBack={onBack} />
@@ -296,6 +329,62 @@ export function SettingsPanel({
           <p className="text-[9px] text-slate-500 mt-1.5 leading-relaxed">
             {t("settings.opacityHint")}
           </p>
+        </SettingsCard>
+
+        {/* 字体大小（整体缩放）：档位白名单见 appearance.ts 的 UI_SCALE_OPTIONS，点击即时预览并落盘 */}
+        <SettingsCard
+          title={t("settings.fontSize")}
+          hint={t("settings.fontSizeHint")}
+        >
+          <PillGroup>
+            {UI_SCALE_OPTIONS.map((option) => (
+              <PillButton
+                key={option.value}
+                active={option.value === uiScale}
+                onClick={() => {
+                  applyUiScale(option.value);
+                  persistUiScale(option.value);
+                  setUiScale(option.value);
+                }}
+              >
+                {t(option.labelKey)}
+              </PillButton>
+            ))}
+          </PillGroup>
+        </SettingsCard>
+
+        {/* 窗口大小：工作区百分比档位（见 windowSize.ts 的 WIN_PRESETS）；
+            点击先落盘理论值（档位判定以其为准），再异步应用 setSize + 右边界夹取 */}
+        <SettingsCard
+          title={t("settings.winSize")}
+          hint={t("settings.winSizeHint")}
+        >
+          <PillGroup>
+            {WIN_PRESETS.map((p) => (
+              <PillButton
+                key={p.scale}
+                active={
+                  winPct === null
+                    ? p.scale === 1
+                    : matchesPreset(winPct, p.scale)
+                }
+                onClick={() => {
+                  const pct = { w: BASE_PCT.w * p.scale, h: BASE_PCT.h * p.scale };
+                  persistWinSizePct(pct);
+                  void applyWindowPct(pct);
+                  setWinPct(pct);
+                }}
+              >
+                {t(p.labelKey)}
+              </PillButton>
+            ))}
+            {/* 自定义态：已调整过但不匹配任何档位（边缘拖拽的结果），四个档位均不 active */}
+            {winPct !== null && !WIN_PRESETS.some((p) => matchesPreset(winPct, p.scale)) && (
+              <PillButton active={false} disabled>
+                {t("settings.winSizeCustom")}
+              </PillButton>
+            )}
+          </PillGroup>
         </SettingsCard>
 
         {/* 语言：与顶栏 LanguageToggle 读写同一 Context，切换后全站即时同步 */}
@@ -374,6 +463,37 @@ export function SettingsPanel({
                 />
               </label>
             ))}
+        </SettingsCard>
+
+        {/* 重置时间展示：订阅额度的重置时间展示方式（localStorage 持久化，改完即存） */}
+        <SettingsCard
+          title={t("settings.resetDisplay")}
+          action={<span className="text-[9px] text-slate-500">{t("settings.instant")}</span>}
+          hint={t("settings.resetDisplayHint")}
+        >
+          {(
+            [
+              ["countdown", t("settings.resetCountdown")],
+              ["datetime", t("settings.resetDatetime")],
+            ] as [keyof ResetDisplay, string][]
+          ).map(([key, label]) => (
+            <label
+              key={key}
+              className="flex items-center justify-between gap-2 rounded-md px-1.5 py-1 hover:bg-slate-900/5 cursor-pointer transition-colors"
+            >
+              <span className="text-[10px] text-slate-900/80">{label}</span>
+              <input
+                type="checkbox"
+                checked={resetDisplay[key]}
+                onChange={(e) => {
+                  const next = { ...resetDisplay, [key]: e.target.checked };
+                  saveResetDisplay(next);
+                  setResetDisplay(next);
+                }}
+                className="accent-sky-500 h-3 w-3 shrink-0"
+              />
+            </label>
+          ))}
         </SettingsCard>
 
         {/* Kimi 额度凭据：本地凭据探测失败 / OAuth 过期时手动补救的通道 */}
@@ -455,7 +575,7 @@ export function SettingsPanel({
             />
             <span className="text-[9px] text-slate-700/45 truncate">
               {cursorCfg.fx_rate_fetched_at
-                ? `${cursorCfg.fx_rate_source ?? t("settings.fxUnknownSource")} · ${fmtFxTime(cursorCfg.fx_rate_fetched_at)}`
+                ? `${cursorCfg.fx_rate_source ?? t("settings.fxUnknownSource")} · ${formatResetStamp(cursorCfg.fx_rate_fetched_at)}`
                 : t("settings.fxNever")}
             </span>
           </div>

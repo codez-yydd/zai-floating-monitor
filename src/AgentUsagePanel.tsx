@@ -7,7 +7,7 @@ import type {
   TrendBucket,
   TrendPoint,
 } from "./types";
-import { formatCost, formatCountdownCore, formatPct, formatTokens, formatTps } from "./format";
+import { formatCost, formatCountdownCore, formatPct, formatResetStamp, formatTokens, formatTps } from "./format";
 import { modelCost } from "./merge";
 import { hasPositivePrice, type FoldedModelStat } from "./modelName";
 import {
@@ -29,6 +29,7 @@ import {
   LoadingState,
 } from "./layout";
 import { useI18n } from "./i18n";
+import { useResetDisplay } from "./resetDisplay";
 
 /** 通用快照形状：Codex / Claude 的快照结构一致（stats/trend 同构 +
  *  同款五字段速率限制），TS 结构化类型直接兼容。monthly 两字段为 Kimi
@@ -106,16 +107,31 @@ function AgentQuotaRow({
   delta?: AgentQuotaDelta;
 }) {
   const { t } = useI18n();
+  const display = useResetDisplay();
   const remain = Math.max(0, 100 - usedPct);
   const showReset = resetAt != null && resetAt > now;
+  // 重置时间三态同行拼接（与汇总页 QuotaMiniRow 同款）：双开「↻ 45m · 08-30 14:37」
+  let resetText = "";
+  if (showReset) {
+    if (display.countdown && display.datetime) {
+      resetText = `↻ ${formatCountdownCore(resetAt - now)} · ${formatResetStamp(resetAt)}`;
+    } else if (display.datetime) {
+      resetText = `↻ ${t("common.resetAt", { time: formatResetStamp(resetAt) })}`;
+    } else if (display.countdown) {
+      resetText = `↻ ${formatCountdownCore(resetAt - now)}`;
+    }
+  }
   return (
     <div>
       <div className="flex items-center justify-between gap-2 mb-0.5">
         <span className="text-[10px] text-slate-600 truncate">
           {label}
-          {showReset && (
-            <span className="ml-1 text-[8px] text-slate-400 num">
-              ↻ {formatCountdownCore(resetAt - now)}
+          {resetText && (
+            <span
+              className="ml-1 text-[8px] text-slate-400 num"
+              title={display.datetime ? resetText : undefined}
+            >
+              {resetText}
             </span>
           )}
         </span>

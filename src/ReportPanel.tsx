@@ -31,7 +31,7 @@ import {
   remoteUsage,
   saveReport,
 } from "./api";
-import { formatCost, formatTokens } from "./format";
+import { formatCost, formatResetStamp, formatTokens } from "./format";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import {
   mergeStats,
@@ -61,6 +61,7 @@ import {
 import { RangePicker, resolveRange } from "./RangePicker";
 import { useI18n, type MessageKey, type TFn } from "./i18n";
 import { dateLocale, type Locale } from "./i18n/locale";
+import { loadResetDisplay, useResetDisplay, type ResetDisplay } from "./resetDisplay";
 
 interface Props {
   onBack: () => void;
@@ -489,11 +490,33 @@ function metricValue(
   return currency === "cny" ? item.cost_cny : item.cost_usd;
 }
 
-/** 重置倒计时描述（文案走词典，模式 B：由调用方传 t） */
-function quotaResetText(t: TFn, resetAt: number | null, now: number): string {
+/** 重置倒计时描述（文案走词典，模式 B：由调用方传 t 与展示偏好）。
+ *  双开「约 N 小时后 · 重置于 08-30 14:37」；仅时间点「重置于 08-30 14:37」。 */
+function quotaResetText(
+  t: TFn,
+  resetAt: number | null,
+  now: number,
+  display: ResetDisplay
+): string {
   if (!resetAt) return t("report.resetUnknown");
   const hours = Math.max(0, Math.ceil((resetAt - now) / 3_600_000));
-  if (hours >= 24) return t("report.resetDays", { n: Math.ceil(hours / 24) });
+  const days = Math.ceil(hours / 24);
+  if (display.datetime) {
+    const stamp = t("common.resetAt", { time: formatResetStamp(resetAt) });
+    // 仅时间点模式：resetAt 已过期（<= now）不显示过去时刻，兜底为未知；
+    // 倒计时（双开 / 仅倒计时）保持原有照常显示的行为。
+    if (!display.countdown) {
+      return resetAt <= now ? t("report.resetUnknown") : stamp;
+    }
+    return (
+      (hours >= 24
+        ? t("report.resetInDays", { n: days })
+        : t("report.resetInHours", { n: hours })) +
+      " · " +
+      stamp
+    );
+  }
+  if (hours >= 24) return t("report.resetDays", { n: days });
   return t("report.resetHours", { n: hours });
 }
 
@@ -1373,6 +1396,7 @@ function ModelUsageRow({
 
 function QuotaSummary({ quotas }: { quotas: ReportQuota[] }) {
   const { t } = useI18n();
+  const display = useResetDisplay();
   return (
     <SectionCard title={t("report.quotaSnapshot")} action={<span className="text-[9px] text-slate-500">{t("report.quotaScope")}</span>}>
       <div className="space-y-1.5">
@@ -1407,9 +1431,9 @@ function QuotaSummary({ quotas }: { quotas: ReportQuota[] }) {
                   />
                 ))}
               </div>
-              {resetWindow && (
+              {resetWindow && (display.countdown || display.datetime) && (
                 <div className="text-[9px] text-slate-700/40 mt-1.5">
-                  {quotaResetText(t, resetWindow.resetAt, Date.now())}
+                  {quotaResetText(t, resetWindow.resetAt, Date.now(), display)}
                 </div>
               )}
             </div>
@@ -1453,6 +1477,8 @@ function buildMarkdown(
   locale: Locale
 ): string {
   const now = Date.now();
+  // 导出文案同样跟随重置时间展示偏好（非组件上下文，直接读一次）
+  const display = loadResetDisplay();
   const title =
     preset === "today" ? t("report.md.daily") : t("report.md.custom");
   if (!report || report.agents.length === 0) {
@@ -1543,11 +1569,12 @@ function buildMarkdown(
       const resetWindow = quota.windows.find(
         (window) => window.resetAt != null
       );
-      const reset = resetWindow
-        ? t("report.md.quotaReset", {
-            text: quotaResetText(t, resetWindow.resetAt, now),
-          })
-        : "";
+      const reset =
+        resetWindow && (display.countdown || display.datetime)
+          ? t("report.md.quotaReset", {
+              text: quotaResetText(t, resetWindow.resetAt, now, display),
+            })
+          : "";
       lines.push(
         "- " +
           t("report.md.quotaLine", {

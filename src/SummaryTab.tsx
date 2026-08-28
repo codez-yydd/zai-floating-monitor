@@ -14,7 +14,7 @@ import type {
   Stats,
   TrendPoint,
 } from "./types";
-import { formatCost, formatCountdownCore, formatMs, formatTokens, formatTps, levelLabel } from "./format";
+import { formatCost, formatCountdownCore, formatMs, formatResetStamp, formatTokens, formatTps, levelLabel } from "./format";
 import { modelCost } from "./merge";
 import {
   canonicalModelId,
@@ -32,6 +32,7 @@ import { useEffect, useState } from "react";
 import { useI18n } from "./i18n";
 import type { AgentId, AgentVisibility } from "./agentVisibility";
 import { AGENT_COLOR } from "./agentVisibility";
+import { useResetDisplay } from "./resetDisplay";
 import { BrandIcon, type BrandIconName } from "./BrandIcon";
 import {
   SwitchAccountButton,
@@ -413,14 +414,29 @@ function QuotaMiniRow({
   delta?: AgentQuotaDelta;
 }) {
   const { t } = useI18n();
+  const display = useResetDisplay();
   const remain = Math.max(0, 100 - usedPct);
   const showReset = resetAt != null && resetAt > now;
+  // 重置时间三态同行文本：双开「↻ 45m · 08-30 14:37」；truncate 截断时 title 兜底
+  let resetText = "";
+  if (showReset) {
+    if (display.countdown && display.datetime) {
+      resetText = `↻ ${formatCountdownCore(resetAt - now)} · ${formatResetStamp(resetAt)}`;
+    } else if (display.datetime) {
+      resetText = `↻ ${t("common.resetAt", { time: formatResetStamp(resetAt) })}`;
+    } else if (display.countdown) {
+      resetText = `↻ ${formatCountdownCore(resetAt - now)}`;
+    }
+  }
   return (
     <div>
       <div className="flex items-center gap-1 mb-0.5">
         <span className="text-[9px] text-slate-500 w-10 shrink-0 whitespace-nowrap">{label}</span>
-        <span className="num text-[8px] text-slate-400 flex-1 text-right truncate min-w-0">
-          {showReset ? `↻ ${formatCountdownCore(resetAt - now)}` : ""}
+        <span
+          className="num text-[8px] text-slate-400 flex-1 text-right truncate min-w-0"
+          title={display.datetime ? resetText : undefined}
+        >
+          {resetText}
         </span>
         <span
           className="num text-[9px] font-medium w-12 text-right shrink-0 whitespace-nowrap"
@@ -559,6 +575,7 @@ export function SummaryTab({
   agentVisibility,
 }: Props) {
   const { t } = useI18n();
+  const resetDisplay = useResetDisplay();
   const [trendMetric, setTrendMetric] = useState<"cost" | "token">("cost");
   const [sortBy, setSortBy] = useState<"cost" | "token" | "requests">("cost");
   const [now, setNow] = useState(Date.now());
@@ -1069,9 +1086,22 @@ export function SummaryTab({
                     )}
                   </div>
                   {a.cycleResetAt != null && a.cycleResetAt > now ? (
-                    <span className="num text-[8px] text-slate-400 shrink-0 whitespace-nowrap">
-                      ↻ {formatCountdownCore(a.cycleResetAt - now)}
-                    </span>
+                    // Cursor 的 billing_cycle_end 只有日期精度：时间点仅出 MM-DD，
+                    // 禁止显示由 ISO 日期解析出的假时分；双开「↻ 5d · 09-01」
+                    resetDisplay.datetime ? (
+                      <span className="num text-[8px] text-slate-400 shrink-0 whitespace-nowrap">
+                        ↻{" "}
+                        {resetDisplay.countdown
+                          ? `${formatCountdownCore(a.cycleResetAt - now)} · ${formatResetStamp(a.cycleResetAt, { withTime: false })}`
+                          : formatResetStamp(a.cycleResetAt, { withTime: false })}
+                      </span>
+                    ) : resetDisplay.countdown ? (
+                      <span className="num text-[8px] text-slate-400 shrink-0 whitespace-nowrap">
+                        ↻ {formatCountdownCore(a.cycleResetAt - now)}
+                      </span>
+                    ) : (
+                      <span />
+                    )
                   ) : a.cycleResetDate ? (
                     <span className="num text-[8px] text-slate-400 shrink-0 whitespace-nowrap">
                       {t("summary.resetDate", { date: a.cycleResetDate })}

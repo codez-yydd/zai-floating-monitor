@@ -18,6 +18,8 @@
   /* 面板玻璃底：RGB 三元组 + 透明度分离，设置页滑块只改 --panel-alpha 即时生效 */
   --panel-bg: 255 255 255;
   --panel-alpha: 0.55;
+  /* 整体缩放：设置页字体大小档位只改 --ui-scale 即时生效（#root transform 消费） */
+  --ui-scale: 1;
   --panel-border: rgba(15, 23, 42, 0.14);
   --panel-text: #1f2937;
   /* 面板内侧高光描边（.dark 覆盖为微弱浅光） */
@@ -43,6 +45,25 @@ body,
 }
 
 /*
+ * 整体缩放：transform: scale 放大内容后按比例缩回宽高，300×500 固定窗口内不溢出。
+ * 弃用 zoom：实机（macOS WKWebView）上 zoom 元素自身的百分比宽高参照的是
+ * 缩放后视口，calc(100% / var(--ui-scale)) 补偿失效，面板视觉大小随档位变化
+ * （放大档内容溢出、缩小档露边）；transform 是纯渲染变换、不影响布局解析，
+ * 百分比照常参照父级，补偿行为确定。
+ * 必须放在上面的组规则之后：同为 ID 选择器，靠源顺序覆盖组内的
+ * height:100%，顺序错了放大档位（如 1.25）会把面板底部裁剪。
+ */
+#root {
+  transform: scale(var(--ui-scale));
+  transform-origin: top left;
+  width: calc(100% / var(--ui-scale));
+  height: calc(100% / var(--ui-scale));
+  /* 组规则给的 16px 圆角会被 zoom 同倍缩放，除回 --ui-scale 补偿，
+   * 与 .panel-shell 同款（默认档 1 时与原值一致），避免裁掉角落。 */
+  border-radius: calc(16px / var(--ui-scale));
+}
+
+/*
  * 面板容器：用半透明白色表面压住后方文字，模糊完全交给原生 popover
  * 材质（windowEffects.effects: popover）提供。
  * 不再叠加 CSS backdrop-filter，避免与原生材质双重模糊、合成时序竞争
@@ -50,7 +71,9 @@ body,
  */
 .panel-shell {
   height: 100%;
-  border-radius: 16px;
+  /* #root 被 zoom 放大后圆角会同倍放大，除回 --ui-scale 保持与
+   * 原生窗口 16px 圆角对齐（默认档 1 时与原值一致）。 */
+  border-radius: calc(16px / var(--ui-scale));
   overflow: hidden;
   background: rgb(var(--panel-bg) / var(--panel-alpha));
   border: 1px solid var(--panel-border);

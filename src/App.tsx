@@ -7,6 +7,7 @@ import { ComparePanel } from "./ComparePanel";
 import { ReportPanel } from "./ReportPanel";
 import { ThemePanel } from "./ThemePanel";
 import { DataProvider } from "./DataCache";
+import { ResizeHandles } from "./ResizeHandles";
 import { fetchPricing, saveCurrency } from "./api";
 import { startUpdateScheduler } from "./updater";
 import { useI18n } from "./i18n";
@@ -134,6 +135,8 @@ export default function App() {
         ) : (
           <SyncPanel onBack={backToStats} />
         )}
+        {/* 边缘拖拽热区：所有 view 共用，放在 panel-shell 最后一个子节点 */}
+        <ResizeHandles />
       </div>
     </DataProvider>
   );
