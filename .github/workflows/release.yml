@@ -145,7 +145,7 @@ jobs:
           gh release view "v$VERSION" >/dev/null 2>&1 && gh release delete "v$VERSION" --yes || true
           gh release create "v$VERSION" out/* \
             --title "ZBar v$VERSION" \
-            --notes "ZBar v0.7.0：新增 Agent 动态壁纸——面板中一键为 ZCode 桌面端注入视频/图片壁纸：壁纸目录扫描与缩略图预览、拖拽导入、参数实时热生效；对话区/侧栏/右栏三区域独立透明度调节；自动备份官方原包、一键还原与升级检测；内置无缝流光默认壁纸；适配 macOS 与 Windows。" \
+            --notes "ZBar v0.8.0：新增字体大小与窗口大小调节、订阅重置时间双展示——字体大小四档（小/标准/大/特大）整体等比缩放面板内容（字号/图标/间距），即时生效；窗口支持拖拽边缘/四角自由拉宽拉高，也可在设置页选择预设档位，尺寸按显示器工作区百分比自动记忆，跨分辨率与重启后自适应恢复；订阅额度重置时间新增“具体时间点”展示（MM-DD HH:mm），与倒计时可任意组合开启，默认倒计时，覆盖主面板/汇总页/各 Agent 详情页与报告导出。" \
             --latest
 
       # Gitee 更新源由本地 scripts/publish_gitee.sh 发布，见脚本头说明
