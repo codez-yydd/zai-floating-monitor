@@ -205,8 +205,8 @@ fn run_asar_in(cwd: Option<&Path>, args: &[&str]) -> Result<String, String> {
         .output()
         .map_err(|e| format!("主题处理工具调用失败（{e}），请确认 Node.js 安装正常"))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stderr = strip_npm_noise(&String::from_utf8_lossy(&output.stderr));
+        let stdout = strip_npm_noise(&String::from_utf8_lossy(&output.stdout));
         let sub = args.first().copied().unwrap_or("");
         let detail = if stderr.is_empty() { stdout } else { stderr };
         // npx/electron 的原始输出仅进日志，不直接透传给用户可见层
@@ -215,7 +215,23 @@ fn run_asar_in(cwd: Option<&Path>, args: &[&str]) -> Result<String, String> {
         let short: String = detail.chars().take(200).collect();
         return Err(format!("主题资源处理失败（asar {sub}）：{short}"));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(strip_npm_noise(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// 过滤 npm 12 起 npx 运行时混入 stdout/stderr 的 `npm notice run ...`
+/// 提示行：不过滤会污染 list 的路径清单解析、挤占错误详情的 200 字符
+/// 截断窗口（真实错误被 notice 行淹没，用户只看到 npm 输出无法排查）。
+/// 纯函数，便于单测。
+fn strip_npm_noise(text: &str) -> String {
+    text.lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !(t.starts_with("npm notice") || t.starts_with("npm error"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
 }
 
 /// 解包 asar 到目标目录（extract）。
@@ -279,11 +295,32 @@ pub fn asar_extract_file_to_stdout(asar: &Path, inner_path: &str) -> Result<Stri
         .map_err(|e| format!("创建抽检临时目录失败: {e}"))?;
 
     let result = (|| -> Result<String, String> {
-        run_asar_in(Some(&work_dir), &["extract-file", &asar.to_string_lossy(), inner_path])
-            .map_err(|e| format!("抽取 asar 内文件失败（{inner_path}）：{e}"))?;
-        let content_path = work_dir.join(base);
-        std::fs::read_to_string(&content_path)
-            .map_err(|e| format!("读取抽检文件失败（{}）: {e}", content_path.display()))
+        // @electron/asar v4 起在 Windows 上按 Windows 路径语义索引包内条目，
+        // 正斜杠内路径报 "was not found in this archive"（v3 两平台均只认
+        // 正斜杠）。故 Windows 先按 v4 的反斜杠形式请求，失败回退正斜杠
+        // 原样重试一次，兼容 npx 缓存中仍为 v3 的机器；回退仅发生在失败
+        // 路径（失败本就意味着安装即将中止），正常情况零额外开销。POSIX
+        // 平台两版本路径语义一致，不做转换。
+        #[cfg(windows)]
+        let attempts: Vec<String> = vec![inner_path.replace('/', "\\"), inner_path.to_string()];
+        #[cfg(not(windows))]
+        let attempts: Vec<String> = vec![inner_path.to_string()];
+
+        let mut last_err = String::new();
+        for attempt in &attempts {
+            match run_asar_in(Some(&work_dir), &["extract-file", &asar.to_string_lossy(), attempt])
+            {
+                // extract-file 的 stdout 无内容价值，文件内容从落盘读回
+                Ok(_) => {
+                    let content_path = work_dir.join(base);
+                    return std::fs::read_to_string(&content_path).map_err(|e| {
+                        format!("读取抽检文件失败（{}）: {e}", content_path.display())
+                    });
+                }
+                Err(e) => last_err = e,
+            }
+        }
+        Err(format!("抽取 asar 内文件失败（{inner_path}）：{last_err}"))
     })();
 
     // 无论成败都清理临时目录
@@ -291,17 +328,66 @@ pub fn asar_extract_file_to_stdout(asar: &Path, inner_path: &str) -> Result<Stri
     result
 }
 
+/// list 输出行归一化为 `/` 分隔、无前导分隔符的 rel 路径（纯函数，便于单测）。
+/// @electron/asar v4 起在 Windows 上输出 `\out\renderer\index.html` 风格
+/// （v3 两平台均为 `/out/renderer/index.html`），不归一化会导致清单比对
+/// 靠两侧格式对称侥幸通过，语义上已是错误行为。
+fn normalize_list_line(line: &str) -> String {
+    line.trim()
+        .trim_start_matches(['/', '\\'])
+        .replace('\\', "/")
+}
+
 /// 列出 asar 内全部文件路径（list，安装校验的文件清单比对用）。
-/// 每行一条路径并已做首尾 trim；行首可能带前导 `/`，集合比对侧需统一归一化。
+/// 输出统一为 `/` 分隔、无前导分隔符的 rel 路径（normalize_list_line），
+/// 调用方与平台、@electron/asar 版本无关。
 pub fn asar_list(asar: &Path) -> Result<Vec<String>, String> {
     let out = run_asar(&["list", &asar.to_string_lossy()])
         .map_err(|e| format!("列出 asar 内容失败：{e}"))?;
-    Ok(out.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+    Ok(out
+        .lines()
+        .map(normalize_list_line)
+        .filter(|l| !l.is_empty())
+        .collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// npm 12 噪音过滤（strip_npm_noise）：notice/error 行剔除，
+    /// asar 真实输出与空行以外的内容保留。
+    #[test]
+    fn npm噪音过滤_剔除notice保留真实输出() {
+        // v4 Windows 真机错误形态：notice 行 + 真实错误行混杂
+        let mixed = "npm notice run npx\nnpm notice run asar extract-file a.asar out/renderer/index.html\nfile:///C:/npm-cache/_npx/\nError: \"x\" was not found in this archive";
+        let stripped = strip_npm_noise(mixed);
+        assert!(!stripped.contains("npm notice"), "notice 行应被剔除：{stripped}");
+        assert!(stripped.contains("was not found"), "真实错误应保留：{stripped}");
+        assert!(stripped.contains("file:///"), "非 notice 行应保留：{stripped}");
+        // 全 notice → 空（走 stderr 优先逻辑时不会再被 notice 占位）
+        assert_eq!(strip_npm_noise("npm notice run npx\nnpm notice run asar list a"), "");
+        // 无噪音输出原样（仅 trim）
+        assert_eq!(strip_npm_noise("v4.3.0\n"), "v4.3.0");
+        // npm error 行同样剔除
+        assert_eq!(strip_npm_noise("npm error code E404\nreal"), "real");
+    }
+
+    /// list 行归一化（normalize_list_line）：v4 Windows 反斜杠与 v3 POSIX
+    /// 风格统一为 `/` 分隔、无前导分隔符的 rel 路径。
+    #[test]
+    fn list行归一化_反斜杠与前导分隔符统一() {
+        // v4 Windows 实测形态
+        assert_eq!(normalize_list_line(r"\out\renderer\index.html"), "out/renderer/index.html");
+        // v3 POSIX 形态
+        assert_eq!(normalize_list_line("/out/renderer/index.html"), "out/renderer/index.html");
+        // 已归一化输入幂等
+        assert_eq!(normalize_list_line("out/main.js"), "out/main.js");
+        // 目录条目（无扩展名文件路径同样处理）
+        assert_eq!(normalize_list_line(r"\out\renderer"), "out/renderer");
+        // 纯空白行归一化为空（由 asar_list 的 filter 剔除）
+        assert_eq!(normalize_list_line("   "), "");
+    }
 
     #[test]
     fn node_预检_结果一致() {
