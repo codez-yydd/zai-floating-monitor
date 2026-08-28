@@ -87,8 +87,9 @@ export function persistWinSizePct(pct: WinSizePct): void {
   }
 }
 
-/** 取显示器逻辑工作区（x/y/w/h）：workArea 缺失时用整屏尺寸估算并扣系统栏高度 */
-function logicalWorkArea(monitor: Monitor): {
+/** 取显示器逻辑工作区（x/y/w/h）：workArea 缺失时用整屏尺寸估算并扣系统栏高度
+ *  （导出供 ResizeHandles 的 JS resize 会话复用，行为与内部使用完全一致） */
+export function logicalWorkArea(monitor: Monitor): {
   x: number;
   y: number;
   w: number;
