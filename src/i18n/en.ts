@@ -458,11 +458,6 @@ export const en: typeof zh = {
     "settings.winSizeHint":
       "Drag the panel edges to resize freely, or pick a preset; your size is remembered.",
 
-    "settings.kimiCard": "Kimi credential",
-    "settings.kimiKeyPh": "Paste API Key",
-    "settings.kimiKeyHint":
-      "If local credential detection fails or OAuth expires, paste an API Key created in the Kimi console here; leave empty to disable. Stored locally only (~/.zbar/kimi.json), never synced.",
-
     "settings.fxCard": "Exchange rate",
     "settings.fxAutoNote": "Auto-updating; uncheck to edit manually",
     "settings.fxNever": "Never fetched",

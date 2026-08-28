@@ -573,20 +573,15 @@ export interface KimiRateLimits {
 }
 
 /** Kimi 用量快照（get_kimi_usage 返回）。
- *  stats / trend 与 z.ai 同构；rate_limits 仅配置 API Key 且接口成功时有值，
+ *  stats / trend 与 z.ai 同构；rate_limits 仅 OAuth 凭据可用且接口成功时有值，
  *  额度获取失败不阻断统计（rate_limits_error 携带中文原因）。 */
 export interface KimiSnapshot {
   stats: Stats;
   trend: TrendPoint[];
-  /** 订阅额度（未配置 / 接口失败为 null，原因见 rate_limits_error） */
+  /** 订阅额度（无凭据 / 接口失败为 null，原因见 rate_limits_error） */
   rate_limits: KimiRateLimits | null;
   /** 额度接口失败原因（统计仍正常展示） */
   rate_limits_error: string | null;
-}
-
-/** Kimi 配置（~/.zbar/kimi.json） */
-export interface KimiConfig {
-  api_key: string;
 }
 
 // ===== 多智谱账号切换（与 Rust accounts 模块结构一一对应）=====

@@ -25,13 +25,12 @@
 //! - **额度来源**：会话文件里没有 rate_limits，订阅额度实时调
 //!   GET {apiBase}/usages（Kimi Code CLI 内部同款）。域名按 CLI 的
 //!   ~/.kimi-code/region 分流：global → api.kimi.ai/coding/v1，否则（含
-//!   文件缺失）默认 api.kimi.com/coding/v1。凭据优先 ~/.zbar/kimi.json 的
-//!   api_key（用户显式配置，长期有效），否则读 ~/.kimi-code/credentials/
-//!   *.json：OAuth 结构（access_token + expires_at + refresh_token 三者
-//!   齐全）的 access_token 有效期仅 15 分钟且只有 CLI 运行时才刷新，应用
-//!   打开时大概率已过期，故过期时用 refresh_token 调 POST
-//!   {oauthHost}/api/oauth/token 换新——新 token 只存内存缓存，绝不写回
-//!   凭据文件（CLI 自己管理该文件，应用只读；refresh_token 实测非
+//!   文件缺失）默认 api.kimi.com/coding/v1。凭据只读 Kimi Code CLI 的
+//!   ~/.kimi-code/credentials/*.json：OAuth 结构（access_token + expires_at +
+//!   refresh_token 三者齐全）的 access_token 有效期仅 15 分钟且只有 CLI
+//!   运行时才刷新，应用打开时大概率已过期，故过期时用 refresh_token 调
+//!   POST {oauthHost}/api/oauth/token 换新——新 token 只存内存缓存，绝不
+//!   写回凭据文件（CLI 自己管理该文件，应用只读；refresh_token 实测非
 //!   rotation 型可复用，内存刷新不影响 CLI）。
 //!
 //! 实现方式与 claude.rs 同构：原始 jsonl 只读 + 派生自有库 ~/.zbar/kimi.sqlite，
@@ -904,47 +903,6 @@ pub struct KimiRateLimits {
     pub monthly_reset_at: Option<i64>,
 }
 
-/// Kimi 配置（~/.zbar/kimi.json）。api_key 为用户显式配置的 API Key，
-/// 额度请求凭据的最高优先来源（Kimi Code CLI 的 OAuth token 可能过期/无权限）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KimiConfig {
-    #[serde(default)]
-    pub api_key: String,
-}
-
-impl Default for KimiConfig {
-    fn default() -> Self {
-        Self {
-            api_key: String::new(),
-        }
-    }
-}
-
-fn kimi_config_path() -> Result<PathBuf, String> {
-    Ok(config_dir()?.join("kimi.json"))
-}
-
-/// 读取 Kimi 配置；文件不存在返回默认空配置（不报错）。
-/// 全字段 serde 默认值，兼容旧文件缺字段（参照 cursor.rs 的 CursorConfig 模式）。
-pub fn load_kimi_config() -> Result<KimiConfig, String> {
-    let path = kimi_config_path()?;
-    if !path.exists() {
-        return Ok(KimiConfig::default());
-    }
-    let data = std::fs::read_to_string(&path).map_err(|e| format!("读取 Kimi 配置失败: {e}"))?;
-    serde_json::from_str::<KimiConfig>(&data).map_err(|e| format!("解析 Kimi 配置失败: {e}"))
-}
-
-/// 保存 Kimi 配置。写路径单一（设置页保存），无后台读-改-写竞争，不加锁。
-pub fn save_kimi_config(cfg: &KimiConfig) -> Result<(), String> {
-    let dir = config_dir()?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建配置目录失败: {e}"))?;
-    let path = kimi_config_path()?;
-    let data = serde_json::to_string_pretty(cfg)
-        .map_err(|e| format!("序列化 Kimi 配置失败: {e}"))?;
-    std::fs::write(&path, data).map_err(|e| format!("写入 Kimi 配置失败: {e}"))
-}
-
 /// Kimi Code CLI 根目录（.kimi-code，与 sessions 的环境变量口径对齐）：
 /// $ZBAR_KIMI_HOME（指向 .kimi-code 根）优先，其次 $KIMI_CODE_HOME
 /// （CLI 自身变量），最后 ~/.kimi-code。region 文件与 credentials 目录
@@ -1070,10 +1028,7 @@ enum KimiCredential {
 fn scan_cli_credentials() -> Result<KimiCredential, String> {
     let dir = credentials_dir();
     if !dir.is_dir() {
-        return Err(
-            "未找到 Kimi 凭据：请在设置中配置 Kimi API Key（保存于 ~/.zbar/kimi.json），或先登录 Kimi Code CLI"
-                .into(),
-        );
+        return Err("未找到 Kimi 凭据：请先登录 Kimi Code CLI（运行一次 kimi 命令）".into());
     }
     let mut files: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&dir)
         .map(|entries| {
@@ -1109,7 +1064,7 @@ fn scan_cli_credentials() -> Result<KimiCredential, String> {
         }
     }
     Err(format!(
-        "未在 {} 中找到可用的 Kimi 凭据（apiKey/access_token 均缺失或为空）。请在设置中配置 Kimi API Key",
+        "未在 {} 中找到可用的 Kimi 凭据（apiKey/access_token 均缺失或为空），请先登录 Kimi Code CLI",
         dir.display()
     ))
 }
@@ -1215,69 +1170,52 @@ fn refresh_oauth_token(refresh_token: &str) -> Result<OAuthTokenCache, String> {
     })
 }
 
-/// 解析额度请求的 Bearer token（含 OAuth 内存续期），返回 (token, 是否
-/// 用户显式配置的 API Key)——后者仅供 401 错误文案区分来源。优先级：
-/// a. ~/.zbar/kimi.json 的 api_key（用户显式配置，长期有效，最高优先）；
-/// b. 内存缓存的新 access_token（未过期）；
-/// c. 凭据文件的 access_token（未过期 → 直接用并同步内存缓存；CLI 运行
+/// 解析额度请求的 Bearer token（含 OAuth 内存续期）。优先级：
+/// a. 内存缓存的新 access_token（未过期）；
+/// b. 凭据文件的 access_token（未过期 → 直接用并同步内存缓存；CLI 运行
 ///    期间会自己刷新文件里的 token）；
-/// d. 文件 token 过期但有 refresh_token → POST 刷新端点换新（仅进内存
+/// c. 文件 token 过期但有 refresh_token → POST 刷新端点换新（仅进内存
 ///    缓存，不写文件）；
-/// e. 刷新失败（网络/HTTP 错误）→ 回退文件旧 access_token 试一次，由
+/// d. 刷新失败（网络/HTTP 错误）→ 回退文件旧 access_token 试一次，由
 ///    /usages 的 401 分支给出最终指引。
 /// 并发：锁只保护缓存读写，刷新 HTTP 在锁外执行，偶发重复刷新无害
 /// （refresh_token 可复用）。
-fn resolve_request_token() -> Result<(String, bool), String> {
-    // a. 用户显式配置的 API Key
-    match load_kimi_config() {
-        Ok(cfg) => {
-            let key = cfg.api_key.trim();
-            if !key.is_empty() {
-                return Ok((key.to_string(), true));
-            }
-        }
-        Err(e) => {
-            // 解析失败不静默：文件损坏/权限问题时应能从日志定位，
-            // 仍继续走 OAuth 路径取 token
-            eprintln!("[zbar-kimi] 读取 kimi.json 配置失败（跳过 API Key 分支）: {e}");
-        }
-    }
-
+fn resolve_request_token() -> Result<String, String> {
     let now_ms = chrono::Utc::now().timestamp_millis();
 
-    // b. 内存缓存（上次刷新得到的新 token；锁内只做读取判断）
+    // a. 内存缓存（上次刷新得到的新 token；锁内只做读取判断）
     {
         let cache = oauth_token_cache()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(cached) = cache.as_ref() {
             if token_usable(cached.expires_at_ms, now_ms) {
-                return Ok((cached.access_token.clone(), false));
+                return Ok(cached.access_token.clone());
             }
         }
     }
 
     match scan_cli_credentials()? {
-        KimiCredential::Plain(token) => Ok((token, false)),
+        KimiCredential::Plain(token) => Ok(token),
         KimiCredential::OAuth(oauth) => {
-            // c. 文件 token 未过期 → 直接用并同步内存缓存
+            // b. 文件 token 未过期 → 直接用并同步内存缓存
             if token_usable(oauth.expires_at_ms, now_ms) {
                 store_oauth_cache(oauth.access_token.clone(), oauth.expires_at_ms);
-                return Ok((oauth.access_token, false));
+                return Ok(oauth.access_token);
             }
-            // d. 过期但有 refresh_token → 换新（只进内存，不写文件）
+            // c. 过期但有 refresh_token → 换新（只进内存，不写文件）
             match refresh_oauth_token(&oauth.refresh_token) {
                 Ok(fresh) => {
                     let token = fresh.access_token.clone();
                     store_oauth_cache(token.clone(), fresh.expires_at_ms);
-                    Ok((token, false))
+                    Ok(token)
                 }
                 Err(e) => {
-                    // e. 刷新失败 → 回退旧 token 试一次
+                    // d. 刷新失败 → 回退旧 token 试一次
                     eprintln!(
                         "[zbar-kimi] OAuth token 自动续期失败（回退凭据文件 token 重试）: {e}"
                     );
-                    Ok((oauth.access_token, false))
+                    Ok(oauth.access_token)
                 }
             }
         }
@@ -1590,7 +1528,7 @@ fn fetch_user_level_name() -> Option<String> {
     }
 
     let fetched: Option<String> = (|| {
-        let (token, _) = resolve_request_token().ok()?;
+        let token = resolve_request_token().ok()?;
         let endpoints = kimi_endpoints();
         match build_kimi_agent()
             .get(&format!("{}/me", endpoints.api_base))
@@ -1619,7 +1557,7 @@ fn fetch_user_level_name() -> Option<String> {
 }
 
 fn fetch_live_rate_limits_uncached() -> Result<Option<KimiRateLimits>, String> {
-    let (token, from_api_key) = resolve_request_token()?;
+    let token = resolve_request_token()?;
     let endpoints = kimi_endpoints();
     let agent = build_kimi_agent();
 
@@ -1629,16 +1567,12 @@ fn fetch_live_rate_limits_uncached() -> Result<Option<KimiRateLimits>, String> {
         .set("Accept", "application/json")
         .call();
     let resp = resp_result.map_err(|e| match &e {
-        // 鉴权失败按凭据来源给出准确指引（不一律引导配 API Key）
+        // OAuth token 被服务端拒绝：清空内存缓存，下次取 token 改走
+        // 重读凭据文件/刷新路径，避免无效 token 在缓存 TTL 内反复 401
         ureq::Error::Status(401, _) | ureq::Error::Status(403, _) => {
-            if from_api_key {
-                "Kimi 额度接口鉴权失败：设置的 API Key 无效或无权限，请检查 ~/.zbar/kimi.json 中的 Kimi API Key".to_string()
-            } else {
-                // OAuth token 被服务端拒绝：清空内存缓存，下次取 token 改走
-                // 重读凭据文件/刷新路径，避免无效 token 在缓存 TTL 内反复 401
-                clear_oauth_cache();
-                "Kimi 额度接口鉴权失败（OAuth 凭据已过期且自动续期失败）：请运行一次 kimi 命令刷新登录，或在设置中配置长期 API Key".to_string()
-            }
+            clear_oauth_cache();
+            "Kimi 额度接口鉴权失败（OAuth 凭据已过期且自动续期失败）：请运行一次 kimi 命令刷新登录"
+                .to_string()
         }
         _ => format!("Kimi 实时额度请求失败（网络错误或服务不可用）: {e}"),
     })?;

@@ -16,7 +16,6 @@ import type {
   CursorConfig,
   CursorSnapshot,
   DeviceInfo,
-  KimiConfig,
   KimiSnapshot,
   MergeResult,
   ModelInfo,
@@ -410,16 +409,6 @@ export async function fetchKimiUsage(
   return invoke<KimiSnapshot>("get_kimi_usage", {
     req: { from_ms: fromMs, to_ms: toMs, bucket },
   });
-}
-
-/** 读取 Kimi 配置 */
-export async function getKimiConfig(): Promise<KimiConfig> {
-  return invoke<KimiConfig>("get_kimi_config");
-}
-
-/** 保存 Kimi 配置 */
-export async function setKimiConfig(config: KimiConfig): Promise<void> {
-  await invoke("set_kimi_config", { config });
 }
 
 // ===== 多智谱账号切换 =====

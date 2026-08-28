@@ -59,12 +59,6 @@ export const settings = {
   "settings.resetDisplayHint":
     "订阅额度的重置时间展示方式，两项可同时开启；时间点格式为 MM-DD HH:mm。",
 
-  // ===== Kimi 额度凭据 =====
-  "settings.kimiCard": "Kimi 额度凭据",
-  "settings.kimiKeyPh": "填入 API Key",
-  "settings.kimiKeyHint":
-    "本地凭据自动探测失败或 OAuth 过期时，可在此填入控制台创建的 API Key；留空表示不使用。仅存本机（~/.zbar/kimi.json），不参与同步。",
-
   // ===== 汇率 =====
   "settings.fxCard": "汇率",
   "settings.fxAutoNote": "自动更新中，取消勾选可手动输入",

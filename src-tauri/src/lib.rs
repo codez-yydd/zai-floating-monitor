@@ -905,18 +905,6 @@ async fn get_kimi_debug() -> Result<kimi::KimiDebugInfo, String> {
         .map_err(|e| format!("Kimi 诊断任务失败: {e}"))?
 }
 
-/// 读取 Kimi 配置
-#[tauri::command]
-fn get_kimi_config() -> Result<kimi::KimiConfig, String> {
-    kimi::load_kimi_config()
-}
-
-/// 保存 Kimi 配置
-#[tauri::command]
-fn set_kimi_config(config: kimi::KimiConfig) -> Result<(), String> {
-    kimi::save_kimi_config(&config)
-}
-
 fn append_agent_quota_snapshot(
     source: &str,
     plan_type: Option<String>,
@@ -2030,8 +2018,6 @@ pub fn run() {
             get_claude_debug,
             get_kimi_usage,
             get_kimi_debug,
-            get_kimi_config,
-            set_kimi_config,
             list_accounts,
             capture_account,
             switch_account,

@@ -3,10 +3,8 @@ import type { CursorConfig, ShortcutConfig } from "./types";
 import {
   fetchFxRate,
   getCursorConfig,
-  getKimiConfig,
   getShortcutConfig,
   setCursorConfig,
-  setKimiConfig,
   setShortcutConfig,
 } from "./api";
 import {
@@ -132,12 +130,6 @@ export function SettingsPanel({
   // 汇率手动输入草稿：失焦再解析，避免清空输入时被 parseFloat(NaN) 立即跳回默认值
   const [fxDraft, setFxDraft] = useState<string | null>(null);
 
-  // ===== Kimi API Key（~/.zbar/kimi.json，本地凭据探测失败/OAuth 过期时的补救通道）=====
-  const [kimiKeyDraft, setKimiKeyDraft] = useState("");
-  const [kimiKeyLoaded, setKimiKeyLoaded] = useState(false);
-  const [savingKimi, setSavingKimi] = useState(false);
-  const [kimiSavedFlash, setKimiSavedFlash] = useState(false);
-
   // 卸载时冲掉未落盘的透明度防抖（离开设置页前保证最后一次调整已持久化）
   useEffect(() => {
     return () => {
@@ -169,20 +161,6 @@ export function SettingsPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Kimi 配置单独读取：失败不阻断设置页其余配置（快捷键/汇率照常加载保存）。
-  // kimiKeyLoaded 兼作保存门禁：仅在读取成功时置 true 放行保存；
-  // 失败时保持 false，草稿停在空串也不会覆盖真实 Key，并经 AlertBanner 提示原因。
-  useEffect(() => {
-    getKimiConfig()
-      .then((cfg) => {
-        setKimiKeyDraft(cfg.api_key);
-        setKimiKeyLoaded(true);
-      })
-      .catch((e) =>
-        setError(`Kimi 配置读取失败: ${String(e)}`)
-      );
-  }, []);
-
   // 保存 Cursor 配置（设置页改动落盘：手动汇率输入、自动更新开关）
   const handleSaveCursor = async () => {
     setSavingCursor(true);
@@ -195,22 +173,6 @@ export function SettingsPanel({
       setError(String(e));
     } finally {
       setSavingCursor(false);
-    }
-  };
-
-  // 保存 Kimi API Key（写入 ~/.zbar/kimi.json，后端下一次额度刷新即生效）
-  const handleSaveKimiKey = async () => {
-    setSavingKimi(true);
-    setError(null);
-    try {
-      await setKimiConfig({ api_key: kimiKeyDraft.trim() });
-      setKimiKeyDraft(kimiKeyDraft.trim());
-      setKimiSavedFlash(true);
-      setTimeout(() => setKimiSavedFlash(false), 1500);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setSavingKimi(false);
     }
   };
 
@@ -494,37 +456,6 @@ export function SettingsPanel({
               />
             </label>
           ))}
-        </SettingsCard>
-
-        {/* Kimi 额度凭据：本地凭据探测失败 / OAuth 过期时手动补救的通道 */}
-        <SettingsCard
-          title={t("settings.kimiCard")}
-          action={
-            <BtnPrimary
-              onClick={handleSaveKimiKey}
-              disabled={savingKimi || !kimiKeyLoaded}
-            >
-              {savingKimi
-                ? t("common.saving")
-                : kimiSavedFlash
-                  ? t("common.saved")
-                  : t("common.save")}
-            </BtnPrimary>
-          }
-        >
-          <div className="input-group">
-            <input
-              type="password"
-              value={kimiKeyDraft}
-              placeholder={t("settings.kimiKeyPh")}
-              onChange={(e) => setKimiKeyDraft(e.target.value)}
-              autoComplete="off"
-              className="num"
-            />
-          </div>
-          <p className="text-[8px] text-slate-700/40 mt-0.5 leading-relaxed">
-            {t("settings.kimiKeyHint")}
-          </p>
         </SettingsCard>
 
         {/* ZCode 账号切换：捕获/切换登录快照（数据自管，不进 DataCache） */}
