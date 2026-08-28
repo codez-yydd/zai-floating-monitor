@@ -16,6 +16,7 @@
 # 令牌来源（按优先级，绝不写入仓库文件）：
 #   1. 环境变量 GITEE_TOKEN
 #   2. macOS 钥匙串：security find-generic-password -s zbar-gitee-token -w
+#   GH_TOKEN（可选）用于 GitHub API 认证，避免代理出口 IP 匿名限流；缺省匿名访问，行为不变
 #
 # GitHub 下载走代理（默认 http://127.0.0.1:33210，可用 GH_PROXY 覆盖，
 # 置空则直连）；Gitee 始终直连。
@@ -52,7 +53,13 @@ else
 fi
 TOKEN_PARAM="access_token=$TOKEN"
 
-gh_curl() { # GitHub 下载走代理，Gitee 直连
+gh_curl() { # GitHub 下载走代理，Gitee 直连；GH_TOKEN 非空时附加认证头
+  # GH_TOKEN（可选）：api.github.com 匿名请求受代理出口 IP 限流（HTTP 403），
+  # 有令牌则附加 Bearer 认证提额；该头仅随本函数发往 github.com，
+  # Gitee 侧均为裸 curl 调用，绝不会带 GitHub 令牌
+  if [[ -n "${GH_TOKEN:-}" ]]; then
+    set -- -H "Authorization: Bearer $GH_TOKEN" "$@" # 前插到参数最前
+  fi
   if [[ -n "$GH_PROXY" ]]; then
     curl -sS --proxy "$GH_PROXY" --connect-timeout 20 "$@"
   else
