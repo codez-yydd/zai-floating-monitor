@@ -1,55 +1,110 @@
 # ZBar · ZCode Token 监控
 
+![Tauri](https://img.shields.io/badge/Tauri-2.0-orange) ![React](https://img.shields.io/badge/React-19-blue) ![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178c6) ![TailwindCSS](https://img.shields.io/badge/Tailwind-v4-38bdf8) ![Rust](https://img.shields.io/badge/Rust-edition%202021-dea584) ![License](https://img.shields.io/badge/License-MIT-yellow) ![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey) [![GitHub Repo](https://img.shields.io/badge/GitHub-codez--yydd%2Fzai--floating--monitor-181717?logo=github)](https://github.com/codez-yydd/zai-floating-monitor) [![Gitee Repo](https://img.shields.io/badge/Gitee-codezwx%2Fzai--floating--monitor-C71D23?logo=gitee)](https://gitee.com/codezwx/zai-floating-monitor)
+
 一个常驻菜单栏的轻量浮动面板，实时统计 [ZCode](https://z.ai) CLI 的 Token 用量与花费。点击菜单栏图标即可唤出毛玻璃面板查看今日 / 7 天 / 30 天的明细，并按模型分组展示。
 
 > macOS 上的形态：菜单栏标题实时显示「今日花费 + 总 Token」，点击图标弹出贴近菜单栏的 popover 面板；Dock 不显示图标，失焦自动收起。
 
-![Tauri](https://img.shields.io/badge/Tauri-2.0-orange) ![React](https://img.shields.io/badge/React-19-blue) ![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178c6) ![TailwindCSS](https://img.shields.io/badge/Tailwind-v4-38bdf8) ![Rust](https://img.shields.io/badge/Rust-edition%202021-dea584)
+---
+
+## 📍 仓库地址
+
+- **GitHub**：[codez-yydd/zai-floating-monitor](https://github.com/codez-yydd/zai-floating-monitor)
+- **Gitee**：[codezwx/zai-floating-monitor](https://gitee.com/codezwx/zai-floating-monitor)
+
+两个仓库内容完全一致，任一仓库均可获取最新版本；GitHub / Gitee 双仓库自动降级的更新源也基于此配置。
+
+---
+
+## 🎬 动态壁纸效果
+
+![ZCode 动态壁纸演示](doc/img/zcode-skin.gif)
+
+> 一键把动态视频壁纸注入 ZCode 桌面应用，作为对话背景——安装前自动备份，可随时还原。
+
+---
+
+## 📑 目录
+
+- [📍 仓库地址](#-仓库地址)
+- [🎬 动态壁纸效果](#-动态壁纸效果)
+- [📸 界面截图](#-界面截图)
+- [✨ 功能特性](#-功能特性)
+- [🧱 技术栈](#-技术栈)
+- [📁 项目结构](#-项目结构)
+- [📋 环境要求](#-环境要求)
+- [🚀 快速开始](#-快速开始)
+- [📜 常用脚本](#-常用脚本)
+- [📦 打包发布](#-打包发布)
+  - [🔄 应用内自动更新（双仓库）](#-应用内自动更新双仓库)
+- [⚙️ 配置说明](#️-配置说明)
+  - [数据库路径](#数据库路径)
+  - [价格配置](#价格配置)
+  - [Coding Plan 额度监控](#coding-plan-额度监控)
+  - [全局快捷键](#全局快捷键)
+  - [动态壁纸](#动态壁纸)
+  - [Cursor 统计](#cursor-统计)
+  - [Kimi 统计](#kimi-统计)
+  - [周额度对比与报表](#周额度对比与报表)
+  - [多设备同步](#多设备同步)
+- [🧮 计费规则](#-计费规则)
+- [🔒 数据安全](#-数据安全)
+- [📄 License](#-license)
 
 ---
 
 ## 📸 界面截图
 
-| 汇总视图 | Z.ai 视图 |
-|:---:|:---:|
-| ![汇总视图](doc/img/summary.png) | ![Z.ai 视图](doc/img/zai-quota.png) |
-| 多服务合计花费 / Token 与订阅额度 | Coding Plan 5 小时 / 每周 / MCP 额度 |
-
-| 趋势与模型排行 | Cursor 视图 |
-|:---:|:---:|
-| ![趋势与模型排行](doc/img/summary-trend.png) | ![Cursor 视图](doc/img/cursor.png) |
-| 按时段用量趋势与模型排行 | Pro / Auto / API 额度与用量统计 |
-
-| 价格设置 | 设备同步 |
-|:---:|:---:|
-| ![价格设置](doc/img/settings.png) | ![设备同步](doc/img/sync.png) |
-| 美元单价、汇率折算与全局快捷键 | 多设备增量同步与数据管理 |
+| 预览 | 说明 |
+|:---:|:---|
+| ![汇总视图](doc/img/summary.png) | **汇总视图** — 多服务合计花费 / Token 与订阅额度 |
+| ![Z.ai 视图](doc/img/zai-quota.png) | **Z.ai 视图** — Coding Plan 5 小时 / 每周 / MCP 额度 |
+| ![趋势与模型排行](doc/img/summary-trend.png) | **趋势与模型排行** — 按时段用量趋势与模型排行 |
+| ![Cursor 视图](doc/img/cursor.png) | **Cursor 视图** — Pro / Auto / API 额度与用量统计 |
+| ![价格设置](doc/img/settings.png) | **价格设置** — 美元单价、汇率折算与全局快捷键 |
+| ![设备同步](doc/img/sync.png) | **设备同步** — 多设备增量同步与数据管理 |
 
 ---
 
 ## ✨ 功能特性
 
+**🖥 核心体验**
+
 - **实时菜单栏标题** — 常驻 macOS 顶部菜单栏，每 30 秒刷新，显示今日自然日的总花费（`¥xx.xx`，美元模式下为 `$xx.xx`）与总 Token（如 `3.7M`）。
 - **浮动统计面板** — 点击托盘图标唤出，支持 **今日 / 24h / 7天 / 30天 / 自定义** 时间范围切换。
-- **Token 明细** — 输入、输出、缓存读、缓存写、推理 Token 分类统计，并按占比可视化。
-- **按模型分组** — 列出每个模型的请求数、Token、花费；未配置价格的模型会标记 ⚠ 提示。
-- **价格配置** — 为每个模型设置「输入 / 输出 / 缓存读」三项**美元**单价（每百万 Token），配置持久化到 `~/.zbar/pricing.json`，人民币花费按当前汇率自动折算；支持一键「检查价格更新」，与内置参考表离线对比（定价数据源自 [cc-switch](https://github.com/farion1231/cc-switch) 开源项目，不联网）。
-- **缓存感知计费** — `input_tokens` 已包含缓存读部分，计费时缓存读按缓存价单独计算，非缓存输入按输入价计算，避免重复计费。
 - **原生体验** — macOS 使用 `popover` 毛玻璃材质 + 透明窗口；Windows/Linux 面板贴近任务栏展开。
 - **自动刷新** — 面板数据每 30 秒自动拉取一次。
+- **⌨️ 全局快捷键** — 默认 `alt+shift+z` 唤起 / 隐藏面板，可在设置中自定义或停用。
+- **🎨 动态壁纸** — 一键把动态视频壁纸注入 ZCode 桌面应用，作为对话背景；安装前自动备份原版、可随时还原。ZCode 升级后壁纸会失效，需重新安装；macOS 上注入后 ZCode 内置更新将不可用（还原也无法恢复），需前往官网重新下载。
+
+**🤖 多服务用量统计**
+
 - **Coding Plan 额度监控** — 订阅用户可在面板顶部查看 **5 小时窗口**、**每周额度**与 **MCP 月度额度**的用量进度条，颜色随用量警示（绿→琥珀→红），并显示下次重置倒计时。凭证与接口端点**自动读取**本机 ZCode 客户端登录态（`~/.zcode/v2/config.json`），零配置。
 - **🖥 Cursor 用量统计** — 自动读取本机 Cursor 应用的登录凭据，统计 Pro / Auto / API 套餐额度与 Token 花费明细，美元花费按汇率折算后并入汇总视图。
 - **🟢 Codex 用量统计** — 解析本机 `~/.codex/sessions` 会话记录统计 Token 用量与花费；ChatGPT 订阅登录的机器上还可实时拉取 **5 小时 / 每周**额度进度条（API 中转模式自动隐藏额度块）。
 - **🟠 Claude 用量统计** — 解析本机 `~/.claude/projects` 会话记录统计 Token 用量与花费（含子代理会话，按 message 去重防重复计数）；claude.ai 订阅登录的机器上实时拉取 **5 小时会话 / 每周**额度（第三方中转模式自动隐藏额度块）。
 - **🌙 Kimi 用量统计** — 解析本机 `~/.kimi-code/sessions` 会话记录（`wire.jsonl`）统计 Token 用量、花费与 **Token 输出速度**；已登录 Kimi Code CLI 的机器上自动探测本地凭据（OAuth 过期时后台自动续期，无需配置），实时拉取订阅额度：**5 小时滚动窗口 / 周期额度**进度条与重置倒计时、加油包余额、官方会员档位名；也可在设置中手动配置 Kimi API Key。
-- **💱 汇率自动更新** — USD→CNY 汇率默认每日自动联网更新（也可改为手动填写），用于各服务的美元花费折算与人民币参考价换算。
 - **🧭 多服务汇总视图** — 「汇总 / Z.ai / Codex / Claude / Cursor / Kimi」标签切换：多服务合计花费与 Token、订阅额度卡片、分时趋势图与模型排行。
-- **⌨️ 全局快捷键** — 默认 `alt+shift+z` 唤起 / 隐藏面板，可在设置中自定义或停用。
-- **📈 周额度对比** — 基于本地额度快照（90 天滚动保留）对比每个重置周期的额度用量，支持跨设备合并。
-- **📝 日报 / 周报** — 一键生成 Markdown 日报（今日）/ 周报（近 7 天）并保存到本地。
-- **🔄 多设备同步** — 自托管同步服务（`server/`），让公司 / 家里等多台电脑汇总查看全量用量。明细增量上传 + `(device, rowid)` 去重，支持**设备筛选**（全部 / 本机 / 指定设备）和**数据清理**（按设备 / 按时间 / 全清 + 可配置自动定时清理）。详见 [server/README.md](./server/README.md)。
 - **⚡ 速度与首字延迟** — 基于调用耗时统计**平均输出速度（tok/s）**与**首字延迟（TTFT）**，含噪声过滤口径（整块下发识别、计时异常剔除）。ZCode / Claude 面板可用；Kimi 面板可用 TPS（由请求耗时推算的输出速度口径、无 TTFT，首字延迟与 Claude 一样隐藏）；Codex / Cursor 数据源无耗时字段，自动隐藏。
 - **🎯 当前模型** — 各 Agent 面板显示「当前模型」（口径：最近一次调用使用的模型 + 相对时间），汇总页各服务分组同步展示。
+
+**💰 价格与计费**
+
+- **价格配置** — 为每个模型设置「输入 / 输出 / 缓存读」三项**美元**单价（每百万 Token），配置持久化到 `~/.zbar/pricing.json`，人民币花费按当前汇率自动折算；支持一键「检查价格更新」，与内置参考表离线对比（定价数据源自 [cc-switch](https://github.com/farion1231/cc-switch) 开源项目，不联网）。
+- **缓存感知计费** — `input_tokens` 已包含缓存读部分，计费时缓存读按缓存价单独计算，非缓存输入按输入价计算，避免重复计费。
+- **💱 汇率自动更新** — USD→CNY 汇率默认每日自动联网更新（也可改为手动填写），用于各服务的美元花费折算与人民币参考价换算。
+
+**📊 数据与报表**
+
+- **Token 明细** — 输入、输出、缓存读、缓存写、推理 Token 分类统计，并按占比可视化。
+- **按模型分组** — 列出每个模型的请求数、Token、花费；未配置价格的模型会标记 ⚠ 提示。
+- **📈 周额度对比** — 基于本地额度快照（90 天滚动保留）对比每个重置周期的额度用量，支持跨设备合并。
+- **📝 日报 / 周报** — 一键生成 Markdown 日报（今日）/ 周报（近 7 天）并保存到本地。
+
+**🔄 同步与更新**
+
+- **🔄 多设备同步** — 自托管同步服务（`server/`），让公司 / 家里等多台电脑汇总查看全量用量。明细增量上传 + `(device, rowid)` 去重，支持**设备筛选**（全部 / 本机 / 指定设备）和**数据清理**（按设备 / 按时间 / 全清 + 可配置自动定时清理）。详见 [server/README.md](./server/README.md)。
 - **⬆️ 应用内自动更新** — 设置 →「关于与更新」检查 / 下载 / 静默安装新版本，更新源 **GitHub / Gitee 双仓库自动降级**，更新包签名校验；启动静默检查，有新版时设置入口亮红点。
 
 ---
@@ -255,6 +310,15 @@ ZBar 以 **只读** 方式访问 ZCode 的 SQLite 数据库，不会干扰 ZCode
   "accelerator": "alt+shift+z"
 }
 ```
+
+### 动态壁纸
+
+点击工具栏的 🎨 按钮即可打开「动态壁纸」，把动态视频注入 ZCode 桌面应用作为对话背景。安装前会自动备份原版资源，随时可一键还原。
+
+注意事项：
+
+- ZCode 升级后壁纸会失效，需要重新安装一次。
+- macOS 上注入后，ZCode 自带的内置更新将不可用（还原也无法恢复），升级 ZCode 请前往官网重新下载。
 
 ### Cursor 统计
 

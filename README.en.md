@@ -1,53 +1,108 @@
 # ZBar · ZCode Token Monitor
 
+![Tauri](https://img.shields.io/badge/Tauri-2.0-orange) ![React](https://img.shields.io/badge/React-19-blue) ![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178c6) ![TailwindCSS](https://img.shields.io/badge/Tailwind-v4-38bdf8) ![Rust](https://img.shields.io/badge/Rust-edition%202021-dea584) ![License](https://img.shields.io/badge/License-MIT-yellow) ![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey) [![GitHub Repo](https://img.shields.io/badge/GitHub-codez--yydd%2Fzai--floating--monitor-181717?logo=github)](https://github.com/codez-yydd/zai-floating-monitor) [![Gitee Repo](https://img.shields.io/badge/Gitee-codezwx%2Fzai--floating--monitor-C71D23?logo=gitee)](https://gitee.com/codezwx/zai-floating-monitor)
+
 A lightweight menu-bar floating panel that tracks the Token usage and cost of the [ZCode](https://z.ai) CLI in real time. Click the menu-bar icon to summon a vibrancy panel showing today's / 7-day / 30-day breakdowns, grouped by model.
 
 > On macOS: the menu-bar title shows today's cost + total tokens in real time; clicking the icon pops a popover panel hugging the menu bar; the Dock icon is hidden, and the panel auto-dismisses on blur.
 
-![Tauri](https://img.shields.io/badge/Tauri-2.0-orange) ![React](https://img.shields.io/badge/React-19-blue) ![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178c6) ![TailwindCSS](https://img.shields.io/badge/Tailwind-v4-38bdf8) ![Rust](https://img.shields.io/badge/Rust-edition%202021-dea584)
+---
+
+## 📍 Repositories
+
+- **GitHub**: [codez-yydd/zai-floating-monitor](https://github.com/codez-yydd/zai-floating-monitor)
+- **Gitee**: [codezwx/zai-floating-monitor](https://gitee.com/codezwx/zai-floating-monitor)
+
+Both repositories have exactly the same content — the latest version can be obtained from either one; the GitHub / Gitee dual-repo auto-fallback update source is also based on these addresses.
+
+---
+
+## 🎬 Live Wallpaper Demo
+
+![ZCode live wallpaper demo](doc/img/zcode-skin.gif)
+
+> Inject a live video wallpaper into the ZCode desktop app as the conversation background in one click — the original app is backed up automatically before installation and can be restored anytime.
+
+---
+
+## 📑 Contents
+
+- [📍 Repositories](#-repositories)
+- [🎬 Live Wallpaper Demo](#-live-wallpaper-demo)
+- [📸 Screenshots](#-screenshots)
+- [✨ Features](#-features)
+- [🧱 Tech Stack](#-tech-stack)
+- [📁 Project Structure](#-project-structure)
+- [📋 Prerequisites](#-prerequisites)
+- [🚀 Quick Start](#-quick-start)
+- [📜 Scripts](#-scripts)
+- [📦 Build & Release](#-build--release)
+  - [🔄 In-app auto update (dual repos)](#-in-app-auto-update-dual-repos)
+- [⚙️ Configuration](#️-configuration)
+  - [Database Path](#database-path)
+  - [Pricing](#pricing)
+  - [Coding Plan Quota Monitor](#coding-plan-quota-monitor)
+  - [Global Hotkey](#global-hotkey)
+  - [Dynamic wallpaper](#dynamic-wallpaper)
+  - [Cursor Stats](#cursor-stats)
+  - [Kimi Stats](#kimi-stats)
+  - [Weekly Compare & Reports](#weekly-compare--reports)
+  - [Multi-device Sync](#multi-device-sync)
+- [🧮 Billing Rules](#-billing-rules)
+- [🔒 Data Safety](#-data-safety)
+- [📄 License](#-license)
 
 ---
 
 ## 📸 Screenshots
 
-| Summary view | Z.ai view |
-|:---:|:---:|
-| ![Summary view](doc/img/summary.png) | ![Z.ai view](doc/img/zai-quota.png) |
-| Total cost / tokens across services & subscription quotas | Coding Plan 5-hour / weekly / MCP quotas |
-
-| Trend & model ranking | Cursor view |
-|:---:|:---:|
-| ![Trend & model ranking](doc/img/summary-trend.png) | ![Cursor view](doc/img/cursor.png) |
-| Hourly usage trend and model ranking | Pro / Auto / API quotas & usage stats |
-
-| Pricing settings | Device sync |
-|:---:|:---:|
-| ![Pricing settings](doc/img/settings.png) | ![Device sync](doc/img/sync.png) |
-| USD unit prices, FX rate & global hotkey | Incremental multi-device sync & data management |
+| Preview | Description |
+|:---:|:---|
+| ![Summary view](doc/img/summary.png) | **Summary view** — Total cost / tokens across services & subscription quotas |
+| ![Z.ai view](doc/img/zai-quota.png) | **Z.ai view** — Coding Plan 5-hour / weekly / MCP quotas |
+| ![Trend & model ranking](doc/img/summary-trend.png) | **Trend & model ranking** — Hourly usage trend and model ranking |
+| ![Cursor view](doc/img/cursor.png) | **Cursor view** — Pro / Auto / API quotas & usage stats |
+| ![Pricing settings](doc/img/settings.png) | **Pricing settings** — USD unit prices, FX rate & global hotkey |
+| ![Device sync](doc/img/sync.png) | **Device sync** — Incremental multi-device sync & data management |
 
 ---
 
 ## ✨ Features
 
+**🖥 Core experience**
+
 - **Live menu-bar title** — lives in the macOS menu bar, refreshing every 30s, showing today's total cost (`¥xx.xx`, or `$xx.xx` in USD mode) and total tokens (e.g. `3.7M`).
 - **Floating stats panel** — summoned by clicking the tray icon; supports **today / 24h / 7d / 30d / custom** time ranges.
-- **Token breakdown** — input, output, cache-read, cache-write and reasoning tokens, visualized by proportion.
-- **Per-model grouping** — requests, tokens and cost per model; models without pricing are flagged with ⚠.
-- **Pricing config** — **CNY / USD** dual currency; set input / output / cache-read unit prices (per million tokens) for each model, persisted to `~/.zbar/pricing.json`; one-click "check price updates" pulls the latest community-maintained prices from [models.dev](https://models.dev) (CNY reference prices converted at the current FX rate).
-- **Cache-aware billing** — `input_tokens` already includes cache-read tokens; cache-read is billed at the cache rate and non-cache input at the input rate, avoiding double counting.
 - **Native feel** — macOS uses the `popover` vibrancy material + transparent window; Windows/Linux panels unfold near the taskbar.
 - **Auto refresh** — panel data is re-fetched every 30 seconds.
+- **⌨️ Global hotkey** — summon / hide the panel with `alt+shift+z` by default; customizable or disable-able in settings.
+- **🎨 Dynamic wallpaper** — inject a live video wallpaper into the ZCode desktop app as the conversation background in one click; the original app is backed up automatically before installation and can be restored anytime. The wallpaper is invalidated after a ZCode upgrade and needs to be reinstalled; on macOS, ZCode's built-in updater becomes unavailable after injection (even restoring cannot bring it back) — re-download ZCode from the official site.
+
+**🤖 Multi-service usage stats**
+
 - **Coding Plan quota monitor** — subscribers can view the **5-hour window**, **weekly quota** and **MCP monthly quota** progress bars at the top of the panel; the color escalates with usage (green → amber → red) and shows a reset countdown. Credentials and the API endpoint are read **automatically** from the local ZCode client's signed-in state (`~/.zcode/v2/config.json`) — zero configuration.
 - **🖥 Cursor usage stats** — reads the local Cursor app's login credentials automatically; tracks Pro / Auto / API plan quotas and per-model token costs, with USD costs converted at the FX rate and merged into the summary view.
 - **🌙 Kimi usage stats** — parses local `~/.kimi-code/sessions` session records (`wire.jsonl`) to tally token usage, cost and **token output speed (TPS)**; on machines signed in to the Kimi Code CLI, local credentials are detected automatically (OAuth expiry renewed in the background — no configuration needed) to fetch subscription quotas live: **5-hour rolling window / cycle quota** progress bars with reset countdowns, booster wallet balance and official membership tier name; a Kimi API Key can also be configured manually in settings.
-- **💱 Auto FX rate** — the USD→CNY rate is refreshed online daily by default (manual input supported); used to convert USD costs across services and for CNY reference prices.
 - **🧭 Multi-service summary view** — summary / Z.ai / Cursor / Kimi tabs: total cost & tokens across services, subscription quota cards, hourly trend chart and model ranking.
-- **⌨️ Global hotkey** — summon / hide the panel with `alt+shift+z` by default; customizable or disable-able in settings.
-- **📈 Weekly quota compare** — compare quota usage across reset cycles based on local quota snapshots (90-day rolling retention), with cross-device merge.
-- **📝 Daily / weekly reports** — one-click Markdown report (daily = today, weekly = last 7 days) saved locally.
-- **🔄 Multi-device sync** — self-hosted sync server (`server/`) to aggregate usage across machines (office / home). Incremental detail upload + `(device, rowid)` dedup, with **device filtering** (all / local / specific device) and **data cleanup** (by device / by time / all + configurable auto cleanup). See [server/README.md](./server/README.md).
 - **⚡ Speed & TTFT** — average output speed (tok/s) and first-token latency (TTFT) from per-call durations, with noise filtering (whole-block delivery detection, timing-outlier rejection). Available on ZCode / Claude / Kimi panels (Kimi's tok/s is a TPS estimate derived from request durations with no TTFT, so first-token latency is hidden there just like Claude; Codex / Cursor data sources carry no duration and auto-hide these columns).
 - **🎯 Current model** — each agent panel shows the "current model" (latest model actually used + relative time); the summary page shows it per service group.
+
+**💰 Pricing & billing**
+
+- **Pricing config** — **CNY / USD** dual currency; set input / output / cache-read unit prices (per million tokens) for each model, persisted to `~/.zbar/pricing.json`; one-click "check price updates" pulls the latest community-maintained prices from [models.dev](https://models.dev) (CNY reference prices converted at the current FX rate).
+- **Cache-aware billing** — `input_tokens` already includes cache-read tokens; cache-read is billed at the cache rate and non-cache input at the input rate, avoiding double counting.
+- **💱 Auto FX rate** — the USD→CNY rate is refreshed online daily by default (manual input supported); used to convert USD costs across services and for CNY reference prices.
+
+**📊 Data & reports**
+
+- **Token breakdown** — input, output, cache-read, cache-write and reasoning tokens, visualized by proportion.
+- **Per-model grouping** — requests, tokens and cost per model; models without pricing are flagged with ⚠.
+- **📈 Weekly quota compare** — compare quota usage across reset cycles based on local quota snapshots (90-day rolling retention), with cross-device merge.
+- **📝 Daily / weekly reports** — one-click Markdown report (daily = today, weekly = last 7 days) saved locally.
+
+**🔄 Sync & update**
+
+- **🔄 Multi-device sync** — self-hosted sync server (`server/`) to aggregate usage across machines (office / home). Incremental detail upload + `(device, rowid)` dedup, with **device filtering** (all / local / specific device) and **data cleanup** (by device / by time / all + configurable auto cleanup). See [server/README.md](./server/README.md).
 - **⬆️ In-app auto update** — Settings → "About & update" to check / download / silently install new versions; endpoints fall back between **GitHub and Gitee** automatically, packages are signature-verified, and a silent startup check lights a red dot on the settings entry when a new version is available.
 
 ---
@@ -247,6 +302,15 @@ Summon / hide the panel with `alt+shift+z` by default; change or disable it unde
   "accelerator": "alt+shift+z"
 }
 ```
+
+### Dynamic wallpaper
+
+Open "Dynamic wallpaper" via the 🎨 button in the toolbar and inject a live video wallpaper into the ZCode desktop app as the conversation background. The original resources are backed up automatically before installation and can be restored anytime with one click.
+
+Notes:
+
+- The wallpaper is invalidated after a ZCode upgrade and needs to be reinstalled.
+- On macOS, ZCode's built-in updater becomes unavailable after injection (even restoring cannot bring it back) — to upgrade ZCode, re-download it from the official website.
 
 ### Cursor Stats
 
