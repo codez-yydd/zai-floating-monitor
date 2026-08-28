@@ -7,6 +7,7 @@
 //! - 复用项目现有 ureq HTTP 客户端 + pricing::config_dir() 的 ~/.zbar/ 目录。
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -164,7 +165,7 @@ struct SyncResponse {
     proto: u32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct SyncPayload {
     records: Vec<UsageRow>,
     last_rowid: Option<i64>,
@@ -369,6 +370,13 @@ pub fn upload_incremental() -> Result<SyncOutcome, String> {
     let base = cfg.server_url.clone();
     let token = cfg.device_token.clone();
 
+    // 上传前先触发一次派生库增量导入（import_incremental 自带 30 秒节流，
+    // 后台同步每轮至多真正导入一次，不会高频阻塞），让新会话的
+    // session_id → project_key 映射尽早可用，缩小「无映射 → 明细连
+    // session_id 都不带」的上传窗口。失败静默：未安装 ZCode / 派生库
+    // 不可用时不影响同步本身。
+    let _ = crate::zcode_sessions::import_incremental();
+
     // 读取待上传的快照（ts > 游标）。读失败不阻断明细同步。
     let mut pending_snaps = crate::quota_history::load_all()
         .unwrap_or_default()
@@ -393,9 +401,12 @@ pub fn upload_incremental() -> Result<SyncOutcome, String> {
     let mut total_uploaded = 0usize;
     const BATCH: usize = 500;
     let mut first_batch = true;
+    // M5：派生库有映射且服务端 proto >= 5 时，zcode 明细附带会话/项目维度
+    // （session_id / project_key / project_display）；否则按旧契约上传。
+    let zcode_with_projects = zcode_projects_supported(&base, &token);
 
     loop {
-        let records = db::query_since(since, BATCH)?;
+        let records = query_zcode_rows_with_sessions(since, BATCH, zcode_with_projects)?;
         // 明细耗尽，且还有未发的快照 → 发一个空 records 的批次把快照送出
         let records_empty = records.is_empty();
         if records_empty && pending_snaps.is_empty() && pending_agent_quota_snapshots.is_empty() {
@@ -434,13 +445,10 @@ pub fn upload_incremental() -> Result<SyncOutcome, String> {
             agent_quota_snapshots: agent_quota_snapshots_to_send,
             last_agent_quota_snapshot_ts,
         };
-        let resp: SyncResponse = ureq::post(&format!("{base}/sync"))
-            .set("Authorization", &format!("Bearer {token}"))
-            .timeout(Duration::from_secs(15))
-            .send_json(&payload)
-            .map_err(map_http_err("上传数据"))?
-            .into_json()
-            .map_err(|e| format!("解析上传响应失败: {e}"))?;
+        // 防御对称：zcode 阶段一批次与派生来源一样走降级重试发送
+        // （服务端自报 proto>=5 却 4xx 拒收新字段时剥字段重试，见函数注释）
+        let resp: SyncResponse =
+            post_zcode_batch_with_fallback(&base, &token, &payload, zcode_with_projects)?;
 
         total_uploaded += resp.accepted;
         total_uploaded += resp.accepted_agent_quota_snapshots;
@@ -512,6 +520,238 @@ pub fn upload_incremental() -> Result<SyncOutcome, String> {
     })
 }
 
+/// 构造派生来源的上传批次 payload。with_projects=false 时剥掉每条记录的
+/// 会话/项目维度字段（proto 4 降级：服务端未升级时按旧契约上传，
+/// 字段缺失序列化端即不发，服务端落 NULL，与旧行为完全一致）。
+fn build_derived_payload(
+    records: &[UsageRow],
+    last_rowid: Option<i64>,
+    with_projects: bool,
+) -> SyncPayload {
+    let records = if with_projects {
+        records.to_vec()
+    } else {
+        records
+            .iter()
+            .map(|row| {
+                let mut row = row.clone();
+                row.session_id = None;
+                row.project_key = None;
+                row.project_display = None;
+                row
+            })
+            .collect()
+    };
+    SyncPayload {
+        records,
+        last_rowid,
+        snapshots: Vec::new(),
+        last_snapshot_ts: None,
+        agent_quota_snapshots: Vec::new(),
+        last_agent_quota_snapshot_ts: None,
+    }
+}
+
+// ===== zcode 明细的会话/项目维度增强（M5）=====
+
+/// 判断 zcode 明细上传是否附带会话/项目维度（proto 5）：
+/// 派生库有映射 且 服务端自报 proto >= 5。
+/// 探测用空批次请求（无写入副作用，与派生来源的协议探测同款）；网络
+/// 失败/派生库不可用时返回 false，上传退回原契约（三字段不发），不影响
+/// 原有错误路径。
+fn zcode_projects_supported(base: &str, token: &str) -> bool {
+    if !crate::zcode_sessions::has_project_mapping() {
+        return false; // 派生库无映射：无可附带维度，跳过协议探测
+    }
+    let probe: SyncResponse = match ureq::post(&format!("{base}/sync"))
+        .set("Authorization", &format!("Bearer {token}"))
+        .timeout(Duration::from_secs(15))
+        .send_json(&SyncPayload {
+            records: Vec::new(),
+            last_rowid: None,
+            snapshots: Vec::new(),
+            last_snapshot_ts: None,
+            agent_quota_snapshots: Vec::new(),
+            last_agent_quota_snapshot_ts: None,
+        })
+        .and_then(|resp| resp.into_json::<SyncResponse>().map_err(|e| e.into()))
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            // 探测失败不阻断同步：本轮不带新字段（原行为），下轮重探
+            eprintln!("[zbar-sync] zcode 项目维度协议探测失败（本轮按旧契约上传）: {e}");
+            return false;
+        }
+    };
+    if probe.proto >= 5 {
+        true
+    } else {
+        eprintln!(
+            "[zbar-sync] 服务端未升级到 proto 5（当前 proto={}），zcode 明细暂不携带项目维度字段",
+            probe.proto
+        );
+        false
+    }
+}
+
+/// 查询主库 rowid > since 的 zcode 明细（与 db::query_since 同 SQL、同
+/// rowid 游标口径，仅多带 session_id 列），并按 zcode_sessions 派生库的
+/// session_id → (project_key, cwd) 映射填充三字段。
+/// with_projects=false、主库无 session_id 列或映射查不到该会话时，三字段
+/// 保持 None（与 db::query_since 原行为逐字节一致）。
+fn query_zcode_rows_with_sessions(
+    since: i64,
+    limit: usize,
+    with_projects: bool,
+) -> Result<Vec<UsageRow>, String> {
+    let conn = db::open_db()?;
+    // 老版本主库无 session_id 列：直接走原查询（行为逐字节一致）
+    if !db::has_column(&conn, "model_usage", "session_id") {
+        return db::query_since(since, limit);
+    }
+    let sql = "SELECT rowid, started_at, model_id, provider_id,
+            COALESCE(input_tokens,0), COALESCE(output_tokens,0),
+            COALESCE(cache_read_input_tokens,0), COALESCE(cache_creation_input_tokens,0),
+            COALESCE(reasoning_tokens,0), COALESCE(computed_total_tokens,0),
+            session_id
+     FROM model_usage
+     WHERE rowid > ?1
+     ORDER BY rowid ASC
+     LIMIT ?2";
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| format!("准备 zcode 增量查询失败: {e}"))?;
+    // 中间结构：(UsageRow, 该行的 session_id)；session_id 不进 UsageRow
+    // （db.rs 的同步契约结构，禁止改动），回填完成后丢弃
+    let rows = stmt
+        .query_map(rusqlite::params![since, limit as i64], |row| {
+            Ok((
+                UsageRow {
+                    local_rowid: row.get(0)?,
+                    started_at: row.get(1)?,
+                    model_id: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    provider_id: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                    input_tokens: row.get(4)?,
+                    output_tokens: row.get(5)?,
+                    cache_read_input_tokens: row.get(6)?,
+                    cache_creation_input_tokens: row.get(7)?,
+                    reasoning_tokens: row.get(8)?,
+                    computed_total_tokens: row.get(9)?,
+                    // 本库（zcode）的行固定标记为 zcode 来源
+                    source: "zcode".into(),
+                    session_id: None,
+                    project_key: None,
+                    project_display: None,
+                },
+                row.get::<_, Option<String>>(10)?,
+            ))
+        })
+        .map_err(|e| format!("读取 zcode 增量记录失败: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("读取 zcode 增量记录失败: {e}"))?;
+
+    // 逐行回填维度：查到映射才附带三字段（绑定出现，查不到保持 None）
+    let map = if with_projects {
+        crate::zcode_sessions::session_project_map()
+    } else {
+        HashMap::new()
+    };
+    Ok(rows
+        .into_iter()
+        .map(|(mut row, session_id)| {
+            if let Some((key, display)) = session_id.as_ref().and_then(|id| map.get(id)) {
+                row.session_id = session_id.clone();
+                row.project_key = Some(key.clone());
+                row.project_display = Some(display.clone());
+            }
+            row
+        })
+        .collect())
+}
+
+/// 发送一批明细到 /sync（抽出公共发送逻辑，供 proto 5 降级重试复用）。
+fn post_sync_batch(
+    base: &str,
+    token: &str,
+    payload: &SyncPayload,
+) -> Result<SyncResponse, String> {
+    ureq::post(&format!("{base}/sync"))
+        .set("Authorization", &format!("Bearer {token}"))
+        .timeout(Duration::from_secs(15))
+        .send_json(payload)
+        .map_err(map_http_err("上传数据"))?
+        .into_json()
+        .map_err(|e| format!("解析上传响应失败: {e}"))
+}
+
+/// 错误串是否为 HTTP 4xx。map_http_err 生成的格式固定为「xx失败: HTTP {code}: body」，
+/// 字符串匹配足以覆盖降级重试场景的判定（不区分 4xx 具体码）。
+fn is_http_4xx(err: &str) -> bool {
+    err.contains("HTTP 4")
+}
+
+/// 带降级重试的批次上传：正常路径按探测结果决定是否携带项目维度字段
+/// （proto 5）；若服务端自报 proto>=5 但处理新字段时返回 4xx（实现不一致
+/// 的中间版本），剥掉新字段按 proto 4 契约重试一次。降级事件记日志不弹窗，
+/// 重试仍失败才向调用方报错（游标不推进，下次重试）。
+fn post_batch_with_fallback(
+    base: &str,
+    token: &str,
+    records: &[UsageRow],
+    last_rowid: Option<i64>,
+    with_projects: bool,
+) -> Result<SyncResponse, String> {
+    let payload = build_derived_payload(records, last_rowid, with_projects);
+    match post_sync_batch(base, token, &payload) {
+        Ok(resp) => Ok(resp),
+        Err(e) if with_projects && is_http_4xx(&e) => {
+            eprintln!(
+                "[zbar-sync] proto 5 上传被服务端拒绝（{e}），本批降级为 proto 4 重试（不含项目维度字段）"
+            );
+            let fallback = build_derived_payload(records, last_rowid, false);
+            post_sync_batch(base, token, &fallback)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// zcode 阶段一批次的降级重试发送，与派生来源的 post_batch_with_fallback
+/// 防御对称：服务端自报 proto>=5 却在处理新字段时返回 4xx（实现不一致的
+/// 中间版本）时，剥掉明细的三字段按 proto 4 契约重试一次，重试仍失败才
+/// 返回 Err。若不降级，单批 4xx 会让 upload_incremental 提前返回——阶段
+/// 二/三不再执行、游标不推进，而协议探测每轮仍成功，同步将永久卡死。
+/// zcode 批次额外携带额度快照字段，与派生来源的 payload 不同构，无法
+/// 直接复用 build_derived_payload，故单独实现（重试时仅剥明细三字段，
+/// 快照原样保留）。with_projects=false 时批次本就不带三字段，4xx 不重试。
+fn post_zcode_batch_with_fallback(
+    base: &str,
+    token: &str,
+    payload: &SyncPayload,
+    with_projects: bool,
+) -> Result<SyncResponse, String> {
+    match post_sync_batch(base, token, payload) {
+        Ok(resp) => Ok(resp),
+        Err(e) if with_projects && is_http_4xx(&e) => {
+            eprintln!(
+                "[zbar-sync] proto 5 上传被服务端拒绝（{e}），本批降级为 proto 4 重试（不含项目维度字段）"
+            );
+            let mut fallback = payload.clone();
+            fallback.records = fallback
+                .records
+                .drain(..)
+                .map(|mut row| {
+                    row.session_id = None;
+                    row.project_key = None;
+                    row.project_display = None;
+                    row
+                })
+                .collect();
+            post_sync_batch(base, token, &fallback)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// 上传派生来源（codex/claude 导入库）的增量（id > 对应游标，循环分批）。
 /// 查询前由各模块自行增量导入（原始 jsonl → 派生 sqlite）。两条路径完全同构，
 /// 仅数据源与游标字段不同，故按 source 参数泛化：
@@ -578,6 +818,18 @@ fn upload_derived_source_incremental(
             "服务端版本过旧（不支持多来源同步），{source} 数据暂不上传，请升级服务端 zbar-sync 后重试"
         ));
     }
+    // proto 5 = 服务端支持明细的会话/项目维度（session_id / project_key /
+    // project_display）。未升级的服务端会忽略新字段（落 NULL），不报错，
+    // 但为避免字段被静默丢弃，这里主动按旧契约剥掉字段上传并记日志；
+    // 服务端升级后下一轮同步自动携带完整维度（游标已推进的旧行不补传，
+    // 与 proto 2/3/4 的能力协商惯例一致）。
+    let with_projects = probe.proto >= 5;
+    if !with_projects {
+        eprintln!(
+            "[zbar-sync] 服务端未升级到 proto 5（当前 proto={}），{source} 明细暂不携带项目维度字段",
+            probe.proto
+        );
+    }
 
     let mut since = cursor;
     let mut total = 0usize;
@@ -593,21 +845,7 @@ fn upload_derived_source_incremental(
         }
         // 本批最大 rowid（游标必须至少推进到这里，否则死循环）
         let batch_max = records.last().map(|r| r.local_rowid).unwrap_or(since);
-        let payload = SyncPayload {
-            records,
-            last_rowid: Some(batch_max),
-            snapshots: Vec::new(),
-            last_snapshot_ts: None,
-            agent_quota_snapshots: Vec::new(),
-            last_agent_quota_snapshot_ts: None,
-        };
-        let resp: SyncResponse = ureq::post(&format!("{base}/sync"))
-            .set("Authorization", &format!("Bearer {token}"))
-            .timeout(Duration::from_secs(15))
-            .send_json(&payload)
-            .map_err(map_http_err("上传数据"))?
-            .into_json()
-            .map_err(|e| format!("解析上传响应失败: {e}"))?;
+        let resp = post_batch_with_fallback(&base, &token, &records, Some(batch_max), with_projects)?;
         total += resp.accepted;
         since = resp.max_rowid.max(batch_max);
         match source {
@@ -632,22 +870,8 @@ fn upload_derived_source_incremental(
             let last = revised.last().expect("修订记录非空");
             revision_ts = last.revision_at;
             revision_id = last.usage.local_rowid;
-            let records = revised.into_iter().map(|row| row.usage).collect();
-            let resp: SyncResponse = ureq::post(&format!("{base}/sync"))
-                .set("Authorization", &format!("Bearer {token}"))
-                .timeout(Duration::from_secs(15))
-                .send_json(&SyncPayload {
-                    records,
-                    // 修订行已经上传过，不推进普通 Codex rowid 游标。
-                    last_rowid: None,
-                    snapshots: Vec::new(),
-                    last_snapshot_ts: None,
-                    agent_quota_snapshots: Vec::new(),
-                    last_agent_quota_snapshot_ts: None,
-                })
-                .map_err(map_http_err("上传 Codex 模型修订"))?
-                .into_json()
-                .map_err(|e| format!("解析 Codex 模型修订响应失败: {e}"))?;
+            let records = revised.into_iter().map(|row| row.usage).collect::<Vec<_>>();
+            let resp = post_batch_with_fallback(&base, &token, &records, None, with_projects)?;
             total += resp.accepted;
         }
         // 补传期间新产生且修订序号更大的记录留给下一轮，避免漏掉并发写入。
@@ -670,22 +894,7 @@ fn upload_derived_source_incremental(
                 break;
             }
             after_id = records.last().map(|r| r.local_rowid).unwrap_or(after_id);
-            let resp: SyncResponse = ureq::post(&format!("{base}/sync"))
-                .set("Authorization", &format!("Bearer {token}"))
-                .timeout(Duration::from_secs(15))
-                .send_json(&SyncPayload {
-                    records,
-                    // 修订行都是已上传过的 rowid，不携带 last_rowid 以免扰动
-                    // 服务端对该来源游标状态的判断
-                    last_rowid: None,
-                    snapshots: Vec::new(),
-                    last_snapshot_ts: None,
-                    agent_quota_snapshots: Vec::new(),
-                    last_agent_quota_snapshot_ts: None,
-                })
-                .map_err(map_http_err("上传 Claude 修订数据"))?
-                .into_json()
-                .map_err(|e| format!("解析上传响应失败: {e}"))?;
+            let resp = post_batch_with_fallback(&base, &token, &records, None, with_projects)?;
             total += resp.accepted;
         }
         // 推进到补传开始前的水位：补传期间新发生的修订（updated_at 更大）

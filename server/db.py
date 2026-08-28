@@ -38,6 +38,9 @@ def _usage_records_schema(table):
     source 标记数据来源（'zcode' / 'codex'）：同一台设备、同一 local_rowid
     在不同 source 下互不冲突（两套 rowid 序列各自从 1 递增）。
     迁移时用同一份定义建 usage_records_new，保证新旧表结构严格一致。
+    session_id / project_key / project_display 为 proto 5 新增的会话与
+    项目维度列（全部可空，缺省 NULL）；旧库由 _migrate_usage_records_columns
+    用 ALTER TABLE 原地补列，补列后列序与本定义一致（都在末尾）。
     """
     return f"""
 CREATE TABLE IF NOT EXISTS {table} (
@@ -54,6 +57,9 @@ CREATE TABLE IF NOT EXISTS {table} (
     reasoning_tokens            INTEGER NOT NULL DEFAULT 0,
     computed_total_tokens       INTEGER NOT NULL DEFAULT 0,
     uploaded_at                 INTEGER NOT NULL,
+    session_id                  TEXT,
+    project_key                 TEXT,
+    project_display             TEXT,
     PRIMARY KEY (device_id, source, local_rowid)
 )
 """
@@ -217,12 +223,38 @@ def _migrate_quota_snapshots(conn):
         conn.isolation_level = ""
 
 
+def _migrate_usage_records_columns(conn):
+    """usage_records 幂等补列：session_id / project_key / project_display（proto 5）。
+
+    proto 5 客户端上传的明细会带会话与项目维度字段；老库直接用
+    ALTER TABLE ADD COLUMN 原地补列（全部可空、不改主键、不搬数据），
+    已有行三列为 NULL——与 proto 2/3/4 客户端上传时的落库行为完全一致。
+    ALTER 不会删除表上的索引，无需像 source/account 迁移那样重建索引。
+    可重复调用，幂等。
+    """
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(usage_records)").fetchall()]
+    if not cols:
+        return
+    added = False
+    for name in ("session_id", "project_key", "project_display"):
+        if name not in cols:
+            conn.execute(f"ALTER TABLE usage_records ADD COLUMN {name} TEXT")
+            added = True
+    if added:
+        conn.commit()
+        print(
+            "[zbar-sync] usage_records 已补列：session_id / project_key / "
+            "project_display（proto 5 会话与项目维度，老记录为空）"
+        )
+
+
 def init_db():
     """初始化数据库：创建数据目录 + 自动建库建表（幂等，可重复调用）。
 
     老库（无 source 列）在此处自动迁移；迁移中 DROP TABLE 会连带删掉
     usage_records 上的两个索引，故迁移后重放一遍索引语句挂回新表。
     quota_snapshots 的 account 迁移同理（DROP 会删掉 ts 索引）。
+    proto 5 的补列迁移用 ALTER TABLE 原地完成，不影响索引。
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = get_conn()
@@ -234,6 +266,7 @@ def init_db():
         conn.commit()
         _migrate_usage_records(conn)
         _migrate_quota_snapshots(conn)
+        _migrate_usage_records_columns(conn)
         if not conn.in_transaction:
             for sql in (INDEX_STARTED, INDEX_DEVICE_STARTED, INDEX_SNAPSHOT_TS):
                 conn.execute(sql)
@@ -314,6 +347,8 @@ def insert_usage_records(device_id, records, uploaded_at):
     """批量插入明细记录（主键 (device_id, source, local_rowid) 去重 + 修订覆盖）。
 
     每条记录的 source 缺省为 'zcode'（旧客户端不传即 zcode，向后兼容）。
+    proto 5 起每条记录还可带 session_id / project_key / project_display
+    （均可缺省，旧客户端不传时落库为 NULL）；主键去重不受影响。
     同主键重传且 computed_total_tokens 更大时覆盖旧值：Claude Code 会话流式
     落盘，客户端可能先上传某条消息的中间值、稍后本地修正为终值并补传
     （见客户端 claude 模块的 updated_at 修订机制）。另外允许同 Token 数的
@@ -334,8 +369,9 @@ def insert_usage_records(device_id, records, uploaded_at):
                         (device_id, source, local_rowid, started_at, model_id, provider_id,
                          input_tokens, output_tokens, cache_read_input_tokens,
                          cache_creation_input_tokens, reasoning_tokens,
-                         computed_total_tokens, uploaded_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         computed_total_tokens, uploaded_at,
+                         session_id, project_key, project_display)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(device_id, source, local_rowid) DO UPDATE SET
                         started_at = CASE
                             WHEN excluded.computed_total_tokens > usage_records.computed_total_tokens
@@ -383,7 +419,12 @@ def insert_usage_records(device_id, records, uploaded_at):
                             WHEN excluded.computed_total_tokens > usage_records.computed_total_tokens
                                 THEN excluded.computed_total_tokens
                             ELSE usage_records.computed_total_tokens
-                        END
+                        END,
+                        -- proto 5 会话/项目维度：仅在携带非 NULL 值时回填，
+                        -- 不用 NULL 抹掉此前已写入的归属信息。
+                        session_id = COALESCE(excluded.session_id, usage_records.session_id),
+                        project_key = COALESCE(excluded.project_key, usage_records.project_key),
+                        project_display = COALESCE(excluded.project_display, usage_records.project_display)
                     WHERE excluded.computed_total_tokens > usage_records.computed_total_tokens
                        OR (
                            COALESCE(usage_records.model_id, '') = ''
@@ -404,6 +445,9 @@ def insert_usage_records(device_id, records, uploaded_at):
                         r.get("reasoning_tokens", 0),
                         r.get("computed_total_tokens", 0),
                         uploaded_at,
+                        r.get("session_id"),
+                        r.get("project_key"),
+                        r.get("project_display"),
                     ),
                 )
                 accepted += cur.rowcount
@@ -861,6 +905,36 @@ def max_agent_quota_snapshot_ts_of(device_id):
         conn.close()
 
 
+def _group_agent_quota_rows(rows):
+    """把展平的 agent_quota_snapshots 行组装回客户端 snapshot 形状。
+
+    按 (device_id, source, ts, plan_type) 分组，windows 逐行追加；
+    /agent-quota-snapshots 与 /overview 的 quota_latest 共用本组装逻辑，
+    保证两处返回口径一致。
+    """
+    grouped = {}
+    for row in rows:
+        key = (row["device_id"], row["source"], row["ts"], row["plan_type"])
+        snapshot = grouped.get(key)
+        if snapshot is None:
+            snapshot = {
+                "device_id": row["device_id"],
+                "source": row["source"],
+                "ts": row["ts"],
+                "plan_type": row["plan_type"] or None,
+                "windows": [],
+            }
+            grouped[key] = snapshot
+        snapshot["windows"].append(
+            {
+                "key": row["window_key"],
+                "used_pct": row["used_pct"],
+                "reset_at": row["reset_at"],
+            }
+        )
+    return list(grouped.values())
+
+
 def query_agent_quota_snapshots(from_ms, to_ms, device_ids, source=None):
     """查询 Agent 额度快照，并组装为客户端可直接解析的 snapshot 形状。
 
@@ -885,27 +959,7 @@ def query_agent_quota_snapshots(from_ms, to_ms, device_ids, source=None):
     finally:
         conn.close()
 
-    grouped = {}
-    for row in rows:
-        key = (row["device_id"], row["source"], row["ts"], row["plan_type"])
-        snapshot = grouped.get(key)
-        if snapshot is None:
-            snapshot = {
-                "device_id": row["device_id"],
-                "source": row["source"],
-                "ts": row["ts"],
-                "plan_type": row["plan_type"] or None,
-                "windows": [],
-            }
-            grouped[key] = snapshot
-        snapshot["windows"].append(
-            {
-                "key": row["window_key"],
-                "used_pct": row["used_pct"],
-                "reset_at": row["reset_at"],
-            }
-        )
-    return list(grouped.values())
+    return _group_agent_quota_rows(rows)
 
 
 def query_period_detail(periods, device_ids, source=None):
@@ -950,6 +1004,174 @@ def query_period_detail(periods, device_ids, source=None):
         return out
     finally:
         conn.close()
+
+
+# ===== 项目维度聚合 + overview 查询（proto 5）=====
+
+UNKNOWN_PROJECT_KEY = "__unknown__"
+
+
+def query_projects(from_ms, to_ms, device_ids):
+    """按 (project_key, source) 聚合用量，供 GET /projects 与 /overview 使用。
+
+    project_key / session_id 是 proto 5 新增列：proto 2/3/4 客户端上传的
+    记录三列均为 NULL，统一聚合为 UNKNOWN_PROJECT_KEY 一个分组、sessions
+    计 0（COUNT(DISTINCT NULL) = 0），与 Rust 侧汇总口径一致。
+    tokens 口径为 SUM(computed_total_tokens)：computed_total_tokens 是客户端
+    上报的计算后总额，与 /usage（_query_overall_and_models）及客户端项目
+    聚合三方一致；codex 等来源的上游自报总额不等于四类原始 token 之和，
+    不能用 input + output + cache_read + cache_write 四类相加，否则手机页
+    与桌面端数字对不上。
+    返回按 total_tokens 降序的
+    [{key, display, by_source: [{source, tokens, requests, sessions}], total_tokens, requests}]。
+    """
+    dev_frag, dev_params = _build_device_filter(device_ids)
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT COALESCE(project_key, '{UNKNOWN_PROJECT_KEY}') AS key,
+                   MAX(project_display) AS display,
+                   source,
+                   COUNT(*) AS requests,
+                   -- tokens 口径与 /usage 的 SUM(computed_total_tokens) 对齐，
+                   -- 不用四类原始 token 相加（codex 上游自报总额与之不等）
+                   COALESCE(SUM(computed_total_tokens), 0) AS total_tokens,
+                   COUNT(DISTINCT session_id) AS sessions
+            FROM usage_records
+            WHERE started_at >= ? AND started_at < ? {dev_frag}
+            GROUP BY COALESCE(project_key, '{UNKNOWN_PROJECT_KEY}'), source
+            ORDER BY key ASC
+            """,
+            [from_ms, to_ms] + dev_params,
+        ).fetchall()
+    finally:
+        conn.close()
+
+    projects = {}
+    order = []
+    for r in rows:
+        key = r["key"]
+        # 与 SQL 的 SUM(computed_total_tokens) 对应（见上方口径说明）
+        tokens = r[4]
+        p = projects.get(key)
+        if p is None:
+            p = {
+                "key": key,
+                "display": r["display"],
+                "by_source": [],
+                "total_tokens": 0,
+                "requests": 0,
+            }
+            projects[key] = p
+            order.append(p)
+        p["by_source"].append(
+            {
+                "source": r["source"] or "zcode",
+                "tokens": tokens,
+                "requests": r["requests"],
+                "sessions": r["sessions"],
+            }
+        )
+        p["total_tokens"] += tokens
+        p["requests"] += r["requests"]
+    order.sort(key=lambda p: -p["total_tokens"])
+    return order
+
+
+def query_usage_summary(from_ms, to_ms, device_ids, source=None):
+    """/overview 周期卡用的整体汇总 + 模型分组。
+
+    内部直接复用 /usage 的 _query_overall_and_models，保证与 /usage 的
+    overall / by_model 字段与口径完全一致。
+    """
+    conn = get_conn()
+    try:
+        overall, by_model = _query_overall_and_models(conn, from_ms, to_ms, device_ids, source)
+        return overall, by_model
+    finally:
+        conn.close()
+
+
+def max_uploaded_at():
+    """全部明细的最新上传时间（/overview 的 last_synced_at）。无数据返回 None。"""
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT MAX(uploaded_at) FROM usage_records").fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def last_uploaded_at_by_device():
+    """各设备最新一次上传时间（/overview 设备列表用）。返回 {device_id: ms}。"""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT device_id, MAX(uploaded_at) FROM usage_records GROUP BY device_id"
+        ).fetchall()
+        return {r[0]: r[1] for r in rows}
+    finally:
+        conn.close()
+
+
+def query_latest_quota_snapshots():
+    """各来源最新一条额度快照（/overview 的 quota_latest）。
+
+    返回 {"zai": 最新一条 Z.ai 快照（/snapshots 单条形状）或 None,
+          "agent": {source: [snapshot, ...]}}；agent 快照复用
+    /agent-quota-snapshots 的最新一条逻辑与组装形状（取各 source 的
+    最大 ts，再取该 ts 的全部行按设备/账号分组）。
+    """
+    conn = get_conn()
+    try:
+        zai_row = conn.execute(
+            """
+            SELECT device_id, ts, account, level, weekly_pct, weekly_reset,
+                   hour5_pct, mcp_pct, mcp_used, mcp_total
+            FROM quota_snapshots
+            ORDER BY ts DESC
+            LIMIT 1
+            """
+        ).fetchone()
+
+        agent_out = {}
+        for source in AGENT_QUOTA_WINDOWS:
+            max_ts = conn.execute(
+                "SELECT MAX(ts) FROM agent_quota_snapshots WHERE source = ?",
+                (source,),
+            ).fetchone()[0]
+            if not max_ts:
+                continue
+            rows = conn.execute(
+                """
+                SELECT device_id, source, ts, plan_type, window_key,
+                       used_pct, reset_at
+                FROM agent_quota_snapshots
+                WHERE source = ? AND ts = ?
+                ORDER BY device_id ASC, plan_type ASC, window_key ASC
+                """,
+                (source, max_ts),
+            ).fetchall()
+            agent_out[source] = _group_agent_quota_rows(rows)
+    finally:
+        conn.close()
+
+    zai = None
+    if zai_row is not None:
+        zai = {
+            "device_id": zai_row["device_id"],
+            "ts": zai_row["ts"],
+            "account": zai_row["account"] or None,
+            "level": zai_row["level"] or "",
+            "weekly_pct": zai_row["weekly_pct"],
+            "weekly_reset": zai_row["weekly_reset"],
+            "hour5_pct": zai_row["hour5_pct"],
+            "mcp_pct": zai_row["mcp_pct"],
+            "mcp_used": zai_row["mcp_used"],
+            "mcp_total": zai_row["mcp_total"],
+        }
+    return {"zai": zai, "agent": agent_out}
 
 
 # ===== 配置表（自动清理用）=====

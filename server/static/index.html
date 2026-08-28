@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<title>ZBar 用量监控</title>
+<style>
+/* 深色主题 · 系统字体 · 零外部资源（内网可用） */
+:root {
+  --bg: #0f1115;
+  --card: #181b22;
+  --card-2: #1f232d;
+  --border: #272c37;
+  --text: #e7eaf0;
+  --muted: #8b93a3;
+  --accent: #4f8cff;
+  --green: #34c77b;
+  --amber: #f5b544;
+  --red: #ef5350;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei",
+    "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+.hidden { display: none !important; }
+.wrap { max-width: 680px; margin: 0 auto; padding: 0 14px 32px; }
+
+/* ===== 登录视图 ===== */
+.login {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.login-box {
+  width: 100%;
+  max-width: 360px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 28px 22px;
+}
+.login-logo {
+  width: 46px; height: 46px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #4f8cff, #7a5cff);
+  color: #fff;
+  font-weight: 700;
+  font-size: 20px;
+  display: flex; align-items: center; justify-content: center;
+  margin: 0 auto 14px;
+}
+.login-box h1 { font-size: 18px; text-align: center; margin-bottom: 6px; }
+.login-tip { color: var(--muted); font-size: 13px; text-align: center; margin-bottom: 18px; }
+.login-box input {
+  width: 100%;
+  background: var(--card-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  font-size: 15px;
+  padding: 11px 12px;
+  outline: none;
+}
+.login-box input:focus { border-color: var(--accent); }
+.login-err { color: var(--red); font-size: 12px; min-height: 18px; margin: 8px 0 4px; }
+.btn {
+  width: 100%;
+  border: none;
+  border-radius: 10px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 15px;
+  padding: 11px 0;
+  cursor: pointer;
+}
+.btn:active { opacity: .85; }
+.btn[disabled] { opacity: .5; cursor: default; }
+
+/* ===== 顶栏 ===== */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 0 10px;
+  background: var(--bg);
+}
+.topbar .logo {
+  width: 30px; height: 30px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #4f8cff, #7a5cff);
+  color: #fff;
+  font-weight: 700; font-size: 14px;
+  display: flex; align-items: center; justify-content: center;
+}
+.topbar h1 { font-size: 17px; flex: 1; }
+.sync-time { color: var(--muted); font-size: 12px; text-align: right; }
+.refresh-btn {
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+  border-radius: 8px;
+  font-size: 13px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.refresh-btn.spin { animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.pull-tip {
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+  height: 0;
+  overflow: hidden;
+  transition: height .15s;
+}
+.pull-tip.show { height: 26px; line-height: 26px; }
+
+.state-tip { color: var(--muted); text-align: center; padding: 32px 0; }
+.error-box {
+  background: #2a1b1c;
+  border: 1px solid #55292b;
+  border-radius: 12px;
+  color: #f0a5a3;
+  padding: 12px 14px;
+  margin: 10px 0;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.error-box button {
+  border: none; border-radius: 8px;
+  background: var(--red); color: #fff;
+  padding: 6px 12px; cursor: pointer; font-size: 12px;
+  flex-shrink: 0;
+}
+
+/* ===== 周期卡 ===== */
+.periods { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 6px 0 12px; }
+.period-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px 10px;
+  text-align: center;
+}
+.period-card .label { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+.period-card .tokens { font-size: 17px; font-weight: 700; }
+.period-card .req { color: var(--muted); font-size: 12px; margin-top: 4px; }
+
+/* ===== 通用卡片 ===== */
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px;
+  margin-bottom: 12px;
+}
+.card h2 { font-size: 14px; margin-bottom: 12px; }
+.card .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 14px 0; }
+
+.bar-track {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--card-2);
+  overflow: hidden;
+}
+.bar-fill { height: 100%; border-radius: 4px; background: var(--accent); transition: width .4s; }
+
+/* ===== 各源分组 ===== */
+.source-item { margin-bottom: 14px; }
+.source-item:last-child { margin-bottom: 0; }
+.source-head { display: flex; justify-content: space-between; margin-bottom: 6px; }
+.source-head .name { font-weight: 600; }
+.source-head .val { color: var(--muted); font-size: 12px; }
+.model-rows { margin-top: 8px; }
+.model-row {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 3px 0 3px 10px;
+}
+.model-row .m { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70%; }
+
+/* ===== 额度 ===== */
+.quota-item { margin-bottom: 12px; }
+.quota-item:last-child { margin-bottom: 0; }
+.quota-head { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 5px; }
+.quota-head .pct { color: var(--muted); font-size: 12px; }
+.pct-green .bar-fill { background: var(--green); }
+.pct-amber .bar-fill { background: var(--amber); }
+.pct-red .bar-fill { background: var(--red); }
+.quota-sub { color: var(--muted); font-size: 11px; margin-top: 3px; }
+
+/* ===== 项目 Top ===== */
+.proj-item { margin-bottom: 12px; }
+.proj-item:last-child { margin-bottom: 0; }
+.proj-head { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 4px; gap: 10px; }
+.proj-head .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proj-head .val { color: var(--muted); font-size: 12px; flex-shrink: 0; }
+.proj-sub { color: var(--muted); font-size: 11px; margin-top: 3px; }
+
+/* ===== 设备 ===== */
+.dev-row { display: flex; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.dev-row:last-child { border-bottom: none; }
+.dev-row .name { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dev-row .meta { color: var(--muted); font-size: 12px; text-align: right; }
+
+.foot { color: var(--muted); font-size: 11px; text-align: center; margin-top: 18px; }
+
+.toast {
+  position: fixed;
+  left: 50%; bottom: 48px;
+  transform: translateX(-50%);
+  background: #2b303b;
+  color: var(--text);
+  border-radius: 10px;
+  padding: 8px 16px;
+  font-size: 13px;
+  z-index: 99;
+}
+</style>
+</head>
+<body>
+
+<!-- 登录视图：首次打开输入 view token -->
+<section id="login" class="login hidden">
+  <div class="login-box">
+    <div class="login-logo">Z</div>
+    <h1>ZBar 用量监控</h1>
+    <p class="login-tip">输入服务端生成的查看令牌（VIEW_TOKEN）<br>见服务端启动日志，或向管理员索取</p>
+    <input id="token-input" type="password" placeholder="访问令牌" autocomplete="off">
+    <div class="login-err" id="login-err"></div>
+    <button class="btn" id="btn-login">验证并进入</button>
+  </div>
+</section>
+
+<!-- 主视图 -->
+<main id="main" class="hidden">
+  <div class="wrap">
+    <header class="topbar">
+      <div class="logo">Z</div>
+      <h1>ZBar</h1>
+      <div class="sync-time">最后同步<br><span id="last-sync">…</span></div>
+      <button class="refresh-btn" id="btn-refresh">刷新</button>
+    </header>
+    <div class="pull-tip" id="pull-tip">下拉刷新</div>
+
+    <div class="state-tip" id="loading">加载中…</div>
+    <div class="error-box hidden" id="error">
+      <span id="error-text">加载失败</span>
+      <button id="btn-retry">重试</button>
+    </div>
+
+    <section class="periods" id="periods"></section>
+    <section class="card" id="sources-card"><h2>近 7 天各来源</h2><div class="body"></div></section>
+    <section class="card" id="quota-card"><h2>订阅额度</h2><div class="body"></div></section>
+    <section class="card" id="projects-card"><h2>近 7 天项目 Top10</h2><div class="body"></div></section>
+    <section class="card" id="devices-card"><h2>设备</h2><div class="body"></div></section>
+
+    <footer class="foot">每 60 秒自动刷新 · 仅统计 Token 用量，不显示花费</footer>
+  </div>
+</main>
+
+<div class="toast hidden" id="toast"></div>
+
+<script>
+"use strict";
+
+var TOKEN_KEY = "zbar_view_token";
+var REFRESH_MS = 60000;
+
+var token = localStorage.getItem(TOKEN_KEY) || "";
+var data = null;
+var timer = null;
+var loading = false;
+
+// ===== 工具 =====
+
+function $(id) { return document.getElementById(id); }
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+  });
+}
+
+// Token 数格式化：中文单位（万 / 亿）
+function fmtTokens(n) {
+  n = Number(n) || 0;
+  if (n >= 1e8) return (n / 1e8).toFixed(2) + " 亿";
+  if (n >= 1e4) return (n / 1e4).toFixed(1) + " 万";
+  return String(n);
+}
+
+function fmtInt(n) {
+  return (Number(n) || 0).toLocaleString("zh-CN");
+}
+
+// 相对时间：「x 分钟前」
+function relTime(ms) {
+  if (!ms) return "从未";
+  var diff = Date.now() - Number(ms);
+  if (diff < 60e3) return "刚刚";
+  if (diff < 3600e3) return Math.floor(diff / 60e3) + " 分钟前";
+  if (diff < 86400e3) return Math.floor(diff / 3600e3) + " 小时前";
+  return Math.floor(diff / 86400e3) + " 天前";
+}
+
+var SOURCE_NAMES = { zcode: "ZCode", codex: "Codex", claude: "Claude", cursor: "Cursor" };
+function sourceName(s) { return SOURCE_NAMES[s] || s || "未知来源"; }
+
+var WINDOW_NAMES = { hour5: "5 小时", weekly: "每周", cursor_auto: "Auto", cursor_api: "API" };
+function windowName(k) { return WINDOW_NAMES[k] || k; }
+
+function projectName(p) {
+  if (p.key === "__unknown__") return p.display || "未知项目";
+  return p.display || p.key || "未知项目";
+}
+
+// 用量进度条颜色：绿 → 琥珀 → 红
+function pctLevel(p) {
+  if (p <= 60) return "pct-green";
+  if (p <= 80) return "pct-amber";
+  return "pct-red";
+}
+
+function showToast(msg) {
+  var t = $("toast");
+  t.textContent = msg;
+  t.classList.remove("hidden");
+  clearTimeout(showToast._h);
+  showToast._h = setTimeout(function () { t.classList.add("hidden"); }, 2200);
+}
+
+// ===== API =====
+
+function api(path) {
+  return fetch(path, { headers: { "Authorization": "Bearer " + token } }).then(function (res) {
+    if (res.status === 401) {
+      logout();
+      throw new Error("令牌已失效，请重新输入");
+    }
+    if (!res.ok) throw new Error("服务端返回 " + res.status);
+    return res.json();
+  });
+}
+
+// ===== 登录 / 登出 =====
+
+function logout() {
+  token = "";
+  localStorage.removeItem(TOKEN_KEY);
+  if (timer) { clearInterval(timer); timer = null; }
+  $("main").classList.add("hidden");
+  $("login").classList.remove("hidden");
+  $("token-input").value = "";
+  $("login-err").textContent = "";
+}
+
+function tryLogin(input) {
+  var btn = $("btn-login");
+  btn.disabled = true;
+  $("login-err").textContent = "";
+  fetch("/view/check", { headers: { "Authorization": "Bearer " + input } }).then(function (res) {
+    if (res.ok) {
+      token = input;
+      localStorage.setItem(TOKEN_KEY, input);
+      $("login").classList.add("hidden");
+      $("main").classList.remove("hidden");
+      startAutoRefresh();
+      loadOverview();
+    } else {
+      $("login-err").textContent = res.status === 401 ? "令牌不正确，请检查后重试" : "服务端异常（" + res.status + "）";
+    }
+  }).catch(function () {
+    $("login-err").textContent = "无法连接服务端，请检查地址与网络";
+  }).finally(function () {
+    btn.disabled = false;
+  });
+}
+
+// ===== 数据加载与渲染 =====
+
+function loadOverview() {
+  if (loading) return;
+  loading = true;
+  $("btn-refresh").classList.add("spin");
+  api("/overview" + todayStartQuery()).then(function (d) {
+    data = d;
+    $("loading").classList.add("hidden");
+    $("error").classList.add("hidden");
+    render();
+  }).catch(function (e) {
+    if (token) {
+      $("loading").classList.add("hidden");
+      $("error-text").textContent = "加载失败：" + e.message;
+      $("error").classList.remove("hidden");
+    }
+  }).finally(function () {
+    loading = false;
+    $("btn-refresh").classList.remove("spin");
+  });
+}
+
+// 本地时区的今日零点：让服务端按访客时区统计「今日」
+function todayStartQuery() {
+  var d = new Date();
+  var local = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  return "?today_start=" + local;
+}
+
+function render() {
+  if (!data) return;
+  $("last-sync").textContent = relTime(data.last_synced_at);
+  renderPeriods();
+  renderSources();
+  renderQuota();
+  renderProjects();
+  renderDevices();
+}
+
+function renderPeriods() {
+  var defs = [
+    ["today", "今日", data.today],
+    ["last_7d", "近 7 天", data.last_7d],
+    ["last_30d", "近 30 天", data.last_30d]
+  ];
+  $("periods").innerHTML = defs.map(function (d) {
+    var o = (d[2] && d[2].overall) || {};
+    return '<div class="period-card">' +
+      '<div class="label">' + d[1] + "</div>" +
+      '<div class="tokens">' + fmtTokens(o.total_tokens) + "</div>" +
+      '<div class="req">' + fmtInt(o.requests) + " 次请求</div>" +
+      "</div>";
+  }).join("");
+}
+
+// 各源分组（近 7 天，由 by_model 按 source 聚合，与 overall 口径一致）
+function renderSources() {
+  var body = $("sources-card").querySelector(".body");
+  var byModel = (data.last_7d && data.last_7d.by_model) || [];
+  if (!byModel.length) {
+    body.innerHTML = '<div class="empty">暂无数据，等待设备同步</div>';
+    return;
+  }
+  var bySource = {};
+  byModel.forEach(function (m) {
+    var s = bySource[m.source];
+    if (!s) s = bySource[m.source] = { tokens: 0, requests: 0, models: [] };
+    s.tokens += Number(m.total_tokens) || 0;
+    s.requests += Number(m.requests) || 0;
+    s.models.push(m);
+  });
+  var sources = Object.keys(bySource).map(function (k) { return bySource[k]; });
+  var total = sources.reduce(function (a, s) { return a + s.tokens; }, 0);
+  var html = "";
+  Object.keys(bySource).sort(function (a, b) { return bySource[b].tokens - bySource[a].tokens; })
+    .forEach(function (k) {
+      var s = bySource[k];
+      var pct = total > 0 ? Math.round(s.tokens / total * 100) : 0;
+      html += '<div class="source-item">' +
+        '<div class="source-head"><span class="name">' + esc(sourceName(k)) + "</span>" +
+        "<span>" + fmtTokens(s.tokens) + " · " + fmtInt(s.requests) + " 次</span></div>" +
+        '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%"></div></div>' +
+        '<div class="model-rows">' +
+        s.models.sort(function (a, b) { return (b.total_tokens || 0) - (a.total_tokens || 0); })
+          .slice(0, 3).map(function (m) {
+            return '<div class="model-row"><span class="m">' + esc(m.model_id || "未知模型") + "</span>" +
+              "<span>" + fmtTokens(m.total_tokens) + "</span></div>";
+          }).join("") +
+        "</div></div>";
+    });
+  body.innerHTML = html;
+}
+
+// 订阅额度：各源最新快照的百分比条
+function renderQuota() {
+  var body = $("quota-card").querySelector(".body");
+  var q = data.quota_latest || {};
+  var devNames = {};
+  (data.devices || []).forEach(function (d) { devNames[d.device_id] = d.device_name; });
+  var html = "";
+
+  // Z.ai 快照（weekly / 5h / mcp）
+  var zai = q.zai;
+  if (zai) {
+    [
+      ["每周额度", zai.weekly_pct],
+      ["5 小时额度", zai.hour5_pct],
+      ["MCP 额度", zai.mcp_pct]
+    ].forEach(function (row) {
+      var p = Math.min(100, Math.max(0, Number(row[1]) || 0));
+      // zai.level 来自快照数据，quotaRow 内部已统一 esc，这里不再转义
+      html += quotaRow("Z.ai" + (zai.level ? " · " + zai.level : ""), row[0], p);
+    });
+  }
+
+  // Agent 快照（codex / claude / cursor，各源最新一条）
+  var agent = q.agent || {};
+  Object.keys(agent).forEach(function (src) {
+    var snaps = agent[src] || [];
+    snaps.forEach(function (sn) {
+      // plan_type / 设备名均来自客户端上传，quotaRow 内部已统一 esc，不再转义
+      var suffix = (sn.plan_type ? " · " + sn.plan_type : "") +
+        (snaps.length > 1 && sn.device_id && devNames[sn.device_id] ? " · " + devNames[sn.device_id] : "");
+      (sn.windows || []).forEach(function (w) {
+        var p = Math.min(100, Math.max(0, Number(w.used_pct) || 0));
+        html += quotaRow(sourceName(src) + suffix, windowName(w.key), p);
+      });
+    });
+  });
+
+  body.innerHTML = html || '<div class="empty">暂无额度快照</div>';
+}
+
+function quotaRow(title, windowLabel, pct) {
+  // title 可能包含客户端上传的 source / plan_type 等任意字符串（未知 source
+  // 会被 sourceName 原样返回），统一在此 esc() 后再拼入 innerHTML，防止 XSS；
+  // 调用方因此不需要（也不应该）再对 title 做转义。
+  return '<div class="quota-item ' + pctLevel(pct) + '">' +
+    '<div class="quota-head"><span>' + esc(title) + " · " + esc(windowLabel) + "</span>" +
+    '<span class="pct">' + Math.round(pct) + "%</span></div>" +
+    '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%"></div></div>' +
+    "</div>";
+}
+
+// 项目 Top10（近 7 天，横条形）
+function renderProjects() {
+  var body = $("projects-card").querySelector(".body");
+  var list = data.projects_top || [];
+  if (!list.length) {
+    body.innerHTML = '<div class="empty">暂无项目数据（需客户端升级到 proto 5）</div>';
+    return;
+  }
+  var max = list[0].total_tokens || 1;
+  body.innerHTML = list.slice(0, 10).map(function (p) {
+    var pct = Math.round((p.total_tokens || 0) / (max || 1) * 100);
+    var sessions = p.by_source.reduce(function (a, s) { return Math.max(a, Number(s.sessions) || 0); }, 0);
+    return '<div class="proj-item">' +
+      '<div class="proj-head"><span class="name">' + esc(projectName(p)) + "</span>" +
+      "<span>" + fmtTokens(p.total_tokens) + "</span></div>" +
+      '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%"></div></div>' +
+      '<div class="proj-sub">' + fmtInt(p.requests) + " 次请求" +
+      (sessions > 0 ? " · " + fmtInt(sessions) + " 个会话" : "") +
+      "</div></div>";
+  }).join("");
+}
+
+function renderDevices() {
+  var body = $("devices-card").querySelector(".body");
+  var list = data.devices || [];
+  if (!list.length) {
+    body.innerHTML = '<div class="empty">暂无设备</div>';
+    return;
+  }
+  body.innerHTML = list.map(function (d) {
+    return '<div class="dev-row"><span class="name">' + esc(d.device_name) + "</span>" +
+      '<span class="meta">' + fmtInt(d.record_count) + " 条 · " +
+      (d.last_uploaded_at ? relTime(d.last_uploaded_at) : "从未上传") + "</span></div>";
+  }).join("");
+}
+
+// ===== 启动 / 刷新 =====
+
+function startAutoRefresh() {
+  if (timer) clearInterval(timer);
+  timer = setInterval(function () {
+    if (!document.hidden) loadOverview();
+  }, REFRESH_MS);
+}
+
+function bindEvents() {
+  $("btn-login").addEventListener("click", function () {
+    var v = $("token-input").value.trim();
+    if (!v) { $("login-err").textContent = "请输入访问令牌"; return; }
+    tryLogin(v);
+  });
+  $("token-input").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") $("btn-login").click();
+  });
+  $("btn-refresh").addEventListener("click", function () {
+    loadOverview();
+    showToast("已刷新");
+  });
+  $("btn-retry").addEventListener("click", loadOverview);
+
+  // 简单下拉刷新：顶部继续下拉超过 64px 触发
+  var startY = 0, pulling = false;
+  document.addEventListener("touchstart", function (e) {
+    if (!data) return;
+    startY = e.touches[0].clientY;
+    pulling = window.scrollY <= 0;
+  }, { passive: true });
+  document.addEventListener("touchmove", function (e) {
+    if (!pulling) return;
+    var dist = e.touches[0].clientY - startY;
+    $("pull-tip").textContent = dist > 64 ? "松开刷新" : "下拉刷新";
+    $("pull-tip").classList.toggle("show", dist > 24 && window.scrollY <= 0);
+  }, { passive: true });
+  document.addEventListener("touchend", function (e) {
+    if (!pulling) return;
+    var dist = (e.changedTouches[0] || {}).clientY - startY;
+    $("pull-tip").classList.remove("show");
+    if (dist > 64 && window.scrollY <= 0) loadOverview();
+    pulling = false;
+  });
+}
+
+function init() {
+  bindEvents();
+  if (token) {
+    // 本地已有 token：先校验再进入，401 时 logout 回登录页
+    fetch("/view/check", { headers: { "Authorization": "Bearer " + token } }).then(function (res) {
+      if (res.ok) {
+        $("main").classList.remove("hidden");
+        startAutoRefresh();
+        loadOverview();
+      } else {
+        logout();
+      }
+    }).catch(function () {
+      $("login-err").textContent = "无法连接服务端，请检查地址与网络";
+      $("login").classList.remove("hidden");
+    });
+  } else {
+    $("login").classList.remove("hidden");
+  }
+}
+
+init();
+</script>
+</body>
+</html>

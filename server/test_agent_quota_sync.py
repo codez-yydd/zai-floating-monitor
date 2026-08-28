@@ -109,7 +109,7 @@ class AgentQuotaSyncTest(unittest.TestCase):
         )
         body = response.get_json()
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(body["proto"], 3)
+        self.assertEqual(body["proto"], 5)
         self.assertEqual(body["accepted"], 0)
         self.assertEqual(body["accepted_snapshots"], 1)
         self.assertEqual(body["max_snapshot_ts"], 100)
@@ -150,7 +150,7 @@ class AgentQuotaSyncTest(unittest.TestCase):
         )
         body = response.get_json()
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(body["proto"], 3)
+        self.assertEqual(body["proto"], 5)
         self.assertEqual(body["accepted_agent_quota_snapshots"], 0)
         self.assertIsNone(body["max_agent_quota_snapshot_ts"])
 
