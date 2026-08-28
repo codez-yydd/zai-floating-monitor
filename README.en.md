@@ -56,14 +56,38 @@ Both repositories have exactly the same content — the latest version can be ob
 
 ## 📸 Screenshots
 
-| Preview | Description |
-|:---:|:---|
-| ![Summary view](doc/img/summary.png) | **Summary view** — Total cost / tokens across services & subscription quotas |
-| ![Z.ai view](doc/img/zai-quota.png) | **Z.ai view** — Coding Plan 5-hour / weekly / MCP quotas |
-| ![Trend & model ranking](doc/img/summary-trend.png) | **Trend & model ranking** — Hourly usage trend and model ranking |
-| ![Cursor view](doc/img/cursor.png) | **Cursor view** — Pro / Auto / API quotas & usage stats |
-| ![Pricing settings](doc/img/settings.png) | **Pricing settings** — USD unit prices, FX rate & global hotkey |
-| ![Device sync](doc/img/sync.png) | **Device sync** — Incremental multi-device sync & data management |
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <img src="doc/img/summary.png" width="320" alt="Summary view"/><br/>
+      <b>Summary view</b> — Total cost / tokens across services & subscription quotas
+    </td>
+    <td width="50%" align="center">
+      <img src="doc/img/zai-quota.png" width="320" alt="Z.ai view"/><br/>
+      <b>Z.ai view</b> — Coding Plan 5-hour / weekly / MCP quotas
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <img src="doc/img/summary-trend.png" width="320" alt="Trend & model ranking"/><br/>
+      <b>Trend & model ranking</b> — Hourly usage trend and model ranking
+    </td>
+    <td width="50%" align="center">
+      <img src="doc/img/cursor.png" width="320" alt="Cursor view"/><br/>
+      <b>Cursor view</b> — Pro / Auto / API quotas & usage stats
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <img src="doc/img/settings.png" width="320" alt="Pricing settings"/><br/>
+      <b>Pricing settings</b> — USD unit prices, FX rate & global hotkey
+    </td>
+    <td width="50%" align="center">
+      <img src="doc/img/sync.png" width="320" alt="Device sync"/><br/>
+      <b>Device sync</b> — Incremental multi-device sync & data management
+    </td>
+  </tr>
+</table>
 
 ---
 

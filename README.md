@@ -56,14 +56,38 @@
 
 ## 📸 界面截图
 
-| 预览 | 说明 |
-|:---:|:---|
-| ![汇总视图](doc/img/summary.png) | **汇总视图** — 多服务合计花费 / Token 与订阅额度 |
-| ![Z.ai 视图](doc/img/zai-quota.png) | **Z.ai 视图** — Coding Plan 5 小时 / 每周 / MCP 额度 |
-| ![趋势与模型排行](doc/img/summary-trend.png) | **趋势与模型排行** — 按时段用量趋势与模型排行 |
-| ![Cursor 视图](doc/img/cursor.png) | **Cursor 视图** — Pro / Auto / API 额度与用量统计 |
-| ![价格设置](doc/img/settings.png) | **价格设置** — 美元单价、汇率折算与全局快捷键 |
-| ![设备同步](doc/img/sync.png) | **设备同步** — 多设备增量同步与数据管理 |
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <img src="doc/img/summary.png" width="320" alt="汇总视图"/><br/>
+      <b>汇总视图</b> — 多服务合计花费 / Token 与订阅额度
+    </td>
+    <td width="50%" align="center">
+      <img src="doc/img/zai-quota.png" width="320" alt="Z.ai 视图"/><br/>
+      <b>Z.ai 视图</b> — Coding Plan 5 小时 / 每周 / MCP 额度
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <img src="doc/img/summary-trend.png" width="320" alt="趋势与模型排行"/><br/>
+      <b>趋势与模型排行</b> — 按时段用量趋势与模型排行
+    </td>
+    <td width="50%" align="center">
+      <img src="doc/img/cursor.png" width="320" alt="Cursor 视图"/><br/>
+      <b>Cursor 视图</b> — Pro / Auto / API 额度与用量统计
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <img src="doc/img/settings.png" width="320" alt="价格设置"/><br/>
+      <b>价格设置</b> — 美元单价、汇率折算与全局快捷键
+    </td>
+    <td width="50%" align="center">
+      <img src="doc/img/sync.png" width="320" alt="设备同步"/><br/>
+      <b>设备同步</b> — 多设备增量同步与数据管理
+    </td>
+  </tr>
+</table>
 
 ---
 
