@@ -644,9 +644,14 @@ pub const EFFECTS_JS: &str = r#"// =============================================
 /// store::ensure_versioned_template）。风格与 effects.js 同款：自愈、
 /// 静默失败、空值防御；DOM 选择器集中在头部常量，便于实机比对调整。
 pub const USAGE_JS: &str = r#"// ============================================================
-// ZBAR-THEME-V18
+// ZBAR-THEME-V19
 // ZBar Agent 对话页用量统计条（由 ZBar 落盘并随版本升级覆盖）
 // ============================================================
+// V19 变更（新增每轮统计条开关参数 usage_turn_bar，默认开启）：renderAll
+//   第二遍渲染前统一读 --zbar-usage-turn-bar（variables.css 渲染 1/0，
+//   变量缺失视为开启，兼容旧 variables.css），关闭时对全部轮节点
+//   removeRow 并跳过 renderOne（removeRow 幂等，已渲染行随关闭清掉、
+//   开启后自动恢复）；估算管线 syncDyn 与会话条不受影响。
 // V18 变更（修复新建任务后（空会话）会话累计条停留在上一个会话数据：
 //   renderAll 开头无 [data-turn-id] 节点时直接早退，renderSessionBar
 //   永不执行，V17 修复的容器判定本身正确但该分支根本到不了会话条渲
@@ -996,6 +1001,7 @@ pub const USAGE_JS: &str = r#"// ===============================================
     修改两处——本常量（文档对照）与 ensureStyle 的 padding-top 规则 */
   var SESSION_BAR_Z = 30; /* 会话条 z-index：适度抬高，不遮挡弹层 */
   var VAR_SESSION_BAR = "--zbar-usage-session-bar"; /* 开关变量（variables.css 渲染 1/0） */
+  var VAR_TURN_BAR = "--zbar-usage-turn-bar"; /* 每轮统计条开关变量（variables.css 渲染 1/0） */
   var TOKEN_CHARS = 3.5; /* 输出 token 估算系数：字符数/token（中英混合经验值，实机可调） */
   var DYN_TICK_MS = 200; /* 动态段刷新周期（每周期采样一次 textContent.length 差分） */
   var SPEED_WINDOW_MS = 1500; /* 速度滑动窗口（1~2 秒，平滑防抖动） */
@@ -1386,6 +1392,21 @@ pub const USAGE_JS: &str = r#"// ===============================================
       var v = (
         getComputedStyle(document.documentElement).getPropertyValue(
           VAR_SESSION_BAR
+        ) || ""
+      ).trim();
+      return v !== "0";
+    } catch (e) {
+      return true; /* 读不到变量（旧 variables.css）按默认开启 */
+    }
+  }
+
+  /* V19：每轮统计条开关（镜像 sessionBarEnabled），renderAll 第二遍渲染
+   * 前统一读取（单次 getComputedStyle，避免逐节点重复读） */
+  function turnBarEnabled() {
+    try {
+      var v = (
+        getComputedStyle(document.documentElement).getPropertyValue(
+          VAR_TURN_BAR
         ) || ""
       ).trim();
       return v !== "0";
@@ -1851,10 +1872,19 @@ pub const USAGE_JS: &str = r#"// ===============================================
     var activeMap = findLiveNodes();
     /* 估算目标管理（V9 多目标）：依最新判定建立/重建/清理各会话目标 */
     syncDyn(activeMap);
-    /* 第二遍：逐节点渲染（仅"最后一个"节点出内容，其余节点清旧行） */
+    /* 第二遍：逐节点渲染（仅"最后一个"节点出内容，其余节点清旧行）。
+     * V19：每轮统计条开关——循环前读一次 --zbar-usage-turn-bar（变量
+     * 缺失视为开启，兼容旧 variables.css），关闭时对全部轮节点
+     * removeRow 并跳过 renderOne（幂等清掉已渲染行，开启后自动恢复）；
+     * syncDyn 估算目标与会话条管线不受影响 */
+    var turnBarOn = turnBarEnabled();
     for (var i = 0; i < nodes.length; i++) {
       var id = nodes[i].getAttribute(ATTR_TURN_ID);
       if (!id) continue;
+      if (!turnBarOn) {
+        removeRow(nodes[i], id);
+        continue;
+      }
       renderOne(nodes[i], id, lastOf[id] === nodes[i], activeMap);
     }
     /* 虚拟列表回收：节点从 DOM 消失（连带统计条断连）即清缓存不残留 */
@@ -2010,6 +2040,10 @@ pub fn file_url(path: &Path) -> String {
 /// 参数 usage_session_bar 渲染 1/0）：usage.js V5 起读它决定是否渲染
 /// 会话条（变量缺失视为开启，与默认值 true 一致），改开关约 1 秒随
 /// 热重载生效。
+/// --zbar-usage-turn-bar 为每轮末尾统计条的开关（V19 新增，由用户参数
+/// usage_turn_bar 渲染 1/0）：usage.js V19 起 renderAll 第二遍渲染前读它
+/// 决定是否渲染每轮条（变量缺失视为开启，与默认值 true 一致），同样随
+/// 每秒热重载即时生效。
 pub fn render_variables_css(params: &ThemeParams, wallpaper_url: &str) -> String {
     format!(
         "/* ZBar 自动生成的主题变量，请勿手工编辑 */\n\
@@ -2028,6 +2062,7 @@ pub fn render_variables_css(params: &ThemeParams, wallpaper_url: &str) -> String
          \x20 --zbar-usage-font-size: {usage_font_size}px;\n\
          \x20 --zbar-usage-opacity: {usage_opacity};\n\
          \x20 --zbar-usage-session-bar: {usage_session_bar};\n\
+         \x20 --zbar-usage-turn-bar: {usage_turn_bar};\n\
          \x20 --zbar-playback-rate: {rate};\n\
          }}\n",
         url = wallpaper_url,
@@ -2043,6 +2078,7 @@ pub fn render_variables_css(params: &ThemeParams, wallpaper_url: &str) -> String
         usage_font_size = params.usage_font_size,
         usage_opacity = params.usage_opacity,
         usage_session_bar = if params.usage_session_bar { 1 } else { 0 },
+        usage_turn_bar = if params.usage_turn_bar { 1 } else { 0 },
         rate = params.playback_rate,
     )
 }
@@ -2291,6 +2327,7 @@ mod tests {
             "--zbar-usage-font-size",
             "--zbar-usage-opacity",
             "--zbar-usage-session-bar",
+            "--zbar-usage-turn-bar",
             "--zbar-playback-rate",
         ] {
             assert!(css.contains(var), "variables.css 缺少变量 {var}");
@@ -2312,6 +2349,7 @@ mod tests {
         assert!(css.contains("--zbar-usage-font-size: 10px;"));
         assert!(css.contains("--zbar-usage-opacity: 0.55;"));
         assert!(css.contains("--zbar-usage-session-bar: 1;"), "{css}");
+        assert!(css.contains("--zbar-usage-turn-bar: 1;"), "{css}");
         assert!(css.contains("--zbar-playback-rate: 1;"));
         // 非 ASCII 壁纸名在 url 里必须已编码（不出现裸中文）
         assert!(!css.contains("我的壁纸"));
@@ -2343,6 +2381,16 @@ mod tests {
         p.usage_session_bar = true;
         let css = render_variables_css(&p, url);
         assert!(css.contains("--zbar-usage-session-bar: 1;"), "{css}");
+
+        // V19：每轮统计条开关同样按参数渲染 1/0（关闭时 renderAll 对
+        // 全部轮节点 removeRow 并跳过 renderOne，随热重载约 1 秒生效）
+        let mut p = ThemeParams::default();
+        p.usage_turn_bar = false;
+        let css = render_variables_css(&p, url);
+        assert!(css.contains("--zbar-usage-turn-bar: 0;"), "{css}");
+        p.usage_turn_bar = true;
+        let css = render_variables_css(&p, url);
+        assert!(css.contains("--zbar-usage-turn-bar: 1;"), "{css}");
     }
 
     #[test]
@@ -2360,7 +2408,11 @@ mod tests {
         assert!(!THEME_CSS.contains("ZBAR-THEME-V9"), "版本头应已升到 V10");
         assert!(EFFECTS_JS.contains("ZBAR-THEME-V5"));
         assert!(!EFFECTS_JS.contains("ZBAR-THEME-V4"), "版本头应已升到 V5");
-        // usage.js V18（修复新建任务后（空会话）会话累计条停留在上一个
+        // usage.js V19（新增每轮统计条开关参数 usage_turn_bar（默认
+        // 开启）：renderAll 第二遍渲染前统一读 --zbar-usage-turn-bar（变
+        // 量缺失视为开启），关闭时对全部轮节点 removeRow 并跳过 renderOne，
+        // syncDyn 与会话条不受影响）；V18 修复新建任务后（空会话）会话
+        // 累计条停留在上一个
         // 会话数据：renderAll 无轮节点分支早退导致 renderSessionBar 永
         // 不执行，该分支补 removeBar；V17 修复新建任务后会话累计条不消
         // 失、数据不重置：currentSessionId 改为焦点优先+可见优先的容器
@@ -2377,10 +2429,25 @@ mod tests {
         // 占位枯萎清理；V9 子代理消耗实时化：document 级扫描 + 多容器
         // 活动轮 + 主轮 live 行 sub 合计 + 会话条 Σ 跳过 m 行；V8 启动
         // 窗口实时渲染；V7 请求图标 ⟳ → ×；V6 生成过程实时跳动）
-        assert!(USAGE_JS.contains("ZBAR-THEME-V18"));
-        assert!(!USAGE_JS.contains("ZBAR-THEME-V17"), "版本头应已升到 V18");
-        assert!(!USAGE_JS.contains("ZBAR-THEME-V16"), "版本头不应回退");
+        assert!(USAGE_JS.contains("ZBAR-THEME-V19"));
+        assert!(!USAGE_JS.contains("ZBAR-THEME-V18"), "版本头应已升到 V19");
+        assert!(!USAGE_JS.contains("ZBAR-THEME-V17"), "版本头不应回退");
         assert!(!USAGE_JS.contains("ZBAR-THEME-V10"), "版本头不应回退");
+        // V19 每轮统计条开关特征：开关变量 + 镜像读取函数 + renderAll
+        // 第二遍渲染循环的关闭分支（对全部轮节点 removeRow 并跳过
+        // renderOne）
+        assert!(
+            USAGE_JS.contains("VAR_TURN_BAR = \"--zbar-usage-turn-bar\""),
+            "每轮统计条开关应读 --zbar-usage-turn-bar 变量（variables.css 渲染 1/0）"
+        );
+        assert!(
+            USAGE_JS.contains("function turnBarEnabled"),
+            "每轮统计条开关应有独立读取函数（镜像 sessionBarEnabled）"
+        );
+        assert!(
+            USAGE_JS.contains("removeRow(nodes[i], id);"),
+            "renderAll 关闭分支应对全部轮节点 removeRow 并跳过 renderOne"
+        );
         // V18 空会话修复特征：renderAll 无轮节点早退分支必须调用
         // removeBar，否则新建任务/清空对话后会话条停留在上一个会话的
         // 累计值永不消失。切片范围：renderAll 函数体内空轮分支起点至

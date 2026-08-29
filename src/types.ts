@@ -702,6 +702,10 @@ export interface ThemeParams {
    *  会话累计用量（Σ ↑↓⟲×），流式生成时实时显示输出速度与估算增量；
    *  经 variables.css --zbar-usage-session-bar（1/0）热重载生效 */
   usageSessionBar: boolean;
+  /** 每轮统计条开关（默认 true）：在 ZCode 每轮对话末尾显示该轮用量
+   *  （↑输入 ↓输出 · ⟲缓存读 · ×请求数 · 速度 · TTFT）；经 variables.css
+   *  --zbar-usage-turn-bar（1/0）热重载生效 */
+  usageTurnBar: boolean;
   /** 当前壁纸指向（未设置为 null）。相对文件名 = wallpapers/ 目录内
    *  文件（如 "default.mp4"）；绝对路径 = 直接引用该文件 */
   wallpaperFile: string | null;

@@ -616,8 +616,8 @@ export const en: typeof zh = {
     "theme.paramSidebarOpacity": "Sidebar opacity",
     "theme.paramSidebarRightOpacity": "Right panel opacity",
     "theme.paramPlaybackRate": "Playback speed",
-    // Usage bar section (standalone card: font size + opacity + session
-    // total toggle, live reload)
+    // Usage bar section (standalone card: font size + opacity + per-turn /
+    // session total toggles, live reload)
     "theme.usageTitle": "Usage Bar",
     "theme.usageHint":
       "Look of the per-turn usage line (↑ input ↓ output · × requests · speed) at the end of each ZCode chat turn. Sliders save as you drag and apply live within ~1s.",
@@ -630,6 +630,10 @@ export const en: typeof zh = {
     "theme.usageSessionBar": "Session total bar",
     "theme.usageSessionBarHint":
       "Pins the running session total (total tokens plus the input/output/cache read/request breakdown) above the chat input, with live output speed and estimated growth while streaming",
+    // Per-turn usage bar toggle (usage.js V19: usage line under each turn)
+    "theme.usageTurnBar": "Per-turn usage bar",
+    "theme.usageTurnBarHint":
+      "Shows each turn's usage at the end of every chat turn (↑ input ↓ output · ⟲ cache read · × requests · speed · TTFT); font size and opacity follow the sliders above",
     // Symbol legend (mirrors the usage.js line format)
     "theme.usageLegend":
       "↑ input (non-cached) · ↓ output · ⟲ cache read · × model requests · t/s output speed · TTFT time to first token · Σ session total tokens (input+output+cache read) · ≈ in-flight output estimate (excluded from totals)",

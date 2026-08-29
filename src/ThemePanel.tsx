@@ -78,7 +78,7 @@ const STAGE_KEYS: Record<string, MessageKey> = {
 interface SliderDef {
   key: keyof Omit<
     ThemeParams,
-    "wallpaperFile" | "wallpaperDir" | "usageSessionBar"
+    "wallpaperFile" | "wallpaperDir" | "usageSessionBar" | "usageTurnBar"
   >;
   labelKey: MessageKey;
   /** 可选滑块说明（渲染在滑块下方的小字；仅部分参数提供） */
@@ -553,6 +553,19 @@ export function ThemePanel({ onBack }: Props) {
     const cur = paramsRef.current;
     if (!cur) return;
     const next = { ...cur, usageSessionBar: checked };
+    setParams(next);
+    scheduleParamsSave(next);
+  };
+
+  /**
+   * 每轮统计条开关变更（布尔参数，不走滑块刻度换算）：本地即时反馈，
+   * 防抖保存管道与滑块共用；Rust 侧落盘后经 variables.css 的
+   * --zbar-usage-turn-bar 热重载透传给注入侧 usage.js（约 1 秒生效）。
+   */
+  const handleUsageTurnBar = (checked: boolean) => {
+    const cur = paramsRef.current;
+    if (!cur) return;
+    const next = { ...cur, usageTurnBar: checked };
     setParams(next);
     scheduleParamsSave(next);
   };
@@ -1095,8 +1108,8 @@ export function ThemePanel({ onBack }: Props) {
           )}
 
           {/* 用量统计条区：独立于壁纸效果参数的配置区域（调整 ZCode 对话内
-              每轮末尾统计条的字号与不透明度，并可开关会话累计条），仅已
-              安装且参数读取成功时可用；保存走同一防抖管道
+              每轮末尾统计条的字号与不透明度，并可开关每轮统计条与会话
+              累计条），仅已安装且参数读取成功时可用；保存走同一防抖管道
               （set_agent_theme_params 整体落盘），保存成功反馈复用
               paramsSavedFlash */}
           {state.installed && params && (
@@ -1127,11 +1140,34 @@ export function ThemePanel({ onBack }: Props) {
                   />
                 ))}
 
+                {/* 开关组（首行分隔线在滑块与开关组之间，两开关行之间
+                    不再加分隔线）：每轮统计条开关（usage.js V19）——ZCode
+                    对话内每轮回复末尾的统计条；字号/不透明度复用上方两个
+                    滑块，开关经 variables.css 热重载生效（样式同设置页
+                    既有 checkbox 模式） */}
+                <label className="flex items-center justify-between gap-2 cursor-pointer pt-2 border-t border-slate-900/6">
+                  <span className="min-w-0">
+                    <span className="block text-[10px] text-slate-600">
+                      {t("theme.usageTurnBar")}
+                    </span>
+                    <span className="block text-[9px] text-slate-500 leading-relaxed">
+                      {t("theme.usageTurnBarHint")}
+                    </span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={params.usageTurnBar}
+                    disabled={actionsDisabled}
+                    onChange={(e) => handleUsageTurnBar(e.target.checked)}
+                    className="accent-sky-500 h-3 w-3 shrink-0 disabled:opacity-40"
+                  />
+                </label>
+
                 {/* 会话累计条开关（usage.js V5）：固定悬浮于 ZCode 对话
                     输入框上方的会话级实时统计条，流式生成时动态跳动；
                     字号/不透明度复用上方两个滑块，开关经 variables.css
-                    热重载生效（样式同设置页既有 checkbox 模式） */}
-                <label className="flex items-center justify-between gap-2 cursor-pointer pt-2 border-t border-slate-900/6">
+                    热重载生效 */}
+                <label className="flex items-center justify-between gap-2 cursor-pointer pt-2">
                   <span className="min-w-0">
                     <span className="block text-[10px] text-slate-600">
                       {t("theme.usageSessionBar")}

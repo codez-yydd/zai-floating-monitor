@@ -114,6 +114,11 @@ pub const DEFAULT_USAGE_OPACITY: f64 = 0.55;
 /// 流式生成时动态跳动），默认开启；开关经 variables.css 的
 /// --zbar-usage-session-bar（1/0）随热重载即时生效
 pub const DEFAULT_USAGE_SESSION_BAR: bool = true;
+/// 每轮末尾统计条默认开关（用户可调参数 usage_turn_bar）：ZCode 对话内
+/// 每轮回复下方的用量统计行（↑输入 ↓输出 · ⟲缓存读 · ×请求数 · t/s ·
+/// TTFT），默认开启；usage.js V19 起消费 --zbar-usage-turn-bar（1/0）
+/// 决定渲染，随热重载即时生效
+pub const DEFAULT_USAGE_TURN_BAR: bool = true;
 
 /// 参数范围常量：(最小, 最大)
 pub const WP_BRIGHTNESS_RANGE: (f64, f64) = (0.4, 1.1);
@@ -181,6 +186,12 @@ pub struct ThemeParams {
     /// 的 --zbar-usage-session-bar（1/0）热重载即时生效（usage.js 侧
     /// 变量缺失视为开启，兼容旧 variables.css）
     pub usage_session_bar: bool,
+    /// 每轮末尾统计条开关（默认 true）：控制 ZCode 对话内每轮回复下方
+    /// 统计条（↑输入 ↓输出 · ⟲缓存读 · ×请求数 · t/s · TTFT）的渲染，
+    /// 字号/不透明度复用 usage_font_size / usage_opacity；开关经
+    /// variables.css 的 --zbar-usage-turn-bar（1/0）热重载即时生效
+    /// （usage.js 侧变量缺失视为开启，兼容旧 variables.css）
+    pub usage_turn_bar: bool,
     /// 当前壁纸指向。语义（V3 起扩展）：
     /// - 绝对路径（以 / 或 Windows 盘符开头）→ 直接引用该文件
     /// - 相对文件名 → wallpapers/ 目录下的文件（如 "default.mp4"）
@@ -206,6 +217,7 @@ impl Default for ThemeParams {
             usage_font_size: DEFAULT_USAGE_FONT_SIZE,
             usage_opacity: DEFAULT_USAGE_OPACITY,
             usage_session_bar: DEFAULT_USAGE_SESSION_BAR,
+            usage_turn_bar: DEFAULT_USAGE_TURN_BAR,
             wallpaper_file: Some(DEFAULT_WALLPAPER_FILE.to_string()),
             wallpaper_dir: None,
         }
@@ -898,7 +910,11 @@ pub const EFFECTS_JS_VERSION: u32 = 5;
 /// renderAll 开头无 [data-turn-id] 节点时直接早退，renderSessionBar 永
 /// 不执行（V17 的会话容器判定本身正确，但该分支根本到不了会话条渲
 /// 染），空轮分支补 removeBar()：会话内无任何轮节点即移除会话条。
-pub const USAGE_JS_VERSION: u32 = 18;
+/// V19：每轮统计条开关——新增参数 usage_turn_bar（默认 true），renderAll
+/// 第二遍渲染前统一读 --zbar-usage-turn-bar（变量缺失视为开启，兼容旧
+/// variables.css），关闭时对全部轮节点 removeRow 并跳过 renderOne，估
+/// 算管线 syncDyn 与会话条不受影响。
+pub const USAGE_JS_VERSION: u32 = 19;
 
 /// 版本标记的头部查找范围（字符数）：版本注释固定在文件头部，
 /// 限定查找范围避免误匹配正文中的同名字样。
@@ -1055,6 +1071,7 @@ mod tests {
         assert_eq!(default.usage_font_size, DEFAULT_USAGE_FONT_SIZE);
         assert_eq!(default.usage_opacity, DEFAULT_USAGE_OPACITY);
         assert_eq!(default.usage_session_bar, DEFAULT_USAGE_SESSION_BAR);
+        assert_eq!(default.usage_turn_bar, DEFAULT_USAGE_TURN_BAR);
         assert_eq!(default.wallpaper_file.as_deref(), Some(DEFAULT_WALLPAPER_FILE));
         assert_eq!(default.wallpaper_dir, None);
 
@@ -1067,7 +1084,7 @@ mod tests {
             "wpBrightness", "wpSaturate", "wpBlur", "maskStrength",
             "panelOpacity", "sidebarOpacity", "sidebarRightOpacity",
             "playbackRate", "baseAlpha", "textShadow",
-            "usageFontSize", "usageOpacity", "usageSessionBar",
+            "usageFontSize", "usageOpacity", "usageSessionBar", "usageTurnBar",
             "wallpaperFile", "wallpaperDir",
         ] {
             assert!(text.contains(key), "params.json 缺少字段 {key}");
@@ -1104,6 +1121,8 @@ mod tests {
         assert_eq!(p.usage_opacity, DEFAULT_USAGE_OPACITY);
         // V5 会话累计条开关：旧版 params.json 缺字段按默认开启补齐
         assert_eq!(p.usage_session_bar, DEFAULT_USAGE_SESSION_BAR);
+        // V19 每轮统计条开关：旧版 params.json 缺字段按默认开启补齐
+        assert_eq!(p.usage_turn_bar, DEFAULT_USAGE_TURN_BAR);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1140,6 +1159,37 @@ mod tests {
     }
 
     #[test]
+    fn usage_turn_bar_开关序列化与兼容() {
+        let dir = test_dir("usage-turn-bar");
+        let path = dir.join(PARAMS_FILE);
+
+        // 显式关闭 → 落盘读回保持 false（不被默认值 true 覆盖），
+        // camelCase 键名落盘
+        let mut p = ThemeParams::default();
+        p.usage_turn_bar = false;
+        write_params_file(&path, &p).unwrap();
+        let back = read_params_file(&path).unwrap();
+        assert!(!back.usage_turn_bar, "显式关闭的开关读回应保持 false");
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("\"usageTurnBar\": false"),
+            "params.json 应含 camelCase 键 usageTurnBar 且值为 false：{text}"
+        );
+        // clamp 收敛只针对数值/文本参数，开关布尔值原样保留
+        assert!(!back.clamped().usage_turn_bar, "clamped 不应改动开关值");
+
+        // 旧版 params.json 缺该字段 → serde default 补默认值 true
+        fs::write(&path, r#"{"wpBrightness":0.9,"wallpaperFile":"a.mp4"}"#).unwrap();
+        let legacy = read_params_file(&path).unwrap();
+        assert!(
+            legacy.usage_turn_bar,
+            "旧版文件缺 usageTurnBar 应按默认开启补齐"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn params_越界值被收敛() {
         let mut p = ThemeParams {
             wp_brightness: 9.0,
@@ -1155,6 +1205,7 @@ mod tests {
             usage_font_size: 99.0,
             usage_opacity: 5.0,
             usage_session_bar: false,
+            usage_turn_bar: false,
             wallpaper_file: Some("  ".into()),
             wallpaper_dir: None,
         }
