@@ -94,8 +94,8 @@ pub trait AgentApp: Send + Sync {
     fn running(&self) -> bool;
     /// 退出应用
     fn quit(&self) -> Result<(), String>;
-    /// 启动应用
-    fn launch(&self) -> bool;
+    /// 启动应用（Err 携带诊断：候选探测结果或命令退出原因）
+    fn launch(&self) -> Result<(), String>;
 }
 
 /// ZCode 桌面应用（Electron，bundle id dev.zcode.app）。
@@ -160,55 +160,75 @@ impl AgentApp for ZcodeApp {
         }
     }
 
-    fn launch(&self) -> bool {
-        #[cfg(any(target_os = "macos", windows))]
+    fn launch(&self) -> Result<(), String> {
+        #[cfg(windows)]
         {
-            crate::accounts::launch_zcode()
+            if crate::accounts::launch_zcode() {
+                Ok(())
+            } else {
+                // 分场景诊断：候选中存在真实 exe 却全部启动失败，多为安全
+                // 软件/系统策略拦截；完全找不到 exe 才是安装位置未被候选
+                // 覆盖，列出探测位置（前 3 条，超出截断加"等"）帮助定位
+                let candidates = crate::accounts::zcode_exe_candidates();
+                let existing: Vec<String> = candidates
+                    .iter()
+                    .filter(|p| p.is_file())
+                    .map(|p| p.display().to_string())
+                    .collect();
+                Err(if existing.is_empty() {
+                    let all: Vec<String> =
+                        candidates.iter().map(|p| p.display().to_string()).collect();
+                    let preview = if all.len() > 3 {
+                        format!("{} 等", all[..3].join("、"))
+                    } else {
+                        all.join("、")
+                    };
+                    format!("未找到 ZCode.exe（已尝试 {} 处：{preview}）", all.len())
+                } else {
+                    format!(
+                        "找到 ZCode.exe 但启动失败（{}），可能被安全软件或系统策略拦截",
+                        existing.join("、")
+                    )
+                })
+            }
         }
-        #[cfg(not(any(target_os = "macos", windows)))]
+        #[cfg(target_os = "macos")]
         {
-            false
+            match Command::new("open")
+                .args(["-a", crate::accounts::ZCODE_APP_NAME])
+                .output()
+            {
+                Ok(out) if out.status.success() => Ok(()),
+                Ok(out) => {
+                    // 退出码缺失（被信号终止）时给文字占位而非裸数字
+                    let code = out
+                        .status
+                        .code()
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "未知".into());
+                    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                    if stderr.is_empty() {
+                        Err(format!("open -a 退出码 {code}"))
+                    } else {
+                        Err(format!("open -a 退出码 {code}（{stderr}）"))
+                    }
+                }
+                Err(e) => Err(format!("执行 open 失败：{e}")),
+            }
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
+        {
+            Err("当前平台暂不支持该操作（仅 macOS / Windows）".into())
         }
     }
 }
 
 // ============================================================
-// Windows 安装根目录探测（纯函数拆分便于单元测试注入假目录树）
+// Windows 安装根目录探测（候选构造与校验函数已下沉 accounts：
+// windows_install_candidates / registry_install_candidates /
+// find_install_root，与 launch_zcode 的 exe 启动候选同源共用；
+// 此处只保留探测入口与缓存/现场捕获一级候选）
 // ============================================================
-
-/// Windows 安装根目录候选（按常见度排序）：
-/// `%LOCALAPPDATA%\Programs\ZCode`（用户级安装，最常见）→
-/// `%ProgramFiles%\ZCode` → `%ProgramFiles(x86)%\ZCode`（机器级安装；
-/// 环境变量未设置时再兜底固定路径 C:\Program Files\ZCode 与
-/// C:\Program Files (x86)\ZCode，覆盖 Windows 装在非 C 盘以外仍读得到
-/// 环境变量的常规场景）。
-#[cfg(windows)]
-fn windows_install_candidates() -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if let Some(base) = std::env::var_os("LOCALAPPDATA") {
-        out.push(PathBuf::from(base).join("Programs").join("ZCode"));
-    }
-    if let Some(base) = std::env::var_os("ProgramFiles") {
-        out.push(PathBuf::from(base).join("ZCode"));
-    }
-    if let Some(base) = std::env::var_os("ProgramFiles(x86)") {
-        out.push(PathBuf::from(base).join("ZCode"));
-    }
-    out.push(PathBuf::from(r"C:\Program Files\ZCode"));
-    out.push(PathBuf::from(r"C:\Program Files (x86)\ZCode"));
-    out
-}
-
-/// 从候选目录中选第一个含 `resources\app.asar` 的（Electron 应用安装根
-/// 目录的判定特征）。纯函数：candidates 由 windows_install_candidates
-/// 构造或测试注入，便于 cfg(windows) 单测构造假目录树。
-#[cfg(windows)]
-fn find_install_root(candidates: &[PathBuf]) -> Option<PathBuf> {
-    candidates
-        .iter()
-        .find(|c| c.join("resources").join("app.asar").is_file())
-        .cloned()
-}
 
 /// 一级候选：exe 路径缓存与运行中进程现场捕获。ZCode 可被 NSIS 安装器
 /// 装到任意盘符（如 D:\app\ZCode），固定候选表覆盖不了；accounts 模块的
@@ -238,97 +258,6 @@ fn cache_or_captured_install_candidates() -> Vec<PathBuf> {
     out
 }
 
-/// 判断注册表卸载表项是否属于 ZCode：DisplayName 或 UninstallString 含
-/// 关键字（不区分大小写），双字段兜底——DisplayName 由安装器写入，不同
-/// 版本/渠道措辞可能变化。纯函数，便于注入测试。
-#[cfg(windows)]
-fn is_zcode_uninstall_entry(display_name: Option<&str>, uninstall_string: Option<&str>) -> bool {
-    const KEYWORD: &str = "zcode";
-    display_name
-        .map(|s| s.to_lowercase().contains(KEYWORD))
-        .unwrap_or(false)
-        || uninstall_string
-            .map(|s| s.to_lowercase().contains(KEYWORD))
-            .unwrap_or(false)
-}
-
-/// 从 UninstallString 提取安装目录（卸载 exe 所在目录）。electron-builder
-/// 的 NSIS 卸载项实测 InstallLocation 为空、UninstallString 形如
-/// `"D:\app\ZCode\Uninstall ZCode.exe" /allusers`（带引号路径 + 参数尾巴）。
-/// 带引号时取第一对引号内的路径；无引号时按空格逐段拼接并以文件存在性
-/// 消歧（防"Program Files"这类含空格目录被截断）。解析失败返回 None；
-/// 提取结果不校验存在性，统一交 find_install_root 按 app.asar 判定。
-/// 纯函数，便于注入测试。
-#[cfg(windows)]
-fn install_dir_from_uninstall_string(s: &str) -> Option<PathBuf> {
-    let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-    if let Some(rest) = s.strip_prefix('"') {
-        let end = rest.find('"')?;
-        return PathBuf::from(&rest[..end]).parent().map(|p| p.to_path_buf());
-    }
-    // 无引号：逐段拼接直到拼出一个真实存在的文件（未命中返回 None）
-    let parts: Vec<&str> = s.split_whitespace().collect();
-    for i in 1..=parts.len() {
-        let candidate = parts[..i].join(" ");
-        if Path::new(&candidate).is_file() {
-            return PathBuf::from(candidate).parent().map(|p| p.to_path_buf());
-        }
-    }
-    None
-}
-
-/// 二级候选：注册表卸载表项。NSIS/MSI 安装器无论 per-user 还是
-/// per-machine 都会写 Uninstall 键，枚举 HKCU、HKLM、HKLM\WOW6432Node
-/// 三处视图（WOW6432Node 覆盖 32 位安装器写入的兼容视图）。安装器未
-/// 卸载干净时的残留项会在 find_install_root 的 app.asar 校验处自然
-/// 落空；枚举/读值失败静默跳过，不影响后续固定候选。
-#[cfg(windows)]
-fn registry_install_candidates() -> Vec<PathBuf> {
-    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ};
-    use winreg::RegKey;
-
-    let mut out = Vec::new();
-    for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
-        for sub in [
-            r"Software\Microsoft\Windows\CurrentVersion\Uninstall",
-            r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
-        ] {
-            let Ok(root) = RegKey::predef(hive).open_subkey_with_flags(sub, KEY_READ) else {
-                continue;
-            };
-            for guid in root.enum_keys().flatten() {
-                let Ok(entry) = root.open_subkey_with_flags(&guid, KEY_READ) else {
-                    continue;
-                };
-                let display: Option<String> = entry.get_value("DisplayName").ok();
-                let uninstall: Option<String> = entry.get_value("UninstallString").ok();
-                if !is_zcode_uninstall_entry(display.as_deref(), uninstall.as_deref()) {
-                    continue;
-                }
-                // InstallLocation 有值且目录真实存在时直接采信（部分安装器会写）
-                let install_loc: Option<String> = entry.get_value("InstallLocation").ok();
-                if let Some(dir) = install_loc
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .map(PathBuf::from)
-                    .filter(|p| p.is_dir())
-                {
-                    out.push(dir);
-                    continue;
-                }
-                if let Some(dir) = uninstall.as_deref().and_then(install_dir_from_uninstall_string)
-                {
-                    out.push(dir);
-                }
-            }
-        }
-    }
-    out
-}
-
 /// Windows 安装根目录探测入口：按"缓存/进程 → 注册表 → 固定候选"逐级
 /// 构造候选并即取即校验（find_install_root 只认 `resources\app.asar`，
 /// 判据唯一），命中即返回——缓存命中的常规路径零注册表枚举开销。全部
@@ -337,14 +266,15 @@ fn registry_install_candidates() -> Vec<PathBuf> {
 #[cfg(windows)]
 fn windows_install_root_or_default() -> PathBuf {
     let local = cache_or_captured_install_candidates();
-    if let Some(hit) = find_install_root(&local) {
+    if let Some(hit) = crate::accounts::find_install_root(&local) {
         return hit;
     }
-    let reg = registry_install_candidates();
-    if let Some(hit) = find_install_root(&reg) {
+    let reg = crate::accounts::registry_install_candidates();
+    if let Some(hit) = crate::accounts::find_install_root(&reg) {
         return hit;
     }
-    if let Some(hit) = find_install_root(&windows_install_candidates()) {
+    let fixed = crate::accounts::windows_install_candidates();
+    if let Some(hit) = crate::accounts::find_install_root(&fixed) {
         return hit;
     }
     std::env::var_os("LOCALAPPDATA")
@@ -1553,10 +1483,11 @@ fn install_steps(
 
     // ---------- ⑩ 拉起 + 存活验证 ----------
     prog.emit("launch", 95.0, None);
-    if !app.launch() {
+    if let Err(reason) = app.launch() {
+        // 先还原再报错：保证用户拿到错误时应用文件已回到原版
         restore_backup(app, prog)?;
         return Err(format!(
-            "无法启动{}（已自动还原备份）",
+            "无法启动{}：{reason}（已自动还原备份）",
             app.display_name()
         ));
     }
@@ -2042,11 +1973,7 @@ pub async fn restart_target_app(app_id: String) -> Result<(), String> {
         };
         app.quit()?;
         std::thread::sleep(Duration::from_secs(1));
-        if app.launch() {
-            Ok(())
-        } else {
-            Err(format!("启动{}失败", app.display_name()))
-        }
+        app.launch().map_err(|e| format!("启动{}失败：{e}", app.display_name()))
     })
     .await
     .map_err(|e| format!("重启任务失败：{e}"))?
@@ -2074,18 +2001,14 @@ pub async fn restart_zcode(app_id: String) -> Result<RestartResultDto, String> {
         };
         let name = app.display_name();
         if !app.running() {
-            if app.launch() {
-                return Ok(RestartResultDto { restarted: false });
-            }
-            return Err(format!("启动{name}失败"));
+            app.launch().map_err(|e| format!("启动{name}失败：{e}"))?;
+            return Ok(RestartResultDto { restarted: false });
         }
         app.quit().map_err(|e| format!("退出{name}失败：{e}"))?;
         for _ in 0..QUIT_POLL_COUNT {
             if !app.running() {
-                if app.launch() {
-                    return Ok(RestartResultDto { restarted: true });
-                }
-                return Err(format!("启动{name}失败"));
+                app.launch().map_err(|e| format!("启动{name}失败：{e}"))?;
+                return Ok(RestartResultDto { restarted: true });
             }
             std::thread::sleep(Duration::from_millis(250));
         }
@@ -3049,38 +2972,15 @@ mod tests {
 }
 
 // ============================================================
-// Windows 专属：安装根目录探测 / 原生替换器不变量 / 提权 .cmd 构造
-// （本机 macOS 不运行，随 cargo check --target x86_64-pc-windows-msvc
+// Windows 专属：原生替换器不变量 / 提权 .cmd 构造
+// （安装根目录探测与其纯函数测试已随候选构造函数下沉 accounts；
+//   本机 macOS 不运行，随 cargo check --target x86_64-pc-windows-msvc
 //   --tests 保证语法与逻辑静态正确；真机验证另行执行）
 // ============================================================
 
 #[cfg(all(windows, test))]
 mod windows_tests {
     use super::*;
-
-    /// 安装根目录探测纯函数（find_install_root）：
-    /// - 候选按顺序命中第一个含 resources\app.asar 的目录；
-    /// - 仅目录存在而无 asar 的候选不命中；全部未命中 / 空列表 → None。
-    #[test]
-    fn 安装根目录探测_选中含asar的候选() {
-        let base = std::env::temp_dir().join(format!("zbar-winroot-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&base);
-        // 候选一：目录与 resources 都在但没有 app.asar（未安装完/残留）
-        let empty = base.join("empty-install");
-        // 候选二：完整安装（resources\app.asar 存在）
-        let real = base.join("real-install");
-        fs::create_dir_all(empty.join("resources")).unwrap();
-        fs::create_dir_all(real.join("resources")).unwrap();
-        fs::write(real.join("resources").join("app.asar"), b"x").unwrap();
-
-        let found =
-            find_install_root(&[empty.clone(), real.clone()]).expect("应命中第二个候选");
-        assert_eq!(found, real, "应跳过无 asar 的候选");
-        assert_eq!(find_install_root(&[empty.clone()]), None, "无 asar 不命中");
-        assert_eq!(find_install_root(&[]), None, "空候选列表不命中");
-
-        let _ = fs::remove_dir_all(&base);
-    }
 
     /// Windows 原生替换器不变量（windows_replace_asar，安装与还原共用）：
     /// - 源缺失 → 报中文错误，原 asar 内容原样（copy 阶段失败零损伤）、
@@ -3186,75 +3086,5 @@ mod windows_tests {
             escape_cmd_path(Path::new(r"C:\用户 zcode\app")),
             r#""C:\用户 zcode\app""#
         );
-    }
-
-    /// 卸载串提取安装目录（install_dir_from_uninstall_string）：
-    /// 带引号路径 + 参数尾巴是 electron-builder NSIS 的实测形态；无引号
-    /// 含空格路径靠文件存在性消歧（临时目录自建文件验证，不依赖系统文件）。
-    #[test]
-    fn 卸载串提取_带引号路径取引号内父目录() {
-        // 本机注册表实测形态：带引号 + /allusers 参数尾巴
-        assert_eq!(
-            install_dir_from_uninstall_string(r#""D:\app\ZCode\Uninstall ZCode.exe" /allusers"#),
-            Some(PathBuf::from(r"D:\app\ZCode"))
-        );
-        // 带引号无参数
-        assert_eq!(
-            install_dir_from_uninstall_string(r#""C:\Program Files\ZCode\Uninstall ZCode.exe""#),
-            Some(PathBuf::from(r"C:\Program Files\ZCode"))
-        );
-        // 前后空白容忍
-        assert_eq!(
-            install_dir_from_uninstall_string(r#"  "D:\ZCode\Uninstall ZCode.exe"  "#),
-            Some(PathBuf::from(r"D:\ZCode"))
-        );
-    }
-
-    #[test]
-    fn 卸载串提取_无引号含空格靠存在性消歧() {
-        // 无引号 + 目录与文件名都含空格：逐段拼接在拼出完整文件路径时
-        // 命中，父目录即安装目录（临时目录自建文件，不依赖系统文件）
-        let base = std::env::temp_dir().join(format!("zbar-winsu-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&base);
-        let install = base.join(r"my zcode");
-        fs::create_dir_all(&install).unwrap();
-        fs::write(install.join("Uninstall ZCode.exe"), b"x").unwrap();
-        let s = install.join("Uninstall ZCode.exe");
-        assert_eq!(
-            install_dir_from_uninstall_string(&s.to_string_lossy()),
-            Some(install),
-            "含空格目录应拼出完整路径后命中"
-        );
-        let _ = fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn 卸载串提取_畸形输入返回空() {
-        assert_eq!(install_dir_from_uninstall_string(""), None);
-        assert_eq!(install_dir_from_uninstall_string("   "), None);
-        // 只有开引号（畸形串）
-        assert_eq!(
-            install_dir_from_uninstall_string(r#""D:\app\ZCode\Uninstall ZCode.exe"#),
-            None
-        );
-        // 无引号且拼不出真实存在的文件（存在性消歧全部未命中）
-        assert_eq!(
-            install_dir_from_uninstall_string(r"Q:\no-such\dir\Uninstall ZCode.exe"),
-            None
-        );
-    }
-
-    /// 卸载表项归属判定（is_zcode_uninstall_entry）：DisplayName 或
-    /// UninstallString 任一含关键字即命中，不区分大小写。
-    #[test]
-    fn 卸载表项判定_双字段关键字兜底() {
-        assert!(is_zcode_uninstall_entry(Some("ZCode 3.10.1"), None));
-        assert!(is_zcode_uninstall_entry(None, Some(r#""D:\app\ZCode\Uninstall ZCode.exe""#)));
-        // 大小写不敏感
-        assert!(is_zcode_uninstall_entry(Some("zcode desktop"), None));
-        assert!(is_zcode_uninstall_entry(None, Some(r#""D:\APP\zcode\Uninstall ZCode.exe""#)));
-        // 双字段皆空皆无关 → 不命中
-        assert!(!is_zcode_uninstall_entry(None, None));
-        assert!(!is_zcode_uninstall_entry(Some("Some Other App"), Some(r#"C:\Other\un.exe"#)));
     }
 }
