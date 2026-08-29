@@ -935,6 +935,31 @@ def _group_agent_quota_rows(rows):
     return list(grouped.values())
 
 
+def _merge_agent_quota_snapshots(snapshots):
+    """把同一 (source, plan_type) 下多设备的最新快照归并为一条。
+
+    对齐桌面端 mergeAgentQuotaSnapshots 的既定口径：额度百分比不相加，
+    取较高值避免低估；reset_at 跟随被保留的那个窗口值。ts 取较大值，
+    device_id / plan_type 取 ts 较新那条的（device_id 供手机页显示设备名）。
+    """
+    # 按 ts 升序处理：used_pct 平局时保留先到的窗口值，与桌面端遍历语义一致。
+    ordered = sorted(snapshots, key=lambda s: (s["ts"], s["device_id"]))
+    windows = {}
+    for snapshot in ordered:
+        for window in snapshot["windows"]:
+            kept = windows.get(window["key"])
+            if kept is None or window["used_pct"] > kept["used_pct"]:
+                windows[window["key"]] = dict(window)
+    newest = ordered[-1]
+    return {
+        "device_id": newest["device_id"],
+        "source": newest["source"],
+        "ts": newest["ts"],
+        "plan_type": newest["plan_type"],
+        "windows": list(windows.values()),
+    }
+
+
 def query_agent_quota_snapshots(from_ms, to_ms, device_ids, source=None):
     """查询 Agent 额度快照，并组装为客户端可直接解析的 snapshot 形状。
 
@@ -1116,62 +1141,148 @@ def last_uploaded_at_by_device():
 
 
 def query_latest_quota_snapshots():
-    """各来源最新一条额度快照（/overview 的 quota_latest）。
+    """各来源最新额度快照（/overview 的 quota_latest）。
 
-    返回 {"zai": 最新一条 Z.ai 快照（/snapshots 单条形状）或 None,
-          "agent": {source: [snapshot, ...]}}；agent 快照复用
-    /agent-quota-snapshots 的最新一条逻辑与组装形状（取各 source 的
-    最大 ts，再取该 ts 的全部行按设备/账号分组）。
+    返回 {"zai_accounts": [Z.ai 快照（/snapshots 单条形状）, ...],
+          "agent": {source: [snapshot, ...]}}。
+
+    Z.ai 部分按账号分组各取最新一条（组内同 ts 多行用 rowid 决胜），
+    结果按 ts 降序。旧版客户端没有账号指纹功能，上传的快照 account 为
+    空串、全部归入同一个 NULL 组，会与真实账号并存导致同一账号被拆成
+    多组。对 NULL 组按可靠性做两步过滤（不猜测账号归属）：
+    1. 同设备合并：该设备的任一快照带过账号指纹（account <> ''），说明
+       设备已升级新版，其空账号快照是旧版残留，直接丢弃；
+    2. 陈旧过滤：NULL 快照本就无法归属账号，ts 落后当前时间超过 48 小时
+       （设备大概率已升级或停用，分钟级新鲜度的快照展示无意义）则不展示；
+       带账号的组不受此限制。
+    其余 NULL 组（每台设备各取最新一条）保留展示，手机页会标注"设备 xxx"。
+
+    agent 部分对每个 source 再按 plan_type 各取最新采样（不同订阅的设备
+    上传节奏不同，只取全局最大 ts 会让较慢设备的订阅随最近上传者闪烁或
+    丢失）；plan_type 为 NULL 时 SQLite GROUP BY 归为一组，符合预期。同一
+    (plan_type, ts) 瞬间多设备各有一条时归并为一条：windows 按 key 合并、
+    used_pct 取较高值避免低估（与桌面端 mergeAgentQuotaSnapshots 口径
+    一致），reset_at 跟随被保留的窗口值；ts 取较大，device_id / plan_type
+    取 ts 较新那条的。最终每个 source 的列表按 ts 降序（最新订阅在前）。
     """
+    stale_limit = 48 * 3600 * 1000  # NULL 组陈旧过滤阈值：48 小时
     conn = get_conn()
     try:
-        zai_row = conn.execute(
+        # ===== Z.ai =====
+        # 出现过带账号指纹快照的设备集合：这些设备上的空账号快照都是
+        # 旧版残留（NULL 组过滤规则 1 使用）。
+        accounted_devices = {
+            r[0]
+            for r in conn.execute(
+                "SELECT DISTINCT device_id FROM quota_snapshots WHERE account <> ''"
+            ).fetchall()
+        }
+        now = now_ms()
+        zai_rows = []
+        # 带账号的组：每组取最新一条。IS/<> 组合与空串判断均为普通 SQL，
+        # 不依赖窗口函数。
+        for g in conn.execute(
             """
-            SELECT device_id, ts, account, level, weekly_pct, weekly_reset,
-                   hour5_pct, mcp_pct, mcp_used, mcp_total
-            FROM quota_snapshots
-            ORDER BY ts DESC
-            LIMIT 1
+            SELECT account, MAX(ts) AS max_ts FROM quota_snapshots
+            WHERE account <> '' GROUP BY account
             """
-        ).fetchone()
+        ).fetchall():
+            row = conn.execute(
+                """
+                SELECT device_id, ts, account, level, weekly_pct, weekly_reset,
+                       hour5_pct, mcp_pct, mcp_used, mcp_total
+                FROM quota_snapshots
+                WHERE account IS ? AND ts = ?
+                ORDER BY rowid DESC
+                LIMIT 1
+                """,
+                (g["account"], g["max_ts"]),
+            ).fetchone()
+            if row is not None:
+                zai_rows.append(row)
+        # NULL 组（account 为空串，旧版客户端）：每台设备各取最新一条，
+        # 再按同设备合并 / 陈旧过滤两条规则决定是否展示。
+        for d in conn.execute(
+            """
+            SELECT device_id, MAX(ts) AS max_ts FROM quota_snapshots
+            WHERE IFNULL(account, '') = '' GROUP BY device_id
+            """
+        ).fetchall():
+            if d["device_id"] in accounted_devices:
+                continue  # 规则 1：同设备已有带指纹快照，空账号是旧版残留
+            if d["max_ts"] is None or now - d["max_ts"] > stale_limit:
+                continue  # 规则 2：无法归属账号且已陈旧，不展示
+            row = conn.execute(
+                """
+                SELECT device_id, ts, account, level, weekly_pct, weekly_reset,
+                       hour5_pct, mcp_pct, mcp_used, mcp_total
+                FROM quota_snapshots
+                WHERE device_id IS ? AND IFNULL(account, '') = '' AND ts = ?
+                ORDER BY rowid DESC
+                LIMIT 1
+                """,
+                (d["device_id"], d["max_ts"]),
+            ).fetchone()
+            if row is not None:
+                zai_rows.append(row)
+        zai_rows.sort(key=lambda r: r["ts"], reverse=True)
 
+        # ===== agent =====
         agent_out = {}
         for source in AGENT_QUOTA_WINDOWS:
-            max_ts = conn.execute(
-                "SELECT MAX(ts) FROM agent_quota_snapshots WHERE source = ?",
-                (source,),
-            ).fetchone()[0]
-            if not max_ts:
-                continue
-            rows = conn.execute(
+            # 按 plan_type 各取最新采样（NULL 归一组），避免不同订阅因
+            # 上传节奏不同而闪烁/丢失。
+            plan_groups = conn.execute(
                 """
-                SELECT device_id, source, ts, plan_type, window_key,
-                       used_pct, reset_at
-                FROM agent_quota_snapshots
-                WHERE source = ? AND ts = ?
-                ORDER BY device_id ASC, plan_type ASC, window_key ASC
+                SELECT plan_type, MAX(ts) AS max_ts FROM agent_quota_snapshots
+                WHERE source = ? GROUP BY plan_type
                 """,
-                (source, max_ts),
+                (source,),
             ).fetchall()
-            agent_out[source] = _group_agent_quota_rows(rows)
+            if not plan_groups:
+                continue
+            merged = []
+            for g in plan_groups:
+                # 取该 (plan_type, max_ts) 瞬间的全部行（可能多设备），
+                # 组装逻辑与 /agent-quota-snapshots 共用。
+                rows = conn.execute(
+                    """
+                    SELECT device_id, source, ts, plan_type, window_key,
+                           used_pct, reset_at
+                    FROM agent_quota_snapshots
+                    WHERE source = ? AND plan_type IS ? AND ts = ?
+                    ORDER BY device_id ASC, window_key ASC
+                    """,
+                    (source, g["plan_type"], g["max_ts"]),
+                ).fetchall()
+                snapshots = _group_agent_quota_rows(rows)
+                # 同 plan_type 多设备多条时归并为一条（窗口取较高值）。
+                merged.append(
+                    snapshots[0]
+                    if len(snapshots) == 1
+                    else _merge_agent_quota_snapshots(snapshots)
+                )
+            merged.sort(key=lambda s: s["ts"], reverse=True)
+            agent_out[source] = merged
     finally:
         conn.close()
 
-    zai = None
-    if zai_row is not None:
-        zai = {
-            "device_id": zai_row["device_id"],
-            "ts": zai_row["ts"],
-            "account": zai_row["account"] or None,
-            "level": zai_row["level"] or "",
-            "weekly_pct": zai_row["weekly_pct"],
-            "weekly_reset": zai_row["weekly_reset"],
-            "hour5_pct": zai_row["hour5_pct"],
-            "mcp_pct": zai_row["mcp_pct"],
-            "mcp_used": zai_row["mcp_used"],
-            "mcp_total": zai_row["mcp_total"],
+    zai_accounts = [
+        {
+            "device_id": row["device_id"],
+            "ts": row["ts"],
+            "account": row["account"] or None,
+            "level": row["level"] or "",
+            "weekly_pct": row["weekly_pct"],
+            "weekly_reset": row["weekly_reset"],
+            "hour5_pct": row["hour5_pct"],
+            "mcp_pct": row["mcp_pct"],
+            "mcp_used": row["mcp_used"],
+            "mcp_total": row["mcp_total"],
         }
-    return {"zai": zai, "agent": agent_out}
+        for row in zai_rows
+    ]
+    return {"zai_accounts": zai_accounts, "agent": agent_out}
 
 
 # ===== 配置表（自动清理用）=====

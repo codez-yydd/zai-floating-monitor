@@ -8,6 +8,7 @@
 <style>
 /* 深色主题 · 系统字体 · 零外部资源（内网可用） */
 :root {
+  color-scheme: dark;
   --bg: #0f1115;
   --card: #181b22;
   --card-2: #1f232d;
@@ -20,7 +21,7 @@
   --red: #ef5350;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
-html, body { height: 100%; }
+html, body { height: 100%; overscroll-behavior-y: contain; }
 body {
   background: var(--bg);
   color: var(--text);
@@ -32,6 +33,9 @@ body {
 }
 .hidden { display: none !important; }
 .wrap { max-width: 680px; margin: 0 auto; padding: 0 14px 32px; }
+/* 加载中：内容卡区整体降透明度，结束恢复 */
+.wrap > nav, .wrap > section { transition: opacity .15s; }
+body.loading .wrap > nav, body.loading .wrap > section { opacity: .6; }
 
 /* ===== 登录视图 ===== */
 .login {
@@ -149,18 +153,77 @@ body {
   flex-shrink: 0;
 }
 
-/* ===== 周期卡 ===== */
-.periods { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 6px 0 12px; }
-.period-card {
+/* ===== 范围切换 tab ===== */
+.range-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.range-tab {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--muted);
+  border-radius: 999px;
+  font-size: 12px;
+  padding: 7px 14px;
+  cursor: pointer;
+}
+.range-tab.active {
+  color: var(--text);
+  border-color: var(--accent);
+  background: rgba(79, 140, 255, .14);
+}
+
+/* ===== 自定义范围 ===== */
+.custom-panel {
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 14px;
-  padding: 12px 10px;
-  text-align: center;
+  padding: 12px 14px;
+  margin-bottom: 12px;
 }
-.period-card .label { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
-.period-card .tokens { font-size: 17px; font-weight: 700; }
-.period-card .req { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.custom-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.custom-row .label { color: var(--muted); font-size: 12px; flex-shrink: 0; }
+.custom-row input {
+  flex: 1;
+  min-width: 0;
+  background: var(--card-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 13px;
+  padding: 8px 10px;
+  outline: none;
+}
+.custom-row input:focus { border-color: var(--accent); }
+.custom-row input::-webkit-calendar-picker-indicator { filter: invert(.7); }
+.custom-apply {
+  width: 100%;
+  border: none;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  padding: 9px 0;
+  cursor: pointer;
+}
+.custom-apply:active { opacity: .85; }
+
+/* ===== 当前范围汇总卡 ===== */
+.summary-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px 14px;
+  text-align: center;
+  margin-bottom: 12px;
+}
+.summary-card .tokens { font-size: 24px; font-weight: 700; }
+.summary-card .req { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.summary-card .range-info { color: var(--muted); font-size: 11px; margin-top: 4px; }
 
 /* ===== 通用卡片 ===== */
 .card {
@@ -176,7 +239,8 @@ body {
 .bar-track {
   height: 8px;
   border-radius: 4px;
-  background: var(--card-2);
+  /* 用半透明白而非 var(--card-2)：分组卡片底色与轨道同色会让 0% 行轨道隐形 */
+  background: rgba(255, 255, 255, .07);
   overflow: hidden;
 }
 .bar-fill { height: 100%; border-radius: 4px; background: var(--accent); transition: width .4s; }
@@ -197,14 +261,51 @@ body {
 }
 .model-row .m { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70%; }
 
-/* ===== 额度 ===== */
-.quota-item { margin-bottom: 12px; }
+/* ===== 额度（按 agent 分组卡片）===== */
+.quota-agent {
+  background: var(--card-2);
+  border-radius: 10px;
+  padding: 10px;
+  margin-bottom: 12px;
+}
+.quota-agent:last-child { margin-bottom: 0; }
+.quota-agent-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.brand-icon { width: 14px; height: 14px; display: inline-flex; flex-shrink: 0; }
+.brand-icon svg { width: 100%; height: 100%; display: block; }
+.quota-agent-name { font-weight: 600; font-size: 13px; }
+.quota-account { margin-bottom: 12px; }
+.quota-account:last-child { margin-bottom: 0; }
+/* 小节标题行：flex 两端对齐（左名称、右套餐徽标） */
+.quota-account-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+.quota-account-title .t-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 套餐 / 等级徽标：小胶囊，中性底色 + 亮前景，深色主题下清晰可读 */
+.quota-badge {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 16px;
+  background: rgba(255, 255, 255, .08);
+  color: var(--text);
+}
+.quota-item { margin-bottom: 8px; }
 .quota-item:last-child { margin-bottom: 0; }
 .quota-head { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 5px; }
-.quota-head .pct { color: var(--muted); font-size: 12px; }
-.pct-green .bar-fill { background: var(--green); }
-.pct-amber .bar-fill { background: var(--amber); }
-.pct-red .bar-fill { background: var(--red); }
+.quota-head .pct { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.quota-reset { color: var(--muted); font-size: 11px; margin-top: 3px; font-variant-numeric: tabular-nums; }
 .quota-sub { color: var(--muted); font-size: 11px; margin-top: 3px; }
 
 /* ===== 项目 Top ===== */
@@ -214,12 +315,6 @@ body {
 .proj-head .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .proj-head .val { color: var(--muted); font-size: 12px; flex-shrink: 0; }
 .proj-sub { color: var(--muted); font-size: 11px; margin-top: 3px; }
-
-/* ===== 设备 ===== */
-.dev-row { display: flex; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border); }
-.dev-row:last-child { border-bottom: none; }
-.dev-row .name { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dev-row .meta { color: var(--muted); font-size: 12px; text-align: right; }
 
 .foot { color: var(--muted); font-size: 11px; text-align: center; margin-top: 18px; }
 
@@ -261,17 +356,33 @@ body {
     </header>
     <div class="pull-tip" id="pull-tip">下拉刷新</div>
 
+    <nav class="range-tabs" id="range-tabs"></nav>
+    <section class="custom-panel hidden" id="custom-panel">
+      <div class="custom-row">
+        <span class="label">开始</span>
+        <input type="datetime-local" id="custom-start">
+      </div>
+      <div class="custom-row">
+        <span class="label">结束</span>
+        <input type="datetime-local" id="custom-end">
+      </div>
+      <button class="custom-apply" id="btn-apply-custom">应用</button>
+    </section>
+
     <div class="state-tip" id="loading">加载中…</div>
     <div class="error-box hidden" id="error">
       <span id="error-text">加载失败</span>
       <button id="btn-retry">重试</button>
     </div>
 
-    <section class="periods" id="periods"></section>
-    <section class="card" id="sources-card"><h2>近 7 天各来源</h2><div class="body"></div></section>
+    <section class="summary-card" id="summary-card">
+      <div class="tokens">—</div>
+      <div class="req">…</div>
+      <div class="range-info"></div>
+    </section>
+    <section class="card" id="sources-card"><h2>各来源分布</h2><div class="body"></div></section>
     <section class="card" id="quota-card"><h2>订阅额度</h2><div class="body"></div></section>
-    <section class="card" id="projects-card"><h2>近 7 天项目 Top10</h2><div class="body"></div></section>
-    <section class="card" id="devices-card"><h2>设备</h2><div class="body"></div></section>
+    <section class="card" id="projects-card"><h2>项目 Top10</h2><div class="body"></div></section>
 
     <footer class="foot">每 60 秒自动刷新 · 仅统计 Token 用量，不显示花费</footer>
   </div>
@@ -286,7 +397,12 @@ var TOKEN_KEY = "zbar_view_token";
 var REFRESH_MS = 60000;
 
 var token = localStorage.getItem(TOKEN_KEY) || "";
+// /overview 中与时间范围无关的部分（quota_latest / devices / last_synced_at）
 var data = null;
+// 当前范围 /usage 结果（overall / by_model）
+var usageData = null;
+// 当前范围 /projects 结果（数组）
+var projectsData = null;
 var timer = null;
 var loading = false;
 
@@ -333,11 +449,55 @@ function projectName(p) {
   return p.display || p.key || "未知项目";
 }
 
-// 用量进度条颜色：绿 → 琥珀 → 红
-function pctLevel(p) {
-  if (p <= 60) return "pct-green";
-  if (p <= 80) return "pct-amber";
-  return "pct-red";
+// ============================================================
+// 额度剩余渐变色：进度条统一按「剩余百分比」着色（算法与桌面端
+// src/widgets.tsx 的 REMAINING_STOPS / remainingHsl 一致，勿单改一处）。
+// 分档语义：剩余 >80% 绿、30~80% 黄、<30% 红；段内随剩余连续渐变，
+// 剩余越低颜色越深，边界色连续无跳变。
+// ============================================================
+
+// 插值锚点：[剩余%, 色相, 饱和度%, 亮度%]。色相用 -2 等价 358，避免跨 360 插值走反方向；
+// 饱和度控制在 56~70，与界面低饱和深色风格协调，避免高饱和纯色扎眼
+var REMAINING_STOPS = [
+  [0, -2, 66, 41],    // 砖红（额度耗尽）
+  [30, 24, 70, 50],   // 柔橙（红/黄边界）
+  [80, 48, 68, 46],   // 暖黄（黄/绿边界，色相偏暖降低荧光感）
+  [100, 152, 56, 40]  // 灰绿（额度充裕）
+];
+
+// 剩余百分比 → 基色 HSL（分段线性插值），返回 [h, s, l]
+function remainingHsl(remaining) {
+  var r = Math.min(Math.max(remaining, 0), 100);
+  for (var i = 0; i < REMAINING_STOPS.length - 1; i++) {
+    var a = REMAINING_STOPS[i], b = REMAINING_STOPS[i + 1];
+    if (r <= b[0]) {
+      var t = (r - a[0]) / (b[0] - a[0]);
+      // 色相取模 360 防负（锚点 -2 落在本段时会插出小负数，等价 358 方向）
+      var h = (((a[1] + (b[1] - a[1]) * t) % 360) + 360) % 360;
+      return [h, a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t];
+    }
+  }
+  var last = REMAINING_STOPS[REMAINING_STOPS.length - 1];
+  return [last[1], last[2], last[3]];
+}
+
+// HSL → 字符串（数值四舍五入到 1 位小数，内联样式输出干净）
+function hslStr(h, s, l) {
+  function f(n) { return Math.round(n * 10) / 10; }
+  return "hsl(" + f(h) + ", " + f(s) + "%, " + f(l) + "%)";
+}
+
+// 剩余百分比 → 进度条填充渐变（左深右浅；右端仅提亮 6 个点、封顶 52，保留立体感不发荧光）
+function remainingGradient(remaining) {
+  var c = remainingHsl(remaining);
+  return "linear-gradient(90deg, " + hslStr(c[0], c[1], c[2]) + ", " +
+    hslStr(c[0], c[1], Math.min(c[2] + 6, 52)) + ")";
+}
+
+// 剩余百分比 → 数字文字颜色（同基色但压暗 10 个亮度点、下限 28：小号数字需要更高对比度）
+function remainingTextColor(remaining) {
+  var c = remainingHsl(remaining);
+  return hslStr(c[0], c[1], Math.max(c[2] - 10, 28));
 }
 
 function showToast(msg) {
@@ -346,6 +506,152 @@ function showToast(msg) {
   t.classList.remove("hidden");
   clearTimeout(showToast._h);
   showToast._h = setTimeout(function () { t.classList.add("hidden"); }, 2200);
+}
+
+// ===== 品牌图标（path 数据与桌面端 src/BrandIcon.tsx 一致，勿手改坐标）=====
+
+var BRAND_ICONS = {
+  // Z.ai：外壳 currentColor + 白色 Z 字
+  zai: '<svg viewBox="0 0 30 30" fill="none" aria-hidden="true">' +
+    '<path fill="currentColor" d="M24.51 28.51H5.49c-2.21 0-4-1.79-4-4V5.49c0-2.21 1.79-4 4-4h19.03c2.21 0 4 1.79 4 4v19.03c-.01 2.2-1.8 3.99-4.01 3.99Z"/>' +
+    '<path fill="#fff" d="m15.47 7.1-1.3 1.85c-.2.29-.54.47-.9.47h-7.1V7.09c-.01.01 9.3.01 9.3.01Zm8.83 0-11.16 15.81H5.7L16.86 7.1h7.44Zm-9.77 15.81 1.31-1.86c.2-.29.54-.47.9-.47h7.09v2.33h-9.3Z"/>' +
+    "</svg>",
+  codex: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/></svg>',
+  claude: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z"/></svg>',
+  cursor: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M11.503.131 1.891 5.678a.84.84 0 0 0-.42.726v11.188c0 .3.162.575.42.724l9.609 5.55a1 1 0 0 0 .998 0l9.61-5.55a.84.84 0 0 0 .42-.724V6.404a.84.84 0 0 0-.42-.726L12.497.131a1.01 1.01 0 0 0-.996 0M2.657 6.338h18.55c.263 0 .43.287.297.515L12.23 22.918c-.062.107-.229.064-.229-.06V12.335a.59.59 0 0 0-.295-.51l-9.11-5.257c-.109-.063-.064-.23.061-.23"/></svg>'
+};
+var BRAND_COLORS = { zai: "#38bdf8", codex: "#34d399", claude: "#fb923c", cursor: "#a78bfa" };
+
+// ===== 重置时间（复刻桌面端 formatCountdownCore / formatResetStamp）=====
+
+// 毫秒差 → 倒计时：<1m / Xm / Xh Ym（分钟不补零）/ Xd Yh
+function fmtCountdown(ms) {
+  var totalMin = Math.floor(ms / 60000);
+  if (totalMin < 1) return "<1m";
+  var days = Math.floor(totalMin / 1440);
+  var hours = Math.floor((totalMin % 1440) / 60);
+  var mins = totalMin % 60;
+  if (days > 0) return days + "d " + hours + "h";
+  if (hours > 0) return hours + "h " + mins + "m";
+  return mins + "m";
+}
+
+// 时间戳 → "MM-DD HH:mm"（本地时区，月日时分两位补零）
+function fmtResetStamp(ms) {
+  var d = new Date(ms);
+  function p(n) { return (n < 10 ? "0" : "") + n; }
+  return p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes());
+}
+
+// 重置信息片段：↻ 倒计时 · MM-DD HH:mm（reset 为 null/0 或已过期时不显示）。
+// 倒计时元素带 data-reset，由全局每秒定时器只更新文本。
+function resetInfo(resetMs) {
+  resetMs = Number(resetMs);
+  if (!resetMs || resetMs <= Date.now()) return "";
+  return '<div class="quota-reset">↻ <span data-reset="' + resetMs + '">' +
+    esc(fmtCountdown(resetMs - Date.now())) + "</span> · " + fmtResetStamp(resetMs) + "</div>";
+}
+
+// 倒计时每秒跳动：只改 [data-reset] 文本，不整卡重渲染（避免打断触摸交互）
+function startCountdownTicker() {
+  setInterval(function () {
+    var els = document.querySelectorAll("[data-reset]");
+    var now = Date.now();
+    for (var i = 0; i < els.length; i++) {
+      var left = Number(els[i].getAttribute("data-reset")) - now;
+      if (left <= 0) {
+        // 已到期：隐藏整条重置信息，避免出现负数倒计时
+        var tip = els[i].closest(".quota-reset");
+        if (tip) tip.style.display = "none";
+        continue;
+      }
+      els[i].textContent = fmtCountdown(left);
+    }
+  }, 1000);
+}
+
+// ===== 时间范围 =====
+
+var RANGE_KEYS = ["today", "24h", "7d", "30d", "custom"];
+var RANGE_LABELS = { today: "今日", "24h": "24h", "7d": "近 7 天", "30d": "近 30 天", custom: "自定义" };
+var currentRange = "today";
+// 自定义范围应用后的 [start, end] 毫秒（未应用为 null，切到自定义 tab 只展开面板）
+var customRange = null;
+
+// 当前所选范围 → [start, end] 毫秒（本地时区计算；自定义为止点可含未来时刻）
+function rangeMs() {
+  var now = Date.now();
+  var day = 86400000;
+  if (currentRange === "today") {
+    var d = new Date();
+    return [new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(), now];
+  }
+  if (currentRange === "24h") return [now - day, now];
+  if (currentRange === "7d") return [now - 7 * day, now];
+  if (currentRange === "30d") return [now - 30 * day, now];
+  return customRange || [now - 30 * day, now]; // 自定义未应用时的兜底，正常不触达
+}
+
+function renderTabs() {
+  $("range-tabs").innerHTML = RANGE_KEYS.map(function (k) {
+    return '<button class="range-tab' + (k === currentRange ? " active" : "") +
+      '" data-range="' + k + '">' + RANGE_LABELS[k] + "</button>";
+  }).join("");
+}
+
+// Date → datetime-local 输入值格式（YYYY-MM-DDTHH:mm，本地时区）
+function toLocalInput(d) {
+  function p(n) { return (n < 10 ? "0" : "") + n; }
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) +
+    "T" + p(d.getHours()) + ":" + p(d.getMinutes());
+}
+
+// 自定义输入默认值：起 = 29 天前本地 0 点，止 = 今天 23:59
+function initCustomInputs() {
+  var d = new Date();
+  var start = new Date(d.getFullYear(), d.getMonth(), d.getDate() - 29);
+  var end = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59);
+  $("custom-start").value = toLocalInput(start);
+  $("custom-end").value = toLocalInput(end);
+}
+
+// 应用自定义范围：起 ≥ 止时提示并不应用；成功后才切换到自定义范围并加载数据
+function applyCustom() {
+  var sv = $("custom-start").value;
+  var ev = $("custom-end").value;
+  if (!sv || !ev) { showToast("请选择起止时间"); return; }
+  var start = new Date(sv).getTime();
+  var end = new Date(ev).getTime();
+  if (!(start < end)) { showToast("开始时间需早于结束时间"); return; }
+  customRange = [start, end];
+  $("custom-panel").classList.add("hidden");
+  if (currentRange !== "custom") {
+    currentRange = "custom";
+    renderTabs();
+  }
+  loadData();
+}
+
+// 范围 tab 切换（事件委托，按钮为动态渲染）
+function onRangeTabClick(e) {
+  var btn = e.target.closest("button[data-range]");
+  if (!btn) return;
+  var r = btn.getAttribute("data-range");
+  if (r === "custom") {
+    // 首次点击：只展开面板，范围与高亮保持上一档，等「应用」再切换；
+    // 已是自定义时再点 = 开合切换面板，不重复加载数据
+    if (currentRange === "custom") {
+      $("custom-panel").classList.toggle("hidden");
+      return;
+    }
+    $("custom-panel").classList.remove("hidden");
+    return;
+  }
+  $("custom-panel").classList.add("hidden");
+  if (r === currentRange) return;
+  currentRange = r;
+  renderTabs();
+  loadData();
 }
 
 // ===== API =====
@@ -366,6 +672,7 @@ function api(path) {
 function logout() {
   token = "";
   localStorage.removeItem(TOKEN_KEY);
+  overviewCache = null;
   if (timer) { clearInterval(timer); timer = null; }
   $("main").classList.add("hidden");
   $("login").classList.remove("hidden");
@@ -384,7 +691,7 @@ function tryLogin(input) {
       $("login").classList.add("hidden");
       $("main").classList.remove("hidden");
       startAutoRefresh();
-      loadOverview();
+      loadData();
     } else {
       $("login-err").textContent = res.status === 401 ? "令牌不正确，请检查后重试" : "服务端异常（" + res.status + "）";
     }
@@ -397,16 +704,53 @@ function tryLogin(input) {
 
 // ===== 数据加载与渲染 =====
 
-function loadOverview() {
-  if (loading) return;
+// /overview 结果缓存：额度快照与时间范围无关，短时间内复用，避免重复拉取
+var overviewCache = null;
+var OVERVIEW_CACHE_MS = 45000;
+
+function fetchOverview() {
+  if (overviewCache && Date.now() - overviewCache.at < OVERVIEW_CACHE_MS) {
+    return Promise.resolve(overviewCache.data);
+  }
+  return api("/overview").then(function (d) {
+    overviewCache = { at: Date.now(), data: d };
+    return d;
+  });
+}
+
+// 加载进行中又有新的范围加载请求：当前响应作废后自动补载一次
+var reloadNeeded = false;
+
+// 并行拉取：当前范围用量（/usage）+ 项目聚合（/projects）+ 额度快照（/overview，
+// 带 45s 缓存）。opt.toast 为真时加载成功后提示（手动刷新用，失败走错误框不提示）。
+function loadData(opt) {
+  if (loading) { reloadNeeded = true; return; }
   loading = true;
   $("btn-refresh").classList.add("spin");
-  api("/overview" + todayStartQuery()).then(function (d) {
-    data = d;
+  document.body.classList.add("loading");
+  var range = rangeMs();
+  // 记录发起时的范围快照：响应回来若范围已切换则丢弃，避免渲染旧范围数据
+  var reqRange = currentRange;
+  var reqCustom = customRange;
+  Promise.all([
+    api("/usage?from_ms=" + range[0] + "&to_ms=" + range[1]),
+    api("/projects?from=" + range[0] + "&to=" + range[1]),
+    fetchOverview()
+  ]).then(function (res) {
+    if (currentRange !== reqRange || customRange !== reqCustom) return;
+    usageData = res[0];
+    projectsData = res[1];
+    data = {
+      quota_latest: res[2].quota_latest,
+      devices: res[2].devices,
+      last_synced_at: res[2].last_synced_at
+    };
     $("loading").classList.add("hidden");
     $("error").classList.add("hidden");
     render();
+    if (opt && opt.toast) showToast("已刷新");
   }).catch(function (e) {
+    if (currentRange !== reqRange || customRange !== reqCustom) return;
     if (token) {
       $("loading").classList.add("hidden");
       $("error-text").textContent = "加载失败：" + e.message;
@@ -415,46 +759,41 @@ function loadOverview() {
   }).finally(function () {
     loading = false;
     $("btn-refresh").classList.remove("spin");
+    document.body.classList.remove("loading");
+    if (reloadNeeded) {
+      reloadNeeded = false;
+      loadData(opt);
+    }
   });
-}
-
-// 本地时区的今日零点：让服务端按访客时区统计「今日」
-function todayStartQuery() {
-  var d = new Date();
-  var local = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-  return "?today_start=" + local;
 }
 
 function render() {
   if (!data) return;
   $("last-sync").textContent = relTime(data.last_synced_at);
-  renderPeriods();
+  renderSummary();
   renderSources();
   renderQuota();
   renderProjects();
-  renderDevices();
 }
 
-function renderPeriods() {
-  var defs = [
-    ["today", "今日", data.today],
-    ["last_7d", "近 7 天", data.last_7d],
-    ["last_30d", "近 30 天", data.last_30d]
-  ];
-  $("periods").innerHTML = defs.map(function (d) {
-    var o = (d[2] && d[2].overall) || {};
-    return '<div class="period-card">' +
-      '<div class="label">' + d[1] + "</div>" +
-      '<div class="tokens">' + fmtTokens(o.total_tokens) + "</div>" +
-      '<div class="req">' + fmtInt(o.requests) + " 次请求</div>" +
-      "</div>";
-  }).join("");
+// 当前范围汇总卡：Token 总量 + 请求数 + 范围说明
+function renderSummary() {
+  var o = (usageData && usageData.overall) || {};
+  var info = RANGE_LABELS[currentRange] || "";
+  if (currentRange === "custom" && customRange) {
+    // 自定义：显示起止时间点（MM-DD HH:mm ~ MM-DD HH:mm）
+    info = fmtResetStamp(customRange[0]) + " ~ " + fmtResetStamp(customRange[1]);
+  }
+  $("summary-card").innerHTML =
+    '<div class="tokens">' + fmtTokens(o.total_tokens) + "</div>" +
+    '<div class="req">' + fmtInt(o.requests) + " 次请求</div>" +
+    '<div class="range-info">' + esc(info) + "</div>";
 }
 
-// 各源分组（近 7 天，由 by_model 按 source 聚合，与 overall 口径一致）
+// 各来源分布（当前范围，由 by_model 按 source 聚合，与 overall 口径一致）
 function renderSources() {
   var body = $("sources-card").querySelector(".body");
-  var byModel = (data.last_7d && data.last_7d.by_model) || [];
+  var byModel = (usageData && usageData.by_model) || [];
   if (!byModel.length) {
     body.innerHTML = '<div class="empty">暂无数据，等待设备同步</div>';
     return;
@@ -489,63 +828,162 @@ function renderSources() {
   body.innerHTML = html;
 }
 
-// 订阅额度：各源最新快照的百分比条
+// 套餐等级 → 展示标签（与桌面端 src/format.ts 的 LEVEL_LABEL 一致，未知等级原样返回）
+var LEVEL_LABELS = { lite: "Lite", pro: "Pro", max: "Max", ultra: "Ultra" };
+function levelLabel(level) { return LEVEL_LABELS[level] || level; }
+
+// 订阅套餐 → 徽标文本：首字母大写（如 plus → Plus）
+function planLabel(p) {
+  p = String(p);
+  return p ? p.charAt(0).toUpperCase() + p.slice(1) : p;
+}
+
+// 账号标识脱敏：≥12 位显示前 4 + … + 后 4（完整值由调用方放 title），短值原样
+function maskAccount(a) {
+  a = String(a);
+  return a.length >= 12 ? a.slice(0, 4) + "…" + a.slice(-4) : a;
+}
+
+// agent 分组块头：品牌 logo（品牌色）+ agent 名（品牌色）
+function agentBlock(src, label, inner) {
+  var color = BRAND_COLORS[src] || "#8b93a3";
+  return '<div class="quota-agent">' +
+    '<div class="quota-agent-head">' +
+    '<span class="brand-icon" style="color:' + color + '">' + (BRAND_ICONS[src] || "") + "</span>" +
+    '<span class="quota-agent-name" style="color:' + color + '">' + esc(label) + "</span>" +
+    "</div>" + inner + "</div>";
+}
+
+// 额度窗口行：窗口名 + 剩余百分比 + 进度条（+ 重置信息 / 次数小字）。
+// 入参为「已用百分比」，展示统一换算为「剩余百分比」口径（与桌面端面板一致）
+function quotaRow(windowLabel, usedPct, resetMs, subText) {
+  // windowLabel 可能来自服务端的未知 window key（windowName 原样返回），
+  // subText 含设备名等客户端数据，统一 esc() 后再拼入 innerHTML 防止 XSS。
+  // 已用% 统一在此收敛（null/undefined/越界 → 0..100），剩余 = 100 - 已用，
+  // Z.ai 与 agent 侧调用都不会渲染出 NaN。
+  var used = Math.min(100, Math.max(0, Number(usedPct) || 0));
+  var remaining = 100 - used;
+  return '<div class="quota-item">' +
+    '<div class="quota-head"><span>' + esc(windowLabel) + "</span>" +
+    '<span class="pct" style="color:' + remainingTextColor(remaining) + '">剩余 ' + Math.round(remaining) + "%</span></div>" +
+    '<div class="bar-track"><div class="bar-fill" style="width:' + remaining + "%;background:" + remainingGradient(remaining) + '"></div></div>' +
+    resetInfo(resetMs) +
+    (subText ? '<div class="quota-sub">' + esc(subText) + "</div>" : "") +
+    "</div>";
+}
+
+// 订阅额度：按 agent 分组卡片（品牌 logo + 每账号/订阅小节 + 窗口进度条 + 重置倒计时）
 function renderQuota() {
   var body = $("quota-card").querySelector(".body");
-  var q = data.quota_latest || {};
+  var q = (data && data.quota_latest) || {};
+  // /overview 的 devices 仅用于把 device_id 映射为设备名
   var devNames = {};
-  (data.devices || []).forEach(function (d) { devNames[d.device_id] = d.device_name; });
+  ((data && data.devices) || []).forEach(function (d) { devNames[d.device_id] = d.device_name; });
   var html = "";
 
-  // Z.ai 快照（weekly / 5h / mcp）
-  var zai = q.zai;
-  if (zai) {
-    [
-      ["每周额度", zai.weekly_pct],
-      ["5 小时额度", zai.hour5_pct],
-      ["MCP 额度", zai.mcp_pct]
-    ].forEach(function (row) {
-      var p = Math.min(100, Math.max(0, Number(row[1]) || 0));
-      // zai.level 来自快照数据，quotaRow 内部已统一 esc，这里不再转义
-      html += quotaRow("Z.ai" + (zai.level ? " · " + zai.level : ""), row[0], p);
+  // Z.ai：zai_accounts 每元素一条账号最新快照，每账号一小节。
+  // 旧版客户端（无账号指纹）上报的快照 account 为空：当数组中同时存在带 account
+  // 的条目时，这类旧快照会与真实账号重复，不再渲染小节，改为在分组末尾追加一行
+  // 弱化提示；若全部条目都无 account（用户还没有任何指纹数据），保持现状全量渲染。
+  var zaiAccounts = q.zai_accounts || [];
+  if (zaiAccounts.length) {
+    var withAccount = zaiAccounts.filter(function (z) { return z.account; });
+    var noAccount = zaiAccounts.filter(function (z) { return !z.account; });
+    var renderAccounts = (withAccount.length && noAccount.length) ? withAccount : zaiAccounts;
+    var zaiInner = "";
+    renderAccounts.forEach(function (z, i) {
+      var inner = "";
+      // 小节标题（flex 两端对齐：左名称、右等级徽标）。
+      // 名称优先级：account（≥12 位脱敏，完整值放 title）→ 设备名 → 「账号 N」
+      var zName, zTitle = null;
+      if (z.account) {
+        zName = "账号 " + maskAccount(z.account);
+        zTitle = String(z.account);
+      } else if (devNames[z.device_id]) {
+        zName = "设备 " + devNames[z.device_id];
+      } else {
+        zName = "账号 " + (i + 1);
+      }
+      inner += '<div class="quota-account-title">' +
+        '<span class="t-name"' + (zTitle ? ' title="' + esc(zTitle) + '"' : "") + ">" + esc(zName) + "</span>" +
+        (z.level ? '<span class="quota-badge">' + esc(levelLabel(String(z.level))) + "</span>" : "") +
+        "</div>";
+      inner += quotaRow("每周额度", z.weekly_pct, z.weekly_reset, null);
+      inner += quotaRow("5 小时额度", z.hour5_pct, null, null);
+      // 无 MCP 额度的账号 mcp_pct 为 0 且 mcp_used/mcp_total 均为 null，仅在有任一存在证据时才渲染整行（对齐桌面端 QuotaPanel.tsx 的存在性判断）
+      var hasMcp = z.mcp_pct > 0 || typeof z.mcp_used === "number" || typeof z.mcp_total === "number";
+      if (hasMcp) {
+        // MCP 行附绝对次数小字（服务端为数字时）
+        var mcpSub = null;
+        if (typeof z.mcp_used === "number" && typeof z.mcp_total === "number") {
+          mcpSub = "已用 " + fmtInt(z.mcp_used) + " / 总量 " + fmtInt(z.mcp_total);
+        }
+        inner += quotaRow("MCP 额度", z.mcp_pct, null, mcpSub);
+      }
+      zaiInner += '<div class="quota-account">' + inner + "</div>";
     });
+    // 未归属账号的旧版快照：合并为一行弱化提示（小号灰字 + 顶部细分隔线）。
+    // 设备名来自客户端数据，需 esc() 后再拼入；多台时只报数量，不含动态字符串。
+    if (withAccount.length && noAccount.length) {
+      var staleName;
+      if (noAccount.length === 1) {
+        var onlyDev = devNames[noAccount[0].device_id];
+        staleName = onlyDev ? esc(onlyDev) : "1 台设备";
+      } else {
+        staleName = noAccount.length + " 台设备";
+      }
+      zaiInner += '<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border);color:var(--muted);font-size:11px">' +
+        "另有 " + staleName + " 的旧版客户端快照未归属账号，升级该设备客户端后自动合并</div>";
+    }
+    html += agentBlock("zai", "Z.ai", zaiInner);
   }
 
-  // Agent 快照（codex / claude / cursor，各源最新一条）
+  // Agent 订阅：quota_latest.agent[source] 每元素一条订阅快照，每条一小节
   var agent = q.agent || {};
-  Object.keys(agent).forEach(function (src) {
+  var order = ["codex", "claude", "cursor"];
+  Object.keys(agent).forEach(function (k) {
+    if (order.indexOf(k) < 0) order.push(k); // 未知来源兜底排在后面
+  });
+  order.forEach(function (src) {
     var snaps = agent[src] || [];
+    var inner = "";
     snaps.forEach(function (sn) {
-      // plan_type / 设备名均来自客户端上传，quotaRow 内部已统一 esc，不再转义
-      var suffix = (sn.plan_type ? " · " + sn.plan_type : "") +
-        (snaps.length > 1 && sn.device_id && devNames[sn.device_id] ? " · " + devNames[sn.device_id] : "");
+      var rows = "";
       (sn.windows || []).forEach(function (w) {
-        var p = Math.min(100, Math.max(0, Number(w.used_pct) || 0));
-        html += quotaRow(sourceName(src) + suffix, windowName(w.key), p);
+        // used_pct 为已用%，越界收敛统一在 quotaRow 内完成
+        rows += quotaRow(windowName(w.key), w.used_pct, w.reset_at, null);
       });
+      if (!rows) return;
+      // 小节标题：仅设备名（plan_type 移入右侧徽标，首字母大写）。
+      // 单订阅且无设备名且无 plan_type 时整行省略，直接出窗口行；
+      // 有 plan_type 则渲染仅含徽标的标题行（t-name 空占位，徽标靠右）；
+      // 名称与徽标都为空的标题行无意义，同样不渲染
+      var devName = sn.device_id ? devNames[sn.device_id] : null;
+      var badge = sn.plan_type
+        ? '<span class="quota-badge">' + esc(planLabel(sn.plan_type)) + "</span>"
+        : "";
+      if (snaps.length === 1 && !devName && !sn.plan_type) {
+        inner += '<div class="quota-account">' + rows + "</div>";
+      } else if (devName || badge) {
+        inner += '<div class="quota-account">' +
+          '<div class="quota-account-title"><span class="t-name">' + (devName ? esc(devName) : "") + "</span>" + badge + "</div>" +
+          rows + "</div>";
+      } else {
+        inner += '<div class="quota-account">' + rows + "</div>";
+      }
     });
+    if (inner) html += agentBlock(src, sourceName(src), inner);
   });
 
   body.innerHTML = html || '<div class="empty">暂无额度快照</div>';
 }
 
-function quotaRow(title, windowLabel, pct) {
-  // title 可能包含客户端上传的 source / plan_type 等任意字符串（未知 source
-  // 会被 sourceName 原样返回），统一在此 esc() 后再拼入 innerHTML，防止 XSS；
-  // 调用方因此不需要（也不应该）再对 title 做转义。
-  return '<div class="quota-item ' + pctLevel(pct) + '">' +
-    '<div class="quota-head"><span>' + esc(title) + " · " + esc(windowLabel) + "</span>" +
-    '<span class="pct">' + Math.round(pct) + "%</span></div>" +
-    '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%"></div></div>' +
-    "</div>";
-}
-
-// 项目 Top10（近 7 天，横条形）
+// 项目 Top10（当前范围，横条形；历史无项目维度的 __unknown__ 分组不展示）
 function renderProjects() {
   var body = $("projects-card").querySelector(".body");
-  var list = data.projects_top || [];
+  var list = (projectsData || []).filter(function (p) { return p.key !== "__unknown__"; });
   if (!list.length) {
-    body.innerHTML = '<div class="empty">暂无项目数据（需客户端升级到 proto 5）</div>';
+    body.innerHTML = '<div class="empty">暂无项目数据（服务端与客户端升级后，新用量将按项目归集）</div>';
     return;
   }
   var max = list[0].total_tokens || 1;
@@ -562,26 +1000,12 @@ function renderProjects() {
   }).join("");
 }
 
-function renderDevices() {
-  var body = $("devices-card").querySelector(".body");
-  var list = data.devices || [];
-  if (!list.length) {
-    body.innerHTML = '<div class="empty">暂无设备</div>';
-    return;
-  }
-  body.innerHTML = list.map(function (d) {
-    return '<div class="dev-row"><span class="name">' + esc(d.device_name) + "</span>" +
-      '<span class="meta">' + fmtInt(d.record_count) + " 条 · " +
-      (d.last_uploaded_at ? relTime(d.last_uploaded_at) : "从未上传") + "</span></div>";
-  }).join("");
-}
-
 // ===== 启动 / 刷新 =====
 
 function startAutoRefresh() {
   if (timer) clearInterval(timer);
   timer = setInterval(function () {
-    if (!document.hidden) loadOverview();
+    if (!document.hidden) loadData();
   }, REFRESH_MS);
 }
 
@@ -595,10 +1019,11 @@ function bindEvents() {
     if (e.key === "Enter") $("btn-login").click();
   });
   $("btn-refresh").addEventListener("click", function () {
-    loadOverview();
-    showToast("已刷新");
+    loadData({ toast: true });
   });
-  $("btn-retry").addEventListener("click", loadOverview);
+  $("btn-retry").addEventListener("click", loadData);
+  $("range-tabs").addEventListener("click", onRangeTabClick);
+  $("btn-apply-custom").addEventListener("click", applyCustom);
 
   // 简单下拉刷新：顶部继续下拉超过 64px 触发
   var startY = 0, pulling = false;
@@ -617,20 +1042,23 @@ function bindEvents() {
     if (!pulling) return;
     var dist = (e.changedTouches[0] || {}).clientY - startY;
     $("pull-tip").classList.remove("show");
-    if (dist > 64 && window.scrollY <= 0) loadOverview();
+    if (dist > 64 && window.scrollY <= 0) loadData();
     pulling = false;
   });
 }
 
 function init() {
   bindEvents();
+  renderTabs();
+  initCustomInputs();
+  startCountdownTicker();
   if (token) {
     // 本地已有 token：先校验再进入，401 时 logout 回登录页
     fetch("/view/check", { headers: { "Authorization": "Bearer " + token } }).then(function (res) {
       if (res.ok) {
         $("main").classList.remove("hidden");
         startAutoRefresh();
-        loadOverview();
+        loadData();
       } else {
         logout();
       }
