@@ -616,6 +616,23 @@ export const en: typeof zh = {
     "theme.paramSidebarOpacity": "Sidebar opacity",
     "theme.paramSidebarRightOpacity": "Right panel opacity",
     "theme.paramPlaybackRate": "Playback speed",
+    // Usage bar section (standalone card: font size + opacity + session
+    // total toggle, live reload)
+    "theme.usageTitle": "Usage Bar",
+    "theme.usageHint":
+      "Look of the per-turn usage line (↑ input ↓ output · × requests · speed) at the end of each ZCode chat turn. Sliders save as you drag and apply live within ~1s.",
+    "theme.paramUsageFontSize": "Font size",
+    "theme.paramUsageFontSizeHint": "Text size of the usage line (9–16px)",
+    "theme.paramUsageOpacity": "Opacity",
+    "theme.paramUsageOpacityHint":
+      "Text opacity of the usage line; the waiting state of an in-progress turn is fainter",
+    // Session total bar toggle (usage.js V5: pinned above the chat input)
+    "theme.usageSessionBar": "Session total bar",
+    "theme.usageSessionBarHint":
+      "Pins the running session total (total tokens plus the input/output/cache read/request breakdown) above the chat input, with live output speed and estimated growth while streaming",
+    // Symbol legend (mirrors the usage.js line format)
+    "theme.usageLegend":
+      "↑ input (non-cached) · ↓ output · ⟲ cache read · × model requests · t/s output speed · TTFT time to first token · Σ session total tokens (input+output+cache read) · ≈ in-flight output estimate (excluded from totals)",
     "theme.currentWallpaper": "Current wallpaper",
     "theme.noWallpaper": "No wallpaper selected",
     "theme.lightWallpaperPreset": "Light wallpaper fit",

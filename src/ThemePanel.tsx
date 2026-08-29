@@ -75,8 +75,11 @@ const STAGE_KEYS: Record<string, MessageKey> = {
  *   滑块用百分比刻度（40~110），存值时 ÷scale、展示时 ×scale（见 toScale/fromScale）
  * - 不带 `scale` 的滑块（wpBlur 的 px / playbackRate 的倍速）：刻度即存储值，直存
  */
-const SLIDERS: ReadonlyArray<{
-  key: keyof Omit<ThemeParams, "wallpaperFile" | "wallpaperDir">;
+interface SliderDef {
+  key: keyof Omit<
+    ThemeParams,
+    "wallpaperFile" | "wallpaperDir" | "usageSessionBar"
+  >;
   labelKey: MessageKey;
   /** 可选滑块说明（渲染在滑块下方的小字；仅部分参数提供） */
   hintKey?: MessageKey;
@@ -86,7 +89,10 @@ const SLIDERS: ReadonlyArray<{
   /** 刻度→存储值的换算系数（100 = 百分比刻度，存储值 = 刻度值/100）；缺省 = 刻度即存储值 */
   scale?: number;
   format: (v: number) => string;
-}> = [
+}
+
+/** 壁纸效果参数滑块（"效果参数"卡片内平铺渲染，见下方卡片） */
+const SLIDERS: ReadonlyArray<SliderDef> = [
   {
     key: "wpBrightness",
     labelKey: "theme.paramWpBrightness",
@@ -185,6 +191,36 @@ const SLIDERS: ReadonlyArray<{
   },
 ];
 
+/**
+ * 用量统计条滑块定义：独立于壁纸效果参数的单独配置区域（独立 SettingsCard
+ * 渲染，卡片结构见下方"用量统计条"区），调整 ZCode 对话内每轮末尾用量
+ * 统计条的字号与文字不透明度，同样经 variables.css 热重载即时生效。
+ * - usageFontSize：整数 px 刻度（9~16，步进 1），刻度即存储值直存
+ * - usageOpacity：存储 0.25~1 小数、百分比刻度 25~100、步进 5
+ *   （scale 机制同 SLIDERS：存储值 = 刻度值/100）
+ */
+const USAGE_SLIDERS: ReadonlyArray<SliderDef> = [
+  {
+    key: "usageFontSize",
+    labelKey: "theme.paramUsageFontSize",
+    hintKey: "theme.paramUsageFontSizeHint",
+    min: 9,
+    max: 16,
+    step: 1,
+    format: (v) => `${v}px`,
+  },
+  {
+    key: "usageOpacity",
+    labelKey: "theme.paramUsageOpacity",
+    hintKey: "theme.paramUsageOpacityHint",
+    min: 25,
+    max: 100,
+    step: 5,
+    scale: 100,
+    format: (v) => `${v}%`,
+  },
+];
+
 /** Rust 存储值 → 滑块刻度值（scale 滑块 ×scale，并消除浮点尾差如 0.85×100） */
 const toScale = (v: number, scale?: number) =>
   scale ? Math.round(v * scale * 1000) / 1000 : v;
@@ -197,7 +233,8 @@ const fromScale = (v: number, scale?: number) => (scale ? v / scale : v);
  * 按钮与新增安装的初始观感都以此为准：亮度/饱和度拉满、无模糊遮罩、
  * 氛围底保持基础垫底（0.25）且文字描边关闭、面板与侧栏全透明（V5 分层
  * 后滑块各管各的容器、互不牵连；V6 起右栏亦有独立滑块，同样默认全透明；
- * 其余区域由固定氛围透明度兜底）、原速播放）
+ * 其余区域由固定氛围透明度兜底）、原速播放、用量统计条 10px / 55% 与
+ * 注入模板原写死观感一致）
  */
 const DEFAULT_EFFECT_PARAMS: Pick<
   ThemeParams,
@@ -211,6 +248,8 @@ const DEFAULT_EFFECT_PARAMS: Pick<
   | "sidebarOpacity"
   | "sidebarRightOpacity"
   | "playbackRate"
+  | "usageFontSize"
+  | "usageOpacity"
 > = {
   wpBrightness: 1.1,
   wpSaturate: 1.4,
@@ -222,6 +261,8 @@ const DEFAULT_EFFECT_PARAMS: Pick<
   sidebarOpacity: 0,
   sidebarRightOpacity: 0,
   playbackRate: 1,
+  usageFontSize: 10,
+  usageOpacity: 0.55,
 };
 
 /**
@@ -466,19 +507,10 @@ export function ThemePanel({ onBack }: Props) {
   };
 
   /**
-   * 滑块变更：本地即时反馈，300ms 防抖后把完整参数整体落盘。
-   * `value` 为滑块刻度值，scale 滑块先经 fromScale 换算回 Rust 存储小数再存
-   * （如亮度刻度 85 → 存 0.85），否则会被 Rust 侧 clamp 到 0.4~1.1 破坏数值。
+   * 参数防抖落盘：300ms 防抖后把完整参数整体落盘（滑块与开关共用管道），
+   * 成功时顶部闪现"已保存"反馈，失败进 AlertBanner。
    */
-  const handleSlider = (
-    key: keyof Omit<ThemeParams, "wallpaperFile">,
-    value: number,
-    scale?: number
-  ) => {
-    const cur = paramsRef.current;
-    if (!cur) return;
-    const next = { ...cur, [key]: fromScale(value, scale) };
-    setParams(next);
+  const scheduleParamsSave = (next: ThemeParams) => {
     if (saveTimer.current !== undefined) {
       window.clearTimeout(saveTimer.current);
     }
@@ -493,6 +525,36 @@ export function ThemePanel({ onBack }: Props) {
           setError(t("theme.setParamsFail", { msg: String(e) }))
         );
     }, 300);
+  };
+
+  /**
+   * 滑块变更：本地即时反馈，300ms 防抖后把完整参数整体落盘。
+   * `value` 为滑块刻度值，scale 滑块先经 fromScale 换算回 Rust 存储小数再存
+   * （如亮度刻度 85 → 存 0.85），否则会被 Rust 侧 clamp 到 0.4~1.1 破坏数值。
+   */
+  const handleSlider = (
+    key: keyof Omit<ThemeParams, "wallpaperFile">,
+    value: number,
+    scale?: number
+  ) => {
+    const cur = paramsRef.current;
+    if (!cur) return;
+    const next = { ...cur, [key]: fromScale(value, scale) };
+    setParams(next);
+    scheduleParamsSave(next);
+  };
+
+  /**
+   * 会话累计条开关变更（布尔参数，不走滑块刻度换算）：本地即时反馈，
+   * 防抖保存管道与滑块共用；Rust 侧落盘后经 variables.css 的
+   * --zbar-usage-session-bar 热重载透传给注入侧 usage.js（约 1 秒生效）。
+   */
+  const handleUsageSessionBar = (checked: boolean) => {
+    const cur = paramsRef.current;
+    if (!cur) return;
+    const next = { ...cur, usageSessionBar: checked };
+    setParams(next);
+    scheduleParamsSave(next);
   };
 
   /**
@@ -780,7 +842,7 @@ export function ThemePanel({ onBack }: Props) {
                 </AlertBanner>
               )}
 
-              {/* 操作按钮：未安装 → 安装；已安装 → 重装 / 还原（红色）；
+              {/* 操作按钮：未安装 → 安装；已安装 → 重装 / 重启 / 还原（红色）；
                   换壁纸入口移至下方拖拽投放区（原生文件对话框在本应用上不可见） */}
               <div className="flex flex-wrap items-center gap-1.5">
                 {!state.installed ? (
@@ -798,6 +860,12 @@ export function ThemePanel({ onBack }: Props) {
                     >
                       {t("theme.reinstall")}
                     </BtnPrimary>
+                    <BtnSecondary
+                      onClick={() => setConfirmRestart(true)}
+                      disabled={actionsDisabled}
+                    >
+                      {restarting ? t("theme.restarting") : t("theme.restartZcode")}
+                    </BtnSecondary>
                     <BtnSecondary
                       onClick={() => setConfirm("uninstall")}
                       disabled={actionsDisabled}
@@ -1002,10 +1070,10 @@ export function ThemePanel({ onBack }: Props) {
                   </div>
                 </div>
 
-                {/* 一键预设与恢复默认并排，重启 ZCode 居右：亮色壁纸适配只
-                    覆盖四项推荐值，恢复默认重置全部滑块（均保留壁纸指向与
-                    壁纸目录）；重启让注入资产完全重载（确认浮层保护） */}
-                <div className="flex gap-1.5">
+                {/* 一键预设与恢复默认等宽两列：亮色壁纸适配只覆盖四项推荐
+                    值，恢复默认重置全部滑块（均保留壁纸指向与壁纸目录）；
+                    重启 ZCode 入口已移至顶部 Agent 应用卡片按钮区 */}
+                <div className="grid grid-cols-2 gap-1.5">
                   <BtnSecondary
                     onClick={handleLightWallpaperPreset}
                     disabled={actionsDisabled}
@@ -1018,15 +1086,73 @@ export function ThemePanel({ onBack }: Props) {
                   >
                     {t("theme.resetParams")}
                   </BtnSecondary>
-                  <BtnSecondary
-                    onClick={() => setConfirmRestart(true)}
-                    disabled={actionsDisabled}
-                  >
-                    {restarting ? t("theme.restarting") : t("theme.restartZcode")}
-                  </BtnSecondary>
                 </div>
                 <p className="text-[9px] text-slate-500 leading-relaxed">
                   {t("theme.lightWallpaperPresetDesc")}
+                </p>
+              </div>
+            </SettingsCard>
+          )}
+
+          {/* 用量统计条区：独立于壁纸效果参数的配置区域（调整 ZCode 对话内
+              每轮末尾统计条的字号与不透明度，并可开关会话累计条），仅已
+              安装且参数读取成功时可用；保存走同一防抖管道
+              （set_agent_theme_params 整体落盘），保存成功反馈复用
+              paramsSavedFlash */}
+          {state.installed && params && (
+            <SettingsCard
+              title={t("theme.usageTitle")}
+              hint={t("theme.usageHint")}
+              action={
+                paramsSavedFlash ? (
+                  <span className="text-[9px] text-emerald-600">
+                    {t("theme.paramsSavedFlash")}
+                  </span>
+                ) : undefined
+              }
+            >
+              <div className="flex flex-col gap-2.5">
+                {USAGE_SLIDERS.map((s) => (
+                  <ParamSlider
+                    key={s.key}
+                    label={t(s.labelKey)}
+                    hint={s.hintKey ? t(s.hintKey) : undefined}
+                    value={toScale(params[s.key], s.scale)}
+                    min={s.min}
+                    max={s.max}
+                    step={s.step}
+                    format={s.format}
+                    disabled={actionsDisabled}
+                    onChange={(v) => handleSlider(s.key, v, s.scale)}
+                  />
+                ))}
+
+                {/* 会话累计条开关（usage.js V5）：固定悬浮于 ZCode 对话
+                    输入框上方的会话级实时统计条，流式生成时动态跳动；
+                    字号/不透明度复用上方两个滑块，开关经 variables.css
+                    热重载生效（样式同设置页既有 checkbox 模式） */}
+                <label className="flex items-center justify-between gap-2 cursor-pointer pt-2 border-t border-slate-900/6">
+                  <span className="min-w-0">
+                    <span className="block text-[10px] text-slate-600">
+                      {t("theme.usageSessionBar")}
+                    </span>
+                    <span className="block text-[9px] text-slate-500 leading-relaxed">
+                      {t("theme.usageSessionBarHint")}
+                    </span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={params.usageSessionBar}
+                    disabled={actionsDisabled}
+                    onChange={(e) => handleUsageSessionBar(e.target.checked)}
+                    className="accent-sky-500 h-3 w-3 shrink-0 disabled:opacity-40"
+                  />
+                </label>
+
+                {/* 符号图例：统计条各图标含义说明（与 usage.js 行格式
+                    一一对应，方便对照实机读数） */}
+                <p className="text-[9px] text-slate-500 leading-relaxed break-words">
+                  {t("theme.usageLegend")}
                 </p>
               </div>
             </SettingsCard>

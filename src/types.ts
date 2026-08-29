@@ -692,6 +692,16 @@ export interface ThemeParams {
   sidebarRightOpacity: number;
   /** 播放速度（0.5~2.0，倍速；仅视频壁纸有意义） */
   playbackRate: number;
+  /** 对话内用量统计条字号（9~16 整数 px，默认 10 = 注入模板原写死值）：
+   *  经 variables.css 热重载生效，无需重启 ZCode */
+  usageFontSize: number;
+  /** 对话内用量统计条文字不透明度（0.25~1 小数，前端滑块刻度 25~100，
+   *  默认 0.55 = 注入模板原写死值），热重载生效；等待态会更淡一些 */
+  usageOpacity: number;
+  /** 会话累计条开关（默认 true）：在 ZCode 对话输入框上方固定悬浮当前
+   *  会话累计用量（Σ ↑↓⟲×），流式生成时实时显示输出速度与估算增量；
+   *  经 variables.css --zbar-usage-session-bar（1/0）热重载生效 */
+  usageSessionBar: boolean;
   /** 当前壁纸指向（未设置为 null）。相对文件名 = wallpapers/ 目录内
    *  文件（如 "default.mp4"）；绝对路径 = 直接引用该文件 */
   wallpaperFile: string | null;

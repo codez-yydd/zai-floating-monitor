@@ -6,6 +6,8 @@
 //!   zcode/variables.css   由参数渲染出的 CSS 变量（注入物外链引用）
 //!   zcode/theme.css       主题样式（版本化落盘：低于内置版本自动升级）
 //!   zcode/effects.js      壁纸运行时脚本（版本化落盘，同上）
+//!   zcode/usage.js        对话页用量统计条脚本（版本化落盘，同上）
+//!   zcode/usage-data.js   用量数据（usage_feed 后台任务周期导出，非模板）
 //!   zcode/wallpapers/     壁纸视频库（卸载还原时保留）
 //!   zcode/backup/         原 app.asar 备份（仅保留 meta.json 指向的最新一份）+ meta.json
 //!   zbar-staging-zcode-<ts>/  安装过程中的 asar 解包临时目录
@@ -52,6 +54,11 @@ pub const STATE_FILE: &str = "state.json";
 pub const VARIABLES_CSS: &str = "variables.css";
 pub const THEME_CSS: &str = "theme.css";
 pub const EFFECTS_JS: &str = "effects.js";
+/// 对话页用量统计条脚本（版本化落盘模板，inject::USAGE_JS）
+pub const USAGE_JS: &str = "usage.js";
+/// 用量数据文件（usage_feed 后台任务周期导出，非模板不做版本化；
+/// usage.js 按自身 src 推导同目录地址加载）
+pub const USAGE_DATA_FILE: &str = "usage-data.js";
 pub const WALLPAPERS_DIR: &str = "wallpapers";
 pub const BACKUP_DIR: &str = "backup";
 pub const BACKUP_META_FILE: &str = "meta.json";
@@ -92,6 +99,21 @@ pub const DEFAULT_BASE_ALPHA: f64 = 0.25;
 /// （variables.css 渲染真值并随热重载即时生效），默认关闭不改变
 /// 既有观感
 pub const DEFAULT_TEXT_SHADOW: f64 = 0.0;
+/// 对话内用量统计条字号默认值（用户可调参数 usage_font_size，9~16 整数 px）：
+/// 取 usage.js V3 模板实际写死的 10px（font 简写 `400 10px/1.5`），
+/// 升级 V4 后默认观感与旧版一致（V4 起消费 --zbar-usage-font-size，
+/// variables.css 渲染真值并随热重载即时生效，模板内仅保留兜底）
+pub const DEFAULT_USAGE_FONT_SIZE: f64 = 10.0;
+/// 对话内用量统计条文字不透明度默认值（用户可调参数 usage_opacity，
+/// 0.25~1）：取 usage.js V3 模板正常态实际写死的 opacity .55；等待态
+/// 原写死 .35 的低透明观感由 V4 模板按正常态乘 0.636 系数保持
+/// （0.55 × 0.636 ≈ 0.35）
+pub const DEFAULT_USAGE_OPACITY: f64 = 0.55;
+/// 会话级实时统计条默认开关（用户可调参数 usage_session_bar）：
+/// usage.js V5 起在对话输入框上方固定悬浮当前会话累计条（Σ ↑↓⟲×，
+/// 流式生成时动态跳动），默认开启；开关经 variables.css 的
+/// --zbar-usage-session-bar（1/0）随热重载即时生效
+pub const DEFAULT_USAGE_SESSION_BAR: bool = true;
 
 /// 参数范围常量：(最小, 最大)
 pub const WP_BRIGHTNESS_RANGE: (f64, f64) = (0.4, 1.1);
@@ -104,6 +126,8 @@ pub const SIDEBAR_RIGHT_OPACITY_RANGE: (f64, f64) = (0.0, 1.0);
 pub const PLAYBACK_RATE_RANGE: (f64, f64) = (0.5, 2.0);
 pub const BASE_ALPHA_RANGE: (f64, f64) = (0.0, 1.0);
 pub const TEXT_SHADOW_RANGE: (f64, f64) = (0.0, 1.0);
+pub const USAGE_FONT_SIZE_RANGE: (f64, f64) = (9.0, 16.0);
+pub const USAGE_OPACITY_RANGE: (f64, f64) = (0.25, 1.0);
 
 /// 动态壁纸主题参数（前端皮肤页的滑杆/表单数据）。
 /// serde camelCase：与前端契约字段（wpBrightness / wallpaperFile 等）一一对应。
@@ -142,6 +166,21 @@ pub struct ThemeParams {
     /// text-shadow，强度消费 --zbar-text-shadow，壁纸过亮/过暗时
     /// 把文字从背景里托出来，热重载即时生效
     pub text_shadow: f64,
+    /// 对话内用量统计条字号（9~16 整数 px，默认 10 = usage.js V3 模板
+    /// 写死值）：usage.js V4 起消费 --zbar-usage-font-size（variables.css
+    /// 渲染真值，热重载即时生效），模板内仅保留同值兜底
+    pub usage_font_size: f64,
+    /// 对话内用量统计条文字不透明度（0.25~1，默认 0.55 = usage.js V3
+    /// 模板正常态写死值）：usage.js V4 起消费 --zbar-usage-opacity；
+    /// 等待态低透明观感由模板按本参数乘 0.636 系数保持（默认 ≈0.35）
+    pub usage_opacity: f64,
+    /// 会话级实时统计条开关（默认 true）：usage.js V5 起在 ZCode 对话
+    /// 输入框上方固定悬浮当前会话累计条（Σ ↑非缓存输入 ↓输出 ⟲缓存读
+    /// ×请求数，流式生成时动态跳动显示实时速度与估算增量），字号/不
+    /// 透明度复用 usage_font_size / usage_opacity；开关经 variables.css
+    /// 的 --zbar-usage-session-bar（1/0）热重载即时生效（usage.js 侧
+    /// 变量缺失视为开启，兼容旧 variables.css）
+    pub usage_session_bar: bool,
     /// 当前壁纸指向。语义（V3 起扩展）：
     /// - 绝对路径（以 / 或 Windows 盘符开头）→ 直接引用该文件
     /// - 相对文件名 → wallpapers/ 目录下的文件（如 "default.mp4"）
@@ -164,6 +203,9 @@ impl Default for ThemeParams {
             playback_rate: DEFAULT_PLAYBACK_RATE,
             base_alpha: DEFAULT_BASE_ALPHA,
             text_shadow: DEFAULT_TEXT_SHADOW,
+            usage_font_size: DEFAULT_USAGE_FONT_SIZE,
+            usage_opacity: DEFAULT_USAGE_OPACITY,
+            usage_session_bar: DEFAULT_USAGE_SESSION_BAR,
             wallpaper_file: Some(DEFAULT_WALLPAPER_FILE.to_string()),
             wallpaper_dir: None,
         }
@@ -187,6 +229,8 @@ impl ThemeParams {
         self.playback_rate = clamp(self.playback_rate, PLAYBACK_RATE_RANGE);
         self.base_alpha = clamp(self.base_alpha, BASE_ALPHA_RANGE);
         self.text_shadow = clamp(self.text_shadow, TEXT_SHADOW_RANGE);
+        self.usage_font_size = clamp(self.usage_font_size, USAGE_FONT_SIZE_RANGE);
+        self.usage_opacity = clamp(self.usage_opacity, USAGE_OPACITY_RANGE);
         if !self.wallpaper_file.as_deref().is_some_and(|s| !s.trim().is_empty()) {
             self.wallpaper_file = Some(DEFAULT_WALLPAPER_FILE.to_string());
         }
@@ -725,6 +769,128 @@ pub fn set_wallpaper_dir(app_id: &str, dir: Option<String>) -> Result<(), String
 /// 为默认值）
 pub const THEME_CSS_VERSION: u32 = 11;
 pub const EFFECTS_JS_VERSION: u32 = 5;
+/// usage.js V1（对话页用量统计条首版：每轮对话下方渲染 ↑ 输入 ↓ 输出
+/// ⟲ 缓存读 · 请求数 · 输出速度 · 首字延迟，数据源为 usage_feed 导出的
+/// 同目录 usage-data.js；选择器常量集中在文件头部便于实机调整）；
+/// usage.js V2（实机缺陷修复：实测 DOM data-turn-id 的值是 msg_ 前缀的
+/// user_message_id 而非 turn_id，匹配键改用数据 v2 新增的 umid 字段；
+/// 同一轮的多个虚拟列表单元节点只在 DOM 顺序最后一个节点渲染；数据 ts
+/// 未变时跳过重建与重渲染。usage.js 为外链注入——模板升级落盘后，用户
+/// 重启 ZCode 冷启动重载页面即生效新脚本，无需重装 asar）；
+/// usage.js V3（修复 scheduleRender 异常死锁：rAF 回调改 try/finally，
+/// scheduled 复位移入 finally；另加 15 秒低频兜底渲染自愈）；
+/// usage.js V4（样式参数化：统计条字号/不透明度改由 variables.css 的
+/// --zbar-usage-font-size / --zbar-usage-opacity 驱动（皮肤页新增
+/// "用量统计条"滑块可调，随每秒热重载即时生效），模板内仅保留 V3
+/// 写死值（10px / .55）兜底；等待态低透明由正常态乘 0.636 系数得出
+/// （默认 0.55×0.636≈0.35，与 V3 写死观感一致）。渲染/匹配/死锁
+/// 防护逻辑零改动）；
+/// usage.js V5（行格式图标化 + 会话级实时统计条：每轮行 "N req" →
+/// "× N"、"tok/s" → "t/s"、"首字" → "TTFT"，仅显示层数据与渲染管线
+/// 零改动；新增 renderSessionBar 会话条——fixed 悬浮于对话输入框上方
+/// （锚点 workspace-main，bottom 常量实机可调），显示当前会话真实累计
+/// Σ ↑↓⟲×（按 sess 过滤 turns 聚合，含并入的子代理部分），轮进行中时
+/// 追加 "⋯ t/s · ↓ ~估算" 动态段（textContent.length 差分 × 3.5 字符/
+/// token 估算，滑动窗口求速，200ms 刷新），轮完成即切回数据库真实值；
+/// 开关由新增参数 usage_session_bar 经 variables.css 的
+/// --zbar-usage-session-bar（1/0）热重载生效，数据格式 v2 不变）；
+/// usage.js V6（生成过程实时跳动，Claude Code CLI 式）：数据源追加
+/// runs 数组（usage_feed 从 model_usage 聚合"已落库至少一步请求、
+/// turn_usage 尚未写入"的进行中轮，v2 契约不变附加字段，旧脚本忽略
+/// 未知字段平滑兼容）——每轮条渲染优先级改为完成数据 > 进行中 run
+/// （runIndex 命中，真实聚合 + DOM 流式估算叠加 ↓ + 估算速度段 +
+/// "…" 尾缀）> data-running 等待态，轮完成 2 秒内自然切最终真实值；
+/// 会话条 Σ = 完成轮合计 + runs（sess 或 psess 命中）+ 流式估算，
+/// 新会话首轮也即时显示。修复 V5 动态段不生效的两个根因：
+/// renderSessionBar 在会话无完成轮时提前返回致定时器从未启动；动态
+/// 检测只依赖 data-running="true" 实机不可靠——目标节点改由 runIndex
+/// 数据驱动（findLiveNode），data-running 仅作数据未达头 2 秒兜底）
+/// usage.js V7（请求次数图标 ⟳ → ×：原 ⟳ 与缓存读 ⟲ 仅箭头方向之差
+/// 过于相似易混淆，改乘号 × 读作"共 N 次"；缓存读 ⟲ 与其余格式不变）；
+/// usage.js V8（启动窗口实时渲染，修复实机缺陷"发消息后每轮条不显示、
+/// 会话累计条不动，直到第一笔模型请求完成后才有内容"）：V6/V7 的实时
+/// 渲染以数据驱动——live 每轮条与估算目标（findLiveNode）都依赖
+/// runIndex（runs = model_usage 已完成请求的聚合），轮次开始到首笔请求
+/// 完成之间（思考阶段可达几十秒）model_usage 无行 → runs 无该轮 → live
+/// 条不渲染、估算无目标、会话条 sessionRunTotals 为空，启动窗口全空白
+/// （data-running 兜底实机不可靠）。V8 活动轮判定改为 DOM 驱动：会话内
+/// DOM 顺序最后一个 data-turn-id（umid）节点，其 umid 不在 index 即为
+/// 活动轮——既不在 index 也不在 runIndex = 启动窗口活动轮（消息发出节
+/// 点即在 DOM，无需任何数据库数据）：每轮条立即渲染动态段起始态
+/// "⋯ X.X t/s · ↓ ~X …"（真实部分全 0 不渲染数字段，估算来自 DOM，
+/// title 说明第一笔请求完成后显示真实用量），runIndex 命中后切 live 完
+/// 整格式；估算目标统一为该活动轮节点（删除 runs 目标依赖与 data-running
+/// 依赖，等待态渲染分支删除）；会话条放弃渲染条件追加"无活动轮"，估
+/// 算输出改入动态段 ↓ ~X（不再叠加进 Σ ↓ 真实数字）；轮完成切换与估
+/// 算器重置路径不变）
+/// usage.js V9（子代理消耗实时化，实机反馈：子代理运行时主对话的每轮
+/// 条和会话累计条都不随子代理消耗动态更新，子代理详情面板也不显示自己
+/// 的统计）：实机核实子代理详情面板与主对话同 document（无 iframe），
+/// 面板有自己的 [data-session-id] 容器（值为子代理会话 id）与
+/// [data-turn-id] 节点（值为子代理会话自己的 umid，与数据 runs 子代理
+/// 行一致），面板默认关闭、点开才挂载。V8 三个缺陷：renderAll 扫描限定
+/// workspace-main 锚点（面板在锚点外扫不到）；主轮 runs 行只聚合主会话
+/// 自身 model_usage（子代理跑时主轮条/会话条不动）；主轮未完成时其子代
+/// 理完成轮不进 turns 也不进 runs（消耗在界面丢失，会话 Σ 缺数）。
+/// V9 渲染端：renderAll 与活动轮判定改 document 级扫描（35 节点量级，
+/// 锚点仅保留给会话条定位），子代理面板每轮条随扫描按子代理行 umid 命
+/// 中渲染 live 条；活动轮判定改多容器（findLiveNodes 遍历所有
+/// [data-session-id] 容器，每容器 DOM 最后 umid 不在完成索引的节点为
+/// 该会话活动轮，返回 Map：sess → 节点，并行多子代理各有活动轮）；估
+/// 算器多目标（dyn.targets：sess → {node, 基准长度, 窗口样本}，单一
+/// 200ms 定时器统一采样驱动）；主轮 live 行数字合计数据侧并入的 sub
+/// （子代理消耗实时反映在主轮条），title 分解"含子代理 n 轮"；会话条
+/// Σ 跳过 m:1 子代理行（其值已并入主轮行 sub，随主轮行一并计入），
+/// 修复原 psess 裸命中的双计/丢失；关闭会话条不再连带停估算。
+/// V9 数据端（usage_feed，数据格式仍 v2 附加字段向后兼容）：主会话
+/// runs 行新增 sub 聚合 = psess 指向该会话的子代理 runs 行（并行多子
+/// 代理全并）+ 游离子代理完成轮（turns/merge 阶段按时间窗口分流：父
+/// 会话无覆盖子轮开始时刻的完成主轮 = 所属主轮未落库才输出，防与
+/// turns 整轮并入双计）；子代理 runs 行在父会话存在主轮行时打 m:1）；
+/// usage.js V10（统计条显示稳定性，用户反馈：统计条图标段数一会多一
+/// 会少、左右宽度持续变化，观感差——原三态各一种结构且"有值才显示、
+/// 无值省略"）：每轮条三态（启动窗口/live/完成）统一为同一固定结构
+/// "↑ in ↓ out ⟲ cr · × req · speed t/s · TTFT ttft"，任何状态都渲
+/// 染全部字段位、只更新数值；数字等宽补位（token 5 字符 / req 3 字符
+/// / 速度与 TTFT 各 4 字符，等宽字体 + tabular-nums 下整行宽度恒定；
+/// dur 缺失速度占位、进行中/缺失 TTFT 显示 "–"）；↓ 前固定 1 字符估
+/// 算前缀位（进行中 "~"、完成空格）；启动窗口极简行与行尾 "…" 进行
+/// 中标记删除（合并进统一格式函数 barLineOf）；会话条动态段
+/// "⋯ t/s · ↓ ~est" 两段永远显示（idle 时 0.0 / 0），Σ 数字段同步补
+/// 位；顺带修复已完成子代理面板的残留占位（枯萎判定：活动轮目标文本
+/// 连续 STALE_MS=90 秒无增长且 umid 始终不在 index/runIndex → 移除
+/// 残留占位行并从活动轮目标中移除，文本再变化时重新评估）。数据解析、
+/// runs/turns 索引、活动轮判定主逻辑、估算采样均不变）。usage.js V11
+/// （会话条让位，用户反馈：会话累计条悬浮位置落入输入框内部、遮挡输
+/// 入提示文字）：样式表为输入区容器 .chat-composer-region 追加
+/// padding-bottom（COMPOSER_GAP_PX = 22px，输入框整体干净上移、无布
+/// 局破坏），会话条 SESSION_BAR_BOTTOM_PX 96 → 2（贴近页面最底部，落
+/// 在输入区上移腾出的空隙中；渲染与数据管线零改动）。usage.js V12
+/// （会话条动态测量定位到输入框上沿之上 + 还原输入框位置 + resize 自
+/// 适应，用户反馈：V11 统计条贴死窗口边缘、与 ZCode 留白风格不协调）：
+/// 删除 V11 的 .chat-composer-region padding-bottom 规则与
+/// COMPOSER_GAP_PX 常量（输入框还原原位），会话条每次渲染动态测量
+/// 输入区容器 getBoundingClientRect().top，bottom = window.innerHeight
+/// - top + SESSION_BAR_ABOVE_PX（6px），测量失败退回固定
+/// SESSION_BAR_BOTTOM_PX（96px 兜底）；初始化追加 window resize 监听
+/// （scheduleRender）自适应缩放；渲染与数据管线零改动）。usage.js V13
+/// （会话条 DOM 挂载进输入区容器 + CSS 顶部留白定位，废弃动态测量。
+/// 实机缺陷：V12 的"测 region.top → fixed bottom 计算"会压住输入框内
+/// 第一行文字——测量目标与可见输入卡片边缘不一致 + 输入框单行/多行
+/// 切换的时序窗口）：ensureStyle 注入 .chat-composer-region relative +
+/// padding-top:26px 顶部留白，会话条改 absolute（top:4px 居中）由
+/// renderSessionBar 幂等挂载进容器，零坐标测量、删除 resize 监听（随
+/// 文档流自动跟随）；region 缺失退回挂 body + fixed +
+/// SESSION_BAR_BOTTOM_PX（96 兜底）；渲染与数据管线零改动）
+/// 实机缺陷：V13 遗漏 SEL_COMPOSER 常量定义，挂载块每次抛
+/// ReferenceError 被 catch 静默吞掉，会话条永远走 body + fixed 兜底。
+/// V14 修复：常量区补回定义 + 挂载 catch 增加一次性告警。
+/// V15：会话条 Σ 段新增会话总 Token（tin+tout+tcr），速度段去 ⋯ 前缀，
+/// 流式估算段 ↓ ~ 改 ≈ 前缀（渲染与数据管线零改动）。
+/// V16：整体移除每轮统计行（完成态/进行中/启动窗口）的鼠标悬浮 title
+/// 提示（titleOf/liveTitleOf/LIVE_TITLE/LIVE_START_TITLE 一并删除，
+/// 行可见内容与数据管线零改动）。
+pub const USAGE_JS_VERSION: u32 = 16;
 
 /// 版本标记的头部查找范围（字符数）：版本注释固定在文件头部，
 /// 限定查找范围避免误匹配正文中的同名字样。
@@ -770,8 +936,8 @@ pub(crate) fn ensure_versioned_template(
 }
 
 /// 确保/升级主题资产：
-/// - theme.css / effects.js：版本化覆盖（头部版本低于内置模板时升级，
-///   见 ensure_versioned_template；实机调优过的当前版本不动）
+/// - theme.css / effects.js / usage.js：版本化覆盖（头部版本低于内置模板
+///   时升级，见 ensure_versioned_template；实机调优过的当前版本不动）
 /// - variables.css：按当前参数重渲（内容无变化时跳过写盘）
 /// - 默认壁纸：wallpapers/ 无 default.mp4 且应用打包资源里有则拷入
 ///
@@ -796,6 +962,7 @@ pub(crate) fn ensure_theme_assets_in(
 
     ensure_versioned_template(&dir.join(THEME_CSS), inject::THEME_CSS, THEME_CSS_VERSION)?;
     ensure_versioned_template(&dir.join(EFFECTS_JS), inject::EFFECTS_JS, EFFECTS_JS_VERSION)?;
+    ensure_versioned_template(&dir.join(USAGE_JS), inject::USAGE_JS, USAGE_JS_VERSION)?;
 
     // 默认壁纸：优先应用打包资源（Tauri resources wallpapers/*），
     // 并行智能体产出的 default.mp4 会随应用分发；资源缺失时静默跳过，
@@ -877,6 +1044,9 @@ mod tests {
         assert_eq!(default.playback_rate, DEFAULT_PLAYBACK_RATE);
         assert_eq!(default.base_alpha, DEFAULT_BASE_ALPHA);
         assert_eq!(default.text_shadow, DEFAULT_TEXT_SHADOW);
+        assert_eq!(default.usage_font_size, DEFAULT_USAGE_FONT_SIZE);
+        assert_eq!(default.usage_opacity, DEFAULT_USAGE_OPACITY);
+        assert_eq!(default.usage_session_bar, DEFAULT_USAGE_SESSION_BAR);
         assert_eq!(default.wallpaper_file.as_deref(), Some(DEFAULT_WALLPAPER_FILE));
         assert_eq!(default.wallpaper_dir, None);
 
@@ -889,6 +1059,7 @@ mod tests {
             "wpBrightness", "wpSaturate", "wpBlur", "maskStrength",
             "panelOpacity", "sidebarOpacity", "sidebarRightOpacity",
             "playbackRate", "baseAlpha", "textShadow",
+            "usageFontSize", "usageOpacity", "usageSessionBar",
             "wallpaperFile", "wallpaperDir",
         ] {
             assert!(text.contains(key), "params.json 缺少字段 {key}");
@@ -920,6 +1091,42 @@ mod tests {
         // V10 新增参数：旧版文件缺字段同样按默认补齐
         assert_eq!(p.base_alpha, DEFAULT_BASE_ALPHA);
         assert_eq!(p.text_shadow, DEFAULT_TEXT_SHADOW);
+        // V4 用量统计条参数：旧版 params.json 缺字段同样按默认补齐
+        assert_eq!(p.usage_font_size, DEFAULT_USAGE_FONT_SIZE);
+        assert_eq!(p.usage_opacity, DEFAULT_USAGE_OPACITY);
+        // V5 会话累计条开关：旧版 params.json 缺字段按默认开启补齐
+        assert_eq!(p.usage_session_bar, DEFAULT_USAGE_SESSION_BAR);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn usage_session_bar_开关序列化与兼容() {
+        let dir = test_dir("usage-session-bar");
+        let path = dir.join(PARAMS_FILE);
+
+        // 显式关闭 → 落盘读回保持 false（不被默认值 true 覆盖），
+        // camelCase 键名落盘
+        let mut p = ThemeParams::default();
+        p.usage_session_bar = false;
+        write_params_file(&path, &p).unwrap();
+        let back = read_params_file(&path).unwrap();
+        assert!(!back.usage_session_bar, "显式关闭的开关读回应保持 false");
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("\"usageSessionBar\": false"),
+            "params.json 应含 camelCase 键 usageSessionBar 且值为 false：{text}"
+        );
+        // clamp 收敛只针对数值/文本参数，开关布尔值原样保留
+        assert!(!back.clamped().usage_session_bar, "clamped 不应改动开关值");
+
+        // 旧版 params.json 缺该字段 → serde default 补默认值 true
+        fs::write(&path, r#"{"wpBrightness":0.9,"wallpaperFile":"a.mp4"}"#).unwrap();
+        let legacy = read_params_file(&path).unwrap();
+        assert!(
+            legacy.usage_session_bar,
+            "旧版文件缺 usageSessionBar 应按默认开启补齐"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -937,6 +1144,9 @@ mod tests {
             playback_rate: 10.0,
             base_alpha: 2.0,
             text_shadow: -1.0,
+            usage_font_size: 99.0,
+            usage_opacity: 5.0,
+            usage_session_bar: false,
             wallpaper_file: Some("  ".into()),
             wallpaper_dir: None,
         }
@@ -951,6 +1161,8 @@ mod tests {
         assert_eq!(p.playback_rate, PLAYBACK_RATE_RANGE.1);
         assert_eq!(p.base_alpha, BASE_ALPHA_RANGE.1);
         assert_eq!(p.text_shadow, TEXT_SHADOW_RANGE.0);
+        assert_eq!(p.usage_font_size, USAGE_FONT_SIZE_RANGE.1);
+        assert_eq!(p.usage_opacity, USAGE_OPACITY_RANGE.1);
         // 空白文件名回默认
         assert_eq!(p.wallpaper_name(), DEFAULT_WALLPAPER_FILE);
         p.wallpaper_file = None;
@@ -1057,6 +1269,7 @@ mod tests {
         // 内置模板头部带各自的当前版本标记
         assert_eq!(template_version_of(inject::THEME_CSS), Some(THEME_CSS_VERSION));
         assert_eq!(template_version_of(inject::EFFECTS_JS), Some(EFFECTS_JS_VERSION));
+        assert_eq!(template_version_of(inject::USAGE_JS), Some(USAGE_JS_VERSION));
         // 旧版文件无标记 → None（视为需要升级）
         assert_eq!(template_version_of("/* 旧版无版本头 */\nbody{}"), None);
         // 显式旧版本号可被提取
@@ -1082,6 +1295,7 @@ mod tests {
         // 场景一：旧版模板（无版本头）→ theme.css 升 V10、effects.js 升 V5
         fs::write(dir.join(THEME_CSS), "/* 旧版 theme，无版本头 */").unwrap();
         fs::write(dir.join(EFFECTS_JS), "// 旧版 effects，无版本头").unwrap();
+        // usage.js 为本功能新增模板：老用户目录里不存在 → 首次 ensure 落盘
         ensure_theme_assets_in(&dir, &wp_dir, None).unwrap();
         assert!(
             fs::read_to_string(dir.join(THEME_CSS))
@@ -1094,6 +1308,22 @@ mod tests {
                 .unwrap()
                 .contains("ZBAR-THEME-V5"),
             "旧版 effects.js 应被升级覆盖到 V5"
+        );
+        assert!(
+            fs::read_to_string(dir.join(USAGE_JS))
+                .unwrap()
+                .contains(&format!("ZBAR-THEME-V{USAGE_JS_VERSION}")),
+            "缺失的 usage.js 应首次落盘"
+        );
+
+        // 场景一补充：usage.js 为旧版本（头部标记低于内置版本）→ 覆盖升级
+        fs::write(dir.join(USAGE_JS), "// ZBAR-THEME-V0 旧版占位\n").unwrap();
+        ensure_theme_assets_in(&dir, &wp_dir, None).unwrap();
+        assert!(
+            fs::read_to_string(dir.join(USAGE_JS))
+                .unwrap()
+                .contains(&format!("ZBAR-THEME-V{USAGE_JS_VERSION}")),
+            "旧版 usage.js 应被升级覆盖"
         );
 
         // 场景二：effects.js 为 V3（已装用户的真实升级路径，V3/V4 旧版

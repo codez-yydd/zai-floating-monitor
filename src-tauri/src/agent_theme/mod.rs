@@ -41,12 +41,15 @@
 //!   含 macOS「应用管理」拦截识别与设置指引）
 //! - sign：codesign ad-hoc 重签名（macOS 专属，签名命令已纳入替换/还原
 //!   脚本内执行；Windows 无签名流程）
+//! - usage_feed：对话页用量统计条数据源（turn_usage → usage-data.js，
+//!   皮肤安装成功启动 / 卸载还原停止，见各流程挂点）
 
 pub mod asar;
 pub mod inject;
 pub mod privilege;
 pub mod sign;
 pub mod store;
+pub mod usage_feed;
 
 use serde::Serialize;
 use std::collections::HashSet;
@@ -1597,6 +1600,8 @@ fn install_impl(
     match result {
         Ok(()) => {
             prog.emit("done", 100.0, Some("动态壁纸主题安装完成"));
+            // 皮肤已就绪：启动用量统计条数据源（usage-data.js 周期导出）
+            usage_feed::start();
             Ok(())
         }
         Err(e) => {
@@ -1646,6 +1651,8 @@ fn restore_backup(app: &dyn AgentApp, prog: &Progress) -> Result<(), String> {
             ));
         }
     }
+    // 还原意味着皮肤即将卸载/失效：先停用量导出线程再动 asar
+    usage_feed::stop();
     let _ = app.quit();
     // 单会话替换（三级策略执行）：cp 备份到临时名 → 换入 → 先验证签名、
     // 失败才 ad-hoc 重签、再失败在脚本内换回还原前状态（Windows 为同款
@@ -1754,6 +1761,9 @@ fn uninstall_impl(handle: &AppHandle, app_id: &str) -> Result<(), String> {
         // 签名校验/重签已随脚本完成，此处仅推进进度
         prog.emit("sign", 60.0, None);
 
+        // 皮肤即将卸载：先停用量导出线程（避免其在目录清理后重建目录写
+        // usage-data.js；usage-data.js 随主题目录清理一并删除）
+        usage_feed::stop();
         // 清理主题目录（wallpapers 壁纸素材保留）+ 状态复位
         prog.emit("cleanup", 80.0, None);
         store::cleanup_theme_dir_keep_wallpapers(app.id())?;

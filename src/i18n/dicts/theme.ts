@@ -85,6 +85,23 @@ export const theme = {
   "theme.paramSidebarOpacity": "侧栏不透明度",
   "theme.paramSidebarRightOpacity": "右栏不透明度",
   "theme.paramPlaybackRate": "播放速度",
+  // 用量统计条区（独立配置区域：字号 + 不透明度 + 会话累计条开关，
+  // 热重载生效）
+  "theme.usageTitle": "用量统计条",
+  "theme.usageHint":
+    "ZCode 对话内每轮末尾统计条（↑输入 ↓输出 · ×请求数 · 速度等）的外观，拖动滑块即时保存并热生效（约 1 秒）。",
+  "theme.paramUsageFontSize": "字号",
+  "theme.paramUsageFontSizeHint": "统计条文字大小（9~16px）",
+  "theme.paramUsageOpacity": "不透明度",
+  "theme.paramUsageOpacityHint":
+    "统计条文字不透明度；进行中的轮次等待态会更淡一些",
+  // 会话累计条开关（usage.js V5：固定悬浮于对话输入框上方的会话级实时统计条）
+  "theme.usageSessionBar": "会话累计条",
+  "theme.usageSessionBarHint":
+    "在对话输入框上方固定显示当前会话累计（总 Token 与输入/输出/缓存读/请求数明细），流式生成时实时显示输出速度与估算增量",
+  // 统计条符号图例（与 usage.js 行格式一一对应）
+  "theme.usageLegend":
+    "↑ 输入（非缓存） · ↓ 输出 · ⟲ 缓存读 · × 模型请求数 · t/s 输出速度 · TTFT 首字延迟 · Σ 会话总 Token（输入+输出+缓存读） · ≈ 生成中输出估算（未计入累计）",
   "theme.currentWallpaper": "当前壁纸",
   "theme.noWallpaper": "未选择壁纸",
   "theme.lightWallpaperPreset": "亮色壁纸适配",

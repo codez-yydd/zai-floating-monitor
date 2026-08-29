@@ -2004,6 +2004,9 @@ pub fn run() {
             }
 
             sync::spawn_sync_worker();
+            // 对话页用量统计条数据源：皮肤已安装时启动后台导出
+            // （未安装不启动；安装成功/卸载的启停在 agent_theme 流程挂点）
+            agent_theme::usage_feed::start_if_installed();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
