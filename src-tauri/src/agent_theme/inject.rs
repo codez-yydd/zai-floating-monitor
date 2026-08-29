@@ -644,9 +644,29 @@ pub const EFFECTS_JS: &str = r#"// =============================================
 /// store::ensure_versioned_template）。风格与 effects.js 同款：自愈、
 /// 静默失败、空值防御；DOM 选择器集中在头部常量，便于实机比对调整。
 pub const USAGE_JS: &str = r#"// ============================================================
-// ZBAR-THEME-V16
+// ZBAR-THEME-V18
 // ZBar Agent 对话页用量统计条（由 ZBar 落盘并随版本升级覆盖）
 // ============================================================
+// V18 变更（修复新建任务后（空会话）会话累计条停留在上一个会话数据：
+//   renderAll 开头无 [data-turn-id] 节点时直接早退，renderSessionBar
+//   永不执行，V17 修复的容器判定本身正确但该分支根本到不了会话条渲
+//   染，条停留在上一个会话的累计值永不消失。实机复现：新任务容器
+//   data-session-id="draft" 可见且含焦点）：
+//   a) renderAll 空轮分支在 stopDyn 之后补 removeBar()：会话内无任何
+//      轮节点即移除会话条。其余逻辑零改动。
+// V17 变更（修复新建任务后会话累计条不消失、数据不重置：多会话保活
+//   下旧会话容器在任务切换后仍挂载在 DOM 且通常排在前面，原
+//   currentSessionId 用 querySelector 首中即取，读到保活的旧会话 id，
+//   条继续渲染旧会话累计，应读到新任务的 draft/无数据并随之消失）：
+//   a) 新增 visibleEl：元素当前是否可见（保活面板隐藏时 rect 归零或
+//      display:none）。
+//   b) currentSessionId 重写为容器遍历两级优先：包含
+//      document.activeElement 的容器（用户正在输入的会话）优先，其次
+//      第一个可见容器；锚点内优先、无候选再全文档。都拿不到返回空
+//      串，renderSessionBar 既有逻辑随之 removeBar。
+//   c) composer 挂载点新增 pickComposerRegion：可见且属于当前会话容
+//      器（closest 命中会话容器属性值）优先，其次第一个可见的，都无
+//      返回 null 走既有 body 兜底分支。渲染与数据管线零改动。
 // V16 变更（整体移除每轮统计行（完成态/进行中/启动窗口）的鼠标悬浮
 //   title 提示。用户反馈：悬浮信息无必要，且原生 title 提示框样式丑）：
 //   a) 删除三态行的 title 赋值，以及仅为其服务的明细构造函数与口径
@@ -1374,15 +1394,50 @@ pub const USAGE_JS: &str = r#"// ===============================================
     }
   }
 
-  /* 当前会话 id（V9）：优先取锚点内的会话容器属性值——子代理详情面板
-   * 容器与主对话同 document，document 级首个容器可能是面板容器，须先
-   * 限定主对话锚点范围；锚点内拿不到再退化为全局首个。拿不到返回空串
-   * （不渲染） */
+  /* V17：元素当前是否可见（保活面板隐藏时 rect 归零或 display:none）*/
+  function visibleEl(el) {
+    try {
+      var r = el.getBoundingClientRect();
+      var s = window.getComputedStyle(el);
+      return r.width > 0 && r.height > 0 &&
+        s.display !== "none" && s.visibility !== "hidden";
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /* 当前会话 id（V17 重写）：旧实现 querySelector 首中即取，多会话保
+   * 活时首中的是任务切换后仍挂载在 DOM 的旧会话容器（通常排在前面），
+   * 导致新建任务后条继续渲染旧会话累计、永不消失。改为遍历候选容器
+   * 按两级优先取值：① 包含 document.activeElement 的容器（用户正在
+   * 输入的会话，含焦点时通常即当前任务）；② 第一个可见容器
+   * （visibleEl，保活面板隐藏时 rect 归零或 display:none）。锚点内优
+   * 先——子代理详情面板容器与主对话同 document，须先限定主对话锚点
+   * 范围；锚点内无候选再退化为全文档。都不满足返回空串（renderSessionBar
+   * 既有逻辑随之 removeBar） */
   function currentSessionId(anchor) {
     try {
-      var el = (anchor || document).querySelector(SEL_SESSION_ID) ||
-        document.querySelector(SEL_SESSION_ID);
-      return (el && el.getAttribute(ATTR_SESSION_ID)) || "";
+      var scopes = anchor ? [anchor, document] : [document];
+      for (var s = 0; s < scopes.length; s++) {
+        var list = scopes[s].querySelectorAll(SEL_SESSION_ID);
+        var firstVisible = null;
+        for (var i = 0; i < list.length; i++) {
+          var el = list[i];
+          /* ① 焦点所在容器（用户正在输入的会话）优先即取 */
+          try {
+            if (document.activeElement &&
+              el.contains(document.activeElement)) {
+              return el.getAttribute(ATTR_SESSION_ID) || "";
+            }
+          } catch (e2) {}
+          /* ② 记录第一个可见容器，扫完无焦点命中再取 */
+          if (firstVisible === null && visibleEl(el)) {
+            firstVisible = el.getAttribute(ATTR_SESSION_ID) || "";
+          }
+        }
+        if (firstVisible !== null) return firstVisible;
+      }
+      return "";
     } catch (e) {
       return "";
     }
@@ -1654,6 +1709,31 @@ pub const USAGE_JS: &str = r#"// ===============================================
     return tgt && tgt.node === node ? dynEstimate(sess) : EST_ZERO;
   }
 
+  /* V17：会话条挂载点选择。多会话保活时 document 首个
+   * .chat-composer-region 可能属于隐藏的旧会话容器（首中即用会把条挂
+   * 错位置），改为两级选择：① 可见且属于当前会话容器（closest 命中
+   * 会话容器属性值 === sessId，分栏视图下跟随当前会话）；② 第一个可
+   * 见的。都无返回 null，走 renderSessionBar 既有 body 兜底分支 */
+  function pickComposerRegion(sessId) {
+    try {
+      var list = document.querySelectorAll(SEL_COMPOSER);
+      var firstVisible = null;
+      for (var i = 0; i < list.length; i++) {
+        var el = list[i];
+        if (!visibleEl(el)) continue;
+        if (firstVisible === null) firstVisible = el;
+        var owner = el.closest ? el.closest(SEL_SESSION_ID) : null;
+        if (sessId && owner &&
+          (owner.getAttribute(ATTR_SESSION_ID) || "") === sessId) {
+          return el;
+        }
+      }
+      return firstVisible;
+    } catch (e) {
+      return null;
+    }
+  }
+
   function renderSessionBar(anchor, activeMap) {
     if (!sessionBarEnabled()) {
       /* V9：估算目标已独立管理（syncDyn），关闭会话条不再连带停估算
@@ -1710,11 +1790,13 @@ pub const USAGE_JS: &str = r#"// ===============================================
     var text = parts.join(" · ");
     var bar = ensureBar();
     /* V13：挂载进输入区容器（幂等迁移）——条 absolute 住进 CSS 注入的
-     * 26px 顶部留白，零坐标测量、随文档流自适应。region 缺失（选择器
-     * 失效/结构变更）退回旧路径：挂 body、打兜底标记切 fixed +
+     * 26px 顶部留白，零坐标测量、随文档流自适应。V17：挂载点经
+     * pickComposerRegion 选择（可见优先并跟随当前会话容器，多会话保
+     * 活时不再首中隐藏旧会话的输入区容器）。region 缺失（选择器失效/
+     * 结构变更）退回旧路径：挂 body、打兜底标记切 fixed +
      * SESSION_BAR_BOTTOM_PX（迁回 region 时移除标记自动还原） */
     try {
-      var region = document.querySelector(SEL_COMPOSER);
+      var region = pickComposerRegion(sessId);
       if (region) {
         if (bar.parentElement !== region) region.appendChild(bar);
         if (bar.hasAttribute(ATTR_SESSION_BAR_FIXED)) {
@@ -1745,6 +1827,11 @@ pub const USAGE_JS: &str = r#"// ===============================================
     var nodes = document.querySelectorAll(SEL_TURN);
     if (!nodes.length) {
       stopDyn(); /* 会话清空即停估算（防幽灵目标空转） */
+      /* V18：空会话（新建任务/清空对话）同样要推进会话条——此前此处
+       * 早退导致 renderSessionBar 永不执行，条停留在上一个会话的
+       * 累计值永不消失（实机复现：新任务容器 data-session-id="draft"
+       * 可见且含焦点，V17 的会话判定本身正确，缺的就是这一步） */
+      removeBar();
       return;
     }
     /* 第一遍：按 DOM 顺序确定每个 umid 的最后一个节点（querySelectorAll
@@ -2273,7 +2360,14 @@ mod tests {
         assert!(!THEME_CSS.contains("ZBAR-THEME-V9"), "版本头应已升到 V10");
         assert!(EFFECTS_JS.contains("ZBAR-THEME-V5"));
         assert!(!EFFECTS_JS.contains("ZBAR-THEME-V4"), "版本头应已升到 V5");
-        // usage.js V16（整体移除每轮统计行的悬浮 title 提示，titleOf/
+        // usage.js V18（修复新建任务后（空会话）会话累计条停留在上一个
+        // 会话数据：renderAll 无轮节点分支早退导致 renderSessionBar 永
+        // 不执行，该分支补 removeBar；V17 修复新建任务后会话累计条不消
+        // 失、数据不重置：currentSessionId 改为焦点优先+可见优先的容器
+        // 遍历选择（旧
+        // querySelector 首中在多会话保活时拿到旧会话），composer 挂载
+        // 点经 pickComposerRegion 可见优先并跟随当前会话容器；V16 整体
+        // 移除每轮统计行的悬浮 title 提示，titleOf/
         // liveTitleOf/LIVE_TITLE/LIVE_START_TITLE 一并删除；V15 会话条
         // Σ 段新增会话总 Token + 速度段去 ⋯ 前缀 +
         // 流式估算段改 ≈ 前缀；V14 修复 V13 遗漏 SEL_COMPOSER 定义 + 挂
@@ -2283,9 +2377,48 @@ mod tests {
         // 占位枯萎清理；V9 子代理消耗实时化：document 级扫描 + 多容器
         // 活动轮 + 主轮 live 行 sub 合计 + 会话条 Σ 跳过 m 行；V8 启动
         // 窗口实时渲染；V7 请求图标 ⟳ → ×；V6 生成过程实时跳动）
-        assert!(USAGE_JS.contains("ZBAR-THEME-V16"));
-        assert!(!USAGE_JS.contains("ZBAR-THEME-V15"), "版本头应已升到 V16");
+        assert!(USAGE_JS.contains("ZBAR-THEME-V18"));
+        assert!(!USAGE_JS.contains("ZBAR-THEME-V17"), "版本头应已升到 V18");
+        assert!(!USAGE_JS.contains("ZBAR-THEME-V16"), "版本头不应回退");
         assert!(!USAGE_JS.contains("ZBAR-THEME-V10"), "版本头不应回退");
+        // V18 空会话修复特征：renderAll 无轮节点早退分支必须调用
+        // removeBar，否则新建任务/清空对话后会话条停留在上一个会话的
+        // 累计值永不消失。切片范围：renderAll 函数体内空轮分支起点至
+        // 该分支的 return 为止
+        let ra_lo = USAGE_JS
+            .find("function renderAll")
+            .expect("renderAll 应存在");
+        let ra_body = &USAGE_JS[ra_lo..];
+        let br_off = ra_body
+            .find("if (!nodes.length)")
+            .expect("renderAll 空轮分支应存在");
+        let br_len = ra_body[br_off..]
+            .find("return;")
+            .expect("空轮分支应包含 return");
+        let empty_branch = &ra_body[br_off..br_off + br_len];
+        assert!(
+            empty_branch.contains("stopDyn()"),
+            "空轮分支应保留 stopDyn（会话清空停估算目标）"
+        );
+        assert!(
+            empty_branch.contains("removeBar();"),
+            "V18 空轮分支应调用 removeBar（空会话时移除会话条，防残留上一会话累计）: {empty_branch}"
+        );
+        // V17 会话选择修复特征：可见性 helper（保活面板隐藏时跳过）、
+        // composer 挂载点选择函数；旧 querySelector 首中写法应已删除
+        assert!(
+            USAGE_JS.contains("function visibleEl"),
+            "V17 应新增可见性判断 helper（保活面板隐藏时 rect 归零或 display:none）"
+        );
+        assert!(
+            USAGE_JS.contains("function pickComposerRegion"),
+            "composer 挂载点应经 pickComposerRegion 可见优先并跟随当前会话容器"
+        );
+        assert!(
+            !USAGE_JS
+                .contains("(anchor || document).querySelector(SEL_SESSION_ID)"),
+            "currentSessionId 旧 querySelector 首中写法应已删除（多会话保活时拿到旧会话）"
+        );
         // V4 样式参数化特征（保留）：两个变量消费 + V3 写死值兜底 + 等待态乘系数
         assert!(
             USAGE_JS.contains("var(--zbar-usage-font-size,10px)"),

@@ -890,7 +890,15 @@ pub const EFFECTS_JS_VERSION: u32 = 5;
 /// V16：整体移除每轮统计行（完成态/进行中/启动窗口）的鼠标悬浮 title
 /// 提示（titleOf/liveTitleOf/LIVE_TITLE/LIVE_START_TITLE 一并删除，
 /// 行可见内容与数据管线零改动）。
-pub const USAGE_JS_VERSION: u32 = 16;
+/// V17：修复新建任务后会话累计条不消失、数据不重置——currentSessionId
+/// 改为焦点优先+可见优先的容器遍历选择（多会话保活时旧 querySelector
+/// 首中会拿到旧会话容器），composer 挂载点经 pickComposerRegion 可见
+/// 优先并跟随当前会话容器（渲染与数据管线零改动）。
+/// V18：修复新建任务后（空会话）会话累计条停留在上一个会话数据——
+/// renderAll 开头无 [data-turn-id] 节点时直接早退，renderSessionBar 永
+/// 不执行（V17 的会话容器判定本身正确，但该分支根本到不了会话条渲
+/// 染），空轮分支补 removeBar()：会话内无任何轮节点即移除会话条。
+pub const USAGE_JS_VERSION: u32 = 18;
 
 /// 版本标记的头部查找范围（字符数）：版本注释固定在文件头部，
 /// 限定查找范围避免误匹配正文中的同名字样。
