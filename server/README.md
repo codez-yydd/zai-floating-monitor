@@ -19,8 +19,6 @@ app.py          # 主程序（所有接口）
 db.py           # 数据库操作（自动建库建表）
 auth.py         # 鉴权（master token / device token）
 config.py       # 配置（端口、数据目录）
-static/
-  index.html    # 手机端查看页面（Flask 自动托管在 /static/）
 start.sh        # 启动脚本
 requirements.txt
 ```
@@ -126,23 +124,17 @@ PORT=8080 python3 app.py
 |------|------|------|
 | `POST /register` | Master Token | 注册设备，返回 Device Token |
 | `POST /sync` | Device Token | 增量上传用量明细（每条可带 source，缺省 zcode；proto 5 起可带会话/项目字段） |
-| `GET /usage` | Device / View Token | 聚合查询（overall + by_model + trend，可选 source 过滤） |
-| `GET /models` | Device / View Token | 全部设备 × 全部来源的模型清单（distinct，价格配置用） |
-| `GET /snapshots` | Device / View Token | Z.ai 额度快照查询 |
-| `GET /agent-quota-snapshots` | Device / View Token | Codex / Claude / Cursor 额度快照查询 |
-| `POST /period_detail` | Device / View Token | 按周期返回逐条用量明细 |
-| `GET /projects` | Device / View Token | 项目维度聚合查询（proto 5） |
-| `GET /overview` | Device / View Token | 手机首屏聚合（周期汇总 + 额度 + 项目 Top + 设备） |
-| `GET /devices` | Device / View Token | 设备列表 |
-| `POST /view/token/regenerate` | Master Token | 重新生成 view token（手机页只读凭证），明文仅返回一次 |
-| `GET /view/check` | View Token | view token 校验（手机页首次输入时调用） |
+| `GET /usage` | Device Token | 聚合查询（overall + by_model + trend，可选 source 过滤） |
+| `GET /models` | Device Token | 全部设备 × 全部来源的模型清单（distinct，价格配置用） |
+| `GET /snapshots` | Device Token | Z.ai 额度快照查询 |
+| `GET /agent-quota-snapshots` | Device Token | Codex / Claude / Cursor 额度快照查询 |
+| `POST /period_detail` | Device Token | 按周期返回逐条用量明细 |
+| `GET /devices` | Device Token | 设备列表 |
 | `POST /device/revoke` | Master Token | 撤销设备 |
 | `POST /cleanup` | Master Token | 数据清理（按设备/按时间/全清/reset） |
 | `GET /cleanup/status` | Device Token | 数据量 + 自动清理配置 |
 | `POST /cleanup/config` | Master Token | 配置自动定时清理 |
 | `GET /health` | 无 | 健康检查 |
-
-> 鉴权级别说明：**View Token 是只读凭证**，仅能调用上表标注「Device / View Token」的查询接口；所有写操作（注册、上传、设备管理、清理）只认 Master / Device Token。
 
 ---
 
@@ -163,49 +155,9 @@ PORT=8080 python3 app.py
 
 ---
 
-## 手机端查看页面
-
-服务端自带一个单文件手机仪表盘（原生 JS，零外部资源，内网可直接用），在手机浏览器查看全部设备的用量汇总。
-
-### 获取 view token
-
-view token 是**只读**的「手机端查看页面访问令牌」，与 device token 相互独立：
-
-- **首次启动自动生成**，明文只打印一次到服务端日志：
-
-  ```
-  [zbar-sync] VIEW_TOKEN: 3f8a…
-  [zbar-sync]   ↑ 手机端查看页面访问令牌（浏览器打开 /static/index.html 时输入）
-  ```
-
-- **重新生成**（旧 token 立即失效，用于轮换或泄露后作废）：
-
-  ```bash
-  curl -X POST http://你的服务器:3838/view/token/regenerate \
-       -H "Content-Type: application/json" \
-       -d '{"master_token": "你的 MASTER_TOKEN"}'
-  ```
-
-  响应里的 `view_token` 明文仅返回这一次，请立即保存。
-
-### 访问页面
-
-浏览器打开 `http://你的服务器:3838/static/index.html`，首次输入 view token（通过 `GET /view/check` 校验），通过后保存在手机浏览器 `localStorage`，之后免输入。页面每 60 秒自动刷新，也支持下拉或点右上角按钮手动刷新。
-
-页面内容：今日 / 近 7 天 / 近 30 天的 Token 与请求数、各来源分组占比、各订阅额度进度条、近 7 天项目 Top10、设备列表。不含花费展示（服务端无价格表）。
-
-### 安全边界
-
-- view token **只读**：只能调用 `/usage`、`/projects`、`/overview` 等查询接口，无法上传数据、管理设备或删除数据；写操作只认 Master / Device Token。
-- 可随时通过 regenerate 接口轮换，泄露后旧 token 立即失效。
-- 服务端只存 token 的 SHA-256 哈希，明文不落盘。
-- 自托管 HTTP 下 view token 与 device token 一样是明文传输，建议仅在内网使用，或通过 Nginx 配置 HTTPS 反向代理。
-
----
-
 ## proto 5：会话 / 项目维度
 
-`POST /sync` 上传的明细 records 每条新增三个可选字段：`session_id`（会话 ID）、`project_key`（归一化后的项目路径键，如 `/users/chacca/code/my-app`，无法归属时为 null）、`project_display`（原始形态路径）。服务端在 `usage_records` 表幂等补列存储（全部可空，不改主键），并新增只读接口 `GET /projects?from=<ms>&to=<ms>[&devices=id1,id2]` 按 `(project_key, source)` 聚合查询，`project_key` 为空的记录聚合为 `"__unknown__"`（手机页显示为「未知项目」）。**旧客户端（proto 2/3/4）完全不受影响**：不传新字段即照旧落库为 NULL，聚合归入 `"__unknown__"`；客户端探测 `/sync` 响应中的 `proto: 5` 后才会启用新字段上传。
+`POST /sync` 上传的明细 records 每条新增三个可选字段：`session_id`（会话 ID）、`project_key`（归一化后的项目路径键，如 `/users/chacca/code/my-app`，无法归属时为 null）、`project_display`（原始形态路径）。服务端在 `usage_records` 表幂等补列存储（全部可空，不改主键）。**旧客户端（proto 2/3/4）完全不受影响**：不传新字段即照旧落库为 NULL；客户端探测 `/sync` 响应中的 `proto: 5` 后才会启用新字段上传。项目维度数据当前仅落库存储，服务端暂无聚合查询接口（原 `GET /projects` 已随手机端查看功能下线移除）。
 
 ---
 

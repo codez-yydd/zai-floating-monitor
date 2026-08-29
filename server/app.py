@@ -61,34 +61,14 @@ def _session_project_available():
     """判断当前加载的 db.py 是否支持会话/项目维度（proto 5）。
 
     宝塔热替换场景下可能出现新 app.py + 旧 db.py：旧版 insert_usage_records
-    会忽略 records 里的新字段（不报错、只是不落库），但 /projects 等新查询
-    函数不存在。此处与 proto 2/3/4 的探测方式一致，按新能力标记 proto 5。
+    会忽略 records 里的新字段（不报错、只是不落库）。此处与 proto 2/3/4 的
+    探测方式一致，按明细表幂等补列能力标记 proto 5；项目维度数据仅落库
+    存储，服务端暂无聚合查询接口（/projects 已随手机端查看功能下线移除）。
     """
-    return all(
-        callable(getattr(db, name, None))
-        for name in ("_migrate_usage_records_columns", "query_projects")
-    )
-
-
-def _overview_storage_available():
-    """判断当前加载的 db.py 是否具备 /overview 所需的全部查询函数。
-
-    宝塔热替换兼容：缺任一函数时 /overview 返回全空结构而不是 500。
-    """
-    return all(
-        callable(getattr(db, name, None))
-        for name in (
-            "query_usage_summary",
-            "max_uploaded_at",
-            "last_uploaded_at_by_device",
-        )
-    )
+    return callable(getattr(db, "_migrate_usage_records_columns", None))
 
 
 # ===== 鉴权辅助 =====
-
-# view token（手机端查看页面只读凭证）在 config 表中的键：存 sha256，不存明文
-VIEW_TOKEN_HASH_KEY = "view_token_hash"
 
 def get_master_token():
     """全局 master token（启动时初始化）。"""
@@ -120,35 +100,11 @@ def require_device_token():
     return None, device_id
 
 
-def require_read_token():
-    """校验 Header 里的 device_token 或 view_token（只读查询接口用）。
-
-    view token 是手机端查看页面的只读凭证：只放行查询类接口；写操作
-    （/register、/sync、/device/*、/cleanup*）仍只认 master / device token，
-    不接受 view token。失败返回 (error_response, None)，与
-    require_device_token 的返回形状一致。
-    """
-    auth_header = request.headers.get("Authorization", "")
-    token = None
-    if auth_header.startswith("Bearer "):
-        token = auth_header[7:].strip()
-    if not token:
-        return (jsonify({"error": "缺少 Authorization 头"}), 401), None
-    token_hash = hash_token(token)
-    device_id = db.find_device_by_token_hash(token_hash)
-    if device_id:
-        return None, device_id
-    view_hash = db.get_config(VIEW_TOKEN_HASH_KEY) or ""
-    if view_hash and safe_eq(token_hash, view_hash):
-        return None, None
-    return (jsonify({"error": "token 无效"}), 401), None
-
-
 # ===== 同步接口 =====
 
 # /sync 上传明细（records）的来源白名单：source 由持有 device token 的客户端
 # 上传，属于任意字符串，不校验会原样落库（usage_records.source）并回流到
-# /usage、/projects 等展示接口，构成 XSS 注入面，这里统一收紧。
+# /usage 等展示接口，构成 XSS 注入面，这里统一收紧。
 SYNC_SOURCE_WHITELIST = {"zcode", "codex", "claude", "kimi", "cursor"}
 
 
@@ -323,7 +279,7 @@ def usage():
     可选 query 参数 source（'zcode' / 'codex'）：不传 = 全部来源合并；
     by_model 每个分组带 source 字段，供前端区分展示。
     """
-    err, _ = require_read_token()
+    err, _ = require_device_token()
     if err:
         return err
 
@@ -355,7 +311,7 @@ def models():
     本机没有"的模型也能直接配价并参与价格更新检查。
     旧客户端不调用本接口，无兼容性问题。
     """
-    err, _ = require_read_token()
+    err, _ = require_device_token()
     if err:
         return err
     return jsonify({"models": db.list_all_models()})
@@ -368,7 +324,7 @@ def snapshots():
     复用 /usage 的 devices/exclude_device 过滤语义。
     用于对比页/报告页的跨设备周额度周期解析。
     """
-    err, _ = require_read_token()
+    err, _ = require_device_token()
     if err:
         return err
 
@@ -393,7 +349,7 @@ def agent_quota_snapshots():
     返回的 snapshots 保持客户端 AgentQuotaSnapshot 形状，并在顶层增加
     device_id；支持来源、设备集合和时间范围筛选。
     """
-    err, _ = require_read_token()
+    err, _ = require_device_token()
     if err:
         return err
 
@@ -429,7 +385,7 @@ def period_detail():
     body: {periods: [[start,end],...], devices?, exclude_device?, source?}
     source 可选（'zcode' / 'codex'），不传 = 全部来源。
     """
-    err, _ = require_read_token()
+    err, _ = require_device_token()
     if err:
         return err
 
@@ -453,167 +409,10 @@ def period_detail():
 @app.get("/devices")
 def devices():
     """列出所有设备（附各设备记录数）。"""
-    err, _ = require_read_token()
+    err, _ = require_device_token()
     if err:
         return err
     return jsonify(db.list_devices())
-
-
-# ===== view token（手机端查看页面只读凭证）=====
-
-def _load_or_create_view_token():
-    """首次启动生成 view token：hash 存 config 表，明文仅打印一次。
-
-    复刻 master / device token 的存储模式——库里只存 sha256，明文不落盘。
-    已存在（含手动 regenerate 过）时返回 None，启动日志不再重复打印。
-    """
-    if db.get_config(VIEW_TOKEN_HASH_KEY):
-        return None
-    tok = random_hex()
-    db.set_config(VIEW_TOKEN_HASH_KEY, hash_token(tok))
-    return tok
-
-
-@app.post("/view/token/regenerate")
-def view_token_regenerate():
-    """重新生成 view token（master token 鉴权）。
-
-    旧 token 立即失效；新明文仅在本次响应返回一次，服务端只存哈希。
-    """
-    data = request.get_json(force=True)
-    err = require_master_token(data)
-    if err:
-        return err
-    tok = random_hex()
-    db.set_config(VIEW_TOKEN_HASH_KEY, hash_token(tok))
-    return jsonify({"view_token": tok})
-
-
-@app.get("/view/check")
-def view_check():
-    """view token 校验（手机页首次输入 token 时调用）。"""
-    err, _ = require_read_token()
-    if err:
-        return err
-    return jsonify({"ok": True})
-
-
-# ===== 项目维度 + 手机首屏聚合（proto 5）=====
-
-@app.get("/projects")
-def projects():
-    """按项目维度聚合查询（proto 5）。
-
-    query 参数：
-    - from / to：毫秒时间戳（必填，[from, to) 半开区间，与 /usage 一致）
-    - devices：可选，逗号分隔 device_id（复用 /usage 的过滤语义）
-    project_key 为 NULL（proto 5 之前的记录或无法归属项目）聚合为
-    "__unknown__"，客户端显示为「未知项目」。
-    """
-    err, _ = require_read_token()
-    if err:
-        return err
-
-    # 宝塔热替换兼容：旧版 db.py 无项目维度查询函数时返回空列表
-    if not _session_project_available():
-        return jsonify([])
-
-    try:
-        from_ms = int(request.args.get("from", ""))
-        to_ms = int(request.args.get("to", ""))
-    except ValueError:
-        return jsonify({"error": "from / to 必须是毫秒时间戳"}), 400
-
-    all_ids = [d["device_id"] for d in db.list_devices()]
-    filter_ids, has_filter_param = _resolve_device_filter(request.args, all_ids)
-    if has_filter_param and not filter_ids:
-        return jsonify([])
-
-    return jsonify(db.query_projects(from_ms, to_ms, filter_ids))
-
-
-@app.get("/overview")
-def overview():
-    """手机首屏聚合（view token / device token 均可查）。
-
-    一次返回三个周期的 overall + by_model（与 /usage 口径一致）、各源最新
-    额度快照、近 7 天项目 Top10、设备列表与最后同步时间。可选 query 参数
-    today_start（本地今日零点 ms）：不传按 UTC 日界（与 /usage trend 的
-    分桶对齐一致）；手机页传入本地零点让「今日」按访客时区统计。
-    """
-    err, _ = require_read_token()
-    if err:
-        return err
-
-    now = db.now_ms()
-    day = 86_400_000
-    today_start = (now // day) * day
-    raw_today = request.args.get("today_start", "")
-    if raw_today:
-        try:
-            val = int(raw_today)
-        except ValueError:
-            val = 0
-        if 0 < val <= now:
-            today_start = val
-
-    # 宝塔热替换兼容：旧版 db.py 缺查询函数时返回全空结构而不是 500
-    if not _overview_storage_available():
-        empty_overall = db.empty_usage_result(now, now)["overall"]
-        return jsonify({
-            "now": now,
-            "today": {"overall": empty_overall, "by_model": []},
-            "last_7d": {"overall": empty_overall, "by_model": []},
-            "last_30d": {"overall": empty_overall, "by_model": []},
-            "quota_latest": {"zai": None, "agent": {}},
-            "projects_top": [],
-            "devices": [],
-            "last_synced_at": None,
-        })
-
-    all_devices = db.list_devices()
-    all_ids = [d["device_id"] for d in all_devices]
-
-    periods = {
-        "today": (today_start, now),
-        "last_7d": (now - 7 * day, now),
-        "last_30d": (now - 30 * day, now),
-    }
-    usage = {}
-    for name, (start, end) in periods.items():
-        overall, by_model = db.query_usage_summary(start, end, all_ids)
-        usage[name] = {"overall": overall, "by_model": by_model}
-
-    quota_latest = {"zai": None, "agent": {}}
-    if callable(getattr(db, "query_latest_quota_snapshots", None)):
-        quota_latest = db.query_latest_quota_snapshots()
-
-    projects_top = []
-    if _session_project_available():
-        projects_top = db.query_projects(now - 7 * day, now, all_ids)[:10]
-
-    last_by_device = db.last_uploaded_at_by_device()
-    devices_out = [
-        {
-            "device_id": d["device_id"],
-            "device_name": d["device_name"],
-            "record_count": d["record_count"],
-            "last_uploaded_at": last_by_device.get(d["device_id"]),
-        }
-        for d in all_devices
-    ]
-
-    return jsonify({
-        "now": now,
-        "today": usage["today"],
-        "last_7d": usage["last_7d"],
-        "last_30d": usage["last_30d"],
-        "quota_latest": quota_latest,
-        "projects_top": projects_top,
-        "devices": devices_out,
-        # 全部明细的最新一次上传时间（无数据为 null）
-        "last_synced_at": db.max_uploaded_at(),
-    })
 
 
 @app.post("/device/revoke")
@@ -797,12 +596,6 @@ def main():
     print("[zbar-sync] 初始化完成")
     print(f"[zbar-sync] MASTER_TOKEN: {MASTER_TOKEN}")
     print("[zbar-sync]   ↑ 复制此 token 到客户端「同步设置」注册设备")
-
-    # view token：首次启动生成并打印（手机端查看页面只读凭证）
-    view_token = _load_or_create_view_token()
-    if view_token:
-        print(f"[zbar-sync] VIEW_TOKEN: {view_token}")
-        print("[zbar-sync]   ↑ 手机端查看页面访问令牌（浏览器打开 /static/index.html 时输入）")
 
     print(f"[zbar-sync] 监听端口: {PORT}")
 
