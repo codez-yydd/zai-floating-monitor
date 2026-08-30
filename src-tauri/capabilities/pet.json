@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "pet",
+  "description": "Minimal capability for the standalone pet window (event listen + window dragging only; custom commands like get_pet_config are not ACL-gated)",
+  "windows": ["pet"],
+  "permissions": [
+    "core:event:default",
+    "core:window:allow-start-dragging"
+  ]
+}

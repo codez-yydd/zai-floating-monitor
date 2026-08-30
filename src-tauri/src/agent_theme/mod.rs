@@ -1110,7 +1110,13 @@ fn cache_hit(state: &store::StoredState, cur_size: u64, cur_mtime: Option<i64>) 
 }
 
 /// 实测当前 asar 是否含注入标记（带 state.json 缓存：体积与 mtime 双匹配
-/// 则信任缓存，省去 npx 抽检开销）。
+/// 则信任缓存，省去 npx 抽检开销）。实检时顺带检测注入块是否含 pet.js
+/// 引用行（data-zbar-pet 标记）并缓存进 state.pet_marker：宠物功能
+/// （第一阶段）之前安装的皮肤注入块没有该行，落盘模板升级补不出 asar
+/// 里的引用行，state_impl 据此引导用户重装。
+/// 缓存规则：体积+mtime 双匹配 **且 pet_marker 已知** 才走快速路径——
+/// 旧版 state.json（无 pet_marker 字段，反序列化为 None）即使缓存命中
+/// 也需要一次实检补齐 pet 行结论，此后恢复纯缓存快速路径。
 fn detect_injected(app: &dyn AgentApp, state: &mut store::StoredState, node_ok: bool) -> bool {
     let asar_path = app.asar_path();
     if !asar_path.is_file() {
@@ -1119,25 +1125,66 @@ fn detect_injected(app: &dyn AgentApp, state: &mut store::StoredState, node_ok: 
     let cur_meta = fs::metadata(&asar_path).ok();
     let cur_size = cur_meta.as_ref().map(|m| m.len()).unwrap_or(0);
     let cur_mtime = mtime_unix(cur_meta.as_ref());
-    // asar 体积与 mtime 双匹配：文件未变化，直接信任缓存结论（无论注入与否）
-    if cache_hit(state, cur_size, cur_mtime) {
+    // asar 体积与 mtime 双匹配且 pet 行结论已知：文件未变化，直接信任
+    // 缓存结论（无论注入与否）
+    if cache_hit(state, cur_size, cur_mtime) && state.pet_marker.is_some() {
         return state.injected_marker;
     }
     if !node_ok {
-        // 无法实检（Node.js 缺失）：退回缓存值
+        // 无法实检（Node.js 缺失）：退回缓存值（pet_marker 维持未知，
+        // 下次 node 可用时再补检）
         return state.injected_marker;
     }
     let html = asar::asar_extract_file_to_stdout(&asar_path, app.renderer_entry_rel())
         .unwrap_or_default();
     let has = inject::has_inject(&html);
+    // pet 行存在性：仅注入块存在时有意义（未安装时必无，同样缓存，
+    // 避免安装后首个状态查询又实检一次）
+    let pet_ok = has && html.contains("data-zbar-pet");
     // 回写缓存（检测结论跟随 asar 体积 + mtime 指纹，三者保持一致）
-    if has != state.injected_marker || !cache_hit(state, cur_size, cur_mtime) {
+    if has != state.injected_marker
+        || state.pet_marker != Some(pet_ok)
+        || !cache_hit(state, cur_size, cur_mtime)
+    {
         state.injected_marker = has;
+        state.pet_marker = Some(pet_ok);
         state.asar_size = Some(cur_size);
         state.asar_mtime = cur_mtime;
         let _ = store::save_state(app.id(), state);
     }
     has
+}
+
+/// 重装引导原因（state_impl 的 needs_reinstall 判定，纯函数供单测）：
+/// 已安装前提下任一命中即需重装——
+/// - 版本变化：应用升级覆盖了 asar，注入块丢失（既有判定）；
+/// - 缺 pet 行：宠物功能之前安装的旧注入块没有 pet.js 引用行，
+///   落盘模板升级补不出 asar 里的引用行，重装后 apply_inject 重新
+///   注入完整块（含 pet.js）。pet_marker 为 None（旧版 state.json
+///   尚未实检过）不触发——detect_injected 会在缓存命中后的下一次
+///   实检中补齐结论。
+/// 两者同时命中时优先报版本变化（文案更完整，重装一并解决）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReinstallReason {
+    VersionChanged,
+    PetLineMissing,
+}
+
+fn reinstall_reason(
+    installed: bool,
+    version_changed: bool,
+    pet_marker: Option<bool>,
+) -> Option<ReinstallReason> {
+    if !installed {
+        return None;
+    }
+    if version_changed {
+        return Some(ReinstallReason::VersionChanged);
+    }
+    if pet_marker == Some(false) {
+        return Some(ReinstallReason::PetLineMissing);
+    }
+    None
 }
 
 /// get_agent_theme_state 的业务实现
@@ -1171,7 +1218,11 @@ fn state_impl(app_id: &str) -> Result<AgentThemeStateDto, String> {
     let version_changed = app_version.is_some()
         && state.zcode_version.is_some()
         && app_version != state.zcode_version;
-    let needs_reinstall = installed && version_changed;
+    // 重装引导：版本变化（既有判定）或注入块缺 pet.js 引用行（宠物
+    // 功能之前的旧安装，模板升级补不出 asar 引用行），任一命中即引导
+    // 重装；与版本变化判定合并不互相覆盖（两者同现时文案优先报版本）
+    let reason = reinstall_reason(installed, version_changed, state.pet_marker);
+    let needs_reinstall = reason.is_some();
     let backup_missing = installed && !backup_exists;
 
     let detail = if !bundle_exists {
@@ -1182,12 +1233,16 @@ fn state_impl(app_id: &str) -> Result<AgentThemeStateDto, String> {
         ))
     } else if !node_ok {
         Some("未检测到 Node.js/npx，动态壁纸注入需要先安装 Node.js".to_string())
-    } else if needs_reinstall {
+    } else if reason == Some(ReinstallReason::VersionChanged) {
         Some(format!(
             "{}已升级（{} → {}），需要重新安装动态壁纸主题",
             app.display_name(),
             state.zcode_version.as_deref().unwrap_or("?"),
             app_version.as_deref().unwrap_or("?")
+        ))
+    } else if reason == Some(ReinstallReason::PetLineMissing) {
+        Some(format!(
+            "当前皮肤为宠物功能上线前的旧版安装（注入块缺少宠物引用），重新安装一次即可启用桌面宠物"
         ))
     } else if backup_missing {
         Some("备份文件缺失，建议重新安装主题以重建备份".to_string())
@@ -1362,6 +1417,11 @@ fn install_steps(
     // ---------- ④ 注入 + 首次落盘主题资产 ----------
     prog.emit("inject", 30.0, None);
     store::ensure_theme_assets(app.id(), resource_wallpapers)?;
+    // 自定义宠物物化：重装/升级皮肤后主题目录重建，选中 custom:<id> 时
+    // 重新写 pet-custom.js（失败不阻断安装，注入版壳回退内建形象）
+    if let Err(e) = crate::pets::sync_theme_custom_pet() {
+        eprintln!("[zbar-agent-theme] 安装后同步自定义宠物物化失败: {e}");
+    }
     let index_html = staging.join(app.renderer_entry_rel());
     if !index_html.is_file() {
         return Err(format!(
@@ -1477,6 +1537,9 @@ fn install_steps(
         asar_mtime: mtime_unix(Some(&final_meta)),
         injected_at: Some(chrono::Utc::now().to_rfc3339()),
         injected_marker: true,
+        // 本版注入块必含 pet.js 引用行（apply_inject 的 body 块第三行），
+        // 安装完成即写入，后续状态查询无须再实检 pet 行
+        pet_marker: Some(true),
         installing_since: None,
     };
     store::save_state(app.id(), &done_state).map_err(|e| format!("写入安装状态失败: {e}"))?;
@@ -1812,7 +1875,17 @@ pub async fn set_agent_theme_params(
         validate_app_id(&app_id)?;
         store::save_params(&app_id, &params)?;
         // ensure：模板版本升级检查 + 按最新参数重渲 variables.css
-        store::ensure_theme_assets(&app_id, None)
+        store::ensure_theme_assets(&app_id, None)?;
+        // 自定义宠物物化：pet_style 切到 custom:<id> 时把该宠物写为主题
+        // 目录的 pet-custom.js（选中变更才重写，见 pets 模块头）；物化
+        // 失败不阻断参数保存（注入版壳对缺失文件回退内建形象，下次
+        // 保存参数会重试）
+        if app_id == "zcode" {
+            if let Err(e) = crate::pets::sync_theme_custom_pet() {
+                eprintln!("[zbar-agent-theme] 同步自定义宠物物化失败: {e}");
+            }
+        }
+        Ok(())
     })
     .await
     .map_err(|e| format!("保存参数任务失败：{e}"))?
@@ -2063,6 +2136,37 @@ mod tests {
             asar_unpacked_of(Path::new("/a/app.asar")),
             PathBuf::from("/a/app.asar.unpacked")
         );
+    }
+
+    #[test]
+    fn 重装引导_缺pet行的已装状态触发_与版本变化合并不互覆() {
+        // 核心场景（P1-1）：宠物功能之前安装的皮肤——已装、无版本变化、
+        // 实检确认缺 pet 行 → 引导重装（重装后 apply_inject 重新注入
+        // 含 pet.js 的完整块）
+        assert_eq!(
+            reinstall_reason(true, false, Some(false)),
+            Some(ReinstallReason::PetLineMissing),
+            "缺 pet 行的已装状态应触发重装引导"
+        );
+        // 本版安装（pet 行存在）且版本未变 → 不触发
+        assert_eq!(reinstall_reason(true, false, Some(true)), None);
+        // 旧版 state.json 尚未实检过（pet_marker=None）→ 不触发，等待
+        // detect_injected 补齐结论后再判
+        assert_eq!(reinstall_reason(true, false, None), None);
+        // 版本变化（既有判定）保持：pet 行已知存在时仍触发
+        assert_eq!(
+            reinstall_reason(true, true, Some(true)),
+            Some(ReinstallReason::VersionChanged)
+        );
+        // 两者同时命中 → 版本变化优先（文案更完整，重装一并解决）
+        assert_eq!(
+            reinstall_reason(true, true, Some(false)),
+            Some(ReinstallReason::VersionChanged),
+            "版本变化与缺 pet 行同现时优先报版本变化，不互相覆盖"
+        );
+        // 未安装（首次/已还原）一律不触发
+        assert_eq!(reinstall_reason(false, true, Some(false)), None);
+        assert_eq!(reinstall_reason(false, false, None), None);
     }
 
     #[test]

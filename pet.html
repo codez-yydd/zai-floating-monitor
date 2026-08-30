@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ZBar Pet</title>
+    <!--
+      独立桌面宠物窗口入口（宠物功能第二阶段）：透明无边框置顶悬浮窗，
+      与主面板（index.html）互不影响。页面为极简薄壳——
+      - /pet-core.js：宠物核心（与皮肤注入版 pet.js 共用的同一份单源文件，
+        含形象库/状态机/canvas 渲染器与 ZBarPet 工厂），Vite 从 public/
+        原样拷贝服务；
+      - /src/pet-main.ts：宿主壳（监听 Tauri 事件喂数据/参数）。
+      样式内联：窗口即宠物（尺寸 = pet_size），根容器铺满并作为拖动区
+      （data-tauri-drag-region，拖动改窗口位置由 Rust 侧持久化）。
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+      }
+      #pet-root {
+        width: 100%;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        /* 拖动区视觉反馈：无（宠物本体无点击交互，拖动即可移动窗口） */
+        cursor: default;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="pet-root" data-tauri-drag-region=""></div>
+    <script src="/pet-core.js"></script>
+    <script type="module" src="/src/pet-main.ts"></script>
+  </body>
+</html>

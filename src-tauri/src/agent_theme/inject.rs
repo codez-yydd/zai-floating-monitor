@@ -2,12 +2,13 @@
 //!
 //! 注入方式：在 ZCode 的 asar 内 out/renderer/index.html 中，
 //! `</head>` 前插入两个外链样式（variables.css + theme.css）、
-//! `</body>` 前插入 defer 脚本（effects.js + usage.js），全部指向
+//! `</body>` 前插入 defer 脚本（effects.js + usage.js + pet.js），全部指向
 //! ~/.zbar/agent-themes/ 下的主题文件（file:// URL，不改动应用其它资源）。
 //! 注入的外链带 data-zbar-variables / data-zbar-theme / data-zbar-effects /
-//! data-zbar-usage 标记：effects.js 热重载靠 data-zbar-variables 定位
+//! data-zbar-usage / data-zbar-pet 标记：effects.js 热重载靠 data-zbar-variables 定位
 //! variables.css（旧版注入行无 data 属性时回退按 href 匹配，同样可热重载）；
-//! usage.js 靠自身 src 推导同目录 usage-data.js 的地址。
+//! usage.js 靠自身 src 推导同目录 usage-data.js 的地址；pet.js 消费
+//! usage.js 重载的 window.__ZBAR_USAGE__ 全局数据（只读不重复请求）。
 //! 整段引用包裹在 <!--ZBAR-THEME-BEGIN--> … <!--ZBAR-THEME-END--> 标记内，
 //! 重复安装时先剥离旧标记块再插入新块，保证幂等。
 
@@ -1983,6 +1984,302 @@ pub const USAGE_JS: &str = r#"// ===============================================
 })();
 "#;
 
+/// 对话页桌面像素宠物脚本（版本化落盘模板）。
+/// V2 起拆为两段拼接，宠物核心单源化（第二阶段独立悬浮窗宠物与注入版
+/// 共用同一份形象库/状态机/渲染器，防两份帧数据漂移）：
+/// - 核心段 = public/pet-core.js（include_str! 编译期引入，文件即唯一
+///   真相源：PET_STYLES 帧数据 + 状态机 + canvas 渲染器 + ZBarPet 工厂
+///   接口 create(container, opts) / feed(data) / heartbeat(ms) /
+///   setParams / destroy，无环境假设——参数与数据一律由宿主喂入）；
+/// - 宿主壳段（下方内联，普通 r#"…"# 原始字符串，正文无 "# 序列）=
+///   注入版专属：每秒读 variables.css 的 --zbar-pet-* 变量（开关/形象/
+///   大小，随热重载约 1 秒生效）调 create/destroy/setParams；读
+///   usage.js 每 2 秒重载的 window.__ZBAR_USAGE__ 喂数据给 feed；每
+///   2 秒经 script 时间戳重载心跳小文件 usage-data-hb.js 喂 heartbeat
+///   （大文件保持内容不变跳写，存活信号由独立小文件承担，见
+///   usage_feed 模块头）；形象值为 custom:<id>（V3 自定义宠物）时按需
+///   加载同目录物化文件 pet-custom.js 取 window.__ZBAR_PET_CUSTOM__
+///   作为 customAsset 传入核心（静态资产不轮询，资产缺失回退内建
+///   第一形象）；并注入对话页右下角的 fixed 定位样式
+///   （pointer-events:none 不捕获鼠标）。独立悬浮窗版宿主（ZBar 透明
+///   宠物窗口页面）同样加载 pet-core.js，参数直接调 setParams、数据
+///   监听 Tauri 事件喂 feed。
+/// 版本头（ZBAR-THEME-V 标记）写在 pet-core.js 首行，两段拼接后位于
+/// 落盘文件头部，ensure_versioned_template 的提取器无感知。
+pub const PET_JS: &str = concat!(
+    include_str!("../../../public/pet-core.js"),
+    "\n",
+    r#"// ============================================================
+// ZBAR 宠物注入版宿主壳（拼接在 pet-core.js 之后落盘为 pet.js）
+// ============================================================
+// 皮肤注入环境专属逻辑：核心（上方的 ZBarPet 工厂）不做任何环境假设，
+// 本壳负责把 ZCode 对话页的环境接入核心——
+// - 参数来源：每 tick 读 variables.css 的 --zbar-pet-* 变量（effects.js
+//   每秒重载该文件，皮肤页改参数约 1 秒内生效：关闭销毁宠物实例、
+//   开启重建、形象热切换重建、大小经 setParams 即时生效）；
+// - 数据来源：usage.js 每 2 秒把 usage-data.js 重载到
+//   window.__ZBAR_USAGE__，本壳只读全局对象不重复请求大文件；
+// - 心跳来源：每 2 个 tick 经 script 时间戳重载同目录心跳小文件
+//   usage-data-hb.js（几十字节，ZBar 侧仅注入版宠物开启时写出），
+//   读 window.__ZBAR_USAGE_HB__ 喂给核心 heartbeat 接口——大文件保持
+//   "内容不变跳写"（防写放大），存活信号由独立小文件承担；心跳文件
+//   缺失（旧版 ZBar / 宠物关闭中）时加载失败静默，核心回退用数据 ts
+//   判陈旧（V1 行为）；
+// - 自定义形象（V3）：--zbar-pet-style 形如 custom:<id> 时，按需加载
+//   同目录 pet-custom.js（静态资产，不轮询——ZBar 侧仅选中变更/导入
+//   删除时重写该文件），校验 window.__ZBAR_PET_CUSTOM__.meta.id 与
+//   选中 id 一致后作为 customAsset 传入核心；资产缺失/不匹配（加载
+//   未完成/文件缺失/选中已删除）时回退内建第一形象并静默，资产就绪
+//   后下个 tick 自动热切换；
+// - 定位样式：宠物 fixed 悬浮于对话页右下角（right 留 18px 避开滚动条），
+//   z-index 20 低于会话累计条（usage.js 为 30）与弹窗层，
+//   pointer-events:none 不捕获鼠标、不遮挡对话输入区。
+// ============================================================
+(function () {
+  "use strict";
+
+  if (!document.body) return;
+  if (!window.ZBarPet) return; /* 核心缺失（异常环境）静默退出 */
+
+  var STYLE_ID = "zbar-pet-style";
+  var ATTR_SELF = "data-zbar-pet"; /* 本壳注入行的标记（推导心跳文件地址） */
+  var HB_FILE = "usage-data-hb.js";
+  var CUSTOM_FILE = "pet-custom.js";
+  var CUSTOM_PREFIX = "custom:";
+  var VAR_ENABLED = "--zbar-pet-enabled"; /* 开关变量（variables.css 渲染 1/0） */
+  var VAR_STYLE = "--zbar-pet-style"; /* 形象 id 变量（custom:<id> 原样透传） */
+  var VAR_SIZE = "--zbar-pet-size"; /* 像素边长变量（壳读取后喂给核心） */
+  var VAR_ASSET_VER = "--zbar-pet-asset-ver"; /* 物化资产内容戳（重复导入
+    同 id 的热刷新信号，见下方资产同步说明） */
+  var TICK_MS = 1000; /* 参数与数据轮询周期（不做页面隐藏降频，见 tick） */
+  var HB_TICKS = 2; /* 心跳重载周期 = 2 个 tick（与数据重载同节奏） */
+
+  function readVar(name) {
+    try {
+      return (
+        getComputedStyle(document.documentElement).getPropertyValue(name) ||
+        ""
+      ).trim();
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function petEnabled() {
+    /* 值非 "1" 一律视为关闭（含变量缺失的旧 variables.css）：宠物默认
+     * 关闭，不惊扰未开启过的用户；与 usage.js 的开关语义（缺失视为
+     * 开启）相反，因二者默认值不同 */
+    return readVar(VAR_ENABLED) === "1";
+  }
+
+  function styleIdOf() {
+    var id = readVar(VAR_STYLE);
+    return id && window.ZBarPet ? id : "cat"; /* 核心对未知值回退第一形象 */
+  }
+
+  /* ---- 自定义形象资产（V3）：校验 window.__ZBAR_PET_CUSTOM__ 的 id 与
+   *      选中一致（ZBar 侧仅在选中变更时重写 pet-custom.js，页面已加载
+   *      的副本可能滞后于热切换，按 id 比对保证不渲染错宠物） ---- */
+  function customAssetFor(styleId) {
+    if (styleId.indexOf(CUSTOM_PREFIX) !== 0) return null;
+    var a = window.__ZBAR_PET_CUSTOM__;
+    if (
+      a &&
+      a.meta &&
+      a.dataUri &&
+      String(a.meta.id || "") === styleId.slice(CUSTOM_PREFIX.length)
+    ) {
+      return a;
+    }
+    return null;
+  }
+
+  /* ---- 自定义资产懒加载（不轮询）：缺失/不匹配时经 script 时间戳重载
+   *      同目录 pet-custom.js 一次，onload/onerror 后由主循环的下一 tick
+   *      消费（加载完成 → 自动热切换到自定义形象）；in-flight 防重入。
+   *      连续失败（文件确实不在）退避为每 10 tick 重试一次，防每秒空转 ---- */
+  var customLoading = false;
+  var customFails = 0;
+  function reloadCustomAsset() {
+    if (customLoading) return;
+    if (customFails >= 3 && tickCount % 10 !== 0) return;
+    try {
+      var self = document.querySelector("script[" + ATTR_SELF + "]");
+      if (!self || !self.src) return;
+      customLoading = true;
+      var url = self.src.replace(/[^/]*$/, CUSTOM_FILE) + "?t=" + Date.now();
+      var s = document.createElement("script");
+      var done = function () {
+        if (s.parentNode) s.parentNode.removeChild(s);
+        customLoading = false;
+      };
+      s.onload = function () {
+        customFails = 0; /* 成功复位（下次缺失再即时加载） */
+        done();
+      };
+      s.onerror = function () {
+        customFails++; /* 文件缺失（未物化/被清理）静默，回退内建形象 */
+        done();
+      };
+      s.src = url;
+      (document.head || document.documentElement).appendChild(s);
+    } catch (e) {
+      customLoading = false;
+      /* 静默 */
+    }
+  }
+
+  function sizeOf() {
+    var n = parseInt(readVar(VAR_SIZE), 10);
+    return isFinite(n) && n > 0 ? n : 64;
+  }
+
+  /* 对话页定位样式：fixed 右下角 + pointer-events:none（防挡输入区） */
+  function ensureStyle() {
+    if (document.getElementById(STYLE_ID)) return;
+    var st = document.createElement("style");
+    st.id = STYLE_ID;
+    st.textContent =
+      "[data-zbar-pet]{position:fixed;right:18px;bottom:14px;" +
+      "z-index:20;pointer-events:none;" +
+      "user-select:none;-webkit-user-select:none;}";
+    (document.head || document.documentElement).appendChild(st);
+  }
+
+  var pet = null;
+  var curStyle = ""; /* 核心当前生效形象（custom 资产缺失时为内建回退值） */
+  var seenStyle = ""; /* 上次消费的原始选中值（含 custom:<id>，变更检测） */
+  var curAsset = null; /* 上次消费的自定义资产对象（身份比对：重复导入同 id
+    后物化文件重载产生新对象，触发核心按资产身份重建） */
+  var assetVer = ""; /* 上次消费的 --zbar-pet-asset-ver 内容戳（P1-2） */
+  var curSize = 0;
+  var tickCount = 0;
+
+  /* ---- 心跳重载：按本壳注入行的 src 推导同目录心跳小文件地址，时间戳
+   *      cache-bust 强制重读（Chromium 对 file:// 的常用手段），脚本执行
+   *      后读全局心跳喂给核心并移除节点（防 DOM 堆积）；加载失败（旧版
+   *      ZBar 未写心跳 / 文件被清理）静默，核心保持上一次心跳或回退 ts ---- */
+  function reloadHeartbeat() {
+    try {
+      var self = document.querySelector("script[" + ATTR_SELF + "]");
+      if (!self || !self.src) return;
+      var url = self.src.replace(/[^/]*$/, HB_FILE) + "?t=" + Date.now();
+      var s = document.createElement("script");
+      s.src = url;
+      var done = function () {
+        if (s.parentNode) s.parentNode.removeChild(s);
+      };
+      s.onload = function () {
+        try {
+          if (pet) pet.heartbeat(window.__ZBAR_USAGE_HB__);
+        } catch (e) {
+          /* 静默 */
+        }
+        done();
+      };
+      s.onerror = done;
+      (document.head || document.documentElement).appendChild(s);
+    } catch (e) {
+      /* 静默 */
+    }
+  }
+
+  /* ---- 主循环：每 tick 读参数（热重载）→ 同步核心实例 → 喂数据；
+   *      每 HB_TICKS 个 tick 重载一次心跳文件。不做页面隐藏降频（V4，
+   *      与核心同步移除）：ZCode 注入环境的 visibility 判定与视觉可见
+   *      性脱节，降频会造成参数热切换滞后与心跳断流（心跳必须守住核
+   *      心 DATA_FRESH_MS 新鲜度，否则宠物误沉睡）；隐藏时的省电交给
+   *      浏览器对隐藏页定时器的限流。
+   *      V3 自定义形象：want 为 custom:<id> 且资产有效时把资产随
+   *      create/setParams 传入核心；资产缺失时 effective 回退内建第一
+   *      形象（curStyle 记 effective，资产就绪后下一 tick 热切换）。
+   *      资产同步（P1-2）：--zbar-pet-asset-ver 内容戳随 variables.css
+   *      每秒热重载到达（ZBar 侧仅在物化内容变化时改写它），值变化
+   *      说明 pet-custom.js 已更新（重复导入同 id）——强制重载一次，
+   *      重载后全局对象被替换为新对象，经 curAsset 身份比对把新资产
+   *      传给 setParams，核心按资产对象身份重建画布（与独立版按对象
+   *      身份重建的行为对齐） ---- */
+  function tick() {
+    try {
+      if (petEnabled()) {
+        var want = styleIdOf();
+        var isCustom = want.indexOf(CUSTOM_PREFIX) === 0;
+        var asset = customAssetFor(want);
+        var effective = asset
+          ? want
+          : isCustom
+            ? "cat"
+            : want;
+        var size = sizeOf();
+        if (isCustom) {
+          var ver = readVar(VAR_ASSET_VER);
+          /* 重载条件：资产缺失/不匹配，或内容戳变化（重复导入同 id）；
+           * 变量缺失（旧版 variables.css / 未物化）视为空串，仅按资产
+           * 缺失路径走（懒加载 + 失败退避），不额外触发 */
+          if (!asset || (ver && ver !== assetVer)) {
+            assetVer = ver;
+            reloadCustomAsset();
+          } else if (ver) {
+            assetVer = ver;
+          }
+        }
+        if (!pet) {
+          ensureStyle();
+          pet = window.ZBarPet.create(document.body, {
+            style: effective,
+            size: size,
+            customAsset: asset
+          });
+          curStyle = effective;
+          curAsset = asset;
+          seenStyle = want;
+          curSize = size;
+          reloadHeartbeat(); /* 创建即取一次心跳（下个整周期再刷新） */
+        } else {
+          if (
+            want !== seenStyle ||
+            effective !== curStyle ||
+            (asset && curAsset !== asset)
+          ) {
+            /* 选中变化（custom↔内建/custom 间切换）、资产就绪回退态
+             * 热切换、或资产对象被替换（重复导入）都走 setParams
+             * 重建（核心对同 id 的新资产对象按身份重建） */
+            pet.setParams({ style: effective, customAsset: asset });
+            seenStyle = want;
+            curStyle = effective;
+            curAsset = asset;
+          }
+          if (size !== curSize) {
+            pet.setParams({ size: size }); /* 大小热切换（内联画布尺寸） */
+            curSize = size;
+          }
+        }
+      } else if (pet) {
+        pet.destroy(); /* 开关关闭：销毁宠物实例并移除 DOM */
+        pet = null;
+        seenStyle = "";
+        curStyle = "";
+        curAsset = null;
+        assetVer = "";
+      }
+      if (pet && window.__ZBAR_USAGE__) {
+        pet.feed(window.__ZBAR_USAGE__);
+      }
+      tickCount++;
+      if (pet && tickCount % HB_TICKS === 0) {
+        reloadHeartbeat();
+      }
+    } catch (e) {
+      /* 静默 */
+    }
+    setTimeout(tick, TICK_MS);
+  }
+
+  tick();
+})();
+"#
+);
+
 // ============================================================
 // URL 工具
 // ============================================================
@@ -2075,7 +2372,29 @@ pub fn file_url(path: &Path) -> String {
 /// usage_turn_bar 渲染 1/0）：usage.js V19 起 renderAll 第二遍渲染前读它
 /// 决定是否渲染每轮条（变量缺失视为开启，与默认值 true 一致），同样随
 /// 每秒热重载即时生效。
-pub fn render_variables_css(params: &ThemeParams, wallpaper_url: &str) -> String {
+/// --zbar-pet-enabled 为桌面像素宠物的开关（由用户参数 pet_enabled 渲染
+/// 1/0，默认 0）：pet.js 读它决定渲染（值非 "1" 一律视为关闭——宠物默认
+/// 关闭不惊扰现有用户，与 usage_* 开关的"缺失视为开启"语义相反），关闭
+/// 移除宠物 DOM、开启重建，随每秒热重载约 1 秒生效。
+/// --zbar-pet-style 为宠物形象 id（由用户参数 pet_style 渲染，如 cat 或
+/// 自定义宠物的 custom:<id>，原样透传）：pet.js 读它选形象（内建未知值/
+/// custom 缺资产均回退第一形象），形象变化热切换（重建画布）。
+/// --zbar-pet-asset-ver 为自定义宠物物化资产的内容戳（pets::sync_theme_
+/// custom_pet 物化/清除后重渲本文件时计算，非用户参数）：pet.js 壳每秒
+/// 随热重载读取，值变化（重复导入同 id 更新了 pet-custom.js）即重载资产
+/// 并按资产对象身份热重建（P1-2，无此变量时壳按缺失处理、不触发）。
+/// --zbar-pet-size 为宠物显示边长（由用户参数 pet_size 档位按 screen_h
+/// 屏幕逻辑高换算的整数 px，如 81px）：pet.js 的画布 CSS 尺寸直接消费
+/// 该变量（image-rendering:pixelated 最近邻放大），改档位零 JS 成本、
+/// 随热重载即时生效。兼容硬约束：值恒为整数 px——ZCode 页面可能仍运行
+/// 旧版 pet.js（sizeOf 用 parseInt 解析），写 vh/百分比等非 px 值会被
+/// 解析出错误小数值把宠物缩成蚂蚁。
+pub fn render_variables_css(
+    params: &ThemeParams,
+    wallpaper_url: &str,
+    pet_asset_ver: &str,
+    screen_h: f64,
+) -> String {
     format!(
         "/* ZBar 自动生成的主题变量，请勿手工编辑 */\n\
          /* 修改参数请在 ZBar 面板的动态壁纸设置中进行 */\n\
@@ -2094,6 +2413,10 @@ pub fn render_variables_css(params: &ThemeParams, wallpaper_url: &str) -> String
          \x20 --zbar-usage-opacity: {usage_opacity};\n\
          \x20 --zbar-usage-session-bar: {usage_session_bar};\n\
          \x20 --zbar-usage-turn-bar: {usage_turn_bar};\n\
+         \x20 --zbar-pet-enabled: {pet_enabled};\n\
+         \x20 --zbar-pet-style: {pet_style};\n\
+         \x20 --zbar-pet-size: {pet_size}px;\n\
+         \x20 --zbar-pet-asset-ver: {pet_asset_ver};\n\
          \x20 --zbar-playback-rate: {rate};\n\
          }}\n",
         url = wallpaper_url,
@@ -2110,6 +2433,10 @@ pub fn render_variables_css(params: &ThemeParams, wallpaper_url: &str) -> String
         usage_opacity = params.usage_opacity,
         usage_session_bar = if params.usage_session_bar { 1 } else { 0 },
         usage_turn_bar = if params.usage_turn_bar { 1 } else { 0 },
+        pet_enabled = if params.pet_enabled { 1 } else { 0 },
+        pet_style = params.pet_style,
+        pet_size = crate::pet::pet_size_px(params.pet_size, screen_h),
+        pet_asset_ver = pet_asset_ver,
         rate = params.playback_rate,
     )
 }
@@ -2171,8 +2498,9 @@ fn insert_before(html: &str, tag: &str, block: &str, tag_desc: &str) -> Result<S
 ///   - variables.css + theme.css（带 data-zbar-variables / data-zbar-theme
 ///     标记，供 effects.js 定位热重载目标）于 `</head>` 前
 ///   - effects.js（defer，带 data-zbar-effects 标记）+
-///     usage.js（defer，带 data-zbar-usage 标记，对话页用量统计条）于
-///     `</body>` 前
+///     usage.js（defer，带 data-zbar-usage 标记，对话页用量统计条）+
+///     pet.js（defer，带 data-zbar-pet 标记，对话页桌面像素宠物，消费
+///     usage.js 重载的 window.__ZBAR_USAGE__ 数据）于 `</body>` 前
 /// 返回写回后的完整 html。
 pub fn apply_inject(staging_index_html: &Path, theme_dir: &Path) -> Result<String, String> {
     let raw = fs::read_to_string(staging_index_html)
@@ -2183,12 +2511,13 @@ pub fn apply_inject(staging_index_html: &Path, theme_dir: &Path) -> Result<Strin
     let theme_url = file_url(&theme_dir.join(crate::agent_theme::store::THEME_CSS));
     let effects_url = file_url(&theme_dir.join(crate::agent_theme::store::EFFECTS_JS));
     let usage_url = file_url(&theme_dir.join(crate::agent_theme::store::USAGE_JS));
+    let pet_url = file_url(&theme_dir.join(crate::agent_theme::store::PET_JS));
 
     let head_block = format!(
         "{INJECT_BEGIN}\n<link rel=\"stylesheet\" href=\"{vars_url}\" data-zbar-variables=\"\">\n<link rel=\"stylesheet\" href=\"{theme_url}\" data-zbar-theme=\"\">\n{INJECT_END}\n"
     );
     let body_block = format!(
-        "{INJECT_BEGIN}\n<script defer src=\"{effects_url}\" data-zbar-effects=\"\"></script>\n<script defer src=\"{usage_url}\" data-zbar-usage=\"\"></script>\n{INJECT_END}\n"
+        "{INJECT_BEGIN}\n<script defer src=\"{effects_url}\" data-zbar-effects=\"\"></script>\n<script defer src=\"{usage_url}\" data-zbar-usage=\"\"></script>\n<script defer src=\"{pet_url}\" data-zbar-pet=\"\"></script>\n{INJECT_END}\n"
     );
 
     let mut html = insert_before(&cleaned, "</head>", &head_block, "文档头结束标签")?;
@@ -2239,6 +2568,7 @@ mod tests {
         assert_eq!(html2.matches("variables.css").count(), 1);
         assert_eq!(html2.matches("effects.js").count(), 1);
         assert_eq!(html2.matches("usage.js").count(), 1, "二次注入不应重复 usage.js");
+        assert_eq!(html2.matches("pet.js").count(), 1, "二次注入不应重复 pet.js");
 
         // 引用位置：样式在 </head> 之前、脚本在 </body> 之前
         let head_pos = html2.to_ascii_lowercase().find("</head>").unwrap();
@@ -2249,7 +2579,15 @@ mod tests {
         assert!(js_pos < body_pos, "脚本应位于 </body> 之前（defer）");
         let usage_pos = html2.find("usage.js").unwrap();
         assert!(usage_pos < body_pos, "usage.js 应位于 </body> 之前（defer）");
+        let pet_pos = html2.find("pet.js").unwrap();
+        assert!(pet_pos < body_pos, "pet.js 应位于 </body> 之前（defer）");
         assert!(html2.contains("<script defer src="));
+        // pet.js 注入行带 data-zbar-pet 标记（清理与防重复注入定位用）
+        let pet_line = html2
+            .lines()
+            .find(|l| l.contains("pet.js"))
+            .expect("pet.js 注入行应存在");
+        assert!(pet_line.contains("data-zbar-pet"), "pet.js 行应带标记：{pet_line}");
 
         // 剥离后应还原为无标记的原貌
         let stripped = strip_inject_blocks(&html2);
@@ -2343,7 +2681,7 @@ mod tests {
     fn variables_css_渲染含全部变量与壁纸地址() {
         let params = ThemeParams::default();
         let url = "file:///Users/z/.zbar/agent-themes/zcode/wallpapers/my%20wall.mp4";
-        let css = render_variables_css(&params, url);
+        let css = render_variables_css(&params, url, "", 1080.0);
         for var in [
             "--zbar-wallpaper-url",
             "--zbar-wp-brightness",
@@ -2359,10 +2697,21 @@ mod tests {
             "--zbar-usage-opacity",
             "--zbar-usage-session-bar",
             "--zbar-usage-turn-bar",
+            "--zbar-pet-enabled",
+            "--zbar-pet-style",
+            "--zbar-pet-size",
+            "--zbar-pet-asset-ver",
             "--zbar-playback-rate",
         ] {
             assert!(css.contains(var), "variables.css 缺少变量 {var}");
         }
+        // P1-2：资产内容戳变量按入参渲染（空 = 未物化；壳按缺失处理）
+        assert!(css.contains("--zbar-pet-asset-ver: ;"), "{css}");
+        let stamped = render_variables_css(&params, url, "0123456789abcdef", 1080.0);
+        assert!(
+            stamped.contains("--zbar-pet-asset-ver: 0123456789abcdef;"),
+            "{stamped}"
+        );
         // 壁纸地址以 url("…") 形式写入
         assert!(css.contains(&format!("url(\"{url}\")")));
         // 默认参数值渲染（V6 默认：亮度/饱和度拉满、对话列/侧栏/右栏
@@ -2390,7 +2739,7 @@ mod tests {
         let mut p = ThemeParams::default();
         p.base_alpha = 0.4;
         p.text_shadow = 0.8;
-        let css = render_variables_css(&p, url);
+        let css = render_variables_css(&p, url, "", 1080.0);
         assert!(css.contains("--zbar-base-alpha: 0.4;"), "{css}");
         assert!(css.contains("--zbar-text-shadow: 0.8;"), "{css}");
 
@@ -2399,7 +2748,7 @@ mod tests {
         let mut p = ThemeParams::default();
         p.usage_font_size = 13.0;
         p.usage_opacity = 0.8;
-        let css = render_variables_css(&p, url);
+        let css = render_variables_css(&p, url, "", 1080.0);
         assert!(css.contains("--zbar-usage-font-size: 13px;"), "{css}");
         assert!(css.contains("--zbar-usage-opacity: 0.8;"), "{css}");
 
@@ -2407,21 +2756,377 @@ mod tests {
         // 即不渲染会话条，随热重载约 1 秒生效）
         let mut p = ThemeParams::default();
         p.usage_session_bar = false;
-        let css = render_variables_css(&p, url);
+        let css = render_variables_css(&p, url, "", 1080.0);
         assert!(css.contains("--zbar-usage-session-bar: 0;"), "{css}");
         p.usage_session_bar = true;
-        let css = render_variables_css(&p, url);
+        let css = render_variables_css(&p, url, "", 1080.0);
         assert!(css.contains("--zbar-usage-session-bar: 1;"), "{css}");
 
         // V19：每轮统计条开关同样按参数渲染 1/0（关闭时 renderAll 对
         // 全部轮节点 removeRow 并跳过 renderOne，随热重载约 1 秒生效）
         let mut p = ThemeParams::default();
         p.usage_turn_bar = false;
-        let css = render_variables_css(&p, url);
+        let css = render_variables_css(&p, url, "", 1080.0);
         assert!(css.contains("--zbar-usage-turn-bar: 0;"), "{css}");
         p.usage_turn_bar = true;
-        let css = render_variables_css(&p, url);
+        let css = render_variables_css(&p, url, "", 1080.0);
         assert!(css.contains("--zbar-usage-turn-bar: 1;"), "{css}");
+
+        // 桌面宠物参数按参数渲染真值：默认关闭（pet.js 读值非 "1" 一律
+        // 视为关闭，含变量缺失的旧 variables.css），开启后形象与大小随
+        // 参数透出（热重载约 1 秒生效的前提）。pet_size 为档位语义：
+        // 默认档 3 × 1080 逻辑高 = 108px（整数 px，绝不出现小数/非 px 单位）
+        assert!(css.contains("--zbar-pet-enabled: 0;"), "{css}");
+        assert!(css.contains("--zbar-pet-style: cat;"), "{css}");
+        assert!(css.contains("--zbar-pet-size: 108px;"), "{css}");
+        let mut p = ThemeParams::default();
+        p.pet_enabled = true;
+        p.pet_style = "bot".to_string();
+        p.pet_size = 5;
+        let css = render_variables_css(&p, url, "", 1080.0);
+        assert!(css.contains("--zbar-pet-enabled: 1;"), "{css}");
+        assert!(css.contains("--zbar-pet-style: bot;"), "{css}");
+        assert!(css.contains("--zbar-pet-size: 162px;"), "{css}");
+        // V3：自定义形象值 custom:<id> 原样透传（冒号为 CSS 自定义属性的
+        // 合法值字符，注入壳按前缀识别）
+        let mut p = ThemeParams::default();
+        p.pet_style = "custom:boba".to_string();
+        let css = render_variables_css(&p, url, "", 1080.0);
+        assert!(css.contains("--zbar-pet-style: custom:boba;"), "{css}");
+    }
+
+    #[test]
+    fn variables_css_pet_size档位换算px断言() {
+        // 兼容硬约束回归：--zbar-pet-size 恒为「整数 + px」——旧版 pet.js
+        // 的 sizeOf 用 parseInt 解析该值，任何非整数 px 形态（小数、
+        // 无单位、vh/百分比）都会把宠物缩成蚂蚁
+        let url = "file:///x/y.mp4";
+        for screen_h in [800.0, 1080.0, 1440.0, 2160.0] {
+            for level in 1..=crate::pet::PET_SIZE_LEVEL_PCT.len() as u32 {
+                let mut p = ThemeParams::default();
+                p.pet_size = level;
+                let css = render_variables_css(&p, url, "", screen_h);
+                let expect = crate::pet::pet_size_px(level, screen_h);
+                let want = format!("--zbar-pet-size: {expect}px;");
+                assert!(css.contains(&want), "档{level}@{screen_h} 应渲染 {want}：{css}");
+                // 值主体必为纯整数（无小数点、无 vh/% 等单位变体）
+                let line = css
+                    .lines()
+                    .find(|l| l.contains("--zbar-pet-size:"))
+                    .unwrap();
+                let v = line
+                    .trim()
+                    .trim_start_matches("--zbar-pet-size:")
+                    .trim()
+                    .trim_end_matches(';');
+                assert_eq!(v, format!("{expect}px"), "值形态必须为整数px：{line}");
+                assert!(v.trim_end_matches("px").parse::<u32>().is_ok(), "去掉 px 后必须是纯整数：{v}");
+            }
+        }
+        // 屏高非法兜底 1080：默认档 3 → 108px
+        for bad in [0.0, f64::NAN, f64::INFINITY] {
+            let p = ThemeParams::default();
+            let css = render_variables_css(&p, url, "", bad);
+            assert!(css.contains("--zbar-pet-size: 108px;"), "{css}");
+        }
+    }
+
+    #[test]
+    fn pet_js_模板契约与帧数据完整性() {
+        // 头部版本标记（store::ensure_versioned_template 的升级判据，
+        // 与 theme/effects/usage 共用同一提取器）
+        assert!(PET_JS.contains("ZBAR-THEME-V6"));
+        assert!(
+            !PET_JS.contains("ZBAR-THEME-V5"),
+            "版本头应已升到 V6（tool_running / failed 两状态 + ta/fe 信号）"
+        );
+        // 单源拼接契约：PET_JS = pet-core.js（唯一真相源）+ 注入版宿主壳，
+        // 核心段必须完整位于头部（版本标记提取器只看文件头部）
+        assert!(
+            PET_JS.starts_with(include_str!("../../../public/pet-core.js")),
+            "PET_JS 应以 public/pet-core.js 内容开头（include_str! 单源拼接）"
+        );
+        // 核心工厂契约：ZBarPet 工厂 + 完整实例接口（独立悬浮窗宿主与
+        // 注入版宿主共用同一接口；heartbeat 为 V2 心跳契约的可选入口）
+        assert!(PET_JS.contains("window.ZBarPet = { create: create }"));
+        assert!(PET_JS.contains("ZBarPet.create(document.body"));
+        assert!(PET_JS.contains("feed: feed,"));
+        assert!(PET_JS.contains("heartbeat: heartbeat,"));
+        assert!(PET_JS.contains("setParams: function (params)"));
+        assert!(PET_JS.contains("destroy: function ()"));
+        // 严格模式 IIFE（风格与 usage.js/effects.js 一致）
+        assert!(PET_JS.contains("\"use strict\";"));
+        // 参数热重载契约：消费 variables.css 的三个宠物变量
+        assert!(PET_JS.contains("\"--zbar-pet-enabled\""));
+        assert!(PET_JS.contains("\"--zbar-pet-style\""));
+        assert!(PET_JS.contains("\"--zbar-pet-size\""));
+        // 开关语义：值非 "1" 一律视为关闭（默认 false，变量缺失的旧
+        // variables.css 下不显示宠物）
+        assert!(PET_JS.contains("readVar(VAR_ENABLED) === \"1\""));
+        // 数据契约：大文件只读 usage.js 重载的全局数据（壳不重载
+        // usage-data.js），心跳小文件由壳每 2 秒重载喂 heartbeat——
+        // 切出壳段（拼接边界之后）断言职责划分
+        assert!(PET_JS.contains("window.__ZBAR_USAGE__"));
+        assert!(PET_JS.contains("d.v !== 2"));
+        let shell_lo = PET_JS
+            .find("ZBAR 宠物注入版宿主壳")
+            .expect("注入版宿主壳应存在");
+        let shell = &PET_JS[shell_lo..];
+        assert!(
+            shell.contains("usage-data-hb.js"),
+            "壳应重载心跳小文件（存活信号由独立小文件承担）：{shell}"
+        );
+        assert!(
+            shell.contains("pet.heartbeat(window.__ZBAR_USAGE_HB__)"),
+            "壳应把心跳全局喂给核心 heartbeat 接口：{shell}"
+        );
+        assert!(
+            !shell.contains("usage-data.js\"") && !shell.contains("usage-data.js`"),
+            "壳不应自行重载大文件 usage-data.js（usage.js 的职责）：{shell}"
+        );
+        // 核心（壳之前的公共段）：心跳回退 ts（旧数据文件 V1 兼容）+
+        // 闲置判定消费 la（缺失回退 ts，防窗口滑动误弹闲置）
+        let core = &PET_JS[..shell_lo];
+        assert!(
+            core.contains("if (!hbSeen) lastHb = d.ts;"),
+            "核心应在心跳缺失时回退 ts 判陈旧（V1 兼容）：{core}"
+        );
+        assert!(
+            core.contains("typeof d.la === \"number\" ? d.la : d.ts"),
+            "核心应消费 la 判闲置（缺失回退 ts）：{core}"
+        );
+        assert!(
+            core.contains("now - s.lastActivity < IDLE_SLEEP_MS"),
+            "闲置判定应按最后活动时刻 la 计算（V5 纯函数化后经侧写字段消费）：{core}"
+        );
+        // 状态机七状态（V6：五状态 + tool_running/failed）与关键判定常量
+        // （心跳新鲜度 / 闲置入睡 / 庆祝时长）
+        for state in [
+            "sleeping",
+            "idle",
+            "working",
+            "typing",
+            "celebrating",
+            "tool_running",
+            "failed",
+        ] {
+            assert!(PET_JS.contains(&format!("\"{state}\"")), "缺状态 {state}");
+        }
+        assert!(PET_JS.contains("DATA_FRESH_MS = 10000"));
+        assert!(PET_JS.contains("IDLE_SLEEP_MS = 60000"));
+        assert!(PET_JS.contains("CELEBRATE_MS = 3000"));
+        // V5 新常量：pu 预判窗口（实测首请求 30~70s + 余量）与 working
+        // 迟滞窗口（抹平轮间隙回落感）
+        assert!(PET_JS.contains("PENDING_TURN_MS = 90000"));
+        assert!(PET_JS.contains("WORKING_LINGER_MS = 45000"));
+        // V6 新常量：ta 工具活跃窗口（30s 兜轮询间隙与异常残留，正常
+        // 结束 ta 立即归 null）与 fe 沮丧时长（与 CELEBRATE_MS 同款口径）
+        assert!(PET_JS.contains("TOOL_ACTIVE_MS = 30000"));
+        assert!(PET_JS.contains("FAILED_MS = 3000"));
+        // V5 pu 契约：核心消费 d.pu（缺失与 null 归 0，向后兼容旧数据
+        // 文件），预判按 PENDING_TURN_MS 窗口判定；迟滞基准 lastWorkT
+        // 只随真实工作信号前进（迟滞自身不回写，防窗口无限续期）
+        assert!(
+            core.contains("typeof d.pu === \"number\""),
+            "核心应消费 pu 字段（缺失兼容）：{core}"
+        );
+        assert!(
+            core.contains("now - pendingUser < PENDING_TURN_MS"),
+            "预判应按 PENDING_TURN_MS 窗口判定：{core}"
+        );
+        assert!(
+            core.contains("now - s.lastWorkT < WORKING_LINGER_MS"),
+            "迟滞应按 WORKING_LINGER_MS 窗口保持 working：{core}"
+        );
+        assert!(
+            core.contains("if (s.pending) {"),
+            "预判命中的优先级应在 celebrating 之后、idle/sleeping 之前：{core}"
+        );
+        assert!(
+            core.contains("function decideState"),
+            "状态机判定应为模块级纯函数 decideState（单测直测）：{core}"
+        );
+        // V6 ta/fe 契约：核心消费 d.ta / d.fe（缺失与 null 归 0，向后兼容
+        // 旧数据文件）；ta 按 TOOL_ACTIVE_MS 窗口判定 tool_active；fe 驱动
+        // 沮丧窗口并与庆祝成败互斥（feed 的轮完成分支按 fe 新鲜度二选一）
+        assert!(
+            core.contains("typeof d.ta === \"number\""),
+            "核心应消费 ta 字段（缺失兼容）：{core}"
+        );
+        assert!(
+            core.contains("typeof d.fe === \"number\""),
+            "核心应消费 fe 字段（缺失兼容）：{core}"
+        );
+        assert!(
+            core.contains("now - toolActiveAt < TOOL_ACTIVE_MS"),
+            "tool_active 应按 TOOL_ACTIVE_MS 窗口判定：{core}"
+        );
+        assert!(
+            core.contains("if (s.toolActive) return \"tool_running\";"),
+            "工具执行期应优先于 typing/working 输出 tool_running：{core}"
+        );
+        assert!(
+            core.contains("if (s.failedUntil > now) return \"failed\";"),
+            "沮丧窗口内应输出 failed（优先级最高）：{core}"
+        );
+        assert!(
+            core.contains("failedUntil = now + FAILED_MS;"),
+            "轮完成且 fe 新鲜时应置位沮丧截止时刻：{core}"
+        );
+        // V6 内建 fallback 契约：内建形象仅五状态帧，新状态复用相近帧
+        //（tool_running → typing 忙碌执行；failed → sleeping 蔫了），
+        // 渲染路径（drawFrame/frameMsOf/loop）统一经 builtinRenderState
+        assert!(
+            core.contains("tool_running: \"typing\""),
+            "内建 fallback 应将 tool_running 映射到 typing 帧：{core}"
+        );
+        assert!(
+            core.contains("failed: \"sleeping\""),
+            "内建 fallback 应将 failed 映射到 sleeping 帧：{core}"
+        );
+        assert!(
+            core.contains("function builtinRenderState"),
+            "内建渲染路径应经 builtinRenderState 回退新状态帧：{core}"
+        );
+        // V6 迟滞跨工作态：lastWorkT 随 tool_running 前进（迟滞覆盖
+        // 「工作类状态 → 非工作状态」的过渡）
+        assert!(
+            core.contains("st === \"tool_running\""),
+            "迟滞基准 lastWorkT 应覆盖 tool_running（V6 工作类状态）：{core}"
+        );
+        // V4 动画驱动契约：不依赖 rAF（ZCode 注入环境视觉可见但无
+        // beginFrame，rAF 全暂停 → 冻结首帧），setInterval 轮询驱动
+        // （帧推进语义不变）；应用层不做 document.hidden 省电判断
+        // （visibility 判定与视觉可见性脱节时降频会造成同样的冻结/
+        // 状态滞后）。负向断言带调用/三元特征，头部 V4 变更注释中的
+        // 说明字样不受影响
+        assert!(
+            PET_JS.contains("setInterval(loop"),
+            "核心动画应由 setInterval 轮询驱动（V4）：{core}"
+        );
+        assert!(
+            !PET_JS.contains("requestAnimationFrame("),
+            "宠物脚本不应调用 rAF（注入环境 beginFrame 缺失会冻结）"
+        );
+        assert!(
+            !PET_JS.contains("cancelAnimationFrame("),
+            "宠物脚本不应残留 rAF 取消调用（V4 已无 rAF 生命周期）"
+        );
+        assert!(
+            !PET_JS.contains("document.hidden ?"),
+            "宠物脚本不应做 hidden 降频判断（visibility 与视觉可见性脱节）"
+        );
+        // 形象库：至少两个形象（cat + bot），帧数据按状态组织
+        assert!(PET_JS.contains("var PET_STYLES = {"));
+        assert!(PET_JS.contains("cat: {"));
+        assert!(PET_JS.contains("bot: {"));
+        // 渲染契约：防重复挂载标记 + 不捕获鼠标 + 像素风放大
+        assert!(PET_JS.contains("\"data-zbar-pet\""));
+        assert!(PET_JS.contains("pointer-events:none"));
+        assert!(PET_JS.contains("image-rendering:pixelated"));
+        // V3 自定义形象契约（Petdex 图集渲染器）：style 前缀 custom: +
+        // customAsset 资产 + drawImage 按网格切帧（最近邻采样保锐利）
+        // + 缺资产回退内建第一形象
+        assert!(
+            PET_JS.contains("CUSTOM_PREFIX = \"custom:\""),
+            "核心应识别 custom:<id> 形象前缀"
+        );
+        assert!(PET_JS.contains("customAsset"), "create/setParams 应支持 customAsset");
+        assert!(PET_JS.contains("imageSmoothingEnabled = false"));
+        assert!(PET_JS.contains("ctx.drawImage("));
+        assert!(
+            PET_JS.contains("function effectiveStyleOf"),
+            "custom 缺资产应回退内建第一形象（effectiveStyleOf）"
+        );
+        // 注入壳（V3）：custom 选中时按需加载同目录物化文件
+        // pet-custom.js（静态资产不轮询），按 meta.id 比对选中 id
+        let shell_v3 = &PET_JS[PET_JS
+            .find("ZBAR 宠物注入版宿主壳")
+            .expect("注入版宿主壳应存在")..];
+        assert!(
+            shell_v3.contains("window.__ZBAR_PET_CUSTOM__"),
+            "壳应消费物化资产全局：{shell_v3}"
+        );
+        assert!(
+            shell_v3.contains("\"pet-custom.js\""),
+            "壳应加载同目录 pet-custom.js：{shell_v3}"
+        );
+        assert!(
+            shell_v3.contains("function customAssetFor"),
+            "壳应按选中 id 校验资产归属"
+        );
+        assert!(
+            shell_v3.contains("function reloadCustomAsset"),
+            "壳应支持资产缺失时懒加载一次（不轮询）"
+        );
+        assert!(
+            shell_v3.contains("customAsset: asset"),
+            "壳应把资产传给核心 create/setParams"
+        );
+        // P1-2：资产内容戳热刷新——壳读 --zbar-pet-asset-ver，值变化强制
+        // 重载资产，重载后经 curAsset 身份比对把新对象传给核心重建
+        assert!(
+            shell_v3.contains("VAR_ASSET_VER = \"--zbar-pet-asset-ver\""),
+            "壳应读资产内容戳变量：{shell_v3}"
+        );
+        assert!(
+            shell_v3.contains("ver !== assetVer"),
+            "壳应按内容戳变化触发重载"
+        );
+        assert!(
+            shell_v3.contains("curAsset !== asset"),
+            "壳应按资产对象身份变化触发核心重建（重复导入同 id）"
+        );
+        // 帧数据静态完整性：每帧行数必须为 GRID=16（行内长度与字符
+        // 合法性已由设计期校验脚本保证，此处防手改截断）。帧行的判定
+        // 特征：恰好 16 字符且全为 "."/数字（palette 颜色、STATES 等
+        // 普通字符串自然排除，无需脆弱的文本边界）
+        for style in ["cat", "bot"] {
+            let style_lo = PET_JS.find(&format!("{style}: {{")).expect("形象应存在");
+            let style_body = &PET_JS[style_lo..];
+            let frames_lo = style_body.find("frames: {").expect("frames 应存在");
+            let frames_body = &style_body[frames_lo..];
+            let bytes = frames_body.as_bytes();
+            let is_pixel_row = |s: &str| s.len() == 16 && s.chars().all(|c| c == '.' || c.is_ascii_digit());
+            let mut frame_count = 0;
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] != b'[' {
+                    i += 1;
+                    continue;
+                }
+                // 帧开始：数到匹配 "]" 前的像素行数（帧内不嵌套数组）
+                let mut rows = 0;
+                let mut j = i + 1;
+                while j < bytes.len() && bytes[j] != b']' {
+                    if bytes[j] == b'"' {
+                        let start = j + 1;
+                        let mut k = start;
+                        while k < bytes.len() && bytes[k] != b'"' {
+                            k += 1;
+                        }
+                        if k < bytes.len() {
+                            let row = &frames_body[start..k];
+                            if is_pixel_row(row) {
+                                rows += 1;
+                            }
+                        }
+                        j = k + 1;
+                        continue;
+                    }
+                    j += 1;
+                }
+                if rows > 0 {
+                    frame_count += 1;
+                    assert_eq!(rows, 16, "{style} 存在 {rows} 行的坏帧（应 16 行）");
+                }
+                i = j + 1;
+            }
+            assert!(
+                frame_count >= 10,
+                "{style} 帧数异常：{frame_count}（五状态 × 2~4 帧）"
+            );
+        }
     }
 
     #[test]

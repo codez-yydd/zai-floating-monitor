@@ -38,6 +38,11 @@ base64 = "0.22"
 # 账号切换：解密 ~/.zcode/v2/credentials.json 的 enc:v1: 凭证（AES-256-GCM）
 aes-gcm = "0.10"
 sha2 = "0.10"
+# 自定义宠物导入：精灵图集尺寸校验/缩略图生成（png + webp 解码与 png 编码）
+image = { version = "0.25", default-features = false, features = ["png", "webp"] }
+# 自定义宠物导入：Petdex 分发 zip 包（根目录 pet.json + spritesheet）解包；
+# 仅需 DEFLATE 与 STORED，关默认特性减体积
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-autostart = "2.5.1"

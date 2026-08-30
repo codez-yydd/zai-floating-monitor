@@ -43,7 +43,7 @@ export const theme = {
 
   // 状态横幅
   "theme.needsReinstallBanner":
-    "检测到 ZCode 已升级，动态壁纸已失效，建议重新安装以恢复效果。",
+    "皮肤需要重新安装才能完整生效（ZCode 已升级，或为宠物功能上线前的旧版安装，原因见下方提示），重新安装即可恢复。",
   "theme.nodeMissingBanner":
     "未检测到 Node.js，注入依赖它完成。请先安装 Node.js（终端执行 brew install node，或到 nodejs.org 下载）后重试。",
   "theme.backupMissingBanner":
@@ -106,6 +106,39 @@ export const theme = {
   // 统计条符号图例（与 usage.js 行格式一一对应）
   "theme.usageLegend":
     "↑ 输入（非缓存） · ↓ 输出 · ⟲ 缓存读 · × 模型请求数 · t/s 输出速度 · TTFT 首字延迟 · Σ 会话总 Token（输入+输出+缓存读） · ≈ 生成中输出估算（未计入累计）",
+
+  // ===== 桌面宠物区（pet.js V1：对话页右下角按工作状态实时切换动画的
+  // 像素宠物，开关/形象/大小经 variables.css 热重载约 1 秒生效） =====
+  "theme.petTitle": "桌面宠物",
+  "theme.petHint":
+    "在 ZCode 对话页右下角养一只像素宠物，它会跟随 ZCode 的工作状态实时切换动画；不捕获鼠标、不遮挡输入区，改动约 1 秒热生效。升级 ZBar 后首次使用需重新安装一次皮肤。切换形象后若未变化，重启一次 ZCode 生效。",
+  "theme.petEnabled": "启用桌面宠物",
+  "theme.petEnabledHint":
+    "开启后在 ZCode 对话页右下角显示像素宠物（ZCode 需已安装动态壁纸）",
+  // 形象名称（与 pet.js 内嵌形象库 PET_STYLES 的键一一对应）
+  "theme.petStyleCat": "像素小猫",
+  "theme.petStyleBot": "像素小机器人",
+  // 自定义宠物（第三阶段：Petdex 格式导入，petStyles 的 PetStyleSection）
+  "theme.petGroupBuiltin": "内建形象",
+  "theme.petGroupCustom": "自定义形象（Petdex 宠物）",
+  "theme.petCustomEmpty": "还没有自定义宠物。把 Petdex 宠物包拖到窗口即可导入。",
+  "theme.petImportHint":
+    "导入自定义宠物：将 Petdex 宠物包拖入窗口（zip 包 / pet.json / 精灵图集 png·webp）",
+  // 皮肤页形态：png/webp 投放在皮肤页路由给壁纸导入，提示只列 zip/json
+  "theme.petImportHintSkin":
+    "导入自定义宠物：将 Petdex 宠物包拖入窗口（zip 包 / pet.json；裸图集 png/webp 请在设置页宠物卡导入）",
+  "theme.petImporting": "正在导入宠物…",
+  "theme.petImportDone": "宠物已导入 ✓ 重启 ZCode 后可在对话页选用",
+  "theme.petImportFail": "导入宠物失败：{msg}",
+  "theme.petDelete": "删除",
+  "theme.petDeleteConfirm":
+    "删除自定义宠物「{name}」？正在使用时会自动回退内建形象。",
+  "theme.petDeleteFail": "删除宠物失败：{msg}",
+  "theme.paramPetSize": "宠物大小",
+  "theme.paramPetSizeHint": "按屏幕高度比例定档（约 5.5%~15%），换屏幕或改分辨率后自动适配，高分屏低分屏观感一致",
+  // 宠物状态图例（与 pet.js 状态机七状态一一对应）
+  "theme.petLegend":
+    "状态：沉睡（ZCode 闲置超 1 分钟或 ZBar 未运行） · 闲坐（近期有轮次活动） · 思考中（新轮开始、尚无输出） · 奋笔疾书（输出增长中，速度随 token 增速分档） · 跑腿执行（工具运行中，如命令/构建） · 庆祝（轮次完成，约 3 秒） · 沮丧（轮次失败或被取消，约 3 秒）",
   "theme.currentWallpaper": "当前壁纸",
   "theme.noWallpaper": "未选择壁纸",
   "theme.lightWallpaperPreset": "亮色壁纸适配",

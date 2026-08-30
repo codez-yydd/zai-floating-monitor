@@ -8,6 +8,8 @@ mod codex;
 mod cursor;
 mod db;
 mod kimi;
+mod pet;
+mod pets;
 mod pricing;
 mod projects;
 mod quota;
@@ -1932,6 +1934,21 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .on_window_event(|window, event| {
+            // 独立桌面宠物窗口：位置拖动节流落盘 + 销毁时停轮询复位开关
+            // （先于失焦分支处理，宠物窗口不参与面板失焦自动收起逻辑）
+            match event {
+                WindowEvent::Moved(pos) => {
+                    if window.label() == pet::PET_WINDOW_LABEL {
+                        pet::handle_pet_window_moved(window, *pos);
+                    }
+                }
+                WindowEvent::Destroyed => {
+                    if window.label() == pet::PET_WINDOW_LABEL {
+                        pet::handle_pet_window_destroyed(window.app_handle());
+                    }
+                }
+                _ => {}
+            }
             // 失焦时自动隐藏面板（保留窗口本身，不销毁）
             if let WindowEvent::Focused(false) = event {
                 if window.label() == "panel" {
@@ -2007,6 +2024,9 @@ pub fn run() {
             // 对话页用量统计条数据源：皮肤已安装时启动后台导出
             // （未安装不启动；安装成功/卸载的启停在 agent_theme 流程挂点）
             agent_theme::usage_feed::start_if_installed();
+            // 独立桌面宠物（第二阶段）：配置开启时恢复透明悬浮窗并启动
+            // 独立状态轮询（未开启零开销，与皮肤安装状态互不依赖）
+            pet::start_if_enabled(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -2081,7 +2101,13 @@ pub fn run() {
             agent_theme::select_agent_wallpaper,
             agent_theme::set_agent_wallpaper_dir,
             agent_theme::restart_target_app,
-            agent_theme::restart_zcode
+            agent_theme::restart_zcode,
+            pet::get_pet_config,
+            pet::set_pet_config,
+            pets::import_pet,
+            pets::list_custom_pets,
+            pets::delete_custom_pet,
+            pets::get_custom_pet_asset
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

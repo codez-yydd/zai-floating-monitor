@@ -31,6 +31,8 @@ import type {
   RemoteAgentQuotaSnapshot,
   RemoteUsage,
   SessionsPage,
+  PetConfig,
+  CustomPetEntry,
   ShortcutConfig,
   Stats,
   SwitchOutcome,
@@ -580,4 +582,47 @@ export async function saveShareImage(
   suggestedName: string
 ): Promise<string | null> {
   return invoke<string | null>("save_share_image", { pngBytes, suggestedName });
+}
+
+// ===== 独立桌面宠物（第二阶段：不依赖皮肤的透明悬浮窗宠物）=====
+
+/** 读取独立宠物配置（设置页卡片初始数据） */
+export async function getPetConfig(): Promise<PetConfig> {
+  return invoke<PetConfig>("get_pet_config");
+}
+
+/**
+ * 保存并应用独立宠物配置（改完即生效）：开关切换即时建窗/关窗并启停
+ * 独立状态轮询；形象/大小变化即时推送宠物窗口热切换（悬浮窗尺寸由
+ * Rust 侧同步调整）。返回收敛后的最终配置。
+ */
+export async function setPetConfig(config: PetConfig): Promise<PetConfig> {
+  return invoke<PetConfig>("set_pet_config", { config });
+}
+
+// ===== 自定义宠物（第三阶段：Petdex 格式导入，Rust pets 模块契约）=====
+
+/**
+ * 导入自定义宠物。srcPath 支持三种形态（Petdex 分发以 pet.json +
+ * spritesheet 两文件为主，zip 为画廊下载的传输封装）：
+ * - .zip 包：包内提取 pet.json（可选）+ spritesheet（必需）；
+ * - pet.json：同目录找 spritesheet.webp / .png；
+ * - 裸图集（.png / .webp）：默认映射 + 文件名生成。
+ * 重复导入同 id 为整体替换；返回清单项（含缩略图）。
+ */
+export async function importPet(srcPath: string): Promise<CustomPetEntry> {
+  return invoke<CustomPetEntry>("import_pet", { srcPath });
+}
+
+/** 列出自定义宠物清单（按 id 排序，含 idle 首帧缩略图） */
+export async function listCustomPets(): Promise<CustomPetEntry[]> {
+  return invoke<CustomPetEntry[]>("list_custom_pets");
+}
+
+/**
+ * 删除自定义宠物（正在使用的两条管道先回退内建默认形象再删除）。
+ * id 为 list_custom_pets 返回的清单项 id。
+ */
+export async function deleteCustomPet(id: string): Promise<void> {
+  await invoke("delete_custom_pet", { id });
 }

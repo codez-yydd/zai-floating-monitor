@@ -6,7 +6,11 @@
 //!
 //! 数据契约（usage-data.js 内容，键名与 inject::USAGE_JS 消费端一字不差）：
 //! ```js
-//! window.__ZBAR_USAGE__ = { v: 2, ts: <最后数据变化时刻ms>, turns: [{
+//! window.__ZBAR_USAGE__ = { v: 2, ts: <最后数据变化时刻ms>, la: <最后活动时刻ms>,
+//!   pu: <待处理用户消息时刻ms>|null（V5 附加字段，见下方 pu 信号说明）,
+//!   ta: <活跃工具时刻ms>|null（V6 附加字段，见下方 ta/fe 信号说明）,
+//!   fe: <失败轮事件时刻ms>|null（V6 附加字段，同上）,
+//!   turns: [{
 //!   umid: "msg_xxx",   用户消息 id（turn_usage.user_message_id，实测与
 //!                      ZCode DOM 的 data-turn-id 同值，即渲染端匹配键；
 //!                      列缺失或值为 null 时输出 null，该轮无法被匹配）
@@ -52,6 +56,96 @@
 //!   start: 首个请求开始毫秒
 //! }] }
 //! ```
+//!
+//! ## la（最后活动时刻）字段（V2 附加字段，向后兼容）
+//!
+//! `la` = 数据快照内可见的最后真实活动时刻（全部完成轮 end 与全部
+//! 进行中轮 start 的最大值）。宠物闲置判定（idle↔sleeping）消费它：
+//! ts 是"数据内容变化时刻"，轮次滑出查询窗口边界（旧轮退出 turns
+//! 序列）同样会刷新 ts——若无 la，每滑出一轮宠物都会从沉睡误弹回
+//! 闲置并持续 IDLE_SLEEP_MS。la 只随真实活动前进，滑出窗口的旧轮
+//! 不影响它（取 max 时旧值天然被压掉，轮滑出后 la 只会变小或不变，
+//! 变小只会更快入睡，绝不误醒）。la 是 turns/runs 的纯推导值，天然
+//! 随内容参与"变化才写盘"的对比（活动时刻变化本身就是数据变化）。
+//! 进行中轮以该轮首请求时刻（runs.start）近似"最新请求时刻"：
+//! runs 非空时宠物状态机短路进 working/typing，不消费 la，近似无
+//! 影响；完成轮的 end 是精确值，闲置判定实际只消费它。旧消费端按
+//! 未知字段忽略；旧数据文件（无 la）由宠物核心回退用 ts 判闲置。
+//!
+//! ## pu（待处理用户消息）信号（V5 附加字段，向后兼容）
+//!
+//! 宠物"进行中轮"（runs）通道只由**已完成的模型请求行**聚合（model_usage
+//! 每笔请求完成才落行），而 `message` 表的 user 消息**发送即落库**（实测
+//! time_created = 发送时刻）——用户发消息后首个模型请求要 30~70 秒才完成
+//! 落库，期间 runs 为空，宠物停在 waiting/sleeping 造成"滞后"观感。pu =
+//! 最近一条「尚无对应完成轮」的 user 消息的 time_created（毫秒），无则
+//! null；宠物核心据此在 runs 为空时预判进入 working（PENDING_TURN_MS
+//! 窗口内），消除首请求窗口的滞后。
+//!
+//! 查询方案（实测选定候选 A，候选 B 的 session_entry/input_history 表无
+//! 更轻的用户输入信号——均无独立 role/时间语义可直接利用）：
+//! - `message` 按 rowid DESC 取尾部 PENDING_SCAN_ROWS（64）行，子查询内
+//!   `json_extract(data, '$.role')` 解析角色，外层过滤 role = 'user'；
+//!   最近消息必在 rowid 尾部（发送即落库、rowid 单调递增），实测主库
+//!   （10258 行 message，data 列均值 938 B）尾部 64 行含约 8 条 user
+//!   消息，扫查成本与表大小无关（rowid 倒序索引扫），实测 100 次平均
+//!   **0.023ms**，2 秒轮询周期 10ms 预算内余量充足，绝不全表扫；
+//! - 完成轮匹配不回查库（turn_usage.user_message_id 无索引，回查即全表
+//!   扫），而是与调用方已聚合的 turns 的 umid 集合（turn_usage.
+//!   user_message_id，含子代理自身视图行）内存比对：待处理消息必是
+//!   新近消息，其完成轮落库时同样新近，恒在查询窗口内；
+//! - role = 'user' 实测全部为真实用户提示词（主会话与子代理会话的 user
+//!   消息均带 agent 字段，工具结果不落 message 表），无伪信号；
+//! - pu 参与内容对比（变化才写盘的 payload 含 pu——用户发消息本身就是
+//!   数据变化，ts 随之刷新）与 la 推导（取 max，见上方 la 字段）；
+//! - 降级：message 表/核心列缺失（老版本库）、查询失败（json1 异常等）
+//!   一律返回 None（pu 信号缺失），不影响 turns/runs 导出；宠物核心对
+//!   pu 缺失按旧数据文件兼容（预判不生效，行为同 V4）。
+//!
+//! ## ta / fe 信号（V6 附加字段，向后兼容）
+//!
+//! 宠物 V6 新增两个状态的数据通道（turns 行本就透出 status
+//! :"completed"/"cancelled"/"error" 等原值，供渲染端与调试消费）：
+//! - **ta（tool active，活跃工具）**：`tool_usage` 表的工具调用**开始瞬间
+//!   落库**（status='running'、started_at 有值、completed_at 为 NULL），
+//!   完成时更新为 completed——这是「正在执行工具（构建/测试/命令）」的
+//!   实时信号，比 model_usage 的请求完成落库强得多（工具执行期间模型
+//!   请求间隙，runs 的 out 停滞，宠物在 typing/working 间摇摆）。ta =
+//!   最新一条 running 行的 started_at（毫秒），无则 null。查询走
+//!   `tool_usage_started_tool_idx`（started_at 前缀索引，实测 10805 行
+//!   主库平均 **0.003ms**），窗口 10 分钟兜底崩溃残留的 running 行
+//!   （实库发现 3 天前的残留 running 行，正常完成时行会更新、窗口内
+//!   自愈，崩溃残留由窗口剔除）。ta 与 pu 同款参与 ts/la 推导（工具
+//!   开始也是活动）与内容对比（工具开始/结束都触发写盘刷新 ts）；
+//! - **fe（failure event，失败轮事件）**：最近一次「失败或取消」完成轮
+//!   的 completed_at（毫秒），判定 = turn_usage 行
+//!   `status != 'completed' || cancelled_by_user = 1 || tool_error_count > 0`
+//!   （status 为 cancelled/error，或成功轮内含取消/工具报错），无则
+//!   null。**fe 只在失败轮新增时才变化**（MAX 语义天然满足：成功轮
+//!   完成不命中条件、不刷新 fe），消费端以 now − fe < 3000ms 判断
+//!   沮丧窗口；查询为 started_at 窗口过滤 + MAX 聚合（turn_usage 行
+//!   数量级为每天几十行，实测 334 行主库平均 **0.018ms**），窗口取
+//!   与 turns 相同的导出窗口（失败轮落库瞬间必在窗口内；超过窗口的
+//!   超长失败轮漏判属可接受窄边缘）；
+//! - 降级：tool_usage 表/核心列缺失（老版本库）、查询失败一律
+//!   unwrap_or(None)（无 ta/fe → 宠物新状态不触发，行为同 V5），不阻塞
+//!   turns/runs 导出；宠物核心对 ta/fe 缺失（旧数据文件）按 0 兼容。
+//!
+//! ## 心跳独立文件 usage-data-hb.js 与写盘策略（V2，向后兼容）
+//!
+//! 宠物陈旧判定（ZBar 退出 → 数据源停止 → 沉睡）需要每 2 秒刷新的
+//! 心跳，但把心跳塞进 usage-data.js 会迫使大文件（典型几百 KB、至多
+//! 3000 轮）每 2 秒全量重写（写放大，此前版本踩过的坑）。现拆为独立
+//! 小文件：`window.__ZBAR_USAGE_HB__ = <ms>`（几十字节），注入版宠物
+//! 壳每 2 秒经 script 时间戳重载读取喂给宠物核心（heartbeat 接口），
+//! 核心缺失心跳时回退用 ts 判陈旧（V1 行为）。
+//! - usage-data.js 恢复"内容不变跳写"原策略（ts 保持最后数据变化语义）；
+//! - 心跳文件仅当注入版宠物开启（ThemeParams.pet_enabled）时每周期
+//!   重写；宠物关闭时停止写并顺带清理残留文件（无常驻开销）；
+//! - 写放大权衡：几十字节每 2 秒原子写可忽略；"降低心跳粒度"不可行
+//!   （宠物阈值 10s 下粗粒度会在阈值边缘抖动误判）。
+//! - 独立悬浮窗宠物（pet.rs 轮询器）经 Tauri 事件推流，事件本身自带
+//!   新鲜度（查询成功才推），不消费心跳文件。
 //!
 //! ## runs（进行中轮）口径（实库验证结论）
 //!
@@ -121,7 +215,8 @@
 //! - 增量策略：每 2 秒全量重查最近 7 天窗口（至多 3000 轮、超出保留
 //!   最新，防数据文件无限膨胀；长窗口覆盖打开旧会话的历史回填，优先
 //!   简单方案，且天然覆盖"主轮晚于子轮落库"的并期场景）；序列化字节
-//!   无变化则跳过写盘，写盘走 .tmp + rename 原子替换。
+//!   无变化时跳写（ts 保持最后数据变化语义，见上方心跳契约），写盘走
+//!   .tmp + rename 原子替换。
 
 use crate::agent_theme::store;
 use rusqlite::Connection;
@@ -152,6 +247,19 @@ const MAX_TURNS: usize = 3000;
 /// runs 通道；正常轮远快于此，轮完成即由 done 集合过滤）
 const RUN_WINDOW_MS: i64 = 10 * 60 * 1000;
 
+/// pu（待处理用户消息）尾部扫查行数：最近消息必在 rowid 尾部（发送即
+/// 落库、rowid 单调递增），64 行实测覆盖任意活跃期（真实主库尾部 64 行
+/// 含约 8 条 user 消息）；rowid DESC LIMIT 为索引序扫，成本与表大小无关
+/// （实测 10258 行主库平均 0.023ms，2 秒周期 10ms 预算内），禁止放宽为
+/// 全表扫。见模块头 pu 信号说明
+const PENDING_SCAN_ROWS: i64 = 64;
+
+/// ta（活跃工具）查询窗口：running 行仅在 ZCode 崩溃/强杀时残留（实测
+/// 主库发现 3 天前的残留行），正常完成即更新为 completed、ta 归 null；
+/// 窗口剔除崩溃残留（值与 RUN_WINDOW_MS 同为 10 分钟"防陈旧残留"口径，
+/// 独立定义防语义耦合）。消费端另有 TOOL_ACTIVE_MS（30s）二层兜底
+pub(crate) const TOOL_WINDOW_MS: i64 = 10 * 60 * 1000;
+
 /// 导出周期（毫秒）：与注入端 usage.js 的数据重载周期一致
 const INTERVAL_MS: u64 = 2000;
 
@@ -165,12 +273,12 @@ pub(crate) struct UsageTurn {
     /// 轮 id（turn_usage.turn_id，保留透出；DOM data-turn-id 实测并非
     /// 此值，渲染端匹配不使用本字段）
     #[serde(rename = "turn")]
-    turn_id: String,
+    pub(crate) turn_id: String,
     /// 用户消息 id（turn_usage.user_message_id，实测与 ZCode DOM 的
     /// data-turn-id 同值同源，渲染端匹配键；列缺失或值为 null 时导出
     /// null——该轮无法被 DOM 匹配，仅保留数据）
     #[serde(rename = "umid")]
-    user_message_id: Option<String>,
+    pub(crate) user_message_id: Option<String>,
     /// 会话 id
     #[serde(rename = "sess")]
     session_id: String,
@@ -185,7 +293,7 @@ pub(crate) struct UsageTurn {
     input_tokens: i64,
     /// 输出 token
     #[serde(rename = "out")]
-    output_tokens: i64,
+    pub(crate) output_tokens: i64,
     /// 缓存读 token
     #[serde(rename = "cr")]
     cache_read: i64,
@@ -209,7 +317,7 @@ pub(crate) struct UsageTurn {
     /// 首字延迟毫秒（主轮自身，不随并入变化；缺失为 null）
     ttft: Option<i64>,
     /// 并入的子代理聚合（无并入为 null）
-    sub: Option<SubAgg>,
+    pub(crate) sub: Option<SubAgg>,
     /// 子代理自身视图行标记（V20）：1 = 本行是子代理轮的"自身视图行"
     /// （sess 为子代理会话 id、umid/数值/dur/ttft 均为该子轮自身口径），
     /// 与其并入主轮的行（sess=主会话、umid=主轮消息id、数值含并入）并存
@@ -218,7 +326,7 @@ pub(crate) struct UsageTurn {
     /// 消费预留）；主会话行无此键（None 不序列化，旧渲染脚本忽略未知
     /// 字段，v 保持 2 向后兼容）
     #[serde(rename = "subagent", skip_serializing_if = "Option::is_none")]
-    subagent: Option<u8>,
+    pub(crate) subagent: Option<u8>,
     /// 该轮用到的模型（去重逗号拼接，含并入子代理的模型）
     models: String,
 }
@@ -236,7 +344,7 @@ pub(crate) struct SubAgg {
     input_tokens: i64,
     /// 子代理输出 token 合计
     #[serde(rename = "out")]
-    output_tokens: i64,
+    pub(crate) output_tokens: i64,
     /// 子代理缓存读 token 合计
     #[serde(rename = "cr")]
     cache_read: i64,
@@ -286,7 +394,7 @@ impl SubAgg {
 /// 携带自身视图行所需字段（session_id / status / user_message_id /
 /// dur / ttft），见 collect_turns 的自身视图行生成。
 #[derive(Debug, Clone)]
-struct SubTurnRow {
+pub(crate) struct SubTurnRow {
     turn_id: String,
     /// 子代理会话 id（自身视图行的 sess 来源）
     session_id: String,
@@ -326,7 +434,7 @@ pub(crate) struct UsageRun {
     /// 消息，主会话 DOM 匹配不到；列缺失或值为 null 时导出 null——
     /// 该轮无法与 DOM 匹配，仅保留数据并入会话累计）
     #[serde(rename = "umid")]
-    user_message_id: Option<String>,
+    pub(crate) user_message_id: Option<String>,
     /// 会话 id（子代理进行中轮为 sess_subagent_* 形态）
     #[serde(rename = "sess")]
     session_id: String,
@@ -339,7 +447,7 @@ pub(crate) struct UsageRun {
     input_tokens: i64,
     /// 输出 token 合计
     #[serde(rename = "out")]
-    output_tokens: i64,
+    pub(crate) output_tokens: i64,
     /// 缓存读 token 合计
     #[serde(rename = "cr")]
     cache_read: i64,
@@ -359,11 +467,11 @@ pub(crate) struct UsageRun {
     /// 进行中主轮行时置位；None 不序列化（主会话行与无主轮行的子代理
     /// 行均无此键）
     #[serde(rename = "m", skip_serializing_if = "Option::is_none")]
-    merged: Option<u8>,
+    pub(crate) merged: Option<u8>,
     /// 并入本主轮行的子代理实时聚合（仅主会话行：同批子代理 runs 行
     /// 按 psess 归并 + 游离子代理完成轮；None 不序列化）
     #[serde(skip_serializing_if = "Option::is_none")]
-    sub: Option<SubAgg>,
+    pub(crate) sub: Option<SubAgg>,
 }
 
 // ============================================================
@@ -416,8 +524,8 @@ pub fn stop() {
 }
 
 fn feed_loop() {
-    // 变化检测缓存：线程生命周期内持有上轮 turns 序列化字节（线程重启
-    // 丢失缓存只多写一次盘，无正确性影响）
+    // 变化检测缓存：线程生命周期内持有上轮 turns+runs 序列化字节（线程
+    // 重启丢失缓存只多写一次盘，无正确性影响）
     let mut cache: Option<String> = None;
     loop {
         if FEED_STOP.load(Ordering::Relaxed) {
@@ -442,8 +550,9 @@ fn feed_loop() {
     }
 }
 
-/// 单轮导出：读库 → 序列化 → 变化检测后原子写出。任何失败静默跳过本轮
-/// （下个周期重试），不 panic 不累积日志。
+/// 单轮导出：读库 → 序列化 → flush_export 落盘（大文件按变化写、心跳
+/// 小文件按宠物开关维护）。任何失败静默跳过本轮（下个周期重试），
+/// 不 panic 不累积日志。
 fn export_once(cache: &mut Option<String>) {
     let result = (|| -> Result<(), String> {
         let conn = crate::zcode_sessions::open_main_db_readonly_uri()?;
@@ -467,17 +576,72 @@ fn export_once(cache: &mut Option<String>) {
         )?;
         let dir = store::app_dir(TARGET_APP_ID)?;
         fs::create_dir_all(&dir).map_err(|e| format!("创建主题目录失败: {e}"))?;
-        let turns_json = serde_json::to_string(&turns)
-            .map_err(|e| format!("序列化用量数据失败: {e}"))?;
-        let runs_json =
-            serde_json::to_string(&runs).map_err(|e| format!("序列化进行中轮失败: {e}"))?;
-        write_if_changed(&dir, cache, &turns_json, &runs_json, now_ms)?;
+        let pet_enabled = store::load_params(TARGET_APP_ID).pet_enabled;
+        // pu（待处理用户消息）：与 turns 同轮询周期读出；完成轮匹配复用
+        // 已聚合的 turns umid 集合（内存比对，不回查库）。查询失败按无
+        // 信号降级（unwrap_or(None)）——pu 是附加信号，失败不阻塞
+        // turns/runs 导出，宠物端按 pu 缺失退化为既有行为
+        let done_umids: BTreeSet<String> = turns
+            .iter()
+            .filter_map(|t| t.user_message_id.clone())
+            .collect();
+        let pending_user = collect_pending_user_ms(&conn, &done_umids).unwrap_or(None);
+        // ta/fe（V6 附加信号）：与 pu 同款降级（查询失败按无信号，不阻塞
+        // turns/runs 导出）；ta 窗口为 10 分钟残留兜底、fe 窗口与 turns
+        // 相同（失败轮落库瞬间必在窗口内）
+        let active_tool = collect_active_tool_ms(&conn, now_ms - TOOL_WINDOW_MS).unwrap_or(None);
+        let failure_event = collect_failure_event_ms(&conn, now_ms - WINDOW_MS).unwrap_or(None);
+        flush_export(
+            &dir,
+            cache,
+            pet_enabled,
+            &turns,
+            &runs,
+            pending_user,
+            active_tool,
+            failure_event,
+            now_ms,
+        )?;
         Ok(())
     })();
     if result.is_err() {
         // 静默跳过本轮（库被锁超时、目录暂不可写等瞬态），下个周期重试；
         // 刻意不记日志避免刷屏
     }
+}
+
+/// 导出结果落盘（不碰数据库，供单元测试复用）：
+/// - 大文件 usage-data.js 按变化写（内容不变跳写，ts 保持最后数据
+///   变化语义；la/pu/ta/fe 随内容透出——pu/ta/fe 参与内容对比，用户
+///   发消息、工具开始/结束、失败轮落库本身就是数据变化）；
+/// - 心跳小文件 usage-data-hb.js 仅注入版宠物开启时每周期无条件重写
+///   （大文件跳写周期里心跳仍独立推进）；宠物关闭时停写并清理残留
+///   （remove 不存在的文件是常态失败，忽略）。
+pub(crate) fn flush_export(
+    dir: &Path,
+    cache: &mut Option<String>,
+    pet_enabled: bool,
+    turns: &[UsageTurn],
+    runs: &[UsageRun],
+    pending_user: Option<i64>,
+    active_tool: Option<i64>,
+    failure_event: Option<i64>,
+    now_ms: i64,
+) -> Result<(), String> {
+    let la = last_activity_ms(turns, runs, pending_user, active_tool);
+    let turns_json = serde_json::to_string(turns)
+        .map_err(|e| format!("序列化用量数据失败: {e}"))?;
+    let runs_json =
+        serde_json::to_string(runs).map_err(|e| format!("序列化进行中轮失败: {e}"))?;
+    write_if_changed(
+        dir, cache, la, pending_user, active_tool, failure_event, &turns_json, &runs_json, now_ms,
+    )?;
+    if pet_enabled {
+        write_heartbeat_file(dir, now_ms)?;
+    } else {
+        let _ = fs::remove_file(dir.join(store::USAGE_HB_FILE));
+    }
+    Ok(())
 }
 
 // ============================================================
@@ -520,7 +684,7 @@ fn opt_col(conn: &Connection, table: &str, col: &str) -> String {
 /// 见 merge_subagent_turns），交由 runs 侧聚合进主轮行 sub。
 /// Ok(None) = 功能关闭（turn_usage 表或核心列缺失）；
 /// Err = 瞬态查询失败（调用方静默跳过本轮）。
-fn collect_turns(
+pub(crate) fn collect_turns(
     conn: &Connection,
     window_start_ms: i64,
 ) -> Result<Option<(Vec<UsageTurn>, Vec<SubTurnRow>)>, String> {
@@ -742,7 +906,7 @@ fn collect_turns(
 /// runs 据此过滤完成轮；窗口取完整 7 天而非 10 分钟——长轮（>10 分钟）的
 /// turn_usage.started_at 早于 runs 新鲜度窗口，漏查会导致完成后最长 10 分钟
 /// 内残留 runs 行（渲染端虽以 turn_usage 优先，但会话累计会双重计数）。
-fn collect_done_turn_ids(
+pub(crate) fn collect_done_turn_ids(
     conn: &Connection,
     sweep_start_ms: i64,
 ) -> Result<BTreeSet<String>, String> {
@@ -755,6 +919,126 @@ fn collect_done_turn_ids(
         .collect::<Result<BTreeSet<_>, _>>()
         .map_err(|e| format!("读取完成轮失败: {e}"))?;
     Ok(rows)
+}
+
+/// 读出 pu（待处理用户消息）时刻：最近一条「尚无对应完成轮」的 user 消息
+/// 的 time_created（毫秒）。方案与实测依据见模块头 pu 信号说明——rowid
+/// 尾部 PENDING_SCAN_ROWS 行索引序扫 + json_extract 解析角色（实测
+/// 0.023ms@10258 行主库，成本与表大小无关，绝不全表扫）；完成轮匹配与
+/// 调用方已聚合的 turns umid 集合（turn_usage.user_message_id，含子代理
+/// 自身视图行）内存比对，不回查库（该列无索引，回查即 turn_usage 全表
+/// 扫）。返回按 time_created 降序的第一条未匹配 user 消息（即最近的待
+/// 处理消息；更早的未匹配消息不透出——陈旧异常消息由消费端 90 秒窗口
+/// 兜底，不放大信号）。
+/// - Ok(None) = 无待处理消息，或 message 表/核心列缺失（老版本库，
+///   pu 信号整体缺失，宠物端退化为既有行为）；
+/// - Err = 瞬态查询失败（调用方静默降级为无信号，不阻塞导出）。
+pub(crate) fn collect_pending_user_ms(
+    conn: &Connection,
+    done_user_msg_ids: &BTreeSet<String>,
+) -> Result<Option<i64>, String> {
+    // 核心列探测降级与 collect_turns 同款：表/核心列缺失 → 无 pu 信号
+    if !has_table(conn, "message")
+        || !crate::db::has_column(conn, "message", "id")
+        || !crate::db::has_column(conn, "message", "time_created")
+        || !crate::db::has_column(conn, "message", "data")
+    {
+        return Ok(None);
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, time_created FROM \
+             (SELECT id, time_created, json_extract(data, '$.role') AS role \
+              FROM message ORDER BY rowid DESC LIMIT ?1) \
+             WHERE role = 'user' ORDER BY time_created DESC",
+        )
+        .map_err(|e| format!("准备待处理用户消息查询失败: {e}"))?;
+    let rows = stmt
+        .query_map([PENDING_SCAN_ROWS], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+        })
+        .map_err(|e| format!("读取待处理用户消息失败: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("读取待处理用户消息失败: {e}"))?;
+    for (id, tc) in rows {
+        if done_user_msg_ids.contains(&id) {
+            continue;
+        }
+        // 脏行防御：无效时刻不透出（与 turns 的 start > 0 口径一致）
+        if let Some(t) = tc {
+            if t > 0 {
+                return Ok(Some(t));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// 读出 ta（活跃工具）时刻：最新一条 running 状态工具行的 started_at
+/// （毫秒）。工具调用开始瞬间即落库（status='running'、completed_at 为
+/// NULL），完成时更新为 completed——是"正在执行工具"的实时信号（比
+/// model_usage 的请求完成落库强）。查询走 tool_usage_started_tool_idx
+/// 索引（started_at 前缀）+ MAX 聚合，实测 10805 行主库平均 0.003ms；
+/// 窗口兜底崩溃残留的 running 行（见 TOOL_WINDOW_MS）。
+/// - Ok(None) = 窗口内无 running 行，或 tool_usage 表/核心列缺失
+///   （老版本库，ta 信号整体缺失，宠物端退化为既有行为）；
+/// - Err = 瞬态查询失败（调用方静默降级为无信号，不阻塞导出）。
+pub(crate) fn collect_active_tool_ms(
+    conn: &Connection,
+    window_start_ms: i64,
+) -> Result<Option<i64>, String> {
+    if !has_table(conn, "tool_usage")
+        || !crate::db::has_column(conn, "tool_usage", "status")
+        || !crate::db::has_column(conn, "tool_usage", "started_at")
+    {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT MAX(started_at) FROM tool_usage \
+         WHERE status = 'running' AND started_at >= ?1",
+        [window_start_ms],
+        |row| row.get::<_, Option<i64>>(0),
+    )
+    .map(|v| v.filter(|t| *t > 0))
+    .map_err(|e| format!("读取活跃工具失败: {e}"))
+}
+
+/// 读出 fe（失败轮事件）时刻：窗口内最近一次「失败或取消」完成轮的
+/// completed_at（毫秒）。判定 = `status != 'completed' || cancelled_by_user
+/// = 1 || tool_error_count > 0`（status 为 cancelled/error，或轮内含用户
+/// 取消/工具报错——成功轮不命中条件，MAX 聚合天然满足"fe 只在失败轮
+/// 新增时才变化"，成功轮完成不刷新 fe）。实测 334 行主库平均 0.018ms
+/// （turn_usage 行数量级为每天几十行，窗口过滤 + MAX 无压力）。
+/// - Ok(None) = 窗口内无失败轮（或最近失败轮的 completed_at 为 NULL
+///   的异常中断行，无法定位失败时刻，不透出），或 turn_usage 表/
+///   completed_at 列缺失（fe 信号整体缺失）；
+/// - 判定列降级：cancelled_by_user / tool_error_count 缺列（老版本库）
+///   时省略对应 OR 子句，仅按 status 判定（列存在时三者任一命中即失败）；
+/// - Err = 瞬态查询失败（调用方静默降级为无信号，不阻塞导出）。
+pub(crate) fn collect_failure_event_ms(
+    conn: &Connection,
+    window_start_ms: i64,
+) -> Result<Option<i64>, String> {
+    if !has_table(conn, "turn_usage")
+        || !crate::db::has_column(conn, "turn_usage", "status")
+        || !crate::db::has_column(conn, "turn_usage", "started_at")
+        || !crate::db::has_column(conn, "turn_usage", "completed_at")
+    {
+        return Ok(None);
+    }
+    let mut cond = String::from("COALESCE(status, '') != 'completed'");
+    if crate::db::has_column(conn, "turn_usage", "cancelled_by_user") {
+        cond.push_str(" OR COALESCE(cancelled_by_user, 0) = 1");
+    }
+    if crate::db::has_column(conn, "turn_usage", "tool_error_count") {
+        cond.push_str(" OR COALESCE(tool_error_count, 0) > 0");
+    }
+    let sql = format!(
+        "SELECT MAX(completed_at) FROM turn_usage WHERE started_at >= ?1 AND ({cond})"
+    );
+    conn.query_row(&sql, [window_start_ms], |row| row.get::<_, Option<i64>>(0))
+        .map(|v| v.filter(|t| *t > 0))
+        .map_err(|e| format!("读取失败轮事件失败: {e}"))
 }
 
 /// 聚合进行中轮（runs）：近 10 分钟有模型请求、且 turn_usage 尚无该
@@ -774,7 +1058,7 @@ fn collect_done_turn_ids(
 /// - model_usage 表/核心列缺失（老版本库）→ Ok(空)，不影响 turns 导出；
 /// - 行数量级：窗口内行数 = 10 分钟内完成的模型请求数（重度使用数百行），
 ///   分组后 runs 行数 = 活跃轮数（通常个位数），每 2 秒一次开销可忽略。
-fn collect_runs(
+pub(crate) fn collect_runs(
     conn: &Connection,
     recent_start_ms: i64,
     sweep_start_ms: i64,
@@ -1061,41 +1345,138 @@ fn attach_models(
 // 序列化与原子写出
 // ============================================================
 
+/// 数据快照内可见的最后活动时刻（毫秒，纯函数）：全部完成轮的 end、
+/// 全部进行中轮的 start、待处理用户消息时刻 pu 与活跃工具时刻 ta 的
+/// 最大值。口径与用途见模块头 la 字段说明（进行中轮以首请求时刻近似
+/// "最新请求时刻"，runs 非空时状态机短路不消费 la，近似无影响；闲置
+/// 判定实际只消费完成轮的精确 end）。pu 参与取大（V5）：用户发消息
+/// 本身就是活动，pu 出现时宠物预判进 working，90 秒预判窗口结束后 la
+/// 继续支撑闲置档（IDLE_SLEEP_MS 内 idle 而非直接入睡），与完成轮
+/// end 的口径一致。ta 参与取大（V6）：工具开始也是活动，工具结束后
+/// 30 秒 ta 仍托底闲置档（同 pu 语义；工具执行期间状态机短路进
+/// tool_running 不消费 la，无影响）。
+pub(crate) fn last_activity_ms(
+    turns: &[UsageTurn],
+    runs: &[UsageRun],
+    pending_user: Option<i64>,
+    active_tool: Option<i64>,
+) -> i64 {
+    let mut la = 0i64;
+    for t in turns {
+        if let Some(end) = t.end {
+            la = la.max(end);
+        }
+    }
+    for r in runs {
+        la = la.max(r.start);
+    }
+    if let Some(pu) = pending_user {
+        la = la.max(pu);
+    }
+    if let Some(ta) = active_tool {
+        la = la.max(ta);
+    }
+    la
+}
+
 /// 渲染 usage-data.js 完整内容。v 为数据契约版本（v2 起含 umid 字段，
 /// 渲染端对 v !== 2 视为无效数据走静默路径）；runs 为进行中轮附加字段
 /// （v2 格式不变，旧渲染脚本忽略未知字段平滑兼容，空数组也输出）；
-/// ts 为"本次实际写出的时刻"（内容无变化跳写时文件保持上次的 ts，语义
-/// 即最后一次数据变化的时刻，渲染端据此跳过无变化的重建与重渲染）。
-fn render_usage_js(ts_ms: i64, turns_json: &str, runs_json: &str) -> String {
+/// ts 为"最后数据变化时刻"（内容无变化跳写时文件保持上次的 ts，语义
+/// 即最后一次数据变化的时刻，渲染端据此跳过无变化的重建与重渲染）；
+/// la 为最后活动时刻（V2 附加字段，宠物闲置判定消费，见模块头）；
+/// pu 为待处理用户消息时刻（V5 附加字段，null = 无待处理消息，宠物
+/// 预判通道的消费键，见模块头 pu 信号说明）；ta/fe 为活跃工具与失败
+/// 轮事件时刻（V6 附加字段，null = 无信号，宠物新状态通道的消费键，
+/// 见模块头 ta/fe 信号说明；旧渲染脚本按未知字段忽略）。
+fn render_usage_js(
+    ts_ms: i64,
+    la_ms: i64,
+    pending_user: Option<i64>,
+    active_tool: Option<i64>,
+    failure_event: Option<i64>,
+    turns_json: &str,
+    runs_json: &str,
+) -> String {
+    let opt = |v: Option<i64>| match v {
+        Some(t) => t.to_string(),
+        None => "null".to_string(),
+    };
     format!(
-        "window.__ZBAR_USAGE__ = {{\"v\":2,\"ts\":{ts_ms},\"turns\":{turns_json},\"runs\":{runs_json}}};\n"
+        "window.__ZBAR_USAGE__ = {{\"v\":2,\"ts\":{ts_ms},\"la\":{la_ms},\"pu\":{},\"ta\":{},\"fe\":{},\"turns\":{turns_json},\"runs\":{runs_json}}};\n",
+        opt(pending_user),
+        opt(active_tool),
+        opt(failure_event)
     )
 }
 
-/// 变化检测 + 原子写：turns 与 runs 的序列化字节拼接后与上轮相同则跳过
-/// 写盘（runs 聚合值参与序列化，实时跳动数据天然触发重写；ts 字段不参与
+/// 渲染心跳小文件内容（几十字节）：注入版宠物壳每 2 秒经 script 时间戳
+/// 重载读取 window.__ZBAR_USAGE_HB__ 喂给宠物核心（heartbeat 接口）。
+fn render_heartbeat_js(ms: i64) -> String {
+    format!("window.__ZBAR_USAGE_HB__ = {ms};\n")
+}
+
+/// 心跳小文件写出：无条件重写（仅注入版宠物开启时被 export_once 调用，
+/// 调用方保证宠物关闭时不写并清理残留），先写 .tmp 再 rename 原子替换。
+fn write_heartbeat_file(dir: &Path, now_ms: i64) -> Result<(), String> {
+    let target = dir.join(store::USAGE_HB_FILE);
+    let tmp = dir.join(format!("{}.tmp", store::USAGE_HB_FILE));
+    fs::write(&tmp, render_heartbeat_js(now_ms))
+        .map_err(|e| format!("写入 {} 失败: {e}", tmp.display()))?;
+    fs::rename(&tmp, &target).map_err(|e| format!("替换 {} 失败: {e}", target.display()))
+}
+
+/// 变化检测 + 原子写（大文件，恢复"内容不变跳写"策略）：turns 与 runs
+/// 的序列化字节（含 pu/ta/fe 的字符串形态——用户发消息、工具开始/结束、
+/// 失败轮落库本身就是数据变化，三者出现/消失/变化都触发写盘刷新 ts）
+/// 拼接后与上轮相同则跳过写盘（la 是 turns/runs/pu/ta 的纯推导值，天然
+/// 随内容参与变化语义——活动时刻变化本身就是数据变化；ts 字段不参与
 /// 比较——若参与则每轮 ts 都不同，跳写失效，ZCode 渲染层每 2 秒白重载
 /// 一次文件）；需要写出时先写 .tmp 再 rename，Electron 侧不会读到半截
 /// 文件。返回是否实际写盘。
 fn write_if_changed(
     dir: &Path,
     cache: &mut Option<String>,
+    la_ms: i64,
+    pending_user: Option<i64>,
+    active_tool: Option<i64>,
+    failure_event: Option<i64>,
     turns_json: &str,
     runs_json: &str,
     ts_ms: i64,
 ) -> Result<bool, String> {
     let mut payload =
-        String::with_capacity(turns_json.len() + runs_json.len() + 1);
+        String::with_capacity(turns_json.len() + runs_json.len() + 16);
     payload.push_str(turns_json);
-    payload.push('\u{1}'); /* 不可见分隔符：防两段拼接的边界歧义 */
+    payload.push('\u{1}'); /* 不可见分隔符：防多段拼接的边界歧义 */
     payload.push_str(runs_json);
+    payload.push('\u{1}');
+    /* 附加信号形态并入对比键：None（'-'）与任一时刻值互不相同 */
+    for sig in [pending_user, active_tool, failure_event] {
+        match sig {
+            Some(t) => payload.push_str(&t.to_string()),
+            None => payload.push('-'),
+        }
+        payload.push('\u{1}');
+    }
     if cache.as_deref() == Some(payload.as_str()) {
         return Ok(false);
     }
     let target = dir.join(store::USAGE_DATA_FILE);
     let tmp = dir.join(format!("{}.tmp", store::USAGE_DATA_FILE));
-    fs::write(&tmp, render_usage_js(ts_ms, turns_json, runs_json))
-        .map_err(|e| format!("写入 {} 失败: {e}", tmp.display()))?;
+    fs::write(
+        &tmp,
+        render_usage_js(
+            ts_ms,
+            la_ms,
+            pending_user,
+            active_tool,
+            failure_event,
+            turns_json,
+            runs_json,
+        ),
+    )
+    .map_err(|e| format!("写入 {} 失败: {e}", tmp.display()))?;
     fs::rename(&tmp, &target).map_err(|e| format!("替换 {} 失败: {e}", target.display()))?;
     *cache = Some(payload);
     Ok(true)
@@ -1219,15 +1600,33 @@ mod tests {
             !sv_json.contains("\"sub\":{"),
             "自身视图行不携带 sub 并入聚合：{sv_json}"
         );
-        // 完整文件形态：v/ts/turns/runs 四字段 + 分号结尾（v2 格式不变，
-        // runs 为 V6 起追加的进行中轮字段；runs 为空时也输出）
-        let file = render_usage_js(12345, &json, "[]");
+        // 完整文件形态：v/ts/la/pu/ta/fe/turns/runs 字段 + 分号结尾（v2
+        // 格式不变，runs 为 V6 起追加的进行中轮字段、la 为 V2 起追加的
+        // 最后活动时刻字段、pu 为 V5 起追加的待处理用户消息字段、ta/fe
+        // 为 V6 起追加的活跃工具/失败轮事件字段；旧消费端按未知字段忽略；
+        // runs 为空时也输出；心跳已拆独立小文件 usage-data-hb.js，
+        // 大文件不再含 hb 字段）
+        let file = render_usage_js(
+            12345,
+            12000,
+            Some(11000),
+            Some(10500),
+            None,
+            &json,
+            "[]",
+        );
         assert!(
             file.starts_with(
-                "window.__ZBAR_USAGE__ = {\"v\":2,\"ts\":12345,\"turns\":"
+                "window.__ZBAR_USAGE__ = {\"v\":2,\"ts\":12345,\"la\":12000,\"pu\":11000,\"ta\":10500,\"fe\":null,\"turns\":"
             ),
             "{file}"
         );
+        // pu/ta/fe 缺失两态之一：None → null（旧消费端与宠物核心按缺失兼容）
+        let file_null = render_usage_js(12345, 12000, None, None, Some(9000), &json, "[]");
+        assert!(file_null.contains(",\"pu\":null,"), "{file_null}");
+        assert!(file_null.contains(",\"ta\":null,"), "{file_null}");
+        assert!(file_null.contains(",\"fe\":9000,"), "{file_null}");
+        assert!(!file.contains("\"hb\":"), "心跳不应在大文件里：{file}");
         assert!(file.contains(",\"runs\":[]};\n"), "{file}");
         assert!(file.ends_with("};\n"));
     }
@@ -1338,7 +1737,7 @@ mod tests {
     }
 
     #[test]
-    fn 写盘_内容不变跳写_变化才重写且无临时残留() {
+    fn 大文件写盘_内容不变跳写_变化才重写且无临时残留() {
         let dir = std::env::temp_dir().join(format!(
             "zbar-usage-feed-write-{}",
             std::process::id()
@@ -1348,25 +1747,33 @@ mod tests {
         let target = dir.join(store::USAGE_DATA_FILE);
 
         let mut cache: Option<String> = None;
-        // 首次：写盘
+        // 首次：写盘（la 为最后活动时刻，随内容透出）
         assert!(
-            write_if_changed(&dir, &mut cache, "[{\"turn\":\"a\"}]", "[]", 1000).unwrap()
+            write_if_changed(&dir, &mut cache, 900, None, None, None, "[{\"turn\":\"a\"}]", "[]", 1000)
+                .unwrap()
         );
         let first = fs::read_to_string(&target).unwrap();
         assert!(first.contains("\"ts\":1000"), "{first}");
+        assert!(first.contains("\"la\":900"), "{first}");
+        assert!(first.contains("\"pu\":null"), "{first}");
+        assert!(first.contains("\"ta\":null"), "{first}");
+        assert!(first.contains("\"fe\":null"), "{first}");
         assert!(first.contains("\"runs\":[]"), "{first}");
-        // 内容无变化（仅 ts 不同）→ 跳写，文件保持旧 ts
+        // 内容无变化（仅 ts/la 参数不同）→ 跳写，文件保持旧值（写放大
+        // 修复：大文件恢复跳写策略，心跳由独立小文件承担）
         assert!(
-            !write_if_changed(&dir, &mut cache, "[{\"turn\":\"a\"}]", "[]", 2000).unwrap()
+            !write_if_changed(&dir, &mut cache, 900, None, None, None, "[{\"turn\":\"a\"}]", "[]", 2000)
+                .unwrap()
         );
         assert_eq!(
             fs::read_to_string(&target).unwrap(),
             first,
-            "内容未变时不应重写文件"
+            "内容未变时不应重写大文件"
         );
         // turns 内容变化 → 重写为新 ts
         assert!(
-            write_if_changed(&dir, &mut cache, "[{\"turn\":\"b\"}]", "[]", 3000).unwrap()
+            write_if_changed(&dir, &mut cache, 900, None, None, None, "[{\"turn\":\"b\"}]", "[]", 3000)
+                .unwrap()
         );
         let third = fs::read_to_string(&target).unwrap();
         assert!(third.contains("\"ts\":3000"), "{third}");
@@ -1377,6 +1784,10 @@ mod tests {
             write_if_changed(
                 &dir,
                 &mut cache,
+                900,
+                None,
+                None,
+                None,
                 "[{\"turn\":\"b\"}]",
                 "[{\"sess\":\"s1\"}]",
                 4000
@@ -1386,10 +1797,215 @@ mod tests {
         let fourth = fs::read_to_string(&target).unwrap();
         assert!(fourth.contains("\"ts\":4000"), "{fourth}");
         assert!(fourth.contains("\"runs\":[{\"sess\":\"s1\"}]"), "{fourth}");
+        // pu 变化（turns/runs 均不变）同样触发重写——用户发消息本身就是
+        // 数据变化（V5）：ts 刷新、pu 透出、la 取大（900 → 5000）
+        assert!(
+            write_if_changed(
+                &dir,
+                &mut cache,
+                5000,
+                Some(5000),
+                None,
+                None,
+                "[{\"turn\":\"b\"}]",
+                "[{\"sess\":\"s1\"}]",
+                5000
+            )
+            .unwrap()
+        );
+        let fifth = fs::read_to_string(&target).unwrap();
+        assert!(fifth.contains("\"ts\":5000"), "{fifth}");
+        assert!(fifth.contains("\"pu\":5000"), "{fifth}");
+        assert!(fifth.contains("\"la\":5000"), "pu 应参与 la 取大：{fifth}");
+        // ta/fe 变化（turns/runs/pu 均不变）同样触发重写——工具开始
+        // （V6）本身就是数据变化：ts 刷新、ta/fe 透出、ta 参与 la 取大
+        assert!(
+            write_if_changed(
+                &dir,
+                &mut cache,
+                6000,
+                Some(5000),
+                Some(6000),
+                None,
+                "[{\"turn\":\"b\"}]",
+                "[{\"sess\":\"s1\"}]",
+                6000
+            )
+            .unwrap()
+        );
+        let sixth = fs::read_to_string(&target).unwrap();
+        assert!(sixth.contains("\"ts\":6000"), "{sixth}");
+        assert!(sixth.contains("\"ta\":6000"), "{sixth}");
+        assert!(sixth.contains("\"la\":6000"), "ta 应参与 la 取大：{sixth}");
+        assert!(
+            write_if_changed(
+                &dir,
+                &mut cache,
+                6000,
+                Some(5000),
+                Some(6000),
+                Some(5500),
+                "[{\"turn\":\"b\"}]",
+                "[{\"sess\":\"s1\"}]",
+                7000
+            )
+            .unwrap()
+        );
+        let seventh = fs::read_to_string(&target).unwrap();
+        assert!(seventh.contains("\"fe\":5500"), "{seventh}");
         // 原子写不留 .tmp 残留
         assert!(!dir.join(format!("{}.tmp", store::USAGE_DATA_FILE)).exists());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 心跳小文件_内容形态与周期重写() {
+        let dir = std::env::temp_dir().join(format!(
+            "zbar-usage-feed-hb-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join(store::USAGE_HB_FILE);
+
+        // 内容形态：几十字节全局赋值（注入版宠物壳消费 window.__ZBAR_USAGE_HB__）
+        write_heartbeat_file(&dir, 1000).unwrap();
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "window.__ZBAR_USAGE_HB__ = 1000;\n"
+        );
+        // 每周期无条件重写（宠物开启时调用方每 2 秒调一次）
+        write_heartbeat_file(&dir, 3000).unwrap();
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "window.__ZBAR_USAGE_HB__ = 3000;\n"
+        );
+        // 不留 .tmp 残留
+        assert!(!dir.join(format!("{}.tmp", store::USAGE_HB_FILE)).exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 导出落盘_宠物关不写心跳且大文件跳写_宠物开心跳每周期刷新() {
+        let dir = std::env::temp_dir().join(format!(
+            "zbar-usage-feed-flush-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let big = dir.join(store::USAGE_DATA_FILE);
+        let hb = dir.join(store::USAGE_HB_FILE);
+
+        let turns = vec![turn("turn_a", "sess_1", 1000, Some(5000))];
+        let mut cache: Option<String> = None;
+
+        // ---- 宠物关：大文件按变化写、心跳不写、残留被清理 ----
+        // 预置心跳残留（模拟此前宠物开启过）
+        fs::write(&hb, b"window.__ZBAR_USAGE_HB__ = 1;\n").unwrap();
+        flush_export(&dir, &mut cache, false, &turns, &[], None, None, None, 1000).unwrap();
+        assert!(big.exists(), "首次导出应写大文件");
+        let first = fs::read_to_string(&big).unwrap();
+        assert!(first.contains("\"ts\":1000"), "{first}");
+        assert!(first.contains("\"pu\":null"), "{first}");
+        assert!(!hb.exists(), "宠物关闭应清理心跳残留");
+        // 内容不变 → 大文件跳写（mtime 不变以内容一致性表达），心跳仍不写
+        flush_export(&dir, &mut cache, false, &turns, &[], None, None, None, 2000).unwrap();
+        assert_eq!(fs::read_to_string(&big).unwrap(), first, "内容未变不应重写大文件");
+        assert!(!hb.exists(), "宠物关闭周期不应写心跳文件");
+
+        // ---- 宠物开：心跳每周期无条件刷新、大文件仍按变化写 ----
+        let mut cache_on: Option<String> = None;
+        flush_export(&dir, &mut cache_on, true, &turns, &[], Some(4500), None, None, 3000).unwrap();
+        let big_on = fs::read_to_string(&big).unwrap();
+        assert!(big_on.contains("\"ts\":3000"), "首次写盘 ts 应为当前周期");
+        assert!(big_on.contains("\"la\":5000"), "la 应随内容透出：{big_on}");
+        assert!(
+            big_on.contains("\"pu\":4500"),
+            "pu 应随内容透出：{big_on}"
+        );
+        assert_eq!(
+            fs::read_to_string(&hb).unwrap(),
+            "window.__ZBAR_USAGE_HB__ = 3000;\n"
+        );
+        // 下一周期内容不变：大文件跳写（保持旧 ts），心跳刷新为当前周期
+        flush_export(&dir, &mut cache_on, true, &turns, &[], Some(4500), None, None, 5000).unwrap();
+        assert_eq!(
+            fs::read_to_string(&big).unwrap(),
+            big_on,
+            "内容未变大文件不应重写（心跳已独立承担存活信号）"
+        );
+        assert_eq!(
+            fs::read_to_string(&hb).unwrap(),
+            "window.__ZBAR_USAGE_HB__ = 5000;\n",
+            "宠物开启时心跳应每周期刷新"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 最后活动时刻_turns_end与runs_start取大_滑出窗口不误醒() {
+        // 纯函数：完成轮取 end（精确值）、进行中轮取 start（首请求近似，
+        // 见模块头口径），全体取 max；无任何活动为 0
+        let t1 = turn("turn_1", "sess_1", 1000, Some(5000));
+        let t2 = turn("turn_2", "sess_1", 2000, Some(9000));
+        let t_noend = turn("turn_3", "sess_1", 3000, None);
+        let run = UsageRun {
+            user_message_id: None,
+            session_id: "sess_1".to_string(),
+            parent_session_id: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+            requests: 1,
+            start: 12000,
+            merged: None,
+            sub: None,
+        };
+        assert_eq!(last_activity_ms(&[], &[], None, None), 0, "无活动应为 0");
+        assert_eq!(
+            last_activity_ms(&[t1.clone(), t2.clone(), t_noend.clone()], &[], None, None),
+            9000,
+            "取完成轮 end 的最大值（缺 end 的行不参与）"
+        );
+        assert_eq!(
+            last_activity_ms(&[t1], &[run], None, None),
+            12000,
+            "进行中轮 start 参与取大"
+        );
+        // pu 参与取大（V5）：用户发消息本身就是活动，且能压过完成轮 end
+        assert_eq!(last_activity_ms(&[t2.clone()], &[], Some(9500), None), 9500);
+        assert_eq!(
+            last_activity_ms(&[t2.clone()], &[], Some(8000), None),
+            9000,
+            "更早的 pu 不拉低 la（取大语义）"
+        );
+        // ta 参与取大（V6）：工具开始也是活动，能压过 pu 与完成轮 end；
+        // 更早的 ta 不拉低 la
+        assert_eq!(
+            last_activity_ms(&[t2.clone()], &[], Some(9500), Some(9800)),
+            9800,
+            "ta 应参与 la 取大（V6）"
+        );
+        assert_eq!(
+            last_activity_ms(&[t2.clone()], &[], Some(9500), Some(8000)),
+            9500,
+            "更早的 ta 不拉低 la（取大语义）"
+        );
+
+        // 滑出窗口场景：旧轮退出 turns 序列（内容变化 → ts 刷新），la
+        // 只会变小（取 max 的旧值被压掉）而不会被"无活动"刷新为 now——
+        // 闲置判定按 la 计算，宠物不会因窗口滑动误弹回闲置
+        let before = last_activity_ms(&[t2.clone(), t_noend.clone()], &[], None, None);
+        let after = last_activity_ms(&[t_noend], &[], None, None); // t2 滑出 1 小时窗口
+        assert_eq!(before, 9000);
+        assert!(after < before, "轮滑出后 la 只会变小：{after}");
+        assert_eq!(after, 0, "剩余行无 end 时 la 归 0（更快入睡）");
+        let _ = t2;
     }
 
     #[test]
@@ -1616,6 +2232,341 @@ mod tests {
         assert_eq!(WINDOW_MS, 7 * 24 * 3600 * 1000, "导出窗口应为 7 天");
         assert_eq!(MAX_TURNS, 3000, "导出行数上限应为 3000 轮");
         assert_eq!(RUN_WINDOW_MS, 10 * 60 * 1000, "runs 新鲜度窗口应为 10 分钟");
+        assert_eq!(PENDING_SCAN_ROWS, 64, "pu 尾部扫查应为 64 行（实测见模块头）");
+        assert_eq!(TOOL_WINDOW_MS, 10 * 60 * 1000, "ta 窗口应为 10 分钟（崩溃残留兜底）");
+    }
+
+    /// pu 查询测试库（message 表按真实 schema 最小化）
+    fn pu_db(name: &str) -> (Connection, std::path::PathBuf) {
+        let (conn, path) = temp_db(name);
+        conn.execute_batch(
+            "CREATE TABLE message (
+                id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER,
+                time_updated INTEGER, data TEXT, sequence INTEGER);",
+        )
+        .unwrap();
+        (conn, path)
+    }
+
+    #[test]
+    fn pu查询_user消息识别与完成轮匹配() {
+        let (conn, path) = pu_db("pu-basic");
+        // 空表 → 无待处理消息
+        assert_eq!(
+            collect_pending_user_ms(&conn, &BTreeSet::new()).unwrap(),
+            None,
+            "空 message 表应返回 None"
+        );
+        // 混合消息：已完成 user（older）、assistant、待处理 user（newer）、
+        // 子代理会话 user（同样参与——子代理任务派发也是"工作将开始"）
+        conn.execute_batch(
+            "INSERT INTO message VALUES
+               ('msg_done', 'sess_1', 1000, 1000, '{\"role\":\"user\",\"agent\":\"zcode-agent\"}', 1),
+               ('msg_a1', 'sess_1', 1500, 1500, '{\"role\":\"assistant\"}', 2),
+               ('msg_new', 'sess_1', 3000, 3000, '{\"role\":\"user\",\"agent\":\"zcode-agent\"}', 3),
+               ('msg_sub', 'sess_subagent_x', 3500, 3500, '{\"role\":\"user\",\"agent\":\"zcode-agent\"}', 4),
+               ('msg_a2', 'sess_1', 4000, 4000, '{\"role\":\"assistant\"}', 5);",
+        )
+        .unwrap();
+        // 全空匹配集：最近 user（msg_sub 3500，跳过 assistant）待处理 → 3500
+        assert_eq!(
+            collect_pending_user_ms(&conn, &BTreeSet::new()).unwrap(),
+            Some(3500),
+            "最近的未匹配 user 消息应透出（子代理会话同样参与）"
+        );
+        // msg_sub 已完成（umid 集合含它）→ 次新未匹配 msg_new → 3000
+        let done: BTreeSet<String> = ["msg_sub".to_string()].into_iter().collect();
+        assert_eq!(
+            collect_pending_user_ms(&conn, &done).unwrap(),
+            Some(3000),
+            "已完成的 user 消息应被跳过，取次新的待处理消息"
+        );
+        // 全部 user 消息均已完成 → None
+        let done_all: BTreeSet<String> =
+            ["msg_sub".to_string(), "msg_new".to_string(), "msg_done".to_string()]
+                .into_iter()
+                .collect();
+        assert_eq!(
+            collect_pending_user_ms(&conn, &done_all).unwrap(),
+            None,
+            "全部 user 消息均有完成轮时应返回 None"
+        );
+        // 最新 user 已完成但更早的未匹配：按 time 降序取第一条未匹配
+        let done_new_only: BTreeSet<String> = ["msg_sub".to_string(), "msg_new".to_string()]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            collect_pending_user_ms(&conn, &done_new_only).unwrap(),
+            Some(1000),
+            "应返回 time 降序第一条未匹配的 user 消息"
+        );
+        drop(conn);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pu查询_坏数据与超窗降级() {
+        let (conn, path) = pu_db("pu-degrade");
+        // 坏数据防御：data 缺 role 键 / 非法 JSON 由 json_extract 返回
+        // NULL 过滤；time_created = 0 的脏行不透出
+        conn.execute_batch(
+            "INSERT INTO message VALUES
+               ('msg_bad0', 'sess_1', 0, 0, '{\"role\":\"user\"}', 1),
+               ('msg_norole', 'sess_1', 500, 500, '{\"time\":{\"created\":500}}', 2),
+               ('msg_ok', 'sess_1', 800, 800, '{\"role\":\"user\"}', 3);",
+        )
+        .unwrap();
+        assert_eq!(
+            collect_pending_user_ms(&conn, &BTreeSet::new()).unwrap(),
+            Some(800),
+            "缺 role 的消息与脏时刻行应被跳过"
+        );
+        drop(conn);
+        let _ = fs::remove_file(&path);
+
+        // 扫查窗口：待处理 user 消息被 64 行 assistant 消息挤出尾部 →
+        // 不透出（尾部扫查窗口语义；活跃期 user 消息密度远高于此）
+        let (conn, path) = pu_db("pu-window");
+        conn.execute_batch(
+            "INSERT INTO message VALUES
+               ('msg_old_user', 'sess_1', 100, 100, '{\"role\":\"user\"}', 1);",
+        )
+        .unwrap();
+        for i in 0..PENDING_SCAN_ROWS {
+            conn.execute(
+                "INSERT INTO message VALUES (?1, 'sess_1', ?2, ?2, '{\"role\":\"assistant\"}', ?3)",
+                rusqlite::params![format!("msg_a{i}"), 200 + i, i + 2],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            collect_pending_user_ms(&conn, &BTreeSet::new()).unwrap(),
+            None,
+            "被尾部 64 行挤出的待处理消息不透出（窗口兜底，陈旧信号不放大）"
+        );
+        drop(conn);
+        let _ = fs::remove_file(&path);
+
+        // 无 message 表（老版本库）→ None（pu 信号整体缺失，不报错）
+        let (conn, path) = temp_db("pu-no-table");
+        conn.execute_batch("CREATE TABLE turn_usage (session_id TEXT);")
+            .unwrap();
+        assert_eq!(
+            collect_pending_user_ms(&conn, &BTreeSet::new()).unwrap(),
+            None,
+            "无 message 表应返回 None"
+        );
+        drop(conn);
+        let _ = fs::remove_file(&path);
+
+        // message 表缺核心列（极端形态）→ None
+        let (conn, path) = temp_db("pu-missing-col");
+        conn.execute_batch("CREATE TABLE message (id TEXT PRIMARY KEY, data TEXT);")
+            .unwrap();
+        assert_eq!(
+            collect_pending_user_ms(&conn, &BTreeSet::new()).unwrap(),
+            None,
+            "缺 time_created 核心列应返回 None"
+        );
+        drop(conn);
+        let _ = fs::remove_file(&path);
+    }
+
+    /// ta/fe 查询测试库（tool_usage + turn_usage 按真实 schema 最小化）
+    fn ta_fe_db(name: &str) -> (Connection, std::path::PathBuf) {
+        let (conn, path) = temp_db(name);
+        conn.execute_batch(
+            "CREATE TABLE tool_usage (
+                id TEXT PRIMARY KEY, session_id TEXT NOT NULL, tool_name TEXT NOT NULL,
+                status TEXT NOT NULL, started_at INTEGER NOT NULL,
+                completed_at INTEGER, exit_code INTEGER,
+                cancelled_by_user INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE turn_usage (
+                session_id TEXT, turn_id TEXT, status TEXT, started_at INTEGER,
+                completed_at INTEGER, cancelled_by_user INTEGER,
+                tool_error_count INTEGER);",
+        )
+        .unwrap();
+        (conn, path)
+    }
+
+    #[test]
+    fn ta查询_running行透出与窗口残留剔除() {
+        let (conn, path) = ta_fe_db("ta");
+        let now = 4_000_000_000_i64;
+        // 空表 → 无活跃工具
+        assert_eq!(
+            collect_active_tool_ms(&conn, now - TOOL_WINDOW_MS).unwrap(),
+            None,
+            "空 tool_usage 表应返回 None"
+        );
+        // 混合行：完成行（新）、running 行（窗口内）、崩溃残留 running 行
+        //（20 分钟前，窗口外）、脏 started_at=0 的 running 行
+        conn.execute_batch(&format!(
+            "INSERT INTO tool_usage (id, session_id, tool_name, status, started_at, completed_at) VALUES
+               ('t_done', 's1', 'Bash', 'completed', {c1}, {c2}),
+               ('t_run', 's1', 'Read', 'running', {r1}, NULL),
+               ('t_run2', 's2', 'Write', 'running', {r2}, NULL),
+               ('t_stale', 's3', 'Bash', 'running', {st}, NULL),
+               ('t_zero', 's4', 'Bash', 'running', 0, NULL);",
+            c1 = now - 30_000,
+            c2 = now - 20_000,
+            r1 = now - 10_000,
+            r2 = now - 5_000,
+            st = now - 20 * 60 * 1000,
+        ))
+        .unwrap();
+        // ta = 窗口内最新 running 行的 started_at（完成行不参与；残留与
+        // 脏行被窗口/值防御剔除）
+        assert_eq!(
+            collect_active_tool_ms(&conn, now - TOOL_WINDOW_MS).unwrap(),
+            Some(now - 5_000),
+            "ta 应取窗口内最新 running 行的 started_at"
+        );
+        // 工具全部完成 → running 行消失 → ta 归 null（正常结束自愈路径）
+        conn.execute_batch(&format!(
+            "UPDATE tool_usage SET status = 'completed', completed_at = {c} WHERE status = 'running';",
+            c = now - 1_000,
+        ))
+        .unwrap();
+        assert_eq!(
+            collect_active_tool_ms(&conn, now - TOOL_WINDOW_MS).unwrap(),
+            None,
+            "running 行全部完成后 ta 应归 null"
+        );
+        drop(conn);
+        let _ = fs::remove_file(&path);
+
+        // 降级：无 tool_usage 表（老版本库）→ None 不报错
+        let (conn, path) = temp_db("ta-no-table");
+        conn.execute_batch("CREATE TABLE turn_usage (session_id TEXT);")
+            .unwrap();
+        assert_eq!(
+            collect_active_tool_ms(&conn, 0).unwrap(),
+            None,
+            "无 tool_usage 表应返回 None"
+        );
+        drop(conn);
+        let _ = fs::remove_file(&path);
+
+        // 降级：缺核心列（极端形态）→ None
+        let (conn, path) = temp_db("ta-missing-col");
+        conn.execute_batch("CREATE TABLE tool_usage (id TEXT PRIMARY KEY, status TEXT);")
+            .unwrap();
+        assert_eq!(
+            collect_active_tool_ms(&conn, 0).unwrap(),
+            None,
+            "缺 started_at 核心列应返回 None"
+        );
+        drop(conn);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn fe查询_失败轮判定与成功轮不刷新() {
+        let (conn, path) = ta_fe_db("fe");
+        let now = 5_000_000_000_i64;
+        // 空表 → 无失败事件
+        assert_eq!(
+            collect_failure_event_ms(&conn, now - WINDOW_MS).unwrap(),
+            None,
+            "空 turn_usage 表应返回 None"
+        );
+        // 场景：历史失败轮（10 分钟前完成）+ 成功轮（1 分钟前完成）——
+        // fe 只在失败轮新增时变化：成功轮不刷新，fe 停在失败轮完成时刻
+        conn.execute_batch(&format!(
+            "INSERT INTO turn_usage VALUES
+               ('s1', 'turn_fail', 'error', {f0}, {f1}, 0, 0),
+               ('s1', 'turn_ok', 'completed', {o0}, {o1}, 0, 0);",
+            f0 = now - 700_000,
+            f1 = now - 600_000,
+            o0 = now - 100_000,
+            o1 = now - 60_000,
+        ))
+        .unwrap();
+        assert_eq!(
+            collect_failure_event_ms(&conn, now - WINDOW_MS).unwrap(),
+            Some(now - 600_000),
+            "成功轮完成不应刷新 fe（MAX 只取失败轮完成时刻）"
+        );
+        // 三种失败形态全命中：cancelled 状态 / 用户取消标记 / 工具报错
+        conn.execute_batch(&format!(
+            "INSERT INTO turn_usage VALUES
+               ('s1', 'turn_cancel', 'cancelled', {c0}, {c1}, 0, 0),
+               ('s1', 'turn_ubye', 'completed', {u0}, {u1}, 1, 0),
+               ('s1', 'turn_toolerr', 'completed', {t0}, {t1}, 0, 2);",
+            c0 = now - 50_000,
+            c1 = now - 40_000,
+            u0 = now - 30_000,
+            u1 = now - 25_000,
+            t0 = now - 20_000,
+            t1 = now - 10_000,
+        ))
+        .unwrap();
+        assert_eq!(
+            collect_failure_event_ms(&conn, now - WINDOW_MS).unwrap(),
+            Some(now - 10_000),
+            "cancelled/用户取消/工具报错均应命中，取最新完成时刻"
+        );
+        // 窗口过滤：失败轮滑出窗口 → 不再透出（消费端 3 秒窗口语义下
+        // 早已无关紧要，窗口只防陈旧行常驻 payload）
+        assert_eq!(
+            collect_failure_event_ms(&conn, now - 5_000).unwrap(),
+            None,
+            "窗口外/无失败轮时应返回 None"
+        );
+        // 异常中断行（completed_at 为 NULL）无法定位失败时刻 → 不透出
+        conn.execute_batch(
+            "INSERT INTO turn_usage VALUES
+               ('s1', 'turn_broken', 'error', 1, NULL, 0, 0);",
+        )
+        .unwrap();
+        assert_eq!(
+            collect_failure_event_ms(&conn, 0).unwrap(),
+            Some(now - 10_000),
+            "NULL 完成时刻的失败行应被 MAX 忽略（不干扰已有值）"
+        );
+        drop(conn);
+        let _ = fs::remove_file(&path);
+
+        // 判定列降级：缺 cancelled_by_user / tool_error_count 列 → 仅按
+        // status 判定（成功轮内的取消/工具报错漏判属可接受降级）
+        let (conn, path) = temp_db("fe-degrade");
+        conn.execute_batch(
+            "CREATE TABLE turn_usage (
+                session_id TEXT, turn_id TEXT, status TEXT, started_at INTEGER,
+                completed_at INTEGER);",
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO turn_usage VALUES
+               ('s1', 't_err', 'error', 1000, 2000),
+               ('s1', 't_ubye', 'completed', 3000, 4000);",
+        )
+        .unwrap();
+        assert_eq!(
+            collect_failure_event_ms(&conn, 0).unwrap(),
+            Some(2000),
+            "缺判定列时应仅按 status 判定（error 命中，completed 漏判）"
+        );
+        drop(conn);
+        let _ = fs::remove_file(&path);
+
+        // completed_at 列缺失 → fe 信号整体缺失（无失败时刻可取）
+        let (conn, path) = temp_db("fe-no-completed");
+        conn.execute_batch(
+            "CREATE TABLE turn_usage (
+                session_id TEXT, turn_id TEXT, status TEXT, started_at INTEGER,
+                cancelled_by_user INTEGER);",
+        )
+        .unwrap();
+        assert_eq!(
+            collect_failure_event_ms(&conn, 0).unwrap(),
+            None,
+            "缺 completed_at 列应返回 None"
+        );
+        drop(conn);
+        let _ = fs::remove_file(&path);
     }
 
     #[test]

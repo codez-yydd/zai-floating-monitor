@@ -143,4 +143,21 @@ export const settings = {
   "settings.accountsAutoLogOk": "{time} 已自动切换到「{name}」",
   "settings.accountsAutoLogFail": "{time} 尝试自动切换失败：无可用账号",
   "settings.accountsAutoLinuxUnsupported": "当前平台不支持切换账号",
+
+  // ===== 独立桌面宠物（第二阶段：不依赖皮肤的透明悬浮窗宠物）=====
+  "settings.petCard": "桌面宠物",
+  "settings.petHint":
+    "独立于动态壁纸皮肤的透明悬浮窗宠物：置顶显示在屏幕上，按 ZCode 工作状态实时切换动画，可拖动调整位置（自动记忆），与皮肤注入版宠物互不影响、可同时开启。",
+  "settings.petEnabled": "启用悬浮窗宠物",
+  "settings.petEnabledHint":
+    "开启后在屏幕右下角显示透明悬浮窗宠物（不依赖动态壁纸皮肤安装）",
+  "settings.petSize": "宠物大小",
+  "settings.petSizeHint":
+    "按屏幕高度比例定档（约 5.5%~15%），换屏幕或改分辨率后自动适配，高分屏低分屏观感一致",
+  "settings.petSizeLevel1": "小",
+  "settings.petSizeLevel2": "中",
+  "settings.petSizeLevel3": "默认",
+  "settings.petSizeLevel4": "大",
+  "settings.petSizeLevel5": "特大",
+  "settings.petApplyFail": "应用宠物设置失败：{msg}",
 };

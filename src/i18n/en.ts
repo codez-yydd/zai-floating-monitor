@@ -443,6 +443,23 @@ export const en: typeof zh = {
     "settings.resetDisplayHint":
       "How quota reset time is shown; both can be on at once. Exact times use MM-DD HH:mm.",
 
+    // Standalone desktop pet (phase 2: transparent floating pet, independent of the skin)
+    "settings.petCard": "Desktop pet",
+    "settings.petHint":
+      "A transparent always-on-top floating pet independent of the live-wallpaper skin: it animates with ZCode's live work state, can be dragged anywhere (position is remembered), and does not interfere with the injected pet — both can be enabled at once.",
+    "settings.petEnabled": "Enable floating pet",
+    "settings.petEnabledHint":
+      "Shows a transparent floating pet in the bottom-right of the screen (no wallpaper skin install required)",
+    "settings.petSize": "Pet size",
+    "settings.petSizeHint":
+      "Sized by screen-height ratio (about 5.5%–15%); adapts when you switch screens or change resolution",
+    "settings.petSizeLevel1": "Small",
+    "settings.petSizeLevel2": "Medium",
+    "settings.petSizeLevel3": "Default",
+    "settings.petSizeLevel4": "Large",
+    "settings.petSizeLevel5": "XL",
+    "settings.petApplyFail": "Failed to apply pet settings: {msg}",
+
     "settings.fontSize": "Font size",
     "settings.fontSmall": "Small",
     "settings.fontStandard": "Default",
@@ -577,7 +594,7 @@ export const en: typeof zh = {
     "theme.zcodeOfficialSite": "ZCode official site (zcode.z.ai)",
 
     "theme.needsReinstallBanner":
-      "ZCode was updated and the live wallpaper no longer matches; reinstalling is recommended.",
+      "The skin needs to be reinstalled to keep working (ZCode was upgraded, or the install predates the pet feature — see the note below); reinstalling restores everything.",
     "theme.nodeMissingBanner":
       "Node.js was not found — injection depends on it. Install Node.js first (run `brew install node`, or download from nodejs.org), then retry.",
     "theme.backupMissingBanner":
@@ -637,6 +654,41 @@ export const en: typeof zh = {
     // Symbol legend (mirrors the usage.js line format)
     "theme.usageLegend":
       "↑ input (non-cached) · ↓ output · ⟲ cache read · × model requests · t/s output speed · TTFT time to first token · Σ session total tokens (input+output+cache read) · ≈ in-flight output estimate (excluded from totals)",
+
+    // Desktop pet section (pet.js V1: pixel pet pinned at the bottom-right of
+    // the ZCode chat page, animating with the live work state; toggle/style/
+    // size apply live within ~1s via variables.css hot reload)
+    "theme.petTitle": "Desktop Pet",
+    "theme.petHint":
+      "Keeps a pixel pet in the bottom-right corner of the ZCode chat page that animates with ZCode's live work state; it never captures the mouse or blocks the composer, and changes apply live within ~1s. After upgrading ZBar, reinstall the skin once before first use. If the style does not change after switching, restart ZCode once to apply.",
+    "theme.petEnabled": "Enable desktop pet",
+    "theme.petEnabledHint":
+      "Shows the pixel pet in the bottom-right of the ZCode chat page (requires the live wallpaper to be installed)",
+    // Pet styles (mirrors the PET_STYLES keys embedded in pet.js)
+    "theme.petStyleCat": "Pixel Cat",
+    "theme.petStyleBot": "Pixel Bot",
+    // Custom pets (phase 3: Petdex-format import, PetStyleSection in petStyles)
+    "theme.petGroupBuiltin": "Built-in styles",
+    "theme.petGroupCustom": "Custom pets (Petdex)",
+    "theme.petCustomEmpty":
+      "No custom pets yet. Drop a Petdex pet package onto the window to import one.",
+    "theme.petImportHint":
+      "Import a custom pet: drop a Petdex package onto the window (zip / pet.json / spritesheet png·webp)",
+    // Skin page variant: png/webp drops route to wallpaper import there
+    "theme.petImportHintSkin":
+      "Import a custom pet: drop a Petdex package onto the window (zip / pet.json; for bare png/webp sheets use the pet card in Settings)",
+    "theme.petImporting": "Importing pet…",
+    "theme.petImportDone": "Pet imported ✓ Restart ZCode to pick it on the chat page",
+    "theme.petImportFail": "Failed to import pet: {msg}",
+    "theme.petDelete": "Delete",
+    "theme.petDeleteConfirm":
+      "Delete custom pet \"{name}\"? If it is currently in use, the built-in style will be restored.",
+    "theme.petDeleteFail": "Failed to delete pet: {msg}",
+    "theme.paramPetSize": "Pet size",
+    "theme.paramPetSizeHint": "Sized by screen-height ratio (about 5.5%–15%); adapts when you switch screens or change resolution",
+    // Pet state legend (mirrors the seven states of the pet.js state machine)
+    "theme.petLegend":
+      "States: sleeping (ZCode idle for over 1 minute or ZBar not running) · idle (recent turn activity) · thinking (new turn started, no output yet) · typing (output growing; animation speed tiers by token rate) · tool running (a tool is running, e.g. command/build) · celebrating (turn finished, about 3s) · failed (turn failed or cancelled, about 3s)",
     "theme.currentWallpaper": "Current wallpaper",
     "theme.noWallpaper": "No wallpaper selected",
     "theme.lightWallpaperPreset": "Light wallpaper fit",

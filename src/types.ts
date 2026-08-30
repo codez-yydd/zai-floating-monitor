@@ -706,8 +706,22 @@ export interface ThemeParams {
    *  （↑输入 ↓输出 · ⟲缓存读 · ×请求数 · 速度 · TTFT）；经 variables.css
    *  --zbar-usage-turn-bar（1/0）热重载生效 */
   usageTurnBar: boolean;
+  /** 桌面像素宠物开关（默认 false，新功能默认关闭）：在 ZCode 对话页
+   *  右下角显示按工作状态实时切换动画的像素宠物（沉睡/闲坐/思考/
+   *  奋笔疾书/庆祝）；经 variables.css --zbar-pet-enabled（1/0）热重载
+   *  即时生效 */
+  petEnabled: boolean;
+  /** 桌面像素宠物形象 id（默认 "cat"）：可选值与注入脚本内嵌形象库
+   *  一致（cat 像素小猫 / bot 像素小机器人）；经 --zbar-pet-style
+   *  热重载切换 */
+  petStyle: string;
+  /** 桌面像素宠物尺寸档位（1~5，默认 3 = 10% 屏高，见 PET_SIZE_LEVEL_PCT）：
+   *  Rust 侧渲染 variables.css 时按主显示器逻辑高换算成整数 px 写入
+   *  --zbar-pet-size 热重载即时生效（像素风最近邻放大），高分屏低分屏
+   *  观感一致 */
+  petSize: number;
   /** 当前壁纸指向（未设置为 null）。相对文件名 = wallpapers/ 目录内
-   *  文件（如 "default.mp4"）；绝对路径 = 直接引用该文件 */
+   *  文件（如 "default.mp4"）；绝对路径 = 直接引用 */
   wallpaperFile: string | null;
   /** 用户壁纸目录（壁纸库扫描来源之一，绝对路径；未设置为 null） */
   wallpaperDir: string | null;
@@ -734,6 +748,103 @@ export interface AgentThemeProgress {
   stage: string;
   percent: number;
   detail: string | null;
+}
+
+// ===== 独立桌面宠物（宠物功能第二阶段，与皮肤注入版互不影响）=====
+
+/**
+ * 宠物尺寸档位表（屏高百分比，%）：与 Rust 侧 pet.rs 的 PET_SIZE_LEVEL_PCT
+ * 保持一致（档位 1~5，换算结果四舍五入取整）。逻辑 px 只随 DPI 缩放、
+ * 不随物理分辨率，改为屏高比例档位后换机器观感一致。各档在典型屏高下
+ * 的约略 px：1080p（逻辑高 1080）→ 59/81/108/135/162；1440 逻辑高屏
+ * → 79/108/144/180/216。默认档 10% 与 Petdex 官方桌宠默认 110px 观感
+ * 接近；上限 15% 为桌宠级视觉分量。运行时常量与换算函数放本模块
+ * （纯常量无依赖），供独立宠物窗口壳（pet-main 初始渲染换算 px）与
+ * 两处设置卡的档位选择器共用。
+ */
+export const PET_SIZE_LEVEL_PCT: ReadonlyArray<number> = [5.5, 7.5, 10.0, 12.5, 15.0];
+
+/** 默认档位（10% 屏高；与 Rust 侧 DEFAULT_PET_SIZE_LEVEL 一致） */
+export const DEFAULT_PET_SIZE_LEVEL = 3;
+
+/** 取不到屏幕信息时的兜底逻辑屏高（1080p@100%，与 Rust 侧一致） */
+export const PET_SIZE_FALLBACK_SCREEN_H = 1080;
+
+/**
+ * 档位 → 显示边长 px（屏高 × 档位百分比，四舍五入取整）：
+ * level 越界夹到 1..5；屏高非法（非正/NaN）兜底 1080，换算永不失败。
+ * pet-core.js 的 applySize 只消费 px 整数。
+ */
+export function petSizePx(level: number, screenH: number): number {
+  const lv = Math.min(
+    Math.max(Math.round(level) || DEFAULT_PET_SIZE_LEVEL, 1),
+    PET_SIZE_LEVEL_PCT.length
+  );
+  const h =
+    Number.isFinite(screenH) && screenH > 0 ? screenH : PET_SIZE_FALLBACK_SCREEN_H;
+  return Math.round((h * PET_SIZE_LEVEL_PCT[lv - 1]) / 100);
+}
+
+/** 独立悬浮窗宠物配置（get/set_pet_config 的契约，~/.zbar/pet.json） */
+export interface PetConfig {
+  /** 悬浮窗开关：true = 创建透明悬浮窗并启动独立状态轮询 */
+  enabled: boolean;
+  /** 宠物形象 id：内建（cat / bot，默认 "cat"）或自定义 "custom:<id>"
+   *  （Petdex 导入，见 pets 模块） */
+  style: string;
+  /** 宠物尺寸档位（1~5，默认 3 = 10% 屏高，见 PET_SIZE_LEVEL_PCT）：
+   *  悬浮窗边长 = 档位 × 窗口所在屏幕逻辑高（Rust 侧建窗/同步时换算） */
+  size: number;
+  /** 窗口左上角位置（逻辑坐标，拖动结束持久化，重启恢复）；
+   *  null = 从未拖动过（默认主显示器右下角） */
+  pos: [number, number] | null;
+}
+
+// ===== 自定义宠物（第三阶段：Petdex 格式导入）=====
+
+/** 自定义宠物的单状态行配置（Petdex 行 → ZBar 七状态映射的落盘形态） */
+export interface CustomPetStateDef {
+  /** 图集行号（0 起） */
+  row: number;
+  /** 该状态循环帧数 */
+  frames: number;
+  /** 每帧停留毫秒；typing 允许数组（按 token 增速三档） */
+  frameMs: number | number[];
+}
+
+/** 自定义宠物元信息（~/.zbar/pets/<id>/pet.json，Rust pets 模块契约） */
+export interface CustomPetMeta {
+  id: string;
+  name: string;
+  /** "petdex-v1"（8×9）| "petdex-v2"（8×11） */
+  format: string;
+  cols: number;
+  rows: number;
+  frameW: number;
+  frameH: number;
+  /** 图集文件名（sheet.webp / sheet.png） */
+  image: string;
+  /** 七状态行配置（sleeping/idle/working/typing/celebrating，V6 新增
+   *  tool_running/failed）。自定义形象行映射：tool_running←行 1 running-right、
+   *  failed←行 5 failed；内建形象 fallback：tool_running→typing 帧、
+   *  failed→sleeping 帧（见 pet-core.js BUILTIN_STATE_FALLBACK） */
+  states: Record<string, CustomPetStateDef>;
+}
+
+/** 自定义宠物渲染资产（get_custom_pet_asset 契约，pet-main 消费） */
+export interface CustomPetAsset {
+  meta: CustomPetMeta;
+  /** 图集 dataUri（data:image/webp;base64,…） */
+  dataUri: string;
+}
+
+/** 自定义宠物清单项（list_custom_pets 契约，两处设置卡选择器消费） */
+export interface CustomPetEntry {
+  id: string;
+  name: string;
+  format: string;
+  /** idle 行首帧缩略图（64×70 内等比 PNG dataUri；生成失败为空串） */
+  thumb: string;
 }
 
 // ===== 项目 / 会话浏览器（与后端 projects 模块结构一一对应）=====

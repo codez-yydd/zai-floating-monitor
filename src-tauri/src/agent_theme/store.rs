@@ -7,7 +7,11 @@
 //!   zcode/theme.css       主题样式（版本化落盘：低于内置版本自动升级）
 //!   zcode/effects.js      壁纸运行时脚本（版本化落盘，同上）
 //!   zcode/usage.js        对话页用量统计条脚本（版本化落盘，同上）
+//!   zcode/pet.js          对话页桌面像素宠物脚本（版本化落盘，同上）
+//!   zcode/pet-custom.js   自定义宠物物化资产（仅 pet_style 为 custom:<id> 时
+//!                         存在，pets::sync_theme_custom_pet 写出，非模板）
 //!   zcode/usage-data.js   用量数据（usage_feed 后台任务周期导出，非模板）
+//!   zcode/usage-data-hb.js 宠物心跳小文件（仅注入版宠物开启时每周期重写）
 //!   zcode/wallpapers/     壁纸视频库（卸载还原时保留）
 //!   zcode/backup/         原 app.asar 备份（仅保留 meta.json 指向的最新一份）+ meta.json
 //!   zbar-staging-zcode-<ts>/  安装过程中的 asar 解包临时目录
@@ -56,9 +60,16 @@ pub const THEME_CSS: &str = "theme.css";
 pub const EFFECTS_JS: &str = "effects.js";
 /// 对话页用量统计条脚本（版本化落盘模板，inject::USAGE_JS）
 pub const USAGE_JS: &str = "usage.js";
+/// 桌面像素宠物脚本（版本化落盘模板，inject::PET_JS）
+pub const PET_JS: &str = "pet.js";
 /// 用量数据文件（usage_feed 后台任务周期导出，非模板不做版本化；
 /// usage.js 按自身 src 推导同目录地址加载）
 pub const USAGE_DATA_FILE: &str = "usage-data.js";
+/// 心跳小文件（usage_feed 后台任务每周期重写，仅注入版宠物开启时）：
+/// 内容 `window.__ZBAR_USAGE_HB__ = <ms>`，注入版宠物壳每 2 秒经 script
+/// 时间戳重载读取喂给宠物核心（与大文件的 hb 写放大权衡见 usage_feed
+/// 模块头）；宠物关闭时停止写出并清理残留
+pub const USAGE_HB_FILE: &str = "usage-data-hb.js";
 pub const WALLPAPERS_DIR: &str = "wallpapers";
 pub const BACKUP_DIR: &str = "backup";
 pub const BACKUP_META_FILE: &str = "meta.json";
@@ -119,6 +130,23 @@ pub const DEFAULT_USAGE_SESSION_BAR: bool = true;
 /// TTFT），默认开启；usage.js V19 起消费 --zbar-usage-turn-bar（1/0）
 /// 决定渲染，随热重载即时生效
 pub const DEFAULT_USAGE_TURN_BAR: bool = true;
+/// 桌面像素宠物默认开关（用户可调参数 pet_enabled）：对话页右下角按
+/// ZCode 工作状态实时切换动画的像素宠物（沉睡/闲坐/思考/奋笔疾书/庆祝
+/// 五状态，数据源为 usage-data.js）。默认关闭：新功能不惊扰现有用户，
+/// 皮肤页开启后经 variables.css 的 --zbar-pet-enabled（1/0）随热重载
+/// 即时生效（pet.js 侧变量缺失/值非 "1" 均视为关闭，语义一致）
+pub const DEFAULT_PET_ENABLED: bool = false;
+/// 桌面像素宠物默认形象 id（用户可调参数 pet_style）：PET_STYLES 的键，
+/// 与 inject::PET_JS 内嵌形象库的第一形象保持一致（cat = 像素小猫，
+/// bot = 像素小机器人）；pet.js 对未知值回退第一形象，Rust 侧仅防空串
+pub const DEFAULT_PET_STYLE: &str = "cat";
+/// 桌面像素宠物默认尺寸档位（用户可调参数 pet_size，1~5，屏高百分比
+/// 见 pet::PET_SIZE_LEVEL_PCT，默认 3 = 10%）：渲染时按 ZBar 主显示器
+/// 逻辑高换算成 px 写入 --zbar-pet-size（如 81px），pet.js 画布 CSS 尺寸
+/// 直接消费该 px 值（image-rendering:pixelated 最近邻放大），改档位随
+/// 热重载即时生效。档位换算/迁移口径与独立版 pet.json 的 size 共用
+/// pet 模块实现。
+pub const DEFAULT_PET_SIZE: u32 = crate::pet::DEFAULT_PET_SIZE_LEVEL;
 
 /// 参数范围常量：(最小, 最大)
 pub const WP_BRIGHTNESS_RANGE: (f64, f64) = (0.4, 1.1);
@@ -133,6 +161,8 @@ pub const BASE_ALPHA_RANGE: (f64, f64) = (0.0, 1.0);
 pub const TEXT_SHADOW_RANGE: (f64, f64) = (0.0, 1.0);
 pub const USAGE_FONT_SIZE_RANGE: (f64, f64) = (9.0, 16.0);
 pub const USAGE_OPACITY_RANGE: (f64, f64) = (0.25, 1.0);
+/* 宠物尺寸档位合法域（1..=5）与旧 px 值迁移口径统一由 pet 模块提供
+（PET_SIZE_LEVEL_PCT / normalize_pet_size），不再各模块重复维护范围常量 */
 
 /// 动态壁纸主题参数（前端皮肤页的滑杆/表单数据）。
 /// serde camelCase：与前端契约字段（wpBrightness / wallpaperFile 等）一一对应。
@@ -192,6 +222,22 @@ pub struct ThemeParams {
     /// variables.css 的 --zbar-usage-turn-bar（1/0）热重载即时生效
     /// （usage.js 侧变量缺失视为开启，兼容旧 variables.css）
     pub usage_turn_bar: bool,
+    /// 桌面像素宠物开关（默认 false，新功能默认关闭不惊扰现有用户）：
+    /// 对话页右下角按 ZCode 工作状态实时切换动画的像素宠物；开关经
+    /// variables.css 的 --zbar-pet-enabled（1/0）热重载即时生效（pet.js
+    /// 侧值非 "1"/变量缺失均视为关闭，与本默认值语义一致）
+    pub pet_enabled: bool,
+    /// 桌面像素宠物形象 id（默认 "cat" = 第一形象）：PET_STYLES 的键
+    /// （cat 像素小猫 / bot 像素小机器人），经 --zbar-pet-style 透出，
+    /// pet.js 对未知值回退第一形象；Rust 侧 clamp 仅防空串/空白回默认
+    pub pet_style: String,
+    /// 桌面像素宠物尺寸档位（1~5，默认 3 = 10% 屏高，见
+    /// pet::PET_SIZE_LEVEL_PCT）：渲染时按主显示器逻辑高换算成 px 写入
+    /// --zbar-pet-size（如 81px——恒为整数 px，绝不写 vh 等单位，旧版
+    /// pet.js 的 sizeOf 用 parseInt 解析该变量），pet.js 画布 CSS 尺寸
+    /// 直接消费该变量（image-rendering:pixelated 最近邻放大），改档位
+    /// 随热重载即时生效
+    pub pet_size: u32,
     /// 当前壁纸指向。语义（V3 起扩展）：
     /// - 绝对路径（以 / 或 Windows 盘符开头）→ 直接引用该文件
     /// - 相对文件名 → wallpapers/ 目录下的文件（如 "default.mp4"）
@@ -218,6 +264,9 @@ impl Default for ThemeParams {
             usage_opacity: DEFAULT_USAGE_OPACITY,
             usage_session_bar: DEFAULT_USAGE_SESSION_BAR,
             usage_turn_bar: DEFAULT_USAGE_TURN_BAR,
+            pet_enabled: DEFAULT_PET_ENABLED,
+            pet_style: DEFAULT_PET_STYLE.to_string(),
+            pet_size: DEFAULT_PET_SIZE,
             wallpaper_file: Some(DEFAULT_WALLPAPER_FILE.to_string()),
             wallpaper_dir: None,
         }
@@ -243,6 +292,16 @@ impl ThemeParams {
         self.text_shadow = clamp(self.text_shadow, TEXT_SHADOW_RANGE);
         self.usage_font_size = clamp(self.usage_font_size, USAGE_FONT_SIZE_RANGE);
         self.usage_opacity = clamp(self.usage_opacity, USAGE_OPACITY_RANGE);
+        // 宠物参数收敛：尺寸归一到档位 1..=5（旧版 px 值按缓存屏高换算
+        // 最近档位迁移，与 pet.json 的迁移口径一致，见 pet::normalize_pet_size）；
+        // 形象 id 防空串/空白回默认（形象合法性由 pet.js 按内嵌形象库
+        // 回退第一形象，Rust 侧不重复维护形象清单，避免两处漂移）
+        self.pet_size = crate::pet::normalize_pet_size(self.pet_size, crate::pet::cached_screen_height());
+        if !self.pet_style.trim().is_empty() {
+            self.pet_style = self.pet_style.trim().to_string();
+        } else {
+            self.pet_style = DEFAULT_PET_STYLE.to_string();
+        }
         if !self.wallpaper_file.as_deref().is_some_and(|s| !s.trim().is_empty()) {
             self.wallpaper_file = Some(DEFAULT_WALLPAPER_FILE.to_string());
         }
@@ -302,11 +361,29 @@ fn resolve_wallpaper_path(dir: &Path, name: &str) -> (PathBuf, bool) {
 }
 
 /// 读取参数；文件不存在或内容损坏时静默返回默认值（皮肤页首开无 params.json）。
+/// 旧版 px 语义的 pet_size（48~128）在首次读取时按缓存屏高一次性迁移
+/// 为最近档位并落盘（与 pet.json 的迁移口径一致；迁移后值域 1..=5，
+/// 后续读取直读不再写盘）。
 pub fn load_params(app_id: &str) -> ThemeParams {
     let Ok(path) = params_path(app_id) else {
         return ThemeParams::default();
     };
-    read_params_file(&path).unwrap_or_default()
+    load_params_at(&path)
+}
+
+/// load_params 的路径显式版（单元测试复用，不依赖真实 ~/.zbar）：
+/// 读 → pet_size 归一（旧 px 迁移档位）→ 变化则落盘。
+pub(crate) fn load_params_at(path: &Path) -> ThemeParams {
+    let Some(mut params) = read_params_file(path) else {
+        return ThemeParams::default();
+    };
+    let level = crate::pet::normalize_pet_size(params.pet_size, crate::pet::cached_screen_height());
+    if level != params.pet_size {
+        params.pet_size = level;
+        // 迁移落盘失败静默（下次读取重试）；仅动 pet_size 不夹其它字段
+        let _ = write_params_file(path, &params);
+    }
+    params
 }
 
 /// 从指定路径读参数（供单元测试复用）。失败返回 None。
@@ -371,6 +448,13 @@ pub struct StoredState {
     pub injected_at: Option<String>,
     /// asar 内注入标记检测结果缓存
     pub injected_marker: bool,
+    /// asar 内注入块是否含 pet.js 引用行（data-zbar-pet 标记）的检测
+    /// 缓存：宠物功能（第一阶段）之前安装的皮肤注入块只有
+    /// effects.js + usage.js 两行，落盘模板升级无法补出 asar 里的
+    /// 引用行，需要重装才能启用注入版宠物——Some(false) = 实检确认
+    /// 缺 pet 行（配合 state_impl 触发引导重装）；None = 旧版
+    /// state.json 尚未实检过（不触发，见 detect_injected 的缓存规则）
+    pub pet_marker: Option<bool>,
     /// 进入 installing 状态的 Unix 时间戳（秒）
     pub installing_since: Option<i64>,
 }
@@ -556,18 +640,43 @@ pub(crate) fn remove_stale_backups_in(dir: &Path, keep: &Path) -> Result<(), Str
 // variables.css 重渲与主题资产落盘
 // ============================================================
 
+/// 物化资产内容戳（FNV-1a 64 位十六进制）：--zbar-pet-asset-ver 的值。
+/// 注入版壳不轮询 pet-custom.js，只随 variables.css 每秒热重载读该变量——
+/// 重复导入同 id 时物化内容变化 → 戳变化 → 壳重载资产热重建（P1-2）。
+/// 文件缺失/不可读返回空串（壳按"未知版本"处理，不触发额外重载）。
+fn pet_asset_stamp(dir: &Path) -> String {
+    let Ok(text) = fs::read_to_string(dir.join(crate::pets::PET_CUSTOM_JS)) else {
+        return String::new();
+    };
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in text.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
 /// 指定目录内的 variables.css 重渲（ensure_theme_assets / apply_wallpaper
-/// 内部调用与单元测试共用，不依赖真实 ~/.zbar）。
+/// / pets::sync_theme_custom_pet 内部调用与单元测试共用，不依赖真实 ~/.zbar）。
 /// wallpaperFile 语义（V3）：绝对路径直接 file_url 引用；相对文件名拼
 /// wallpapers/ 目录；缺失/为空时回落 default.mp4。文件不存在时由
 /// effects.js 对加载失败静默移除、退回原生观感（指向信息不丢失）。
+/// --zbar-pet-asset-ver 按当前 pet-custom.js 内容计算（见 pet_asset_stamp）。
+/// pet_size 按缓存屏高换算成 px 渲染（ZBar 重启/改档位后缓存刷新，皮肤
+/// 页状态轮询触发的本函数重渲即静默按新屏高重写 px——换屏自适应时机
+/// 为下次重渲，不实时监听屏幕变化）。
 /// 幂等优化：内容无变化时跳过写盘——皮肤页状态轮询会反复触发本函数，
 /// 而 effects.js 每秒热重载重读 variables.css，无谓的重写只添噪。
 pub(crate) fn refresh_variables_css_in(dir: &Path) -> Result<(), String> {
-    let params = read_params_file(&dir.join(PARAMS_FILE)).unwrap_or_default();
+    let mut params = read_params_file(&dir.join(PARAMS_FILE)).unwrap_or_default();
+    // 渲染口径归一：params.json 可能仍是未迁移的旧 px 值（迁移落盘由
+    // load_params 负责），此处按同口径换算档位再渲染 px
+    params.pet_size =
+        crate::pet::normalize_pet_size(params.pet_size, crate::pet::cached_screen_height());
     let (wp_path, _) = resolve_wallpaper_path(dir, params.wallpaper_name());
     let url = inject::file_url(&wp_path);
-    let css = inject::render_variables_css(&params, &url);
+    let stamp = pet_asset_stamp(dir);
+    let css = inject::render_variables_css(&params, &url, &stamp, crate::pet::cached_screen_height());
     let path = dir.join(VARIABLES_CSS);
     if fs::read_to_string(&path).is_ok_and(|old| old == css) {
         return Ok(());
@@ -925,6 +1034,60 @@ pub const EFFECTS_JS_VERSION: u32 = 5;
 /// 分钟被踢出 runs，主轮条、会话累计与子代理孤儿并入保持实时值。
 pub const USAGE_JS_VERSION: u32 = 20;
 
+/// 桌面像素宠物脚本 pet.js 的版本化落盘标记。
+/// 版本头写在模板首行注释（ZBAR-THEME-V 标记，提取器与
+/// theme/effects/usage 共用）。V1（首发）：对话页右下角像素宠物，
+/// 五状态机（sleeping / idle / working / typing / celebrating）消费
+/// usage.js 重载的 window.__ZBAR_USAGE__；参数（开关/形象/大小）经
+/// variables.css 热重载即时生效；形象帧数据内嵌 PET_STYLES 常量
+/// （cat 像素小猫 + bot 像素小机器人，格式见模板注释）。
+/// V2（独立悬浮窗 + 核心单源化 + 心跳）：宠物核心（形象库/状态机/
+/// canvas 渲染器）抽取为 public/pet-core.js 单源文件，inject::PET_JS
+/// 经 include_str! 引用后拼接注入版宿主壳落盘（第二阶段独立悬浮窗
+/// 宠物窗口加载同一份核心，防两份帧数据漂移）；数据契约新增附加字段
+/// hb（心跳时间戳，每个导出周期刷新），宠物陈旧判定改用心跳——消除
+/// 模型长思考期间（单请求超过新鲜度阈值不落库、ts 停滞）误入睡。
+/// V3（自定义宠物导入，Petdex 格式）：核心渲染器新增 custom:<id> 形象
+/// 支持——create/setParams 接受 customAsset = { meta, dataUri }，按图集
+/// 网格（cols/rows/frameW/frameH）与逐状态行配置 drawImage 切帧
+/// （imageSmoothingEnabled=false 保像素锐利），帧序循环/五状态机/
+/// typing 速度分档全部复用；custom 样式缺资产回退内建第一形象，内建
+/// style 路径零改动。注入版壳读到 custom:* 形象时按需加载同目录
+/// pet-custom.js（pets::sync_theme_custom_pet 物化）取
+/// window.__ZBAR_PET_CUSTOM__ 作为 customAsset；独立版宿主 invoke
+/// get_custom_pet_asset 获取。
+/// V4（动画驱动改 setInterval，修复 ZCode 注入环境冻结）：核心动画循环
+/// 不再依赖 rAF——ZCode（Electron 多视图）对话页视觉可见但 Chromium
+/// 不向其派发 beginFrame，rAF 全暂停，宠物冻结在首帧（独立悬浮窗正常，
+/// 定时器路径不受影响）——改为 setInterval 轮询（ANIM_MS=60ms，帧推进
+/// 语义不变）；document.hidden 应用层降频一并移除（核心状态机与注入壳
+/// 参数轮询：visibility 判定与视觉可见性脱节时降频会造成状态滞后与
+/// 心跳断流）；interval 生命周期收敛为 build 启动/teardownDom 清理
+/// （顺带修复形象热切换重建后动画链断裂隐患）。独立悬浮窗版同步切换。
+/// V5（待处理用户消息预判 + working 迟滞，修复两个滞后观感缺陷）：
+/// 数据契约新增 pu 附加字段（usage-data.js 与独立版事件快照同口径，值 =
+/// 最近一条「尚无完成轮」的 user 消息时刻 ms，无则 null，usage_feed::
+/// collect_pending_user_ms 查询）——用户消息发送即落库而 runs 只由已
+/// 完成的模型请求行聚合（首笔请求实测 30~70 秒才落库），runs 为空且 pu
+/// 距今 < PENDING_TURN_MS（90s）时预判输出 working；轮完成 runs 消失后
+/// WORKING_LINGER_MS（45s）内维持 working 抹平轮间隙回落感。pu 缺失
+/// （旧数据文件/老版本库）行为同 V4；状态机判定抽出纯函数 decideState。
+/// V6（宠物状态与任务阶段精确匹配，新增 tool_running / failed 两状态）：
+/// 数据契约新增 ta/fe 附加字段（usage-data.js 与独立版事件快照同口径，
+/// usage_feed::collect_active_tool_ms / collect_failure_event_ms 查询）
+/// ——ta = 最新 running 工具行的 started_at（工具调用开始瞬间落库，
+/// "正在执行工具"的实时信号），ta 活跃（30s 窗口）且 runs 非空或 pu
+/// 预判命中时输出 tool_running（优先于 typing/working）；fe = 最近一次
+/// 失败/取消完成轮的 completed_at（只在失败轮新增时变化），距今 <
+/// FAILED_MS(3s) 时输出 failed（沮丧，与 celebrating 成败互斥不叠加）；
+/// WORKING_LINGER 迟滞覆盖「工作类状态（tool_running/typing/working）→
+/// 非工作状态」的过渡。内建形象（仅五状态帧）fallback：tool_running
+/// 复用 typing 帧、failed 复用 sleeping 帧；自定义形象默认映射行 1
+/// running-right / 行 5 failed（pets::build_default_states），旧五状态
+/// pet.json 读取时补齐（pets::normalize_meta）+ 渲染端 customStateDef
+/// 缺键回退（双保险）。ta/fe 缺失（旧数据文件/老版本库）行为同 V5。
+pub const PET_JS_VERSION: u32 = 6;
+
 /// 版本标记的头部查找范围（字符数）：版本注释固定在文件头部，
 /// 限定查找范围避免误匹配正文中的同名字样。
 const VERSION_HEAD_CHARS: usize = 512;
@@ -969,8 +1132,9 @@ pub(crate) fn ensure_versioned_template(
 }
 
 /// 确保/升级主题资产：
-/// - theme.css / effects.js / usage.js：版本化覆盖（头部版本低于内置模板
-///   时升级，见 ensure_versioned_template；实机调优过的当前版本不动）
+/// - theme.css / effects.js / usage.js / pet.js：版本化覆盖（头部版本低于
+///   内置模板时升级，见 ensure_versioned_template；实机调优过的当前版本
+///   不动）
 /// - variables.css：按当前参数重渲（内容无变化时跳过写盘）
 /// - 默认壁纸：wallpapers/ 无 default.mp4 且应用打包资源里有则拷入
 ///
@@ -996,6 +1160,7 @@ pub(crate) fn ensure_theme_assets_in(
     ensure_versioned_template(&dir.join(THEME_CSS), inject::THEME_CSS, THEME_CSS_VERSION)?;
     ensure_versioned_template(&dir.join(EFFECTS_JS), inject::EFFECTS_JS, EFFECTS_JS_VERSION)?;
     ensure_versioned_template(&dir.join(USAGE_JS), inject::USAGE_JS, USAGE_JS_VERSION)?;
+    ensure_versioned_template(&dir.join(PET_JS), inject::PET_JS, PET_JS_VERSION)?;
 
     // 默认壁纸：优先应用打包资源（Tauri resources wallpapers/*），
     // 并行智能体产出的 default.mp4 会随应用分发；资源缺失时静默跳过，
@@ -1081,6 +1246,9 @@ mod tests {
         assert_eq!(default.usage_opacity, DEFAULT_USAGE_OPACITY);
         assert_eq!(default.usage_session_bar, DEFAULT_USAGE_SESSION_BAR);
         assert_eq!(default.usage_turn_bar, DEFAULT_USAGE_TURN_BAR);
+        assert_eq!(default.pet_enabled, DEFAULT_PET_ENABLED);
+        assert_eq!(default.pet_style, DEFAULT_PET_STYLE);
+        assert_eq!(default.pet_size, DEFAULT_PET_SIZE);
         assert_eq!(default.wallpaper_file.as_deref(), Some(DEFAULT_WALLPAPER_FILE));
         assert_eq!(default.wallpaper_dir, None);
 
@@ -1094,6 +1262,7 @@ mod tests {
             "panelOpacity", "sidebarOpacity", "sidebarRightOpacity",
             "playbackRate", "baseAlpha", "textShadow",
             "usageFontSize", "usageOpacity", "usageSessionBar", "usageTurnBar",
+            "petEnabled", "petStyle", "petSize",
             "wallpaperFile", "wallpaperDir",
         ] {
             assert!(text.contains(key), "params.json 缺少字段 {key}");
@@ -1132,6 +1301,118 @@ mod tests {
         assert_eq!(p.usage_session_bar, DEFAULT_USAGE_SESSION_BAR);
         // V19 每轮统计条开关：旧版 params.json 缺字段按默认开启补齐
         assert_eq!(p.usage_turn_bar, DEFAULT_USAGE_TURN_BAR);
+        // 桌面宠物三参数：旧版 params.json 缺字段按默认补齐
+        // （开关默认关闭不惊扰现有用户；形象回第一形象；档位回默认 3）
+        assert_eq!(p.pet_enabled, DEFAULT_PET_ENABLED);
+        assert_eq!(p.pet_style, DEFAULT_PET_STYLE);
+        assert_eq!(p.pet_size, DEFAULT_PET_SIZE);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pet_参数序列化与收敛() {
+        let dir = test_dir("pet-params");
+        let path = dir.join(PARAMS_FILE);
+
+        // 显式开启 + 自定义形象/档位 → 落盘读回原样保持（不被默认关闭覆盖）
+        let mut p = ThemeParams::default();
+        p.pet_enabled = true;
+        p.pet_style = "bot".into();
+        p.pet_size = 5;
+        write_params_file(&path, &p).unwrap();
+        let back = read_params_file(&path).unwrap();
+        assert!(back.pet_enabled, "显式开启的宠物开关读回应保持 true");
+        assert_eq!(back.pet_style, "bot");
+        assert_eq!(back.pet_size, 5);
+        // camelCase 键名与值形态落盘（前端契约）
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("\"petEnabled\": true"),
+            "params.json 应含 camelCase 键 petEnabled 且值为 true：{text}"
+        );
+        assert!(text.contains("\"petStyle\": \"bot\""), "{text}");
+        assert!(text.contains("\"petSize\": 5"), "{text}");
+
+        // clamp 收敛：档位直读、旧 px 值迁移（缓存屏高未初始化 → 1080
+        // 兜底口径：8/48 → 档 1，9999/128 → 档 4）、空白形象回默认、
+        // 开关原样保留
+        let mut q = ThemeParams::default();
+        q.pet_enabled = true;
+        q.pet_size = 8; // 旧 px 越界值：夹回 48 → 4.44% → 档 1
+        q.pet_style = "   ".into();
+        let c = q.clone().clamped();
+        assert_eq!(c.pet_size, 1, "旧过小 px 值应迁移到最小档 1");
+        assert!(c.pet_enabled, "clamped 不应改动开关值");
+        assert_eq!(c.pet_style, DEFAULT_PET_STYLE, "空白形象应回默认");
+        q.pet_size = 9999; // 旧 px 越界值：夹回 128 → 11.85% → 档 4
+        assert_eq!(
+            q.clone().clamped().pet_size,
+            4,
+            "旧过大 px 值应迁移到最近档 4"
+        );
+        q.pet_size = 3; // 档位值直读
+        assert_eq!(q.clone().clamped().pet_size, 3);
+
+        // 旧版 params.json 缺宠物字段 → serde default 按默认关闭补齐
+        fs::write(&path, r#"{"wpBrightness":0.9,"wallpaperFile":"a.mp4"}"#).unwrap();
+        let legacy = read_params_file(&path).unwrap();
+        assert!(!legacy.pet_enabled, "旧版文件缺 petEnabled 应按默认关闭补齐");
+        assert_eq!(legacy.pet_style, DEFAULT_PET_STYLE);
+        assert_eq!(legacy.pet_size, DEFAULT_PET_SIZE);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pet_size_旧px值load时一次性迁移档位() {
+        let dir = test_dir("pet-migrate");
+        let path = dir.join(PARAMS_FILE);
+        // 旧版 px 值（64）落盘 → load 迁移为最近档位并写回（测试环境
+        // 缓存屏高未初始化 → 1080 兜底口径：64 ≈ 5.93% → 档 1），
+        // 其它字段原样保留
+        let mut p = ThemeParams::default();
+        p.pet_enabled = true;
+        p.pet_style = "bot".into();
+        p.pet_size = 64;
+        write_params_file(&path, &p).unwrap();
+        let loaded = load_params_at(&path);
+        assert_eq!(loaded.pet_size, 1, "64px@1080 应迁移到档 1");
+        assert!(loaded.pet_enabled, "迁移不应动开关");
+        assert_eq!(loaded.pet_style, "bot", "迁移不应动形象");
+        let back = read_params_file(&path).unwrap();
+        assert_eq!(back.pet_size, 1, "迁移结果应已落盘");
+        // 二次读取：档位值直读幂等（不再改写）
+        assert_eq!(load_params_at(&path), back);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn variables_css_档位按屏高换算px渲染() {
+        // refresh_variables_css_in 走缓存屏高（测试环境未初始化 → 1080）：
+        // 档 4 × 1080 = 135px，恒为整数 px 形态（旧版 pet.js 的 sizeOf 用
+        // parseInt 解析，非整数 px 会把宠物缩成蚂蚁）
+        let dir = test_dir("vars-pet-size");
+        let wp_dir = dir.join(WALLPAPERS_DIR);
+        fs::create_dir_all(&wp_dir).unwrap();
+        fs::write(wp_dir.join(DEFAULT_WALLPAPER_FILE), b"v").unwrap();
+        let mut p = ThemeParams::default();
+        p.pet_enabled = true;
+        p.pet_size = 4;
+        write_params_file(&dir.join(PARAMS_FILE), &p).unwrap();
+        refresh_variables_css_in(&dir).unwrap();
+        let css = fs::read_to_string(dir.join(VARIABLES_CSS)).unwrap();
+        assert!(css.contains("--zbar-pet-size: 135px;"), "{css}");
+
+        // params.json 仍是未迁移的旧 px 值（迁移落盘由 load_params 负责）
+        // 时，渲染口径同样归一：64 → 档 1 → 59px（5.5% × 1080 = 59.4）
+        let mut p = ThemeParams::default();
+        p.pet_size = 64;
+        write_params_file(&dir.join(PARAMS_FILE), &p).unwrap();
+        refresh_variables_css_in(&dir).unwrap();
+        let css = fs::read_to_string(dir.join(VARIABLES_CSS)).unwrap();
+        assert!(css.contains("--zbar-pet-size: 59px;"), "{css}");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1215,6 +1496,9 @@ mod tests {
             usage_opacity: 5.0,
             usage_session_bar: false,
             usage_turn_bar: false,
+            pet_enabled: true,
+            pet_style: "  ".into(),
+            pet_size: 9999,
             wallpaper_file: Some("  ".into()),
             wallpaper_dir: None,
         }
@@ -1231,6 +1515,11 @@ mod tests {
         assert_eq!(p.text_shadow, TEXT_SHADOW_RANGE.0);
         assert_eq!(p.usage_font_size, USAGE_FONT_SIZE_RANGE.1);
         assert_eq!(p.usage_opacity, USAGE_OPACITY_RANGE.1);
+        // 宠物参数收敛：旧 px 越界值（9999 → 夹回 128 → 11.85%@1080）
+        // 迁移到最近档 4、空白形象回默认、开关原样保留
+        assert_eq!(p.pet_size, 4);
+        assert_eq!(p.pet_style, DEFAULT_PET_STYLE);
+        assert!(p.pet_enabled);
         // 空白文件名回默认
         assert_eq!(p.wallpaper_name(), DEFAULT_WALLPAPER_FILE);
         p.wallpaper_file = None;
@@ -1302,6 +1591,7 @@ mod tests {
             asar_mtime: Some(1_770_000_000),
             injected_at: Some("2026-08-27T00:00:00+00:00".into()),
             injected_marker: true,
+            pet_marker: Some(true),
             installing_since: None,
         };
         let json = serde_json::to_string(&s).unwrap();
@@ -1317,8 +1607,21 @@ mod tests {
         assert!(json.contains("\"asarSize\""));
         assert!(json.contains("\"asarMtime\""));
         assert!(json.contains("\"injectedMarker\""));
+        assert!(json.contains("\"petMarker\""));
 
         // 旧版 state.json 缺 asarMtime → 按容器级 default 反序列化为 None
+        //（V2 起同样适用于 petMarker：旧文件缺字段读回 None = 尚未实检
+        // pet 行，不触发重装引导，见 detect_injected 缓存规则）
+        let legacy_json = serde_json::json!({
+            "status": STATUS_INSTALLED,
+            "zcodeVersion": "1.0.0",
+            "asarSize": 284_000_000u64,
+            "injectedMarker": true
+        });
+        fs::write(&path, legacy_json.to_string()).unwrap();
+        let legacy = read_state_file(&path).unwrap();
+        assert_eq!(legacy.asar_mtime, None);
+        assert_eq!(legacy.pet_marker, None, "旧版 state.json 缺 petMarker 应读回 None");
         fs::write(
             &path,
             r#"{"status":"installed","asarSize":284000000,"injectedMarker":true}"#,
@@ -1338,6 +1641,7 @@ mod tests {
         assert_eq!(template_version_of(inject::THEME_CSS), Some(THEME_CSS_VERSION));
         assert_eq!(template_version_of(inject::EFFECTS_JS), Some(EFFECTS_JS_VERSION));
         assert_eq!(template_version_of(inject::USAGE_JS), Some(USAGE_JS_VERSION));
+        assert_eq!(template_version_of(inject::PET_JS), Some(PET_JS_VERSION));
         // 旧版文件无标记 → None（视为需要升级）
         assert_eq!(template_version_of("/* 旧版无版本头 */\nbody{}"), None);
         // 显式旧版本号可被提取
@@ -1363,7 +1667,7 @@ mod tests {
         // 场景一：旧版模板（无版本头）→ theme.css 升 V10、effects.js 升 V5
         fs::write(dir.join(THEME_CSS), "/* 旧版 theme，无版本头 */").unwrap();
         fs::write(dir.join(EFFECTS_JS), "// 旧版 effects，无版本头").unwrap();
-        // usage.js 为本功能新增模板：老用户目录里不存在 → 首次 ensure 落盘
+        // usage.js / pet.js 为功能模板：老用户目录里不存在 → 首次 ensure 落盘
         ensure_theme_assets_in(&dir, &wp_dir, None).unwrap();
         assert!(
             fs::read_to_string(dir.join(THEME_CSS))
@@ -1383,15 +1687,28 @@ mod tests {
                 .contains(&format!("ZBAR-THEME-V{USAGE_JS_VERSION}")),
             "缺失的 usage.js 应首次落盘"
         );
+        assert!(
+            fs::read_to_string(dir.join(PET_JS))
+                .unwrap()
+                .contains(&format!("ZBAR-THEME-V{PET_JS_VERSION}")),
+            "缺失的 pet.js 应首次落盘"
+        );
 
-        // 场景一补充：usage.js 为旧版本（头部标记低于内置版本）→ 覆盖升级
+        // 场景一补充：usage.js / pet.js 为旧版本（头部标记低于内置版本）→ 覆盖升级
         fs::write(dir.join(USAGE_JS), "// ZBAR-THEME-V0 旧版占位\n").unwrap();
+        fs::write(dir.join(PET_JS), "// ZBAR-THEME-V0 旧版占位\n").unwrap();
         ensure_theme_assets_in(&dir, &wp_dir, None).unwrap();
         assert!(
             fs::read_to_string(dir.join(USAGE_JS))
                 .unwrap()
                 .contains(&format!("ZBAR-THEME-V{USAGE_JS_VERSION}")),
             "旧版 usage.js 应被升级覆盖"
+        );
+        assert!(
+            fs::read_to_string(dir.join(PET_JS))
+                .unwrap()
+                .contains(&format!("ZBAR-THEME-V{PET_JS_VERSION}")),
+            "旧版 pet.js 应被升级覆盖"
         );
 
         // 场景二：effects.js 为 V3（已装用户的真实升级路径，V3/V4 旧版
