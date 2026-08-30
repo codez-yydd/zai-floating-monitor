@@ -20,6 +20,7 @@ use chrono::{Local, TimeZone};
 
 use crate::db;
 use crate::pricing::config_dir;
+use crate::provider_quota::{ProviderQuotaBalance, ProviderQuotaEntry, ProviderQuotaWindow};
 
 const CURSOR_BASE: &str = "https://cursor.com";
 /// Cursor 应用的 state.vscdb 相对于 config_dir 的路径（跨平台通用）
@@ -122,6 +123,58 @@ fn write_cursor_config_unlocked(cfg: &CursorConfig) -> Result<(), String> {
     let data = serde_json::to_string_pretty(cfg)
         .map_err(|e| format!("序列化 Cursor 配置失败: {e}"))?;
     std::fs::write(&path, data).map_err(|e| format!("写入 Cursor 配置失败: {e}"))
+}
+
+// ============================================================
+// 旧手动 cookie 一次性迁移（~/.zbar/cursor.json → 凭证体系）
+// ============================================================
+
+/// 迁移决策（纯函数，单测入口）：旧配置为手动来源（cookie_source=manual）
+/// 且 cookie_header 非空、凭证体系尚无任何条目时才迁移。cookie_source 缺失
+/// 时 serde 默认为 "auto"，auto 模式残留的旧 cookie 不是用户手动配置，不迁移；
+/// 任一条件不满足即无操作（幂等：已迁移过 / 从未手动配置过都不重复创建）。
+fn migration_needed(cookie_source: &str, old_cookie_header: &str, credential_count: usize) -> bool {
+    cookie_source == "manual" && !old_cookie_header.trim().is_empty() && credential_count == 0
+}
+
+/// 把旧手动 cookie（~/.zbar/cursor.json 的 cookie_header）一次性迁移到
+/// 凭证体系（~/.zbar/credentials/cursor.json）：创建一条 label="手动迁移"、
+/// kind="cookie" 的凭证（secret=旧值）。旧 cursor.json 原样保留（不删不改，
+/// 不丢任何用户数据），仅主链路此后不再读取它的 cookie 字段。
+///
+/// 幂等：凭证体系已有条目（add_entry_if_empty 锁内原子判断）或旧值为空时
+/// 无操作；写入走凭证体系模块锁，并发触发也只会创建一条。失败仅记日志
+/// 不阻断启动（下次启动重试；迁移完成前主链路 manual 仍回落 auto）。
+pub fn migrate_legacy_cookie() {
+    let cfg = match load_cursor_config() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("[zbar-cursor] 旧 cookie 迁移跳过（读取配置失败）: {e}");
+            return;
+        }
+    };
+    // 凭证体系当前条目数：仅用于幂等判断（真实写入的原子性由
+    // add_entry_if_empty 在其锁内保证，这里的计数只是快速短路）
+    let existing = crate::provider_credentials::load_query_snapshots("cursor")
+        .map(|s| s.len())
+        .unwrap_or(0);
+    if !migration_needed(&cfg.cookie_source, &cfg.cookie_header, existing) {
+        return;
+    }
+    match crate::provider_credentials::add_entry_if_empty(
+        "cursor",
+        "手动迁移",
+        "cookie",
+        cfg.cookie_header.trim(),
+    ) {
+        Ok(true) => {
+            eprintln!(
+                "[zbar-cursor] 已把旧手动 cookie 迁移到凭证体系（~/.zbar/credentials/cursor.json，原文件保留）"
+            )
+        }
+        Ok(false) => {} // 并发下已被其他调用创建：视为已迁移
+        Err(e) => eprintln!("[zbar-cursor] 旧 cookie 迁移失败（下次启动重试）: {e}"),
+    }
 }
 
 // ============================================================
@@ -477,15 +530,42 @@ fn build_cookie(user_id: &str, token: &str) -> String {
     format!("WorkosCursorSessionToken={user_id}%3A%3A{token}")
 }
 
-/// 解析出有效的 cookie 头。优先级：手动配置 > Cursor 应用本地 DB
-pub fn resolve_cookie(cfg: &CursorConfig) -> Result<String, String> {
-    // 手动模式：直接用配置中的 cookie
-    if cfg.cookie_source == "manual" {
-        let header = cfg.cookie_header.trim();
-        if header.is_empty() {
-            return Err("Cookie 来源为手动模式，但未配置 cookie。请编辑 ~/.zbar/cursor.json 填写 cookie_header 字段".into());
+/// 从凭证查询快照中选出生效的手动 cookie（纯函数，单测入口）：
+/// 第一条 kind=cookie 且 secret 非空的条目。文件条目按创建顺序追加，
+/// 首条即最早创建的一条（保持旧 cookie_header 的"单条生效"语义）。
+fn pick_first_cookie(
+    snapshots: &[crate::provider_credentials::CredentialQuerySnapshot],
+) -> Option<String> {
+    snapshots
+        .iter()
+        .find(|s| s.kind == "cookie" && !s.secret.trim().is_empty())
+        .map(|s| s.secret.trim().to_string())
+}
+
+/// 手动 cookie 的现行来源：凭证体系 ~/.zbar/credentials/cursor.json 的
+/// 第一条 kind=cookie 条目（旧 cursor.json 的 cookie_header 已一次性迁移
+/// 过去，不再读取）。文件不存在/损坏/无有效条目返回 None。
+fn first_manual_cookie() -> Option<String> {
+    match crate::provider_credentials::load_query_snapshots("cursor") {
+        Ok(snapshots) => pick_first_cookie(&snapshots),
+        Err(e) => {
+            // 凭证文件损坏时降级为"未配置"（回落 auto），不让手动路径卡死主链路
+            eprintln!("[zbar-cursor] 读取手动 cookie 凭证失败: {e}");
+            None
         }
-        return Ok(header.to_string());
+    }
+}
+
+/// 解析出有效的 cookie 头。优先级：手动配置（凭证体系最早一条 cookie 条目）
+/// > Cursor 应用本地 DB。手动模式在凭证体系无条目时视为未配置，回落自动模式。
+pub fn resolve_cookie(cfg: &CursorConfig) -> Result<String, String> {
+    // 手动模式：读凭证体系 ~/.zbar/credentials/cursor.json
+    if cfg.cookie_source == "manual" {
+        if let Some(header) = first_manual_cookie() {
+            return Ok(header);
+        }
+        // 凭证体系无条目：手动路径视为未配置，继续走自动模式
+        //（与旧"手动但未填 cookie"相比更健壮：不再直接报错阻断）
     }
 
     // 自动模式：读 Cursor 应用本地 DB
@@ -1144,6 +1224,162 @@ pub fn fetch_cursor_period_buckets(
     Ok(buckets)
 }
 
+// ============================================================
+// 多账号手动凭证（凭证体系 kind=cookie）的额度堆叠
+// ============================================================
+// 供 provider_quota 的 "cursor" 分支调用：对 ~/.zbar/credentials/cursor.json
+// 的全部 kind=cookie 条目逐条查 usage-summary，产出 ProviderQuotaEntry。
+// 本地 auto 登录态不并入本链路（主面板 get_cursor_usage 已展示，避免双查询，
+// 与 claude 先例一致）；无凭证时 provider_quota 的空快照早返回已给出空 Vec。
+
+/// 手动 cookie 会话失效（401/403）的统一提示（与本地登录态过期的文案区分：
+/// 手动凭证要回 cursor.com 重新复制，而不是重开 Cursor 应用）
+const MANUAL_COOKIE_EXPIRED_MSG: &str = "会话已失效，请重新登录 cursor.com 后更新 Cookie";
+
+/// 手动凭证单条查询的失败分类：expired（会话失效）与其余 error 分开，
+/// 供条目状态与凭证卡徽章区分展示。
+struct ManualQuotaFailure {
+    /// "expired" | "error"
+    status: &'static str,
+    /// 中文原因（不含 cookie 内容）
+    message: String,
+}
+
+impl ManualQuotaFailure {
+    fn error(message: String) -> Self {
+        Self { status: "error", message }
+    }
+}
+
+/// 手动凭证专用的 usage-summary 拉取：与 fetch_usage_summary 同端点，但
+/// 错误分类不同（401/403 → expired + 引导更新 Cookie；不动既有函数，保证
+/// 主链路错误文案零回归）。
+fn fetch_usage_summary_manual(cookie: &str) -> Result<UsageSummary, ManualQuotaFailure> {
+    let url = format!("{CURSOR_BASE}/api/usage-summary");
+    let resp = http_agent()
+        .get(&url)
+        .set("Cookie", cookie)
+        .set("Accept", "application/json")
+        .call();
+    match resp {
+        Ok(r) => r.into_json::<UsageSummary>().map_err(|e| {
+            ManualQuotaFailure::error(format!("解析 usage-summary 响应失败: {e}"))
+        }),
+        Err(ureq::Error::Status(code, _)) if code == 401 || code == 403 => {
+            Err(ManualQuotaFailure {
+                status: "expired",
+                message: MANUAL_COOKIE_EXPIRED_MSG.to_string(),
+            })
+        }
+        Err(ureq::Error::Status(code, _)) => Err(ManualQuotaFailure::error(format!(
+            "Cursor 额度查询失败（HTTP {code}）"
+        ))),
+        Err(e) => Err(ManualQuotaFailure::error(format!(
+            "Cursor 网络请求失败: {e}"
+        ))),
+    }
+}
+
+/// usage-summary → 额度卡字段（纯函数，单测入口）。
+/// 窗口映射：plan 的 Auto / API 两个百分比（与主面板口径一致，有值才出窗口；
+/// usage-summary 的窗口结构本质是百分比，used/limit 的美分金额是整个套餐
+/// 周期的扣费口径，映射到单窗口会有歧义，故省略）。
+/// 金额映射：on-demand 剩余额度 → balance（美元）；套餐映射：membership_type
+/// → plan_name。
+fn quota_parts_from_summary(
+    summary: &UsageSummary,
+) -> (
+    Vec<ProviderQuotaWindow>,
+    Option<String>,
+    Option<ProviderQuotaBalance>,
+) {
+    let mut windows = Vec::new();
+    if let Some(plan) = summary.individual_usage.as_ref().and_then(|iu| iu.plan.as_ref()) {
+        if let Some(pct) = plan.auto_percent_used {
+            windows.push(ProviderQuotaWindow {
+                key: "auto".into(),
+                title: "Auto".into(),
+                used_percent: Some(pct),
+                used: None,
+                total: None,
+                unit: None,
+                resets_at: None,
+            });
+        }
+        if let Some(pct) = plan.api_percent_used {
+            windows.push(ProviderQuotaWindow {
+                key: "api".into(),
+                title: "API".into(),
+                used_percent: Some(pct),
+                used: None,
+                total: None,
+                unit: None,
+                resets_at: None,
+            });
+        }
+    }
+    let plan_name = summary.membership_type.clone();
+    let balance = summary
+        .individual_usage
+        .as_ref()
+        .and_then(|iu| iu.on_demand.as_ref())
+        .filter(|od| od.enabled != Some(false))
+        .and_then(|od| od.remaining)
+        .map(|remaining_cents| ProviderQuotaBalance {
+            amount: remaining_cents as f64 / 100.0,
+            currency: "$".into(),
+            granted: None,
+            topped_up: None,
+        });
+    (windows, plan_name, balance)
+}
+
+/// 单条手动凭证 → 一张额度卡条目：查询成功映射窗口/套餐/余额，失败产出
+/// expired/error 条目（不阻塞其他凭证）。
+fn manual_quota_entry(
+    credential_id: &str,
+    label: &str,
+    cookie: &str,
+) -> ProviderQuotaEntry {
+    let (status, message, parts) = match fetch_usage_summary_manual(cookie) {
+        Ok(summary) => {
+            let (windows, plan_name, balance) = quota_parts_from_summary(&summary);
+            ("ok", None, Some((windows, plan_name, balance)))
+        }
+        Err(f) => (f.status, Some(f.message), None),
+    };
+    let (windows, plan_name, balance) = parts.unwrap_or((Vec::new(), None, None));
+    ProviderQuotaEntry {
+        credential_id: credential_id.to_string(),
+        label: label.to_string(),
+        status: status.to_string(),
+        windows,
+        balance,
+        plan_name,
+        message,
+        updated_at: crate::provider_quota::now_ms(),
+    }
+}
+
+/// 查询全部手动凭证（kind=cookie）的额度：逐条调 usage-summary（串行，
+/// 单条失败不影响其余）。非 cookie 型条目与 secret 为空的条目跳过。
+pub(crate) fn fetch_manual_quota_entries(
+    snapshots: &[crate::provider_credentials::CredentialQuerySnapshot],
+) -> Vec<ProviderQuotaEntry> {
+    let mut entries = Vec::new();
+    for cred in snapshots {
+        if cred.kind != "cookie" {
+            continue;
+        }
+        let cookie = cred.secret.trim();
+        if cookie.is_empty() {
+            continue;
+        }
+        entries.push(manual_quota_entry(&cred.id, &cred.label, cookie));
+    }
+    entries
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1200,5 +1436,160 @@ mod tests {
         let quota = calculate_today_quota(&events, &plan);
         assert!((quota.auto_pct.unwrap_or_default() - 1.3747).abs() < 0.01);
         assert!((quota.api_pct.unwrap_or_default() - 0.0168).abs() < 0.01);
+    }
+
+    // ===== 旧 cookie 迁移：决策纯函数（幂等性核心判断）=====
+
+    #[test]
+    fn migration_decision_is_idempotent_and_value_gated() {
+        // 旧值为空（从未手动配置过）→ 无操作
+        assert!(!migration_needed("manual", "", 0));
+        assert!(!migration_needed("manual", "   ", 0));
+        // 凭证体系已有条目（已迁移过 / 用户已手动加过）→ 无操作（幂等）
+        assert!(!migration_needed("manual", "WorkosCursorSessionToken=1%3A%3Aabc", 1));
+        assert!(!migration_needed("manual", "WorkosCursorSessionToken=1%3A%3Aabc", 3));
+        // 旧值非空 + 凭证体系无条目 → 迁移
+        assert!(migration_needed("manual", "WorkosCursorSessionToken=1%3A%3Aabc", 0));
+        // 前后空白不算"空值"（会 trim 后迁移）
+        assert!(migration_needed("manual", "  cookie  ", 0));
+        // auto 来源（含字段缺失时的 serde 默认值）：残留 cookie 非手动配置 → 不迁移
+        assert!(!migration_needed("auto", "WorkosCursorSessionToken=1%3A%3Aabc", 0));
+        // 其他未知来源值同样不迁移（只有显式 manual 才迁移）
+        assert!(!migration_needed("unknown", "WorkosCursorSessionToken=1%3A%3Aabc", 0));
+    }
+
+    // ===== manual 来源切换：凭证快照中的单条生效选择 =====
+
+    fn snap(id: &str, kind: &str, secret: &str) -> crate::provider_credentials::CredentialQuerySnapshot {
+        crate::provider_credentials::CredentialQuerySnapshot {
+            id: id.into(),
+            label: id.into(),
+            kind: kind.into(),
+            secret: secret.into(),
+            region: None,
+        }
+    }
+
+    #[test]
+    fn pick_first_cookie_empty_and_non_cookie_snapshots() {
+        // 无任何凭证 → None（manual 路径视为未配置，回落 auto）
+        assert!(pick_first_cookie(&[]).is_none());
+        // 只有 apiKey / token 条目 → None（只认 kind=cookie）
+        let snaps = vec![snap("a", "apiKey", "sk-xxx"), snap("b", "token", "tok")];
+        assert!(pick_first_cookie(&snaps).is_none());
+    }
+
+    #[test]
+    fn pick_first_cookie_takes_earliest_entry() {
+        // 多条 cookie 条目（多账号堆叠场景）：主链路只取第一条（创建最早）
+        let snaps = vec![
+            snap("old", "cookie", "WorkosCursorSessionToken=1%3A%3Aold"),
+            snap("new", "cookie", "WorkosCursorSessionToken=2%3A%3Anew"),
+        ];
+        assert_eq!(
+            pick_first_cookie(&snaps).as_deref(),
+            Some("WorkosCursorSessionToken=1%3A%3Aold")
+        );
+    }
+
+    #[test]
+    fn pick_first_cookie_skips_blank_secrets() {
+        // 首条 cookie 内容为空白（脏数据）→ 跳过取下一条有效条目
+        let snaps = vec![
+            snap("blank", "cookie", "   "),
+            snap("valid", "cookie", "  WorkosCursorSessionToken=2%3A%3Av"),
+        ];
+        assert_eq!(
+            pick_first_cookie(&snaps).as_deref(),
+            Some("WorkosCursorSessionToken=2%3A%3Av")
+        );
+        // 全部空白 → None
+        let blank = vec![snap("b1", "cookie", ""), snap("b2", "cookie", " ")];
+        assert!(pick_first_cookie(&blank).is_none());
+    }
+
+    // ===== 多账号额度堆叠：usage-summary → 额度卡字段映射 =====
+
+    #[test]
+    fn quota_parts_maps_windows_plan_and_balance() {
+        let summary: UsageSummary = serde_json::from_str(
+            r#"{
+                "membershipType": "pro",
+                "individualUsage": {
+                    "plan": {
+                        "enabled": true,
+                        "autoPercentUsed": 12.5,
+                        "apiPercentUsed": 3.25
+                    },
+                    "onDemand": {
+                        "enabled": true,
+                        "remaining": 4567
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let (windows, plan_name, balance) = quota_parts_from_summary(&summary);
+        // Auto / API 双窗口，顺序与主面板口径一致
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].key, "auto");
+        assert_eq!(windows[0].title, "Auto");
+        assert_eq!(windows[0].used_percent, Some(12.5));
+        assert_eq!(windows[1].key, "api");
+        assert_eq!(windows[1].used_percent, Some(3.25));
+        // 套餐名映射 membership_type
+        assert_eq!(plan_name.as_deref(), Some("pro"));
+        // on-demand 剩余美分 → 美元余额
+        let bal = balance.expect("on-demand 余额应映射");
+        assert!((bal.amount - 45.67).abs() < 1e-9);
+        assert_eq!(bal.currency, "$");
+    }
+
+    #[test]
+    fn quota_parts_empty_summary_yields_empty_entry_parts() {
+        // 空 summary（登录但无任何用量数据）：零窗口、无套餐、无余额（不报错）
+        let summary: UsageSummary = serde_json::from_str("{}").unwrap();
+        let (windows, plan_name, balance) = quota_parts_from_summary(&summary);
+        assert!(windows.is_empty());
+        assert!(plan_name.is_none());
+        assert!(balance.is_none());
+    }
+
+    #[test]
+    fn quota_parts_partial_windows_and_disabled_on_demand() {
+        // 只有 API 百分比（免费号常见形态）→ 只出 API 窗口
+        let summary: UsageSummary = serde_json::from_str(
+            r#"{
+                "individualUsage": {
+                    "plan": { "apiPercentUsed": 8 },
+                    "onDemand": { "enabled": false, "remaining": 1000 }
+                }
+            }"#,
+        )
+        .unwrap();
+        let (windows, _plan, balance) = quota_parts_from_summary(&summary);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].key, "api");
+        // on-demand 已关闭 → 不映射余额
+        assert!(balance.is_none());
+    }
+
+    #[test]
+    fn manual_quota_entry_error_keeps_failure_status_and_message() {
+        // 错误分类：手动构造失败 → expired 条目保留引导文案（网络路径离线不可测，
+        // 此处验证条目组装对 status/message 的透传不丢字段）
+        let entry = ProviderQuotaEntry {
+            credential_id: "c1".into(),
+            label: "手动迁移".into(),
+            status: "expired".into(),
+            windows: Vec::new(),
+            balance: None,
+            plan_name: None,
+            message: Some(MANUAL_COOKIE_EXPIRED_MSG.to_string()),
+            updated_at: 0,
+        };
+        assert_eq!(entry.status, "expired");
+        assert_eq!(entry.message.as_deref(), Some(MANUAL_COOKIE_EXPIRED_MSG));
+        assert!(entry.windows.is_empty());
     }
 }

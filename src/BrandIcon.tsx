@@ -1,13 +1,32 @@
-import type { SVGProps } from "react";
+import type { ReactNode, SVGProps } from "react";
 
 /** 统计标签使用的品牌图标。图形内置为单色 SVG，不依赖运行时网络。 */
-export type BrandIconName = "zai" | "codex" | "claude" | "cursor" | "kimi";
+export type BrandIconName =
+  | "zai"
+  | "codex"
+  | "claude"
+  | "cursor"
+  | "kimi"
+  // 凭证驱动的新 provider：品牌色圆底 + 白色首字母/简笔图形
+  | "gemini"
+  | "grok"
+  | "qoder"
+  | "opencodego"
+  | "minimax"
+  | "moonshot"
+  | "deepseek"
+  | "longcat"
+  | "mimo"
+  | "alibaba"
+  | "alibabatoken"
+  | "stepfun"
+  | "doubao";
 
 interface BrandIconProps extends SVGProps<SVGSVGElement> {
   brand: BrandIconName;
 }
 
-const BRAND_PATHS: Record<Exclude<BrandIconName, "zai">, string> = {
+const BRAND_PATHS: Record<Exclude<BrandIconName, "zai" | "gemini" | "grok" | "qoder" | "opencodego" | "minimax" | "moonshot" | "deepseek" | "longcat" | "mimo" | "alibaba" | "alibabatoken" | "stepfun" | "doubao">, string> = {
   // OpenAI mark，Codex 使用 OpenAI 的品牌标识。
   codex:
     "M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z",
@@ -18,6 +37,90 @@ const BRAND_PATHS: Record<Exclude<BrandIconName, "zai">, string> = {
     "M11.503.131 1.891 5.678a.84.84 0 0 0-.42.726v11.188c0 .3.162.575.42.724l9.609 5.55a1 1 0 0 0 .998 0l9.61-5.55a.84.84 0 0 0 .42-.724V6.404a.84.84 0 0 0-.42-.726L12.497.131a1.01 1.01 0 0 0-.996 0M2.657 6.338h18.55c.263 0 .43.287.297.515L12.23 22.918c-.062.107-.229.064-.229-.06V12.335a.59.59 0 0 0-.295-.51l-9.11-5.257c-.109-.063-.064-.23.061-.23",
   // Kimi mark：手绘月牙形（Kimi 月亮品牌意象，单色填充）。
   kimi: "M20.6 13.3A8.8 8.8 0 1 1 10.7 3.4a6.9 6.9 0 0 0 9.9 9.9Z",
+};
+
+// ============================================================
+// 凭证驱动的新 provider 图标：品牌色圆底 + 白色首字母/简笔图形。
+// 保持与既有图标近似的视觉重量（无描边、纯色块），不引入外部资源。
+// ============================================================
+
+/** 白色首字母字形（圆底内居中） */
+function letterTile(
+  letter: string,
+  fontSize = 12.5,
+  fg = "#fff"
+): ReactNode {
+  return (
+    <text
+      x="12"
+      y="12.6"
+      textAnchor="middle"
+      dominantBaseline="middle"
+      fill={fg}
+      fontSize={fontSize}
+      fontWeight="700"
+      fontFamily="system-ui, -apple-system, 'Segoe UI', sans-serif"
+    >
+      {letter}
+    </text>
+  );
+}
+
+/** 新 provider 的圆底色块定义（bg=底色；icon=白色图形） */
+const CREDENTIAL_AGENT_TILES: Record<
+  Exclude<BrandIconName, "zai" | "codex" | "claude" | "cursor" | "kimi">,
+  { bg: string; icon: ReactNode }
+> = {
+  // Gemini：四角星（Sparkle 品牌意象）
+  gemini: {
+    bg: "#4285F4",
+    icon: (
+      <path
+        fill="#fff"
+        d="M12 4.2 13.9 10.1 19.8 12 13.9 13.9 12 19.8 10.1 13.9 4.2 12 10.1 10.1Z"
+      />
+    ),
+  },
+  grok: { bg: "#1d9bf0", icon: letterTile("G") },
+  qoder: { bg: "#6c5ce7", icon: letterTile("Q") },
+  // OpenCode：终端提示符 >_ 意象
+  opencodego: {
+    bg: "#f97316",
+    icon: (
+      <text
+        x="12"
+        y="12.8"
+        textAnchor="middle"
+        dominantBaseline="middle"
+        fill="#fff"
+        fontSize="9.5"
+        fontWeight="700"
+        fontFamily="ui-monospace, 'Cascadia Mono', Consolas, monospace"
+      >
+        &gt;_
+      </text>
+    ),
+  },
+  minimax: { bg: "#00b96b", icon: letterTile("M") },
+  // Moonshot：月光月牙（与 Kimi 月牙同形，蓝底白字区分）
+  moonshot: {
+    bg: "#4540d6",
+    icon: (
+      <path
+        fill="#fff"
+        d="M19.3 13.6A7.6 7.6 0 1 1 11.4 5a6 6 0 0 0 7.9 8.6Z"
+      />
+    ),
+  },
+  deepseek: { bg: "#4D6BFE", icon: letterTile("D") },
+  // LongCat：亮黄底配深色字（白字对比不足）
+  longcat: { bg: "#ffd100", icon: letterTile("L", 12.5, "#6b5600") },
+  mimo: { bg: "#ff6900", icon: letterTile("m", 13) },
+  alibaba: { bg: "#ff6a00", icon: letterTile("Q") },
+  // 百炼 Token 包：深色「百」字与 alibaba 的白「Q」拉开差异（同系品牌橙底）
+  alibabatoken: { bg: "#ff9240", icon: letterTile("百", 11, "#5c2c00") },
+  stepfun: { bg: "#3b82f6", icon: letterTile("S") },
+  doubao: { bg: "#00d4aa", icon: letterTile("火", 11) },
 };
 
 export function BrandIcon({ brand, ...props }: BrandIconProps) {
@@ -42,6 +145,23 @@ export function BrandIcon({ brand, ...props }: BrandIconProps) {
     );
   }
 
+  const tile = (CREDENTIAL_AGENT_TILES as Record<string, { bg: string; icon: ReactNode } | undefined>)[
+    brand
+  ];
+  if (tile) {
+    return (
+      <svg
+        {...props}
+        viewBox="0 0 24 24"
+        aria-hidden="true"
+        focusable="false"
+      >
+        <circle cx="12" cy="12" r="12" fill={tile.bg} />
+        {tile.icon}
+      </svg>
+    );
+  }
+
   return (
     <svg
       {...props}
@@ -50,7 +170,7 @@ export function BrandIcon({ brand, ...props }: BrandIconProps) {
       aria-hidden="true"
       focusable="false"
     >
-      <path d={BRAND_PATHS[brand]} />
+      <path d={BRAND_PATHS[brand as keyof typeof BRAND_PATHS]} />
     </svg>
   );
 }

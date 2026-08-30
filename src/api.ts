@@ -23,6 +23,7 @@ import type {
   PricingDiff,
   ApplyPriceItem,
   ProjectSummary,
+  ProviderQuotaEntry,
   QuotaResult,
   QuotaSnapshot,
   RegisterRequest,
@@ -33,6 +34,8 @@ import type {
   SessionsPage,
   PetConfig,
   CustomPetEntry,
+  CredentialKind,
+  ProviderCredentialMeta,
   ShortcutConfig,
   Stats,
   SwitchOutcome,
@@ -627,4 +630,91 @@ export async function listCustomPets(): Promise<CustomPetEntry[]> {
  */
 export async function deleteCustomPet(id: string): Promise<void> {
   await invoke("delete_custom_pet", { id });
+}
+
+// ===== 通用凭证体系（Rust provider_credentials 模块，~/.zbar/credentials/）=====
+// invoke 参数名固定 camelCase，与 Tauri v2 对 Rust snake_case 命令参数的
+// 默认匹配约定一致；返回的 CredentialMeta 也是 camelCase（serde rename_all）。
+
+/** 列出某 provider 的全部凭证（元数据 + 掩码，明文 secret 永不下发） */
+export async function listProviderCredentials(
+  provider: string
+): Promise<ProviderCredentialMeta[]> {
+  return invoke<ProviderCredentialMeta[]>("list_provider_credentials", {
+    provider,
+  });
+}
+
+/** 添加一条凭证（secret 后端去首尾空白；label 为空时默认「凭证 N」） */
+export async function addProviderCredential(
+  provider: string,
+  label: string,
+  kind: CredentialKind,
+  secret: string,
+  region?: string | null
+): Promise<ProviderCredentialMeta> {
+  return invoke<ProviderCredentialMeta>("add_provider_credentials", {
+    provider,
+    label,
+    kind,
+    secret,
+    region: region ?? null,
+  });
+}
+
+/** 重命名凭证备注（32 字上限，后端再截断兜底）——已由 update 的 label
+ *  字段承担，独立封装与后端 command 已删除。 */
+
+/**
+ * 更新凭证。字段语义：
+ * - label：传值则更新，null 不变；
+ * - secret：传非空串则更新，null / 空串不变（编辑时留空占位「不修改」）；
+ * - region：传 "cn"/"global" 设置，传空串清除，null 不变。
+ */
+export async function updateProviderCredential(
+  provider: string,
+  id: string,
+  changes: { label?: string | null; secret?: string | null; region?: string | null }
+): Promise<ProviderCredentialMeta> {
+  return invoke<ProviderCredentialMeta>("update_provider_credential", {
+    provider,
+    id,
+    label: changes.label ?? null,
+    secret: changes.secret ?? null,
+    region: changes.region ?? null,
+  });
+}
+
+/** 删除一条凭证（仅删本应用保存的记录，不动 provider 服务端） */
+export async function removeProviderCredential(
+  provider: string,
+  id: string
+): Promise<void> {
+  await invoke("remove_provider_credentials", { provider, id });
+}
+
+/** 重置某 provider 的凭证文件：删除后重建空骨架（持锁执行）。
+ *  凭证文件损坏（JSON 解析失败）导致列表读取失败、增删改全废时的自愈
+ *  入口，会清除该服务全部已存凭证——前端凭证卡二次确认后才调用。 */
+export async function resetProviderCredentials(
+  provider: string
+): Promise<void> {
+  await invoke("reset_provider_credentials", { provider });
+}
+
+/** 该 provider 是否已有凭证（「有凭证自动显示 tab」判断，本地文件级检查） */
+export async function hasProviderCredentials(
+  provider: string
+): Promise<boolean> {
+  return invoke<boolean>("has_provider_credentials", { provider });
+}
+
+// ===== 通用 provider 额度查询（Rust provider_quota 模块，余额型 provider）=====
+
+/** 查询某 provider 全部凭证的额度（每条凭证一个条目；单凭证失败以
+ *  entry.status/error.message 表达，不整体报错；无凭证 / 未接入返回空数组） */
+export async function fetchProviderQuota(
+  provider: string
+): Promise<ProviderQuotaEntry[]> {
+  return invoke<ProviderQuotaEntry[]>("get_provider_quota", { provider });
 }

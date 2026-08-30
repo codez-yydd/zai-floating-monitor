@@ -18,6 +18,8 @@ import type {
   DeviceInfo,
   KimiSnapshot,
   PricingConfig,
+  ProviderCredentialMeta,
+  ProviderQuotaEntry,
   QuotaResult,
   QuotaSnapshot,
   RangePreset,
@@ -42,6 +44,8 @@ import {
   getQuotaHistory,
   getSyncConfig,
   getTodayDelta,
+  fetchProviderQuota,
+  listProviderCredentials,
   listRemoteDevices,
   remoteUsage,
   remoteAgentQuotaSnapshots,
@@ -67,6 +71,7 @@ import {
 } from "./merge";
 import { loadCache, saveCache } from "./cache";
 import { useI18n } from "./i18n";
+import { CREDENTIALS_CHANGED_EVENT } from "./agentVisibility";
 import {
   calculateAgentQuotaDeltas,
   mergeAgentQuotaSnapshots,
@@ -138,6 +143,10 @@ const CURSOR_STALE_MS = 240_000;
 const CODEX_STALE_MS = 60_000;
 const CLAUDE_STALE_MS = 60_000;
 const KIMI_STALE_MS = 60_000;
+
+/** provider 额度缓存老化阈值（与 120s 通用轮询同频）：面板挂载补刷判定
+ *  「无缓存或缓存已老化」用（冷启动 localStorage 恢复的旧缓存也视为旧）。 */
+export const PROVIDER_QUOTA_STALE_MS = 120_000;
 
 interface ZaiEntry {
   stats: Stats | null;
@@ -217,6 +226,30 @@ const EMPTY_KIMI: KimiEntry = {
   ts: 0,
 };
 
+/** 通用 provider 额度缓存条目（provider → {entries, refreshing, ts}）。
+ *  entries 为每条凭证一个 ProviderQuotaEntry（单凭证失败以条目内
+ *  status/message 表达，无全局 error）；不含 secret，可安全持久化。 */
+export interface ProviderQuotaCacheEntry {
+  entries: ProviderQuotaEntry[];
+  refreshing: boolean;
+  ts: number;
+}
+
+/** 冷启动恢复缓存时清掉 refreshing 标志（与 stripRefreshing 同款，但
+ *  条目缺 entries 字段的旧数据一并兜底为空数组）。 */
+function normalizeQuotaCache(
+  map: Record<string, ProviderQuotaCacheEntry>
+): Record<string, ProviderQuotaCacheEntry> {
+  for (const k of Object.keys(map)) {
+    map[k] = {
+      entries: Array.isArray(map[k]?.entries) ? map[k].entries : [],
+      refreshing: false,
+      ts: map[k]?.ts ?? 0,
+    };
+  }
+  return map;
+}
+
 /** 冷启动加载缓存时清掉可能被持久化的 refreshing 标志（崩溃恢复场景）。 */
 function stripRefreshing<T extends { refreshing: boolean }>(
   map: Record<string, T>
@@ -279,6 +312,23 @@ export interface DataCacheValue {
   remoteDevices: DeviceInfo[];
   syncEnabled: boolean;
 
+  // ===== 通用凭证缓存（provider → 元数据列表；不落盘、不轮询，
+  //      仅按需加载 + 凭证增删改事件后失效刷新）=====
+  credentials: Record<string, ProviderCredentialMeta[]>;
+  /** 拉取某 provider 的凭证列表（CredentialsCard 首挂与操作后刷新共用） */
+  refreshCredentials: (provider: string) => Promise<void>;
+
+  // ===== 通用 provider 额度缓存（provider → {entries, refreshing, ts}；
+  //      120s 轮询仅覆盖已有凭证的 provider，手动刷新不受此限制）=====
+  providerQuota: Record<string, ProviderQuotaCacheEntry>;
+  /** 手动刷新某 provider 的额度（面板刷新按钮用；force 供凭证增删改事件
+   *  路径使用：inflight 存在时登记补刷而非丢弃）；查询结果不含 secret，
+   *  完成后顺带刷新该 provider 凭证列表以同步 last_check 徽章 */
+  refreshProviderQuota: (
+    provider: string,
+    opts?: { force?: boolean }
+  ) => Promise<void>;
+
   // ===== 元信息 =====
   /** 当前各数据源中最旧一次成功刷新的时间（最保守的新鲜度下限） */
   lastUpdate: number;
@@ -297,10 +347,13 @@ const Ctx = createContext<DataCacheValue | null>(null);
 interface ProviderProps {
   /** 价格表（合并远程花费时需要） */
   pricing: PricingConfig;
+  /** 凭证驱动 provider 的「已有凭证」状态（App 层探测；120s 额度轮询
+   *  只查 presence 为 true 的 provider，经 ref 读取避免定时器重建） */
+  credentialPresence: Record<string, boolean>;
   children: ReactNode;
 }
 
-export function DataProvider({ pricing, children }: ProviderProps) {
+export function DataProvider({ pricing, credentialPresence, children }: ProviderProps) {
   // ===== i18n：t 走 ref 镜像读取，避免把 t 列进刷新回调依赖导致
   //      语言切换重建全部定时器 / 触发全范围刷新 =====
   const { t } = useI18n();
@@ -376,6 +429,139 @@ export function DataProvider({ pricing, children }: ProviderProps) {
   const [syncConfig, setSyncConfig] = useState<SyncConfig | null>(null);
   const [remoteDevices, setRemoteDevices] = useState<DeviceInfo[]>([]);
   const syncEnabled = !!syncConfig?.enabled && !!syncConfig.device_token;
+
+  // ===== 通用凭证缓存（挂点：内存缓存 + 事件失效刷新，不实现轮询）=====
+  // 只缓存掩码元数据且不进 localStorage——凭证属敏感数据，按需从后端拉取。
+  const [credentials, setCredentials] = useState<
+    Record<string, ProviderCredentialMeta[]>
+  >({});
+  const credentialsInflight = useRef<Set<string>>(new Set());
+
+  const refreshCredentials = useCallback((provider: string): Promise<void> => {
+    if (credentialsInflight.current.has(provider)) return Promise.resolve();
+    credentialsInflight.current.add(provider);
+    return listProviderCredentials(provider)
+      .then((entries) => {
+        setCredentials((prev) => ({ ...prev, [provider]: entries }));
+      })
+      .finally(() => {
+        credentialsInflight.current.delete(provider);
+      });
+  }, []);
+
+  // ===== 通用 provider 额度缓存（120s 独立轮询 + 手动刷新）=====
+  // 条目为每凭证一条 ProviderQuotaEntry（无 secret），可安全持久化：
+  // 冷启动先用缓存渲染配额卡，后台轮询刷新后覆盖。
+  const [providerQuota, setProviderQuota] = useState<
+    Record<string, ProviderQuotaCacheEntry>
+  >(() => normalizeQuotaCache(loadCache<Record<string, ProviderQuotaCacheEntry>>("zbar-provider-quota") ?? {}));
+  const providerQuotaInflight = useRef<Set<string>>(new Set());
+  // 事件驱动 force 刷新的补刷登记：inflight 存在时登记，当前查询完成后
+  // 消费（再查一轮）并从集合移除——一次性登记，天然防无限循环
+  const providerQuotaPendingForce = useRef<Set<string>>(new Set());
+  // providerQuota 的 ref 镜像：presence 补刷判断"是否已有缓存"用
+  const providerQuotaRef = useRef(providerQuota);
+  useEffect(() => {
+    providerQuotaRef.current = providerQuota;
+  }, [providerQuota]);
+  // credentialPresence 的 ref 镜像：120s 定时器 / visibilitychange 读最新值，
+  // 避免把 presence 列入依赖导致定时器反复重建
+  const credentialPresenceRef = useRef(credentialPresence);
+  useEffect(() => {
+    credentialPresenceRef.current = credentialPresence;
+  }, [credentialPresence]);
+
+  /** 刷新某 provider 的额度（120s 轮询与手动刷新共用）：inflight 去重，
+   *  刷新期间保留旧 entries（不清空、无闪烁）；command 整体失败保留旧值
+   *  （单凭证失败已在条目 status/message 里表达，无全局 error 可设）。
+   *  完成后顺带刷新该 provider 凭证列表，让凭证卡的 last_check 徽章
+   *  与本轮回写结论同步。
+   *  force（事件驱动路径专用）：inflight 存在时不丢弃本次刷新——飞行中的
+   *  旧查询持有删除/新增前的凭证列表快照，直接丢弃会短暂留下幽灵额度卡
+   *  （≤120s）；改为登记补刷，当前查询完成后再补一轮（补刷由链内一次性
+   *  消费登记项触发，不再登记，防无限循环）。 */
+  const refreshProviderQuota = useCallback(
+    (provider: string, opts?: { force?: boolean }): Promise<void> => {
+      // 单轮查询（去重检查在外层）：inflight 标记 → 查询 → 回写/保旧
+      const runRound = (): Promise<void> => {
+        providerQuotaInflight.current.add(provider);
+        setProviderQuota((prev) => ({
+          ...prev,
+          [provider]: {
+            entries: prev[provider]?.entries ?? [],
+            refreshing: true,
+            ts: prev[provider]?.ts ?? 0,
+          },
+        }));
+        return fetchProviderQuota(provider)
+          .then((entries) => {
+            setProviderQuota((prev) => ({
+              ...prev,
+              [provider]: { entries, refreshing: false, ts: Date.now() },
+            }));
+          })
+          .catch(() => {
+            setProviderQuota((prev) => ({
+              ...prev,
+              [provider]: {
+                entries: prev[provider]?.entries ?? [],
+                refreshing: false,
+                ts: prev[provider]?.ts ?? 0,
+              },
+            }));
+          })
+          .finally(() => {
+            providerQuotaInflight.current.delete(provider);
+            // 后端查询完成时已回写 last_check，同步凭证列表（本地文件读，开销可忽略）
+            refreshCredentials(provider).catch(() => {});
+          });
+      };
+      if (providerQuotaInflight.current.has(provider)) {
+        if (opts?.force === true) {
+          providerQuotaPendingForce.current.add(provider);
+        }
+        return Promise.resolve();
+      }
+      return runRound().then(() => {
+        // 补刷登记的消费点：本轮结束后立即再查一轮（拿事件后的新凭证列表）；
+        // delete 返回 false 表示无登记，普通路径零开销。补刷轮不触发登记，
+        // 链在此收敛，不会循环
+        if (providerQuotaPendingForce.current.delete(provider)) {
+          return runRound();
+        }
+        return undefined;
+      });
+    },
+    [refreshCredentials]
+  );
+
+  // presence 变化补刷：某 provider 首次探测到有凭证（启动探测完成 / 添加
+  // 首条凭证）时立即查一轮，不等下一个 120s tick
+  useEffect(() => {
+    for (const [provider, has] of Object.entries(credentialPresence)) {
+      if (has && !providerQuotaRef.current[provider]) {
+        void refreshProviderQuota(provider);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [credentialPresence, refreshProviderQuota]);
+
+  // 凭证增删改事件 → 失效刷新该 provider（App 层另行处理 visibility 联动）；
+  // 额度同步补刷一轮：添加凭证后立即可见查询结果，形成操作闭环。
+  // 事件路径带 force：触发时恰有飞行中的旧查询（持有旧凭证列表快照）时，
+  // 完成后补一轮，删除的凭证不会残留幽灵额度卡
+  useEffect(() => {
+    const onCredentialsChanged = (e: Event) => {
+      const provider = (e as CustomEvent<{ provider: string }>).detail?.provider;
+      if (typeof provider === "string" && provider) {
+        refreshCredentials(provider).catch(() => {});
+        void refreshProviderQuota(provider, { force: true });
+      }
+    };
+    window.addEventListener(CREDENTIALS_CHANGED_EVENT, onCredentialsChanged);
+    return () =>
+      window.removeEventListener(CREDENTIALS_CHANGED_EVENT, onCredentialsChanged);
+  }, [refreshCredentials, refreshProviderQuota]);
 
   // ===== 并发保护：同范围正在刷新则跳过，避免重复请求 =====
   const zaiInflight = useRef<Set<string>>(new Set());
@@ -1233,6 +1419,41 @@ export function DataProvider({ pricing, children }: ProviderProps) {
     };
   }, [loadAgentQuotaDeltas]);
 
+  // ===== 通用 provider 额度轮询（120s，独立于上面各循环）：只查已有凭证的
+  //      provider（presence 经 ref 读最新值，定时器不因 presence 变化重建）。
+  //      未接入的 provider 即使有凭证，后端也返回空数组不打网络，轮询无害。 =====
+  useEffect(() => {
+    const tick = () => {
+      for (const [provider, has] of Object.entries(
+        credentialPresenceRef.current
+      )) {
+        if (has) void refreshProviderQuota(provider);
+      }
+    };
+    // 延后首刷（5.5s）错峰：等 App 层 presence 批量探测完成，首轮才有目标
+    const first = setTimeout(tick, 5_500);
+    const timer = setInterval(tick, 120_000);
+    return () => {
+      clearTimeout(first);
+      clearInterval(timer);
+    };
+  }, [refreshProviderQuota]);
+
+  // 窗口恢复可见时补刷全部已有凭证的 provider 额度：隐藏期间 setInterval
+  // 常被节流，恢复后立即补齐（与现有 visibilitychange 补刷同款思路，独立监听）
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      for (const [provider, has] of Object.entries(
+        credentialPresenceRef.current
+      )) {
+        if (has) void refreshProviderQuota(provider);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [refreshProviderQuota]);
+
   // ===== 按需补刷：切到无缓存/过期范围，或配置就绪后补一次。
   //      预设范围通常已被后台任务刷新 → 命中新鲜缓存 → 不请求、秒显。
   //      依赖含 refreshZaiRange/refreshCursorRange/refreshCodexRange：pricing/syncConfig
@@ -1332,6 +1553,10 @@ export function DataProvider({ pricing, children }: ProviderProps) {
   useEffect(() => {
     saveCache("zbar-account-quotas", accountQuotas);
   }, [accountQuotas]);
+  useEffect(() => {
+    // ProviderQuotaEntry 不含 secret（凭证明文永不下发前端），可安全持久化
+    saveCache("zbar-provider-quota", providerQuota);
+  }, [providerQuota]);
 
   // 手动刷新：刷新当前范围（z.ai + Codex + Claude + Cursor + Kimi）一次
   const refresh = useCallback(() => {
@@ -1461,6 +1686,10 @@ export function DataProvider({ pricing, children }: ProviderProps) {
       syncConfig,
       remoteDevices,
       syncEnabled,
+      credentials,
+      refreshCredentials,
+      providerQuota,
+      refreshProviderQuota,
       lastUpdate,
       refreshing,
       refresh,
@@ -1486,6 +1715,10 @@ export function DataProvider({ pricing, children }: ProviderProps) {
       syncConfig,
       remoteDevices,
       syncEnabled,
+      credentials,
+      refreshCredentials,
+      providerQuota,
+      refreshProviderQuota,
       lastUpdate,
       refreshing,
       refresh,

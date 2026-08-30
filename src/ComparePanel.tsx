@@ -42,7 +42,9 @@ interface Props {
   agentVisibility: AgentVisibility;
 }
 
-const COMPARE_AGENTS: AgentId[] = ["zai", "codex", "claude", "cursor", "kimi"];
+/** 对比页参与的 Agent（凭证驱动的新 provider 尚无周额度对比数据，暂不纳入） */
+type CompareAgent = "zai" | "codex" | "claude" | "cursor" | "kimi";
+const COMPARE_AGENTS: CompareAgent[] = ["zai", "codex", "claude", "cursor", "kimi"];
 const AGENT_META: Record<
   AgentId,
   { label: string; brand: BrandIconName; remoteSource?: string }
@@ -52,6 +54,20 @@ const AGENT_META: Record<
   claude: { label: "Claude", brand: "claude", remoteSource: "claude" },
   cursor: { label: "Cursor", brand: "cursor" },
   kimi: { label: "Kimi", brand: "kimi" },
+  // 凭证驱动的新 provider（对比页暂未纳入，元数据先补齐保证类型完整）
+  gemini: { label: "Gemini", brand: "gemini" },
+  grok: { label: "Grok", brand: "grok" },
+  qoder: { label: "Qoder", brand: "qoder" },
+  opencodego: { label: "OpenCode", brand: "opencodego" },
+  minimax: { label: "MiniMax", brand: "minimax" },
+  moonshot: { label: "Moonshot", brand: "moonshot" },
+  deepseek: { label: "DeepSeek", brand: "deepseek" },
+  longcat: { label: "LongCat", brand: "longcat" },
+  mimo: { label: "MiMo", brand: "mimo" },
+  alibaba: { label: "通义灵码", brand: "alibaba" },
+  alibabatoken: { label: "百炼Token包", brand: "alibabatoken" },
+  stepfun: { label: "StepFun", brand: "stepfun" },
+  doubao: { label: "火山引擎", brand: "doubao" },
 };
 
 /** 各 Agent 参与对比的周额度窗口（Z.ai 走 QuotaSnapshot.weekly_pct，不走这里） */
@@ -695,7 +711,7 @@ function buildQuotaSeries(
   slots: WeekSlot[],
   zaiSnapshots: QuotaSnapshot[],
   agentSnapshots: AgentQuotaSnapshot[],
-  enabledAgents: AgentId[],
+  enabledAgents: CompareAgent[],
   accounts: AccountMeta[] | null,
   t: ReturnType<typeof useI18n>["t"]
 ): QuotaSeriesData {

@@ -18,6 +18,7 @@ export const common = {
   "common.save": "保存",
   "common.saving": "保存中…",
   "common.saved": "已保存 ✓",
+  "common.deleting": "删除中…",
 
   // 额度 / 指标通用
   "common.refreshIn": "{time} 后刷新",

@@ -497,7 +497,99 @@ export type StatsTab =
   | "codex"
   | "claude"
   | "cursor"
-  | "kimi";
+  | "kimi"
+  // 凭证驱动的新 provider（通用额度面板，数据接入逐步上线）
+  | "gemini"
+  | "grok"
+  | "qoder"
+  | "opencodego"
+  | "minimax"
+  | "moonshot"
+  | "deepseek"
+  | "longcat"
+  | "mimo"
+  | "alibaba"
+  | "alibabatoken"
+  | "stepfun"
+  | "doubao";
+
+// ===== 通用凭证体系（与 Rust provider_credentials 模块结构一一对应）=====
+
+/** 凭证类型：API Key / Cookie / 长效 Token（按各 provider 的认证方式选择） */
+export type CredentialKind = "apiKey" | "cookie" | "token";
+
+/** 最近一次校验结果（provider 额度查询完成后由后端回写） */
+export interface ProviderCredentialCheck {
+  status: "ok" | "error";
+  /** 校验时刻（ms 时间戳） */
+  at: number;
+  /** 失败原因（不含 secret；成功为 null） */
+  message: string | null;
+}
+
+/** 凭证元数据（list_provider_credentials 返回；只有掩码，永远拿不到明文） */
+export interface ProviderCredentialMeta {
+  id: string;
+  label: string;
+  kind: CredentialKind;
+  /** 掩码展示（前 6 后 4；短串只露首尾 2 位） */
+  maskedSecret: string;
+  /** "cn" | "global" | null（部分 provider 区分国内/国际站） */
+  region: string | null;
+  createdAt: number;
+  updatedAt: number;
+  lastCheck: ProviderCredentialCheck | null;
+}
+
+// ===== 通用额度面板展示模型 =====
+// 纯展示契约：后续各 provider 接入时把其额度接口响应映射为本结构，
+// GenericQuotaPanel 不感知具体 provider 的接口差异。
+
+/** 单个用量窗口（如 5 小时窗 / 周窗 / 月窗） */
+export interface ProviderQuotaWindow {
+  /** 窗口标识（provider 内部去重用，如 "hour5" / "weekly"） */
+  key: string;
+  /** 展示标题（已本地化的短语，如 "5h" / "本周"） */
+  title: string;
+  /** 已用百分比 0-100（缺省时只展示 used/total） */
+  usedPercent?: number;
+  /** 已用量（配窗口 unit 展示） */
+  used?: number;
+  /** 总量 */
+  total?: number;
+  /** 数量单位（"次" / "token" 等，已本地化） */
+  unit?: string;
+  /** 下次重置时间（ms 时间戳） */
+  resetsAt?: number;
+}
+
+/** 按量计费余额（DeepSeek / 通义 Token 等充值型 provider） */
+export interface ProviderQuotaBalance {
+  /** 当前余额 */
+  amount: number;
+  /** 币种符号或代码（"$" / "¥" / "CNY"） */
+  currency: string;
+  /** 累计赠送（有值时与 toppedUp 拆分展示） */
+  granted?: number;
+  /** 累计充值 */
+  toppedUp?: number;
+}
+
+/** 单条凭证的额度展示条目 */
+export interface ProviderQuotaEntry {
+  /** 关联凭证 id（与 ProviderCredentialMeta.id 对应） */
+  credentialId: string;
+  /** 凭证备注名（冗余存储，避免展示层再回查凭证列表） */
+  label: string;
+  status: "ok" | "expired" | "error" | "pending";
+  windows: ProviderQuotaWindow[];
+  balance?: ProviderQuotaBalance;
+  /** 套餐名（"Pro" / "Max5" 等，展示为徽标） */
+  planName?: string;
+  /** 查询失败 / 过期原因 */
+  message?: string;
+  updatedAt: number;
+}
 
 // ===== Codex 用量统计（与 Rust codex 模块结构一一对应）=====
 
@@ -528,7 +620,7 @@ export interface CodexSnapshot {
 
 /** Claude（Anthropic Claude Code）订阅额度（OAuth 实时接口获取） */
 export interface ClaudeRateLimits {
-  /** 订阅类型："pro" / "max" 等（第三方中转模式为 null） */
+  /** 订阅类型："pro" / "max" / "Max 5x" 等（第三方中转模式为 null） */
   plan_type: string | null;
   /** 5 小时会话窗口已用百分比（0-100） */
   primary_pct: number | null;
@@ -538,6 +630,18 @@ export interface ClaudeRateLimits {
   secondary_pct: number | null;
   /** 周窗口重置时间（毫秒时间戳） */
   secondary_reset_at: number | null;
+  /** Sonnet 模型专属周窗口已用百分比（API 返回该窗口才有值，缺省不渲染） */
+  sonnet_weekly_pct?: number | null;
+  /** Sonnet 模型专属周窗口重置时间（毫秒时间戳） */
+  sonnet_weekly_reset_at?: number | null;
+  /** Opus 模型专属周窗口已用百分比（API 返回该窗口才有值，缺省不渲染） */
+  opus_weekly_pct?: number | null;
+  /** Opus 模型专属周窗口重置时间（毫秒时间戳） */
+  opus_weekly_reset_at?: number | null;
+  /** 超额消费已用金额（美元；月度 extra_usage，后端双兼容解析） */
+  extra_used?: number | null;
+  /** 超额消费上限金额（美元；缺省时只展示已用金额） */
+  extra_limit?: number | null;
 }
 
 /** Claude 用量快照（get_claude_usage 返回）。
@@ -547,6 +651,9 @@ export interface ClaudeSnapshot {
   trend: TrendPoint[];
   /** 订阅额度（未登录 claude.ai 订阅 / 第三方中转模式为 null） */
   rate_limits: ClaudeRateLimits | null;
+  /** 授权类额度失败提示（OAuth 凭证缺失 / token 失效，用户可自助修复）；
+   *  网络类失败不产出该字段（保持静默降级）。旧缓存条目无此字段，可选。 */
+  rate_limits_error?: string | null;
 }
 
 // ===== Kimi 用量统计（与 Rust kimi 模块结构一一对应）=====

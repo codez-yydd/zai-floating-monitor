@@ -33,7 +33,10 @@ import { useResetDisplay } from "./resetDisplay";
 
 /** 通用快照形状：Codex / Claude 的快照结构一致（stats/trend 同构 +
  *  同款五字段速率限制），TS 结构化类型直接兼容。monthly 两字段为 Kimi
- *  专属预埋（totalQuota 有值才非空），可选不强制其余 Agent 提供。 */
+ *  专属预埋（totalQuota 有值才非空）；sonnet/opus 周窗口与 extra 两对
+ *  字段为 Claude 专属增量（API 响应存在才有值，缺省不渲染）；其余
+ *  Agent 可选不强制提供。rate_limits_error 仅 Claude 授权类失败产出
+ *  （网络类失败静默），Codex 后端不产出该字段。 */
 export interface AgentUsageSnapshot {
   stats: Stats;
   trend: TrendPoint[];
@@ -47,7 +50,21 @@ export interface AgentUsageSnapshot {
     monthly_pct?: number | null;
     /** 月总额度重置时间（毫秒时间戳，仅 Kimi） */
     monthly_reset_at?: number | null;
+    /** Sonnet 模型专属周窗口已用百分比（仅 Claude，API 返回才有值） */
+    sonnet_weekly_pct?: number | null;
+    /** Sonnet 模型专属周窗口重置时间（毫秒时间戳，仅 Claude） */
+    sonnet_weekly_reset_at?: number | null;
+    /** Opus 模型专属周窗口已用百分比（仅 Claude，API 返回才有值） */
+    opus_weekly_pct?: number | null;
+    /** Opus 模型专属周窗口重置时间（毫秒时间戳，仅 Claude） */
+    opus_weekly_reset_at?: number | null;
+    /** 超额消费已用金额（美元，仅 Claude extra_usage） */
+    extra_used?: number | null;
+    /** 超额消费上限金额（美元；缺省时只展示已用金额） */
+    extra_limit?: number | null;
   } | null;
+  /** 授权类额度失败明确提示（仅 Claude：OAuth 凭证缺失 / token 失效） */
+  rate_limits_error?: string | null;
 }
 
 /** 品牌主题（Tailwind 类名）：Codex 用 emerald、Claude 用 orange、Kimi 用 indigo。 */
@@ -89,6 +106,12 @@ interface Props {
   cacheRateMode: "included" | "separate";
   /** 周额度今日增量；仅周窗口显示。 */
   agentQuotaDelta?: AgentQuotaDelta;
+}
+
+/** 金额展示（美元，保留两位小数；服务端金额已由后端弹性解析为有限数值，
+ *  脏值兜底 0，不因 NaN 渲染破版） */
+function formatUsd(v: number | null | undefined): string {
+  return (typeof v === "number" && Number.isFinite(v) ? v : 0).toFixed(2);
 }
 
 /** 速率限制一行：标签 + 重置倒计时 + 剩余% 在上，剩余进度条在下
@@ -238,6 +261,19 @@ export function AgentUsagePanel({
 
   return (
     <div className="flex-1 overflow-y-auto px-3 py-2.5 page-stack">
+      {/* 授权类失败明确提示（仅 Claude 产出：OAuth 凭证缺失 / token 失效）：
+          有额度行时以额度卡正常展示（该字段必为 null），此处覆盖失败态，
+          区别于网络类失败的静默不渲染 */}
+      {!hasRateRow && snapshot.rate_limits_error && (
+        <SectionCard title={t("stats.rateLimits")}>
+          <p
+            className="text-[10px] text-amber-700/90 leading-relaxed break-all"
+            title={snapshot.rate_limits_error}
+          >
+            ⚠ {snapshot.rate_limits_error}
+          </p>
+        </SectionCard>
+      )}
       {/* 速率限制 */}
       {hasRateRow && rate && (
         <SectionCard
@@ -262,6 +298,37 @@ export function AgentUsagePanel({
                 now={now}
                 delta={agentQuotaDelta}
               />
+            )}
+            {/* 模型专属周窗口（仅 Claude：API 返回 seven_day_opus/sonnet 或
+                limits[].weekly_scoped 才有值，缺省完全不渲染该行） */}
+            {rate.opus_weekly_pct != null && (
+              <AgentQuotaRow
+                label={t("stats.claudeOpusWeekly")}
+                usedPct={rate.opus_weekly_pct}
+                resetAt={rate.opus_weekly_reset_at ?? null}
+                now={now}
+              />
+            )}
+            {rate.sonnet_weekly_pct != null && (
+              <AgentQuotaRow
+                label={t("stats.claudeSonnetWeekly")}
+                usedPct={rate.sonnet_weekly_pct}
+                resetAt={rate.sonnet_weekly_reset_at ?? null}
+                now={now}
+              />
+            )}
+            {/* 超额消费金额行（仅 Claude extra_usage：月度超额金额，美元计价；
+                上限缺失时只展示已用金额） */}
+            {(rate.extra_used != null || rate.extra_limit != null) && (
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[10px] text-slate-600">
+                  {t("stats.claudeExtraUsage")}
+                </span>
+                <span className="num text-[10px] text-slate-700">
+                  ${formatUsd(rate.extra_used)}
+                  {rate.extra_limit != null && ` / $${formatUsd(rate.extra_limit)}`}
+                </span>
+              </div>
             )}
             {/* 月总额度（仅 Kimi 的 totalQuota 有值时出现，无今日增量口径） */}
             {rate.monthly_pct != null && (

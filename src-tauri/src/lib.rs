@@ -3,18 +3,33 @@
 mod accounts;
 mod agent_quota_history;
 mod agent_theme;
+mod alibaba;
+mod alibabatoken;
 mod claude;
 mod codex;
+mod cookie_util;
 mod cursor;
 mod db;
+mod deepseek;
+mod gemini;
+mod grok;
 mod kimi;
+mod longcat;
+mod minimax;
+mod mimo;
+mod moonshot;
+mod opencodego;
 mod pet;
 mod pets;
 mod pricing;
 mod projects;
+mod provider_credentials;
+mod provider_quota;
+mod qoder;
 mod quota;
 mod quota_history;
 mod shortcut;
+mod stepfun;
 mod sync;
 mod zcode_crypto;
 mod zcode_sessions;
@@ -737,12 +752,17 @@ struct ClaudeSnapshot {
     stats: db::Stats,
     trend: Vec<TrendBucket>,
     rate_limits: Option<claude::ClaudeRateLimits>,
+    /// 授权类额度失败的明确提示（OAuth 凭证缺失 / token 被拒 401/403，
+    /// 用户可自助修复）；网络类失败与成功路径为 None（保持既有静默降级）。
+    rate_limits_error: Option<String>,
 }
 
 /// 拉取 Claude 用量快照（本地 projects jsonl 增量导入 + 聚合查询）。
 /// async + spawn_blocking：与 get_codex_usage 同款卸载到阻塞线程池。
-/// 额度只有实时来源（会话文件无 rate_limits，与 Codex 不同）：OAuth 端点
-/// 失败（未登录订阅/网络不通/第三方中转）静默降级为 null，额度块不展示。
+/// 额度只有实时来源（会话文件无 rate_limits，与 Codex 不同）：网络类失败
+/// （未登录订阅/网络不通/第三方中转）静默降级为 null，额度块不展示；
+/// 授权类失败（OAuth 条目缺失 / token 失效）经 rate_limits_error 透出
+/// 明确中文提示，供前端在额度卡位置展示。
 #[tauri::command]
 async fn get_claude_usage(req: ClaudeUsageRequest) -> Result<ClaudeSnapshot, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -751,7 +771,10 @@ async fn get_claude_usage(req: ClaudeUsageRequest) -> Result<ClaudeSnapshot, Str
         let pricing = load_pricing().unwrap_or_default();
 
         let live_rate_limits = claude::fetch_live_rate_limits_with_freshness();
-        let rate_limits = live_rate_limits.clone().ok().and_then(|(live, _)| live);
+        let (rate_limits, rate_limits_error) = match &live_rate_limits {
+            Ok((live, _)) => (live.clone(), None),
+            Err(f) => (None, f.user_message()),
+        };
         if let Ok((Some(live), true)) = live_rate_limits {
             let mut windows = Vec::new();
             if let Some(used_pct) = live.primary_pct {
@@ -796,6 +819,7 @@ async fn get_claude_usage(req: ClaudeUsageRequest) -> Result<ClaudeSnapshot, Str
             stats,
             trend,
             rate_limits,
+            rate_limits_error,
         })
     })
     .await
@@ -2000,6 +2024,11 @@ pub fn run() {
             spawn_title_updater(app.handle().clone());
             spawn_fx_rate_refresher();
 
+            // 旧手动 cookie（~/.zbar/cursor.json 的 cookie_header）一次性迁移到
+            // 凭证体系（~/.zbar/credentials/cursor.json）。幂等：已迁移/无旧值
+            // 时无操作；原文件保留不删。失败仅记日志不阻断启动（下次启动重试）。
+            cursor::migrate_legacy_cookie();
+
             // 应用全局快捷键配置（启动时若已启用则注册）
             let sc = shortcut::load_shortcut();
             if let Err(e) = apply_shortcut(app.handle(), &sc) {
@@ -2123,7 +2152,15 @@ pub fn run() {
             pets::import_pet,
             pets::list_custom_pets,
             pets::delete_custom_pet,
-            pets::get_custom_pet_asset
+            pets::get_custom_pet_asset,
+            provider_credentials::list_provider_credentials,
+            provider_credentials::add_provider_credentials,
+            provider_credentials::update_provider_credential,
+            provider_credentials::remove_provider_credentials,
+            provider_credentials::reset_provider_credentials,
+            provider_credentials::record_credential_check,
+            provider_credentials::has_provider_credentials,
+            provider_quota::get_provider_quota
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

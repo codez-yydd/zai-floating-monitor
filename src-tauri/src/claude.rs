@@ -1208,6 +1208,8 @@ pub fn query_project_sessions(
 
 /// Claude 订阅额度（字段口径与 CodexRateLimits 一致，前端同款渲染）。
 /// plan_type 来自凭据的订阅类型（pro/max 等；中转模式无凭据 → None）。
+/// 模型专属周窗口 / 超额消费为增量字段：API 响应存在才有值（serde 序列化
+/// 时 None 直接省略），旧响应与现有渲染完全不受影响。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClaudeRateLimits {
     pub plan_type: Option<String>,
@@ -1217,41 +1219,130 @@ pub struct ClaudeRateLimits {
     pub secondary_pct: Option<f64>,
     /// 周窗口重置时间（毫秒时间戳）
     pub secondary_reset_at: Option<i64>,
+    /// Sonnet 模型专属周窗口已用百分比（seven_day_sonnet / limits[].weekly_scoped）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sonnet_weekly_pct: Option<f64>,
+    /// Sonnet 模型专属周窗口重置时间（毫秒时间戳）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sonnet_weekly_reset_at: Option<i64>,
+    /// Opus 模型专属周窗口已用百分比（seven_day_opus / limits[].weekly_scoped）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opus_weekly_pct: Option<f64>,
+    /// Opus 模型专属周窗口重置时间（毫秒时间戳）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opus_weekly_reset_at: Option<i64>,
+    /// 超额消费已用金额（美元；月度 extra_usage，字段双兼容解析）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_used: Option<f64>,
+    /// 超额消费上限金额（美元；缺省时前端只展示已用金额）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_limit: Option<f64>,
+}
+
+/// 实时额度失败分类（本地链路缓存与手动凭证链路共用）。授权类失败
+/// （OAuth 条目缺失 / token 被拒）是用户可自助修复的问题，透出明确中文
+/// 提示；网络类失败保持既有静默降级行为（额度块不展示即可）。
+#[derive(Debug, Clone)]
+pub enum ClaudeUsageFailure {
+    /// 凭据中找不到 Claude OAuth 条目（如 Claude Code 2.1.x 钥匙串条目
+    /// 仅含 mcpOAuth / 缺 accessToken）
+    MissingOAuth(String),
+    /// OAuth token 被服务端拒绝（HTTP 401/403）
+    TokenRejected,
+    /// 网络/服务/解析等其他失败（消息仅用于日志与诊断，不透出前端）
+    Other(String),
+}
+
+/// OAuth 条目缺失（含 Claude Code 2.1.x 凭据仅含 mcpOAuth 的场景）的统一
+/// 明确提示：区别于模糊网络错误，用户运行一次 claude 即可自助修复。
+const MISSING_OAUTH_MESSAGE: &str =
+    "未找到 Claude OAuth 凭证，请在终端运行一次 claude 完成登录授权";
+
+/// token 被服务端拒绝（401/403）时的统一提示。
+const TOKEN_REJECTED_MESSAGE: &str = "OAuth Token 已失效，请在终端重新运行 claude 授权";
+
+impl ClaudeUsageFailure {
+    /// 完整中文消息（日志 / 诊断 / 测试断言用）。
+    pub fn message(&self) -> String {
+        match self {
+            ClaudeUsageFailure::MissingOAuth(m) => m.clone(),
+            ClaudeUsageFailure::TokenRejected => TOKEN_REJECTED_MESSAGE.to_string(),
+            ClaudeUsageFailure::Other(e) => e.clone(),
+        }
+    }
+
+    /// 透出给前端的错误提示：仅授权类失败有明确提示（用户可自助修复），
+    /// 网络类失败返回 None（保持静默降级，与既有行为一致）。
+    pub fn user_message(&self) -> Option<String> {
+        match self {
+            ClaudeUsageFailure::Other(_) => None,
+            _ => Some(self.message()),
+        }
+    }
 }
 
 /// Claude Code 登录凭证（只读，绝不修改/刷新——refresh_token 一次性轮换，
 /// 外部写回极易搞坏 Claude Code 登录；token 过期由 Claude Code 自行刷新）。
+#[derive(Debug)]
 struct ClaudeAuth {
     access_token: String,
     /// 订阅类型徽标（subscriptionType 优先，rateLimitTier 兜底）
     plan_label: Option<String>,
 }
 
+/// 订阅套餐展示名归一（纯函数）：rateLimitTier 含乘数档位标识
+/// （default_claude_max_5x / default_claude_max_20x 等）时归一为
+/// "Max 5x"/"Max 20x"——乘数是用户最关心的信息，原始 tier 串过长不适合
+/// 徽标展示；其余原样返回。
+fn plan_display_name(label: &str) -> String {
+    let lower = label.to_ascii_lowercase();
+    if lower.contains("20x") {
+        "Max 20x".to_string()
+    } else if lower.contains("5x") {
+        "Max 5x".to_string()
+    } else {
+        label.to_string()
+    }
+}
+
 /// 解析 .credentials.json / Keychain 里的凭据 JSON。
 /// 结构：{ "claudeAiOauth": { "accessToken", "refreshToken", "expiresAt"(毫秒),
 /// "scopes", "rateLimitTier", "subscriptionType" } }（字段名为 camelCase）。
-fn parse_credentials_json(data: &str) -> Result<ClaudeAuth, String> {
-    let v: serde_json::Value =
-        serde_json::from_str(data).map_err(|e| format!("解析 Claude 凭据失败: {e}"))?;
+/// OAuth 条目缺失（含仅 mcpOAuth）/ 缺 accessToken 归 MissingOAuth 明确
+/// 错误态；JSON 本身解析失败归 Other。
+fn parse_credentials_json(data: &str) -> Result<ClaudeAuth, ClaudeUsageFailure> {
+    let v: serde_json::Value = serde_json::from_str(data)
+        .map_err(|e| ClaudeUsageFailure::Other(format!("解析 Claude 凭据失败: {e}")))?;
     let oauth = v
         .get("claudeAiOauth")
-        .ok_or("Claude 凭据中无 claudeAiOauth（可能仅 MCP OAuth 或第三方中转配置）")?;
+        .ok_or_else(|| ClaudeUsageFailure::MissingOAuth(MISSING_OAUTH_MESSAGE.into()))?;
     let token = oauth
         .get("accessToken")
         .and_then(|t| t.as_str())
+        .map(str::trim)
         .filter(|t| !t.is_empty())
-        .ok_or("Claude 凭据中无 accessToken")?;
-    let plan_label = oauth
+        .ok_or_else(|| ClaudeUsageFailure::MissingOAuth(MISSING_OAUTH_MESSAGE.into()))?;
+    // 套餐名：rateLimitTier 含乘数档位（5x/20x）时优先归一为 "Max 5x"/"Max 20x"
+    //（subscriptionType 通常是 pro/max，不携带乘数信息）；否则沿用既有
+    // subscriptionType → rateLimitTier 优先级原样展示。
+    let tier = oauth
+        .get("rateLimitTier")
+        .and_then(|t| t.as_str())
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+    let sub_type = oauth
         .get("subscriptionType")
         .and_then(|t| t.as_str())
-        .filter(|t| !t.is_empty())
-        .or_else(|| {
-            oauth
-                .get("rateLimitTier")
-                .and_then(|t| t.as_str())
-                .filter(|t| !t.is_empty())
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+    let plan_label = tier
+        .filter(|t| {
+            let lower = t.to_ascii_lowercase();
+            lower.contains("5x") || lower.contains("20x")
         })
-        .map(|s| s.to_string());
+        .map(plan_display_name)
+        .or_else(|| sub_type.map(|s| s.to_string()))
+        .or_else(|| tier.map(|t| t.to_string()));
     Ok(ClaudeAuth {
         access_token: token.to_string(),
         plan_label,
@@ -1264,7 +1355,7 @@ fn parse_credentials_json(data: &str) -> Result<ClaudeAuth, String> {
 /// 2. macOS 上凭据在登录钥匙串（服务名 "Claude Code-credentials"），经
 ///    `security find-generic-password -w` 读取（只读；若系统弹窗询问则取消，
 ///    读取失败按"无凭据"降级，不影响 token 统计）。
-fn load_claude_auth() -> Result<ClaudeAuth, String> {
+fn load_claude_auth() -> Result<ClaudeAuth, ClaudeUsageFailure> {
     let root = std::env::var("ZBAR_CLAUDE_HOME")
         .ok()
         .map(|v| v.trim().to_string())
@@ -1277,8 +1368,9 @@ fn load_claude_auth() -> Result<ClaudeAuth, String> {
         });
     let path = root.join(".credentials.json");
     if path.exists() {
-        let data = std::fs::read_to_string(&path)
-            .map_err(|e| format!("读取 .credentials.json 失败: {e}"))?;
+        let data = std::fs::read_to_string(&path).map_err(|e| {
+            ClaudeUsageFailure::Other(format!("读取 .credentials.json 失败: {e}"))
+        })?;
         return parse_credentials_json(&data);
     }
 
@@ -1297,17 +1389,36 @@ fn load_claude_auth() -> Result<ClaudeAuth, String> {
         }
     }
 
-    Err("未找到 Claude 登录凭证（.credentials.json / 钥匙串），订阅额度不可用（token 统计不受影响）".into())
+    Err(ClaudeUsageFailure::Other(
+        "未找到 Claude 登录凭证（.credentials.json / 钥匙串），订阅额度不可用（token 统计不受影响）"
+            .into(),
+    ))
 }
 
 /// /api/oauth/usage 响应结构（窗口字段名与 Codex 的 wham/usage 不同：
 /// 这里是 five_hour/seven_day + utilization 百分比(0-100) + resets_at ISO8601）。
+/// 增量字段：seven_day_sonnet / seven_day_opus 模型专属周窗口、extra_usage
+/// 月度超额消费、limits[] 补充窗口数组——均为 Option/默认值，旧响应不受影响。
 #[derive(Debug, Deserialize)]
 struct OAuthUsageResponse {
     #[serde(default)]
     five_hour: Option<OAuthWindow>,
     #[serde(default)]
     seven_day: Option<OAuthWindow>,
+    /// Sonnet 模型专属周窗口（部分套餐返回；结构与 seven_day 相同）
+    #[serde(default)]
+    seven_day_sonnet: Option<OAuthWindow>,
+    /// Opus 模型专属周窗口（结构与 seven_day 相同）
+    #[serde(default)]
+    seven_day_opus: Option<OAuthWindow>,
+    /// 月度超额消费（金额结构；字段名做 used/limit 双兼容尝试，见
+    /// parse_extra_usage——保留原始 Value 以兼容字段名差异）
+    #[serde(default)]
+    extra_usage: Option<serde_json::Value>,
+    /// limits[] 补充窗口（带 weekly_scoped 标识的模型专属行，见
+    /// apply_scoped_weekly_limit）
+    #[serde(default)]
+    limits: Vec<OAuthLimit>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1320,27 +1431,157 @@ struct OAuthWindow {
     resets_at: Option<String>,
 }
 
+/// limits[] 条目（CodexBar 口径）：weekly_scoped=true 表示模型专属周窗口，
+/// 进模型专属行；scope 含 "All models" 的通用行留在主周行，不进专属槽位。
+#[derive(Debug, Deserialize)]
+struct OAuthLimit {
+    #[serde(default)]
+    utilization: Option<f64>,
+    #[serde(default)]
+    resets_at: Option<String>,
+    /// 窗口类型（"five_hour" / "seven_day"；仅周窗口类型进模型专属周行）
+    #[serde(default)]
+    limit_type: Option<String>,
+    /// 归属范围（"All models" / "Opus" / "Sonnet"，大小写不敏感识别）
+    #[serde(default)]
+    scope: Option<String>,
+    /// 模型专属周窗口标识
+    #[serde(default)]
+    weekly_scoped: Option<bool>,
+}
+
+/// extra_usage（月度超额消费，美元）→ (已用, 上限)。字段名按 utilization
+/// 响应惯例做双兼容尝试：已用取 spend|used，上限取 limit|monthly_limit；
+/// 两者全缺（或结构不是对象）→ None（不渲染附加信息行）。
+fn parse_extra_usage(v: &serde_json::Value) -> Option<(Option<f64>, Option<f64>)> {
+    let used = crate::provider_quota::num_any(v, &["spend", "used"]);
+    let limit = crate::provider_quota::num_any(v, &["limit", "monthly_limit"]);
+    (used.is_some() || limit.is_some()).then_some((used, limit))
+}
+
+/// limits[] 中带 weekly_scoped 标识的单条模型专属周窗口补位（纯函数）。
+/// 只在对应槽位为空时写入（顶层 seven_day_opus/sonnet 已验证字段优先）；
+/// "All models" 通用 scope 与非周窗口类型（five_hour）跳过，无法识别模型名
+/// 的 scoped 条目保守忽略（不猜测归属）。
+fn apply_scoped_weekly_limit(
+    sonnet: &mut Option<OAuthWindow>,
+    opus: &mut Option<OAuthWindow>,
+    limit: &OAuthLimit,
+) {
+    if limit.weekly_scoped != Some(true) || limit.utilization.is_none() {
+        return;
+    }
+    // 仅周窗口类型进模型专属周行（five_hour 的 scoped 条目不展示）
+    if matches!(limit.limit_type.as_deref(), Some(t)
+        if !t.contains("seven_day") && !t.contains("weekly"))
+    {
+        return;
+    }
+    let Some(scope) = limit.scope.as_deref().map(str::to_ascii_lowercase) else {
+        return;
+    };
+    if scope.contains("all model") || scope.contains("all_model") {
+        return; // 通用 scope 留主周行（seven_day），不进模型专属槽位
+    }
+    let slot = if scope.contains("opus") {
+        opus
+    } else if scope.contains("sonnet") {
+        sonnet
+    } else {
+        return;
+    };
+    if slot.is_none() {
+        *slot = Some(OAuthWindow {
+            utilization: limit.utilization,
+            resets_at: limit.resets_at.clone(),
+        });
+    }
+}
+
+/// /api/oauth/usage 响应体 → 结构化额度（纯函数，本地登录态链路与手动凭证
+/// 链路共用；plan_type 由调用方按凭证信息填充，此处恒为 None）。
+pub(crate) fn parse_usage_response(
+    body: &str,
+) -> Result<ClaudeRateLimits, ClaudeUsageFailure> {
+    let mut resp: OAuthUsageResponse = serde_json::from_str(body).map_err(|e| {
+        ClaudeUsageFailure::Other(format!("解析实时额度失败: {e}"))
+    })?;
+    // limits[] 中带 weekly_scoped 标识的模型专属窗口补位（顶层字段优先）
+    let limits = std::mem::take(&mut resp.limits);
+    for limit in &limits {
+        apply_scoped_weekly_limit(&mut resp.seven_day_sonnet, &mut resp.seven_day_opus, limit);
+    }
+
+    let conv =
+        |w: &OAuthWindow| -> (Option<f64>, Option<i64>) { (w.utilization, w.resets_at.as_deref().and_then(parse_ts_ms)) };
+    let (primary_pct, primary_reset_at) = resp
+        .five_hour
+        .as_ref()
+        .map(conv)
+        .unwrap_or((None, None));
+    let (secondary_pct, secondary_reset_at) = resp
+        .seven_day
+        .as_ref()
+        .map(conv)
+        .unwrap_or((None, None));
+    let (sonnet_weekly_pct, sonnet_weekly_reset_at) = resp
+        .seven_day_sonnet
+        .as_ref()
+        .map(conv)
+        .unwrap_or((None, None));
+    let (opus_weekly_pct, opus_weekly_reset_at) = resp
+        .seven_day_opus
+        .as_ref()
+        .map(conv)
+        .unwrap_or((None, None));
+    let (extra_used, extra_limit) = resp
+        .extra_usage
+        .as_ref()
+        .and_then(parse_extra_usage)
+        .unwrap_or((None, None));
+
+    Ok(ClaudeRateLimits {
+        plan_type: None,
+        primary_pct,
+        primary_reset_at,
+        secondary_pct,
+        secondary_reset_at,
+        sonnet_weekly_pct,
+        sonnet_weekly_reset_at,
+        opus_weekly_pct,
+        opus_weekly_reset_at,
+        extra_used,
+        extra_limit,
+    })
+}
+
 /// 实时额度结果缓存（成功 60s / 失败 15s 双 TTL）。
 /// 成功缓存：前端多命令高频触发，防止打爆端点（该端点对高频请求返回 429）。
 /// 失败负缓存：无凭据/网络不通时同样会被高频触发，一轮 30s tick 内并发
 /// 4~5 个真实 HTTP 请求（各 10s 超时）既浪费也可能触发 Anthropic 限流，
 /// 故失败结果也短暂缓存。
-static LIVE_LIMITS_CACHE: OnceLock<Mutex<Option<(std::time::Instant, Result<Option<ClaudeRateLimits>, String>)>>> =
-    OnceLock::new();
+static LIVE_LIMITS_CACHE: OnceLock<
+    Mutex<Option<(std::time::Instant, Result<Option<ClaudeRateLimits>, ClaudeUsageFailure>)>>,
+> = OnceLock::new();
+
+/// OAuth 额度端点（Claude Code CLI 内部同款；需 claude.ai 订阅 OAuth 登录，
+/// 需带 anthropic-beta: oauth-2025-04-20 头）。
+const OAUTH_USAGE_ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage";
 
 /// 拉取 Claude 订阅额度：GET https://api.anthropic.com/api/oauth/usage
-/// （Claude Code CLI 内部同款端点，需 claude.ai 订阅 OAuth 登录；需带
-/// anthropic-beta: oauth-2025-04-20 头。第三方中转/API Key 模式无凭据，
-/// 返回 Err 由调用方降级为不展示额度块）。
+/// （第三方中转/API Key 模式无凭据，返回 Err 由调用方降级为不展示额度块）。
 #[allow(dead_code)]
 pub fn fetch_live_rate_limits() -> Result<Option<ClaudeRateLimits>, String> {
-    fetch_live_rate_limits_with_freshness().map(|(limits, _)| limits)
+    fetch_live_rate_limits_with_freshness()
+        .map(|(limits, _)| limits)
+        .map_err(|f| f.message())
 }
 
 /// 拉取实时额度并标记本次结果是否来自新的 HTTP 请求。
 /// 缓存命中仍可用于当前进度展示，但不应作为新的历史采样。
+/// 失败按 ClaudeUsageFailure 分类（授权类可透出明确提示，网络类静默降级）。
 pub fn fetch_live_rate_limits_with_freshness(
-) -> Result<(Option<ClaudeRateLimits>, bool), String> {
+) -> Result<(Option<ClaudeRateLimits>, bool), ClaudeUsageFailure> {
     let cache = LIVE_LIMITS_CACHE.get_or_init(|| Mutex::new(None));
     {
         let guard = cache.lock().unwrap_or_else(|p| p.into_inner());
@@ -1358,7 +1599,29 @@ pub fn fetch_live_rate_limits_with_freshness(
     result.map(|limits| (limits, true))
 }
 
-fn fetch_live_rate_limits_uncached() -> Result<Option<ClaudeRateLimits>, String> {
+/// 用指定 OAuth access token 请求 usage 端点（本地登录态链路与手动凭证
+/// 链路共用；agent 由调用方构造，各自决定超时）。返回展平后的
+/// (HTTP 状态码, 响应体)；401/403 归类为 TokenRejected，网络层失败归 Other。
+fn fetch_usage_raw(
+    agent: &ureq::Agent,
+    token: &str,
+) -> Result<(u16, Option<String>), ClaudeUsageFailure> {
+    let resp = agent
+        .get(OAUTH_USAGE_ENDPOINT)
+        .set("Authorization", &format!("Bearer {token}"))
+        .set("Accept", "application/json")
+        .set("anthropic-beta", "oauth-2025-04-20")
+        .set("User-Agent", "claude-code/2.1.0")
+        .call();
+    let (status, body) =
+        crate::provider_quota::flatten_response(resp).map_err(ClaudeUsageFailure::Other)?;
+    if status == 401 || status == 403 {
+        return Err(ClaudeUsageFailure::TokenRejected);
+    }
+    Ok((status, body))
+}
+
+fn fetch_live_rate_limits_uncached() -> Result<Option<ClaudeRateLimits>, ClaudeUsageFailure> {
     let auth = load_claude_auth()?;
     let mut builder = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(10));
@@ -1372,49 +1635,162 @@ fn fetch_live_rate_limits_uncached() -> Result<Option<ClaudeRateLimits>, String>
     }
     let agent = builder.build();
 
-    let resp: OAuthUsageResponse = agent
-        .get("https://api.anthropic.com/api/oauth/usage")
-        .set("Authorization", &format!("Bearer {}", auth.access_token))
-        .set("Accept", "application/json")
-        .set("anthropic-beta", "oauth-2025-04-20")
-        .set("User-Agent", "claude-code/2.1.0")
-        .call()
-        .map_err(|e| format!("实时额度请求失败: {e}"))?
-        .into_json()
-        .map_err(|e| format!("解析实时额度失败: {e}"))?;
+    let (status, body) = fetch_usage_raw(&agent, &auth.access_token)?;
+    if status != 200 {
+        return Err(ClaudeUsageFailure::Other(format!(
+            "实时额度查询失败（HTTP {status}）"
+        )));
+    }
+    let mut limits = parse_usage_response(body.as_deref().unwrap_or_default())?;
+    // 套餐名：parse_credentials_json 已做乘数档位归一（Max 5x / Max 20x）
+    limits.plan_type = auth.plan_label;
 
-    let conv = |w: &OAuthWindow| -> (Option<f64>, Option<i64>) {
-        (
-            w.utilization,
-            w.resets_at
-                .as_deref()
-                .and_then(parse_ts_ms),
+    let has_window = limits.primary_pct.is_some()
+        || limits.secondary_pct.is_some()
+        || limits.opus_weekly_pct.is_some()
+        || limits.sonnet_weekly_pct.is_some();
+    Ok(has_window.then_some(limits))
+}
+
+// ===== 手动凭证多账号查询（provider_quota 的 "claude" 分支调用）=====
+// 用户在凭证体系（~/.zbar/credentials/claude.json）手动添加 kind=token 条目
+// （sk-ant-oat 开头的 OAuth access token，可从本机/另一台机器的
+// .credentials.json 的 claudeAiOauth.accessToken 取得）。本地登录态不并入
+// 本链路——本地路径继续走 fetch_live_rate_limits（带 60s 缓存与历史采样），
+// 避免同一 token 双查询。
+
+/// ClaudeRateLimits → 通用额度面板窗口列表（手动凭证条目卡渲染用）。
+/// 标题与 grok.rs 同为硬编码中文短语（后端产出、前端直展示）；
+/// 百分比窗口 clamp 0-100，超额消费为金额行（limit 缺失时前端只展示金额）。
+fn quota_windows_from_limits(
+    limits: &ClaudeRateLimits,
+) -> Vec<crate::provider_quota::ProviderQuotaWindow> {
+    use crate::provider_quota::ProviderQuotaWindow;
+    let pct_window = |key: &str, title: &str, pct: Option<f64>, reset: Option<i64>| {
+        pct.map(|p| ProviderQuotaWindow {
+            key: key.to_string(),
+            title: title.to_string(),
+            used_percent: Some(p.clamp(0.0, 100.0)),
+            used: None,
+            total: None,
+            unit: None,
+            resets_at: reset,
+        })
+    };
+    let mut out = Vec::new();
+    for w in [
+        pct_window("hour5", "5 小时", limits.primary_pct, limits.primary_reset_at),
+        pct_window("weekly", "本周", limits.secondary_pct, limits.secondary_reset_at),
+        pct_window("opus_weekly", "Opus 周额度", limits.opus_weekly_pct, limits.opus_weekly_reset_at),
+        pct_window("sonnet_weekly", "Sonnet 周额度", limits.sonnet_weekly_pct, limits.sonnet_weekly_reset_at),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        out.push(w);
+    }
+    if limits.extra_used.is_some() || limits.extra_limit.is_some() {
+        out.push(ProviderQuotaWindow {
+            key: "extra_usage".to_string(),
+            title: "超额消费".to_string(),
+            used_percent: None,
+            used: limits.extra_used,
+            total: limits.extra_limit,
+            unit: Some("$".to_string()),
+            resets_at: None,
+        });
+    }
+    out
+}
+
+/// 手动凭证的单条查询结果 → 展示条目（纯函数，单测直接构造输入）。
+/// 分支：401/403(expired「Token 已失效」；fetch_usage_raw 归 TokenRejected，
+/// 此处对原始状态码做同款兜底) > 网络失败(error) > 非 200(error)
+/// > 解析失败/缺用量(error) > 成功(ok + 各窗口 + 超额消费行)。
+/// 手动 token 无凭据 JSON，套餐名无来源（plan_name=None）。
+fn entry_from_usage_raw(
+    cred_id: &str,
+    label: &str,
+    raw: &Result<(u16, Option<String>), ClaudeUsageFailure>,
+) -> crate::provider_quota::ProviderQuotaEntry {
+    use crate::provider_quota::{now_ms, ProviderQuotaEntry};
+    let fail = |status: &str, message: String| ProviderQuotaEntry {
+        credential_id: cred_id.to_string(),
+        label: label.to_string(),
+        status: status.to_string(),
+        windows: vec![],
+        balance: None,
+        plan_name: None,
+        message: Some(message),
+        updated_at: now_ms(),
+    };
+    let token_rejected = || {
+        fail(
+            "expired",
+            "Token 已失效，请重新获取并更新 sk-ant-oat 凭证".to_string(),
         )
     };
-    let (primary_pct, primary_reset_at) = resp
-        .five_hour
-        .as_ref()
-        .map(conv)
-        .unwrap_or((None, None));
-    let (secondary_pct, secondary_reset_at) = resp
-        .seven_day
-        .as_ref()
-        .map(conv)
-        .unwrap_or((None, None));
-
-    let result = if primary_pct.is_some() || secondary_pct.is_some() {
-        Some(ClaudeRateLimits {
-            plan_type: auth.plan_label,
-            primary_pct,
-            primary_reset_at,
-            secondary_pct,
-            secondary_reset_at,
-        })
-    } else {
-        None
+    let (status, body) = match raw {
+        Ok(pair) => pair.clone(),
+        Err(f) => {
+            let (status, message) = match f {
+                ClaudeUsageFailure::TokenRejected => (
+                    "expired",
+                    "Token 已失效，请重新获取并更新 sk-ant-oat 凭证".to_string(),
+                ),
+                ClaudeUsageFailure::MissingOAuth(m) => ("error", m.clone()),
+                ClaudeUsageFailure::Other(e) => ("error", format!("Claude 额度{e}")),
+            };
+            return fail(status, message);
+        }
     };
+    if status == 401 || status == 403 {
+        return token_rejected();
+    }
+    if status != 200 {
+        return fail("error", format!("Claude 额度查询失败（HTTP {status}）"));
+    }
+    let limits = match parse_usage_response(body.as_deref().unwrap_or_default()) {
+        Ok(l) => l,
+        Err(ClaudeUsageFailure::Other(e)) => return fail("error", e),
+        Err(_) => return fail("error", "Claude 额度响应解析失败".to_string()),
+    };
+    let windows = quota_windows_from_limits(&limits);
+    if windows.is_empty() {
+        return fail("error", "Claude 额度响应缺少用量数据".to_string());
+    }
+    ProviderQuotaEntry {
+        credential_id: cred_id.to_string(),
+        label: label.to_string(),
+        status: "ok".to_string(),
+        windows,
+        balance: None,
+        plan_name: limits.plan_type.clone(),
+        message: None,
+        updated_at: now_ms(),
+    }
+}
 
-    Ok(result)
+/// 查询手动凭证（kind=token）的订阅额度：逐条调同一 OAuth usage 端点
+/// （Bearer <手动token> + 同 beta 头），解析复用 parse_usage_response。
+/// 单条失败产出 error/expired 条目，不阻塞其他条目；secret 为空的凭证跳过。
+pub(crate) fn fetch_manual_quota_entries(
+    snapshots: &[crate::provider_credentials::CredentialQuerySnapshot],
+) -> Vec<crate::provider_quota::ProviderQuotaEntry> {
+    let agent = crate::provider_quota::quota_http_agent();
+    let mut entries = Vec::new();
+    for cred in snapshots {
+        let token = cred.secret.trim();
+        if token.is_empty() {
+            continue;
+        }
+        entries.push(entry_from_usage_raw(
+            &cred.id,
+            &cred.label,
+            &fetch_usage_raw(&agent, token),
+        ));
+    }
+    entries
 }
 
 // ===== 诊断 =====
@@ -1489,8 +1865,61 @@ mod tests {
         .expect("仅 rateLimitTier 的凭据解析失败");
         assert_eq!(tier_only.plan_label.as_deref(), Some("max5"));
 
-        assert!(parse_credentials_json(r#"{"claudeAiOauth":{}}"#).is_err());
-        assert!(parse_credentials_json(r#"{"mcpOAuth":{}}"#).is_err());
+        // 无 claudeAiOauth（如 Claude Code 2.1.x 钥匙串条目仅含 mcpOAuth）/
+        // 有条目但缺 accessToken：均为明确错误态（用户可运行 claude 自助修复），
+        // 而非模糊网络错误
+        for broken in [r#"{"mcpOAuth":{}}"#, r#"{"claudeAiOauth":{}}"#] {
+            let err = parse_credentials_json(broken).expect_err("应报 MissingOAuth");
+            match err {
+                ClaudeUsageFailure::MissingOAuth(m) => {
+                    assert_eq!(m, MISSING_OAUTH_MESSAGE);
+                }
+                other => panic!("应为 MissingOAuth，实际 {other:?}"),
+            }
+        }
+        // JSON 本身损坏 → Other（静默降级，不误导为授权问题）
+        assert!(matches!(
+            parse_credentials_json("not json"),
+            Err(ClaudeUsageFailure::Other(_))
+        ));
+    }
+
+    /// 套餐推断增强：rateLimitTier 含乘数标识（default_claude_max_5x /
+    /// default_claude_max_20x）→ 套餐名归一为 "Max 5x"/"Max 20x"；
+    /// 无乘数的 tier/subscriptionType 沿用既有优先级原样展示。
+    #[test]
+    fn plan_tier_multiplier_label() {
+        let parse_label = |json: &str| {
+            parse_credentials_json(json)
+                .expect("凭据解析失败")
+                .plan_label
+        };
+        assert_eq!(
+            parse_label(r#"{"claudeAiOauth":{"accessToken":"t","rateLimitTier":"default_claude_max_5x"}}"#).as_deref(),
+            Some("Max 5x")
+        );
+        assert_eq!(
+            parse_label(r#"{"claudeAiOauth":{"accessToken":"t","rateLimitTier":"default_claude_max_20x"}}"#).as_deref(),
+            Some("Max 20x")
+        );
+        // subscriptionType 通常不携带乘数；tier 含乘数时乘数优先
+        assert_eq!(
+            parse_label(
+                r#"{"claudeAiOauth":{"accessToken":"t","rateLimitTier":"default_claude_max_20x","subscriptionType":"max"}}"#
+            )
+            .as_deref(),
+            Some("Max 20x")
+        );
+        // 无乘数：沿用 subscriptionType → rateLimitTier 优先级
+        assert_eq!(
+            parse_label(r#"{"claudeAiOauth":{"accessToken":"t","rateLimitTier":"max","subscriptionType":"pro"}}"#).as_deref(),
+            Some("pro")
+        );
+        // "max5"（无 x）不是乘数标识，原样保留
+        assert_eq!(
+            parse_label(r#"{"claudeAiOauth":{"accessToken":"t","rateLimitTier":"max5"}}"#).as_deref(),
+            Some("max5")
+        );
     }
 
     /// OAuth 额度响应解析口径：utilization 百分比直读、resets_at ISO 转毫秒。
@@ -1506,6 +1935,180 @@ mod tests {
         // 毫秒换算用纪元原点验证（数值直观不易错），另验证带毫秒小数的时间可解析
         assert_eq!(parse_ts_ms("1970-01-01T00:00:00Z"), Some(0));
         assert!(parse_ts_ms("2026-06-12T19:12:00.759Z").is_some());
+    }
+
+    /// 模型专属周窗口：顶层 seven_day_sonnet / seven_day_opus 字段映射到
+    /// ClaudeRateLimits 增量字段（含 resets_at 毫秒转换）。
+    #[test]
+    fn model_scoped_weekly_windows() {
+        let limits = parse_usage_response(
+            r#"{"five_hour":{"utilization":10.0,"resets_at":"2026-08-14T12:00:00Z"},
+                "seven_day":{"utilization":20.0,"resets_at":"2026-08-17T03:30:00Z"},
+                "seven_day_sonnet":{"utilization":33.0,"resets_at":"2026-08-17T04:00:00Z"},
+                "seven_day_opus":{"utilization":55.5,"resets_at":"2026-08-18T05:00:00Z"}}"#,
+        )
+        .expect("解析失败");
+        assert_eq!(limits.primary_pct, Some(10.0));
+        assert_eq!(limits.secondary_pct, Some(20.0));
+        assert_eq!(limits.sonnet_weekly_pct, Some(33.0));
+        assert_eq!(
+            limits.sonnet_weekly_reset_at,
+            parse_ts_ms("2026-08-17T04:00:00Z")
+        );
+        assert_eq!(limits.opus_weekly_pct, Some(55.5));
+        assert_eq!(
+            limits.opus_weekly_reset_at,
+            parse_ts_ms("2026-08-18T05:00:00Z")
+        );
+        assert_eq!(limits.extra_used, None);
+        assert_eq!(limits.extra_limit, None);
+    }
+
+    /// limits[] 补充窗口（CodexBar 口径）：weekly_scoped=true 且 scope 可识别
+    /// 模型（Opus/Sonnet）→ 补进对应模型专属槽位；"All models" 通用 scope 留
+    /// 主周行不覆盖；five_hour 类型的 scoped 条目忽略；顶层字段优先；
+    /// 无法识别模型名的 scoped 条目保守忽略。
+    #[test]
+    fn weekly_scoped_limits_fill() {
+        let limits = parse_usage_response(
+            r#"{"five_hour":{"utilization":10.0},
+                "seven_day":{"utilization":20.0},
+                "limits":[
+                    {"limit_type":"five_hour","scope":"All models","utilization":11.0},
+                    {"limit_type":"seven_day","scope":"All models","utilization":21.0},
+                    {"limit_type":"seven_day","scope":"Opus","weekly_scoped":true,"utilization":66.0,"resets_at":"2026-08-18T05:00:00Z"},
+                    {"limit_type":"seven_day","scope":"Sonnet","weekly_scoped":true,"utilization":44.0}
+                ]}"#,
+        )
+        .expect("解析失败");
+        // 通用 "All models" scope 不覆盖主周行（仍是 seven_day 的 20.0）
+        assert_eq!(limits.secondary_pct, Some(20.0));
+        assert_eq!(limits.primary_pct, Some(10.0));
+        assert_eq!(limits.opus_weekly_pct, Some(66.0));
+        assert_eq!(limits.sonnet_weekly_pct, Some(44.0));
+
+        // 顶层 seven_day_opus 优先，limits 里的 scoped 条目不覆盖已有槽位
+        let limits = parse_usage_response(
+            r#"{"seven_day_opus":{"utilization":5.0},
+                "limits":[{"limit_type":"seven_day","scope":"Opus","weekly_scoped":true,"utilization":99.0},
+                          {"limit_type":"seven_day","scope":"Haiku","weekly_scoped":true,"utilization":7.0}]}"#,
+        )
+        .expect("解析失败");
+        assert_eq!(limits.opus_weekly_pct, Some(5.0));
+        assert_eq!(limits.sonnet_weekly_pct, None); // 未知模型名保守忽略
+    }
+
+    /// extra_usage（月度超额消费）：spend/limit 与 used/limit 双兼容取值，
+    /// 两者全缺 / 无该字段 → None（不渲染附加信息行）。
+    #[test]
+    fn extra_usage_parsing() {
+        // spend/limit 结构
+        let limits =
+            parse_usage_response(r#"{"extra_usage":{"spend":3.2,"limit":35}}"#).expect("解析失败");
+        assert_eq!(limits.extra_used, Some(3.2));
+        assert_eq!(limits.extra_limit, Some(35.0));
+        // used/limit 兼容形态 + 仅一侧有值
+        let limits =
+            parse_usage_response(r#"{"extra_usage":{"used":1.5}}"#).expect("解析失败");
+        assert_eq!(limits.extra_used, Some(1.5));
+        assert_eq!(limits.extra_limit, None);
+        // 字符串数字（数值解析弹性，与 provider_quota::parse_flexible_f64 同口径）
+        let limits =
+            parse_usage_response(r#"{"extra_usage":{"spend":"12.5","monthly_limit":"100"}}"#)
+                .expect("解析失败");
+        assert_eq!(limits.extra_used, Some(12.5));
+        assert_eq!(limits.extra_limit, Some(100.0));
+        // 全缺 / 空对象 / 无字段 → None
+        let limits =
+            parse_usage_response(r#"{"extra_usage":{"other":1}}"#).expect("解析失败");
+        assert_eq!(limits.extra_used, None);
+        assert_eq!(limits.extra_limit, None);
+        let limits = parse_usage_response(r#"{"five_hour":{"utilization":1.0}}"#).expect("解析失败");
+        assert_eq!(limits.extra_used, None);
+    }
+
+    /// 旧响应零回归：只有 five_hour/seven_day 的历史响应，解析后增量字段
+    /// 全部为 None，主字段口径与改造前一致。
+    #[test]
+    fn legacy_response_backward_compat() {
+        let limits = parse_usage_response(
+            r#"{"five_hour":{"utilization":42.5,"resets_at":"2026-08-14T12:00:00Z"},
+                "seven_day":{"utilization":13.0,"resets_at":"2026-08-17T03:30:00Z"}}"#,
+        )
+        .expect("解析失败");
+        assert_eq!(limits.plan_type, None);
+        assert_eq!(limits.primary_pct, Some(42.5));
+        assert_eq!(limits.secondary_pct, Some(13.0));
+        assert_eq!(limits.sonnet_weekly_pct, None);
+        assert_eq!(limits.sonnet_weekly_reset_at, None);
+        assert_eq!(limits.opus_weekly_pct, None);
+        assert_eq!(limits.opus_weekly_reset_at, None);
+        assert_eq!(limits.extra_used, None);
+        assert_eq!(limits.extra_limit, None);
+        // 坏 JSON → Other（本地链路静默降级）
+        assert!(matches!(
+            parse_usage_response("not json"),
+            Err(ClaudeUsageFailure::Other(_))
+        ));
+    }
+
+    /// 手动凭证条目状态映射：401/403 → expired「Token 已失效」；网络失败 /
+    /// 非 200 / 坏 JSON → error；完整成功响应 → ok + 各窗口 + 超额消费金额行。
+    #[test]
+    fn manual_entry_status_mapping() {
+        for status in [401u16, 403] {
+            let raw = Ok((status, Some("denied".to_string())));
+            let entry = entry_from_usage_raw("abc-1", "Max 订阅", &raw);
+            assert_eq!(entry.status, "expired", "HTTP {status} 应判定为 expired");
+            assert!(
+                entry.message.as_deref().unwrap().contains("Token 已失效"),
+                "expired 消息应包含 Token 已失效"
+            );
+            assert!(entry.windows.is_empty());
+        }
+        // 网络层失败 → error
+        let raw: Result<(u16, Option<String>), ClaudeUsageFailure> =
+            Err(ClaudeUsageFailure::Other("网络错误或服务不可用: timeout".into()));
+        let entry = entry_from_usage_raw("abc-1", "手动", &raw);
+        assert_eq!(entry.status, "error");
+        assert!(entry.message.unwrap().contains("网络错误"));
+        // 500 → error 带状态码
+        let entry = entry_from_usage_raw("abc-1", "手动", &Ok((500, Some("oops".into()))));
+        assert_eq!(entry.status, "error");
+        assert!(entry.message.unwrap().contains("500"));
+        // 200 坏 JSON → error
+        let entry = entry_from_usage_raw("abc-1", "手动", &Ok((200, Some("not json".into()))));
+        assert_eq!(entry.status, "error");
+    }
+
+    /// 手动凭证成功路径：ok 条目携带 hour5/weekly/opus/sonnet 四个百分比窗口
+    /// （标题为后端硬编码中文短语）与超额消费金额行。
+    #[test]
+    fn manual_entry_ok_windows() {
+        let body = r#"{"five_hour":{"utilization":10.0,"resets_at":"2026-08-14T12:00:00Z"},
+            "seven_day":{"utilization":20.0,"resets_at":"2026-08-17T03:30:00Z"},
+            "seven_day_opus":{"utilization":66.0},
+            "seven_day_sonnet":{"utilization":44.0},
+            "extra_usage":{"spend":3.2,"limit":35}}"#;
+        let entry = entry_from_usage_raw("cred-9", "另一台机器", &Ok((200, Some(body.into()))));
+        assert_eq!(entry.status, "ok");
+        assert_eq!(entry.message, None);
+        let keys: Vec<&str> = entry.windows.iter().map(|w| w.key.as_str()).collect();
+        assert_eq!(keys, vec!["hour5", "weekly", "opus_weekly", "sonnet_weekly", "extra_usage"]);
+        assert_eq!(entry.windows[0].title, "5 小时");
+        assert_eq!(entry.windows[1].title, "本周");
+        assert_eq!(entry.windows[2].title, "Opus 周额度");
+        assert_eq!(entry.windows[3].title, "Sonnet 周额度");
+        // 超额消费金额行：used/total 为美元金额，unit 为 $
+        let extra = &entry.windows[4];
+        assert_eq!(extra.title, "超额消费");
+        assert_eq!(extra.used, Some(3.2));
+        assert_eq!(extra.total, Some(35.0));
+        assert_eq!(extra.unit.as_deref(), Some("$"));
+        assert_eq!(extra.used_percent, None);
+        // 响应无任何窗口 → error（缺用量数据）
+        let entry = entry_from_usage_raw("cred-9", "手动", &Ok((200, Some("{}".into()))));
+        assert_eq!(entry.status, "error");
     }
 
     /// 冒烟测试：对本机真实 projects 目录执行增量导入并做全范围查询，
@@ -1561,7 +2164,7 @@ mod tests {
                 .map(|r| (r.local_rowid, r.computed_total_tokens))
                 .collect::<Vec<_>>()
         );
-        // 实时额度（OAuth）：本机未登录订阅/网络不通时应返回 Err（额度块不展示）。
+        // 实时额度（OAuth）：本机未登录订阅/网络不通时应返回 Err（额度块不展示）
         match fetch_live_rate_limits() {
             Ok(v) => eprintln!("[test] 实时额度: {v:?}"),
             Err(e) => eprintln!("[test] 实时额度不可用（不展示额度块）: {e}"),

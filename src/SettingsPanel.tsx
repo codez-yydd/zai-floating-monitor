@@ -51,9 +51,12 @@ import {
 } from "./layout";
 import {
   AGENT_VISIBILITY_OPTIONS,
+  isCredentialAgent,
+  isLocalAgent,
   type AgentId,
   type AgentVisibility,
 } from "./agentVisibility";
+import { ADD_SERVICE_EVENT } from "./AddServiceMenu";
 import { useI18n } from "./i18n";
 
 interface Props {
@@ -399,34 +402,71 @@ export function SettingsPanel({
         </SettingsCard>
 
         <SettingsCard title={t("settings.sources")} action={<span className="text-[9px] text-slate-500">{t("settings.instant")}</span>} hint={t("settings.sourcesHint")}>
-            {AGENT_VISIBILITY_OPTIONS.map((agent) => (
-              <label
-                key={agent.id}
-                className="flex items-center justify-between gap-2 rounded-md px-1.5 py-1 hover:bg-slate-900/5 cursor-pointer transition-colors"
-              >
-                <span className="flex items-center gap-1.5 min-w-0">
-                  <BrandIcon
-                    brand={agent.id}
-                    className="h-3.5 w-3.5 shrink-0 text-slate-700/65"
-                  />
-                  <span className="min-w-0">
-                    <span className="block text-[10px] text-slate-900/80">
-                      {agent.label}
+            {/* 本地采集（首批 5 个）/ 凭证接入（新 provider）两组展示，
+                组标题为轻量小节分隔，样式对齐卡内其他说明文字 */}
+            {(
+              [
+                ["settings.groupLocal", AGENT_VISIBILITY_OPTIONS.slice(0, 5)],
+                ["settings.groupCredential", AGENT_VISIBILITY_OPTIONS.slice(5)],
+              ] as const
+            ).map(([groupKey, agents]) => (
+              <div key={groupKey}>
+                <div className="text-[9px] font-medium text-slate-700/55 mt-2 mb-0.5 first:mt-0">
+                  {t(groupKey)}
+                </div>
+                {agents.map((agent) => (
+                  <label
+                    key={agent.id}
+                    className="flex items-center justify-between gap-2 rounded-md px-1.5 py-1 hover:bg-slate-900/5 cursor-pointer transition-colors"
+                  >
+                    <span className="flex items-center gap-1.5 min-w-0">
+                      <BrandIcon
+                        brand={agent.id}
+                        className="h-3.5 w-3.5 shrink-0 text-slate-700/65"
+                      />
+                      <span className="min-w-0">
+                        <span className="block text-[10px] text-slate-900/80">
+                          {agent.label}
+                        </span>
+                        <span className="block text-[9px] text-slate-700/45 truncate">
+                          {t(agent.descriptionKey)}
+                        </span>
+                      </span>
                     </span>
-                    <span className="block text-[9px] text-slate-700/45 truncate">
-                      {t(agent.descriptionKey)}
+                    <span className="flex items-center gap-1.5 shrink-0">
+                      {/* 凭证型服务（非本地直读型）的行内快捷入口：跳转统计页
+                          并直接打开该服务的添加凭证表单；阻断 label 隐式激活，
+                          避免点按钮时翻转右侧展示开关 */}
+                      {isCredentialAgent(agent.id) && !isLocalAgent(agent.id) && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            e.preventDefault();
+                            window.dispatchEvent(
+                              new CustomEvent(ADD_SERVICE_EVENT, {
+                                detail: agent.id,
+                              })
+                            );
+                          }}
+                          className="text-[9px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-700/80 hover:bg-sky-500/20 transition-colors"
+                          title={t("credentials.add")}
+                        >
+                          {t("credentials.add")}
+                        </button>
+                      )}
+                      <input
+                        type="checkbox"
+                        checked={agentVisibility[agent.id]}
+                        onChange={(e) =>
+                          onAgentVisibilityChange(agent.id, e.target.checked)
+                        }
+                        className="accent-sky-500 h-3 w-3 shrink-0"
+                      />
                     </span>
-                  </span>
-                </span>
-                <input
-                  type="checkbox"
-                  checked={agentVisibility[agent.id]}
-                  onChange={(e) =>
-                    onAgentVisibilityChange(agent.id, e.target.checked)
-                  }
-                  className="accent-sky-500 h-3 w-3 shrink-0"
-                />
-              </label>
+                  </label>
+                ))}
+              </div>
             ))}
         </SettingsCard>
 

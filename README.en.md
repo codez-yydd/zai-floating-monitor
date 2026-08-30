@@ -46,6 +46,7 @@ Both repositories have exactly the same content — the latest version can be ob
   - [Dynamic wallpaper](#dynamic-wallpaper)
   - [Cursor Stats](#cursor-stats)
   - [Kimi Stats](#kimi-stats)
+  - [Credentials](#credentials)
   - [Weekly Compare & Reports](#weekly-compare--reports)
   - [Multi-device Sync](#multi-device-sync)
 - [🧮 Billing Rules](#-billing-rules)
@@ -105,8 +106,16 @@ Both repositories have exactly the same content — the latest version can be ob
 **🤖 Multi-service usage stats**
 
 - **Coding Plan quota monitor** — subscribers can view the **5-hour window**, **weekly quota** and **MCP monthly quota** progress bars at the top of the panel; the color escalates with usage (green → amber → red) and shows a reset countdown. Credentials and the API endpoint are read **automatically** from the local ZCode client's signed-in state (`~/.zcode/v2/config.json`) — zero configuration.
-- **🖥 Cursor usage stats** — reads the local Cursor app's login credentials automatically; tracks Pro / Auto / API plan quotas and per-model token costs, with USD costs converted at the FX rate and merged into the summary view.
+- **🖥 Cursor usage stats** — reads the local Cursor app's login credentials automatically; tracks Pro / Auto / API plan quotas and per-model token costs, with USD costs converted at the FX rate and merged into the summary view. Cookies previously entered manually on the old settings page are **migrated automatically** into the credential system (a seamless upgrade for existing users), and multiple cookies can be added for stacked multi-account display.
+- **🟠 Claude usage stats** — parses local `~/.claude/projects` session records to tally token usage and cost (sub-agent sessions included, deduplicated by message); on machines signed in to claude.ai, subscription quotas are fetched live (**5-hour session / weekly**, hidden automatically in third-party relay modes). Subscription enhancements: **model-specific weekly quota windows** (separate Opus / Sonnet pools), an **extra usage** spend row, a clear error with re-auth guidance when credentials expire, plan-tier detection (Max 5x / Max 20x), and manual `sk-ant-oat` tokens for additional accounts (stacked in an "Other accounts" section).
 - **🌙 Kimi usage stats** — parses local `~/.kimi-code/sessions` session records (`wire.jsonl`) to tally token usage, cost and **token output speed (TPS)**; on machines signed in to the Kimi Code CLI, local credentials are detected automatically (OAuth expiry renewed in the background — no configuration needed) to fetch subscription quotas live: **5-hour rolling window / cycle quota** progress bars with reset countdowns, booster wallet balance and official membership tier name; a Kimi API Key can also be configured manually in settings.
+- **🔑 Universal credential manager** — every agent panel has a built-in credentials entry (no credential config on the settings page): each service accepts **multiple credentials** (multi-account / multi-subscription, displayed stacked), with notes (to distinguish plan tiers), editing and deletion; some services also offer a **region** choice (China / International). Credentials are stored in plain text locally under `~/.zbar/credentials/` (directory mode 700, file mode 600, this machine only). See [Credentials](#credentials).
+- **🧩 12 new subscription / quota services** — credential-driven and hidden by default; each appears once a credential is added or the service is enabled, grouped by credential type:
+  - **API Key** (create a key in the service console and paste it): DeepSeek (balance), Moonshot (balance), MiniMax (5-hour + weekly dual windows), Tongyi Lingma Coding Plan (5h / weekly / monthly windows)
+  - **Manual cookie** (copy the cookie from browser DevTools and paste): Qoder (LLM credits), LongCat by Meituan (token quota + booster packs), Xiaomi MiMo (balance + credits), Alibaba Cloud Bailian token packs (5h / 7-day windows, Team / Personal variants)
+  - **Manual token** (grab the token from the console and paste): StepFun (rate / credits dual-plan variants, Oasis-Token)
+  - **Local read** (zero credentials): Gemini (reads the Gemini CLI signed-in state, auto token refresh), Grok (reads the grok CLI signed-in state, multiple tokens supported), OpenCode Go (usage estimated from a local SQLite DB)
+- **🫘 Volcengine (Ark)** — entry reserved; quota queries coming soon.
 - **🧭 Multi-service summary view** — summary / Z.ai / Cursor / Kimi tabs: total cost & tokens across services, subscription quota cards, hourly trend chart and model ranking.
 - **⚡ Speed & TTFT** — average output speed (tok/s) and first-token latency (TTFT) from per-call durations, with noise filtering (whole-block delivery detection, timing-outlier rejection). Available on ZCode / Claude / Kimi panels (Kimi's tok/s is a TPS estimate derived from request durations with no TTFT, so first-token latency is hidden there just like Claude; Codex / Cursor data sources carry no duration and auto-hide these columns).
 - **🎯 Current model** — each agent panel shows the "current model" (latest model actually used + relative time); the summary page shows it per service group.
@@ -346,6 +355,26 @@ Reads the local Cursor app's login credentials automatically (Cursor must be ins
 
 Parses local `~/.kimi-code/sessions` session records (`wire.jsonl`). Prerequisite: the Kimi Code CLI is installed, signed in, and has produced local sessions. Subscription quotas are fetched live via the locally detected credentials (renewed automatically in the background when OAuth expires), or you can configure a Kimi API Key manually in settings.
 
+### Credentials
+
+Services that cannot be auto-detected from the local sign-in state (ZCode / Codex / Claude / Kimi / Cursor, etc.) are connected via **credentials**. The credentials entry lives inside each agent panel (not on the settings page).
+
+- **Stacked credentials** — each service accepts multiple credentials (multi-account / multi-subscription), displayed stacked in the panel; notes (e.g. to distinguish plan tiers), editing and deletion are supported.
+- **Region** — some services offer a China / International region choice.
+- **Local storage** — one JSON file per service, stored in plain text under `~/.zbar/credentials/` (directory mode 700, file mode 600); this machine only, never synced.
+
+By credential type:
+
+| Type | How to obtain | Services |
+| --- | --- | --- |
+| API Key | Create a key in the service console and paste it | DeepSeek (balance), Moonshot (balance), MiniMax (5-hour + weekly dual windows), Tongyi Lingma Coding Plan (5h / weekly / monthly windows) |
+| Cookie | Copy the cookie from browser DevTools (F12) and paste | Qoder (LLM credits), LongCat by Meituan (token quota + booster packs), Xiaomi MiMo (balance + credits), Alibaba Cloud Bailian token packs (5h / 7-day windows, Team / Personal variants) |
+| Token | Grab the token from the console and paste | StepFun (rate / credits dual-plan variants, Oasis-Token) |
+
+Three more services work with **zero credentials** by reading local state: Gemini (Gemini CLI signed-in state, auto token refresh), Grok (grok CLI signed-in state, multiple tokens), OpenCode Go (usage estimated from a local SQLite DB).
+
+For the exact steps, follow the in-app guidance shown when adding a credential.
+
 ### Weekly Compare & Reports
 
 - **Weekly quota compare** — based on local quota snapshots (`~/.zbar/quota_history.jsonl`, append-only, 90-day rolling retention); compare quota usage across reset cycles, with cross-device merge.
@@ -414,6 +443,7 @@ The panel and the menu-bar title share the same Rust calculation logic, so the n
 - The DB connection uses `SQLITE_OPEN_READ_ONLY` — **strictly read-only**, never touching ZCode data.
 - Pricing config is stored only in the user-local `~/.zbar/` directory; nothing is uploaded.
 - **Account switching** saves ZCode login snapshots under `~/.zbar/accounts/` (directory mode 700, file mode 600) for one-click switching. Snapshots **stay on this machine only** and are never synced. This app is an unofficial community tool, not affiliated with Zhipu AI.
+- Service **credentials** are stored under `~/.zbar/credentials/` (directory mode 700, file mode 600); they stay on this machine and are never synced.
 - **Multi-device sync** is optional and off by default. When enabled, only model names, token counts and timestamps are synced — **never code or conversation content**. The server is self-hosted; the data stays on your own server.
 - The panel hides on blur; the window stays alive (not destroyed) and can be re-summoned by clicking the tray.
 

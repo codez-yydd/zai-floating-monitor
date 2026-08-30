@@ -46,11 +46,29 @@ export const settings = {
   "settings.instant": "即时生效",
   "settings.sourcesHint":
     "关闭后仅从统计标签和汇总中隐藏，不影响本地采集与设备同步。",
+  // 分组小节标题：首批 5 个为本地采集，其余 13 个为凭证接入
+  "settings.groupLocal": "本地采集",
+  "settings.groupCredential": "凭证接入",
   "settings.agentZaiDesc": "Z.ai 用量与 Coding Plan 额度",
   "settings.agentCodexDesc": "OpenAI Codex CLI 用量与额度",
   "settings.agentClaudeDesc": "Claude Code 用量与订阅额度",
   "settings.agentCursorDesc": "Cursor 编辑器用量与套餐额度",
   "settings.agentKimiDesc": "Kimi Code CLI 用量与订阅额度",
+  // 凭证驱动的新 provider：默认隐藏，启用或添加凭证后展示对应标签
+  //（额度接入逐步上线）
+  "settings.agentGeminiDesc": "Gemini 订阅额度（默认隐藏，启用或添加凭证后显示）",
+  "settings.agentGrokDesc": "Grok 订阅额度（默认隐藏，启用或添加凭证后显示）",
+  "settings.agentQoderDesc": "Qoder 订阅额度（默认隐藏，启用或添加凭证后显示）",
+  "settings.agentOpencodegoDesc": "OpenCode 用量与额度（默认隐藏，启用或添加凭证后显示）",
+  "settings.agentMinimaxDesc": "MiniMax 订阅额度（默认隐藏，启用或添加凭证后显示）",
+  "settings.agentMoonshotDesc": "Moonshot 订阅额度（默认隐藏，启用或添加凭证后显示）",
+  "settings.agentDeepseekDesc": "DeepSeek 余额与用量（默认隐藏，启用或添加凭证后显示）",
+  "settings.agentLongcatDesc": "LongCat 订阅额度（默认隐藏，启用或添加凭证后显示）",
+  "settings.agentMimoDesc": "MiMo 订阅额度（默认隐藏，启用或添加凭证后显示）",
+  "settings.agentAlibabaDesc": "通义灵码 Coding Plan 订阅额度（默认隐藏，启用或添加凭证后显示）",
+  "settings.agentAlibabatokenDesc": "百炼 Token 包余额（默认隐藏，启用或添加凭证后显示）",
+  "settings.agentStepfunDesc": "StepFun 订阅额度（默认隐藏，启用或添加凭证后显示）",
+  "settings.agentDoubaoDesc": "火山引擎订阅额度（默认隐藏，启用或添加凭证后显示）",
 
   // ===== 重置时间展示 =====
   "settings.resetDisplay": "重置时间展示",

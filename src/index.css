@@ -353,6 +353,13 @@ body,
 /* 内容区间距 */
 .page-stack { display: flex; flex-direction: column; gap: 0.625rem; }
 
+/* tab 栏横向溢出时的右缘渐隐提示（StatsPanel 检测到可滚动才启用，
+ * mask 让最右 28px 内容淡出，暗示右侧还有更多 tab） */
+.tab-fade-right {
+  mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+}
+
 /* 滚动条 */
 ::-webkit-scrollbar {
   width: 5px;
@@ -405,6 +412,12 @@ body,
   --color-amber-600: #fbbf24;
   --color-amber-700: #fcd34d;
   --color-orange-700: #fdba74;
+  --color-blue-600: #60a5fa;
+  --color-blue-700: #93c5fd;
+  --color-teal-600: #2dd4bf;
+  --color-teal-700: #5eead4;
+  /* 亮黄深档文字提亮为 yellow-300（LongCat 激活态在深底上可读） */
+  --color-yellow-700: #fde047;
   --color-red-600: #f87171;
   --color-red-700: #fca5a5;
   --color-rose-600: #fb7185;

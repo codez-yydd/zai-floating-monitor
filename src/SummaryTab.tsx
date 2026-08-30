@@ -143,6 +143,20 @@ function AgentCostCard({
     claude: "claude",
     cursor: "cursor",
     kimi: "kimi",
+    // 凭证驱动的新 provider（汇总卡片暂只汇总前 5 个，键先补齐保证类型完整）
+    gemini: "gemini",
+    grok: "grok",
+    qoder: "qoder",
+    opencodego: "opencodego",
+    minimax: "minimax",
+    moonshot: "moonshot",
+    deepseek: "deepseek",
+    longcat: "longcat",
+    mimo: "mimo",
+    alibaba: "alibaba",
+    alibabatoken: "alibabatoken",
+    stepfun: "stepfun",
+    doubao: "doubao",
   };
   const brand = brandMap[agent.id];
 

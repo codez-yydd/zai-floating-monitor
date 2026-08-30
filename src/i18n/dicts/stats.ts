@@ -41,6 +41,12 @@ export const stats = {
   "stats.claudeNotFound": "未检测到 Claude Code",
   "stats.claudeNotFoundHint":
     "请安装并使用 Anthropic Claude Code 产生本地会话记录\n（~/.claude/projects）后再查看",
+  // Claude 订阅额度增量窗口（API 返回该窗口才有值，缺省不渲染）
+  "stats.claudeOpusWeekly": "Opus 周额度",
+  "stats.claudeSonnetWeekly": "Sonnet 周额度",
+  "stats.claudeExtraUsage": "超额消费",
+  "stats.claudeOtherAccounts": "其他账号",
+  "stats.cursorOtherAccounts": "其他账号",
   "stats.kimiNotFound": "未检测到 Kimi Code",
   "stats.kimiNotFoundHint":
     "请安装并使用 Kimi Code CLI 产生本地会话记录\n（~/.kimi-code/sessions）后再查看",

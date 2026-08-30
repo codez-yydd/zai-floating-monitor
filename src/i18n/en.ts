@@ -15,6 +15,7 @@ import { settings } from "./dicts/settings";
 import { theme } from "./dicts/theme";
 import { projects } from "./dicts/projects";
 import { share } from "./dicts/share";
+import { credentials } from "./dicts/credentials";
 import { zh } from "./zh";
 
 export const en: typeof zh = {
@@ -34,6 +35,7 @@ export const en: typeof zh = {
     "common.save": "Save",
     "common.saving": "Saving…",
     "common.saved": "Saved ✓",
+    "common.deleting": "Deleting…",
 
     // 额度 / 指标通用
     "common.refreshIn": "Refreshes in {time}",
@@ -135,6 +137,12 @@ export const en: typeof zh = {
     "stats.claudeNotFound": "No Claude Code detected",
     "stats.claudeNotFoundHint":
       "Install and run Claude Code to create local sessions\n(~/.claude/projects), then check back",
+    // Claude subscription quota incremental windows (rendered only when the API returns them)
+    "stats.claudeOpusWeekly": "Opus weekly",
+    "stats.claudeSonnetWeekly": "Sonnet weekly",
+    "stats.claudeExtraUsage": "Extra usage",
+    "stats.claudeOtherAccounts": "Other accounts",
+    "stats.cursorOtherAccounts": "Other accounts",
     "stats.kimiNotFound": "No Kimi Code detected",
     "stats.kimiNotFoundHint":
       "Install and run Kimi Code CLI to create local sessions\n(~/.kimi-code/sessions), then check back",
@@ -431,11 +439,29 @@ export const en: typeof zh = {
     "settings.instant": "Instant",
     "settings.sourcesHint":
       "Hiding a source only removes its tab and summary card; local collection and device sync are unaffected.",
+    // Group subtitles: first 5 agents are local collection, the other 13 are credential-based
+    "settings.groupLocal": "Local collection",
+    "settings.groupCredential": "Credential-based",
     "settings.agentZaiDesc": "Z.ai usage & Coding Plan quota",
     "settings.agentCodexDesc": "Codex CLI usage & quotas",
     "settings.agentClaudeDesc": "Claude Code usage & plan quotas",
     "settings.agentCursorDesc": "Cursor usage & plan quotas",
     "settings.agentKimiDesc": "Kimi Code CLI usage & subscription quota",
+    // Credential-based providers: hidden by default; shown once enabled or a
+    // credential is added (quota integrations rolling out progressively)
+    "settings.agentGeminiDesc": "Gemini subscription quota (hidden by default; shown once enabled or a credential is added)",
+    "settings.agentGrokDesc": "Grok subscription quota (hidden by default; shown once enabled or a credential is added)",
+    "settings.agentQoderDesc": "Qoder subscription quota (hidden by default; shown once enabled or a credential is added)",
+    "settings.agentOpencodegoDesc": "OpenCode usage & quota (hidden by default; shown once enabled or a credential is added)",
+    "settings.agentMinimaxDesc": "MiniMax subscription quota (hidden by default; shown once enabled or a credential is added)",
+    "settings.agentMoonshotDesc": "Moonshot subscription quota (hidden by default; shown once enabled or a credential is added)",
+    "settings.agentDeepseekDesc": "DeepSeek balance & usage (hidden by default; shown once enabled or a credential is added)",
+    "settings.agentLongcatDesc": "LongCat subscription quota (hidden by default; shown once enabled or a credential is added)",
+    "settings.agentMimoDesc": "MiMo subscription quota (hidden by default; shown once enabled or a credential is added)",
+    "settings.agentAlibabaDesc": "Alibaba Coding Plan (Tongyi Lingma) quota (hidden by default; shown once enabled or a credential is added)",
+    "settings.agentAlibabatokenDesc": "Alibaba Token Plan balance (hidden by default; shown once enabled or a credential is added)",
+    "settings.agentStepfunDesc": "StepFun subscription quota (hidden by default; shown once enabled or a credential is added)",
+    "settings.agentDoubaoDesc": "Volcengine subscription quota (hidden by default; shown once enabled or a credential is added)",
 
     "settings.resetDisplay": "Reset time display",
     "settings.resetCountdown": "Countdown",
@@ -801,4 +827,166 @@ export const en: typeof zh = {
     "share.loadFail": "Failed to load data: {msg}",
     "share.regenerate": "Regenerate",
   } satisfies typeof share),
+
+  ...({
+    // ===== Credential card =====
+    "credentials.cardTitle": "Credentials",
+    "credentials.emptyTitle": "No credentials yet",
+    "credentials.add": "Add credential",
+    "credentials.edit": "Edit credential",
+    "credentials.countBadge": "{n}",
+
+    // ===== Add / edit dialog =====
+    "credentials.label": "Label",
+    "credentials.labelPlaceholder": "e.g. Pro plan",
+    "credentials.labelHint": "Up to 32 characters, to tell credentials apart",
+    "credentials.secret": "Secret",
+    "credentials.secretPlaceholderApiKey": "Paste the API key",
+    "credentials.secretPlaceholderCookie": "Paste the cookie string",
+    "credentials.secretPlaceholderToken": "Paste the access token",
+    "credentials.secretKeepHint": "Leave empty to keep the saved secret unchanged",
+    "credentials.secretHintCookie":
+      "Paste the Cookie request header or the full cURL command copied from your browser",
+    "credentials.secretShow": "Show secret",
+    "credentials.secretHide": "Hide secret",
+    "credentials.region": "Region",
+    "credentials.regionNone": "Default",
+    "credentials.regionCn": "China",
+    "credentials.regionGlobal": "Global",
+    "credentials.secretRequired": "Please enter the secret",
+    "credentials.labelRequired": "Label is required",
+
+    // ===== Kind badges =====
+    "credentials.kindApiKey": "API Key",
+    "credentials.kindCookie": "Cookie",
+    "credentials.kindToken": "Token",
+
+    // ===== Check status / time =====
+    "credentials.checkOk": "Verified",
+    "credentials.checkFail": "Check failed",
+    "credentials.notChecked": "Not checked",
+    "credentials.updatedAt": "Updated {time}",
+
+    // ===== Delete confirm / feedback =====
+    "credentials.deleteTitle": "Delete credential",
+    "credentials.deleteConfirm": "Delete \"{name}\"? This cannot be undone.",
+    "credentials.saved": "Saved ✓",
+    "credentials.saveFail": "Save failed: {msg}",
+    "credentials.loadFail": "Failed to load credentials: {msg}",
+    "credentials.resetFile": "Reset credentials file",
+    "credentials.resetTitle": "Reset credentials file",
+    "credentials.resetConfirm":
+      "This clears every stored credential for this service and rebuilds an empty file (to repair a corrupted credentials file). Deleted credentials cannot be recovered. Reset now?",
+    "credentials.resetDone": "Reset ✓",
+    "credentials.resetFail": "Reset failed: {msg}",
+
+    // ===== Add-service entry (tab-bar "+" button / service picker / settings shortcut) =====
+    "credentials.addService": "Add service",
+    "credentials.addServiceTitle": "Add subscription service",
+    "credentials.addServiceHint":
+      "Pick a service and paste its credential; add as many subscriptions as you need",
+    "credentials.comingSoon": "Quota coming soon",
+    "credentials.entriesCount": "{n} credentials",
+
+    // ===== Generic quota panel =====
+    "credentials.quotaPending":
+      "Quota queries are coming soon. Your credential is ready; usage and quota will appear here once connected.",
+    "credentials.quotaRefreshing": "Querying quota, please wait…",
+    "credentials.entryError": "Query failed",
+    "credentials.entryExpired": "Expired",
+    "credentials.entryPending": "Pending",
+    "credentials.balance": "Balance",
+    "credentials.balanceGranted": "{amount} granted",
+    "credentials.balanceToppedUp": "{amount} topped up",
+
+    // ===== Quota window titles (QuotaEntryCard maps by window.key; the titles
+    //      sent by the Rust provider modules are hardcoded Chinese, translated
+    //      here for the English UI. Unknown keys fall back to the Rust title.)
+    //      zh picks the most common wording across providers. =====
+    "credentials.windowTitle.hour5": "5-hour",
+    "credentials.windowTitle.weekly": "Weekly",
+    "credentials.windowTitle.monthly": "Monthly",
+    "credentials.windowTitle.interval": "Current window",
+    "credentials.windowTitle.credits": "Credits",
+    "credentials.windowTitle.quota": "Token quota",
+    "credentials.windowTitle.fuel": "Fuel pack",
+    "credentials.windowTitle.sub_credits": "Subscription credits",
+    "credentials.windowTitle.topup_credits": "Top-up credits",
+    "credentials.windowTitle.opus_weekly": "Opus weekly",
+    "credentials.windowTitle.sonnet_weekly": "Sonnet weekly",
+    "credentials.windowTitle.extra_usage": "Extra usage",
+    "credentials.windowTitle.pro": "Pro model",
+    "credentials.windowTitle.flash": "Flash model",
+    "credentials.windowTitle.auto": "Auto",
+    "credentials.windowTitle.api": "API",
+
+    // ===== Optional-credentials hint for local-type providers (data read from
+    //      local CLI login state / DB; credentials are not required) =====
+    "credentials.localEmptyTitle": "Local data source, no credentials needed",
+    "credentials.localEmptyHint":
+      "This service reads the local CLI login state automatically; no credentials required. You can still add one manually.",
+
+    // ===== Per-provider guides (placeholders until each service is wired up) =====
+    // guideBrief.<provider> is the first sentence shown in the empty state
+    // (where to sign in / get the key); the full guide.<provider> (region
+    // prerequisites, required cookie items, etc.) is revealed via "View setup steps"
+    "credentials.guideMore": "View setup steps",
+    "credentials.guideLess": "Hide steps",
+    "credentials.guideBrief.claude":
+      "Copy the sk-ant-oat OAuth access token from ~/.claude/.credentials.json on this machine and paste it here.",
+    "credentials.guideBrief.cursor":
+      "Sign in to cursor.com and paste the Cookie, or the local Cursor login state is read automatically.",
+    "credentials.guideBrief.grok":
+      "Install the Grok CLI and run grok login to read the local login state automatically; you can also copy the key from ~/.grok/auth.json and add it as a Token.",
+    "credentials.guideBrief.qoder":
+      "Sign in to Qoder (global: qoder.com / China: qoder.com.cn).",
+    "credentials.guideBrief.minimax":
+      "Create a Coding Plan API key under \"API Keys\" on the MiniMax platform.",
+    "credentials.guideBrief.moonshot":
+      "Create an API key under \"API Key Management\" on the Moonshot platform.",
+    "credentials.guideBrief.deepseek":
+      "Create an API key under \"API Keys\" on the DeepSeek platform (platform.deepseek.com).",
+    "credentials.guideBrief.longcat":
+      "Sign in to longcat.chat and open the platform/usage page.",
+    "credentials.guideBrief.mimo":
+      "Sign in to the Xiaomi MiMo platform (platform.xiaomimimo.com).",
+    "credentials.guideBrief.alibaba":
+      "Create a DashScope API key in the Alibaba Cloud Model Studio console and subscribe to a Coding Plan.",
+    "credentials.guideBrief.alibabatoken":
+      "Sign in to the Alibaba Cloud Bailian console subscription page (China / Global).",
+    "credentials.guideBrief.stepfun":
+      "Sign in to the StepFun platform (platform.stepfun.com).",
+    "credentials.guideBrief.doubao":
+      "Get an API key from Volcengine Ark and paste it here.",
+    "credentials.guide.claude":
+      "Copy claudeAiOauth.accessToken (an sk-ant-oat OAuth access token) from ~/.claude/.credentials.json on this machine — or from another machine where the account is logged in — and paste it here to show that account's subscription quota.",
+    "credentials.guide.cursor":
+      "Sign in to cursor.com → copy the Cookie request header of any request (starting with WorkosCursorSessionToken) from the F12 Network panel → paste it here; that account's plan quota will appear automatically. When the Cursor app is signed in on this machine, the main panel reads the local login state automatically — no credentials needed.",
+    "credentials.guide.gemini":
+      "Install the Gemini CLI and sign in with gemini in your terminal; usage and quota are read from the local login state automatically — no credentials needed.",
+    "credentials.guide.grok":
+      "Install the Grok CLI and run grok login to read your monthly quota from the local login state automatically; you can also copy the key from ~/.grok/auth.json and add it as a Token.",
+    "credentials.guide.qoder":
+      "Sign in to Qoder (global: qoder.com / China: qoder.com.cn — pick the region matching your credential) → open the console/account usage page → copy the Cookie request header of any request (or the whole \"Copy as cURL\") from the F12 Network panel → paste it here; big-model credit usage will appear automatically.",
+    "credentials.guide.opencodego":
+      "Once OpenCode is installed and you are signed in to the Go plan, usage is estimated automatically from the local database (~/.local/share/opencode/) — no credentials required.",
+    "credentials.guide.minimax":
+      "Create a Coding Plan API key (an sk-cp- token) under \"API Keys\" on the MiniMax platform (platform.minimaxi.com; global: the minimax.io console) and paste it here; current-window and weekly usage will appear automatically. The region must match the site where the key was created (for a global-site key, select Global).",
+    "credentials.guide.moonshot":
+      "Create an API key under \"API Key Management\" on the Moonshot platform (platform.moonshot.cn; global: platform.moonshot.ai) and paste it here; your balance with granted/topped-up breakdown will appear automatically. The region must match the site where the key was created (for a global-site key, select Global).",
+    "credentials.guide.deepseek":
+      "Create an API key under \"API Keys\" on the DeepSeek platform (platform.deepseek.com) and paste it here; your balance with granted/topped-up breakdown will appear automatically.",
+    "credentials.guide.longcat":
+      "Sign in to longcat.chat → open the platform/usage page → copy the Cookie request header of any request (or the whole \"Copy as cURL\") from the F12 Network panel → paste it here; token quota and fuel-package balance will appear automatically.",
+    "credentials.guide.mimo":
+      "Sign in to the Xiaomi MiMo platform (platform.xiaomimimo.com) → copy the Cookie request header of any request (or the whole \"Copy as cURL\", which must include both api-platform_serviceToken and userId) from the F12 Network panel → paste it here; your account balance and current credit usage will appear automatically.",
+    "credentials.guide.alibaba":
+      "Create a DashScope API key under \"API-KEY Management\" in the Alibaba Cloud Model Studio console (China: bailian.console.aliyun.com / Global: modelstudio.console.alibabacloud.com — pick the region matching your credential), subscribe to a Coding Plan (Tongyi Lingma), and paste it here; 5-hour/weekly/monthly usage will appear automatically.",
+    "credentials.guide.alibabatoken":
+      "Sign in to the Alibaba Cloud Bailian console subscription page (China: bailian.console.aliyun.com / Global: modelstudio.console.alibabacloud.com — pick the region matching your credential) → filter \"tokenplan\" requests in the F12 Network panel → copy the Cookie request header of that request (or the whole \"Copy as cURL\") → paste it here; the Team credit pool or Personal/Solo 5-hour/7-day rolling usage will appear automatically (Personal/Solo needs the Cookie of a request under the quota host bailian-cs.console.aliyun.com / bailian-singapore-cs.alibabacloud.com).",
+    "credentials.guide.stepfun":
+      "Sign in to the StepFun platform (platform.stepfun.com) → find any Dashboard request in the F12 Network panel → copy the Oasis-Token value from the request Cookie and paste it here; 5-hour/weekly usage or subscription/top-up credit balances will appear automatically.",
+    "credentials.guide.doubao":
+      "Get an API key from Volcengine Ark and paste it here; usage and quota will appear automatically once connected.",
+  } satisfies typeof credentials),
 };

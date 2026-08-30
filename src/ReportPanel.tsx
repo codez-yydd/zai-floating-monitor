@@ -143,6 +143,20 @@ const AGENT_META: Record<
   claude: { label: "Claude", brand: "claude", color: "#c2410c" },
   cursor: { label: "Cursor", brand: "cursor", color: "#7c3aed" },
   kimi: { label: "Kimi", brand: "kimi", color: "#4338ca" },
+  // 凭证驱动的新 provider（报告暂只统计前 5 个，元数据先补齐保证类型完整）
+  gemini: { label: "Gemini", brand: "gemini", color: "#2f6fe0" },
+  grok: { label: "Grok", brand: "grok", color: "#0f7ecb" },
+  qoder: { label: "Qoder", brand: "qoder", color: "#5a4bd0" },
+  opencodego: { label: "OpenCode", brand: "opencodego", color: "#d96110" },
+  minimax: { label: "MiniMax", brand: "minimax", color: "#009657" },
+  moonshot: { label: "Moonshot", brand: "moonshot", color: "#3833b4" },
+  deepseek: { label: "DeepSeek", brand: "deepseek", color: "#3a53d0" },
+  longcat: { label: "LongCat", brand: "longcat", color: "#c9a400" },
+  mimo: { label: "MiMo", brand: "mimo", color: "#d95700" },
+  alibaba: { label: "通义灵码", brand: "alibaba", color: "#d95700" },
+  alibabatoken: { label: "百炼Token包", brand: "alibabatoken", color: "#e5772c" },
+  stepfun: { label: "StepFun", brand: "stepfun", color: "#2d68cc" },
+  doubao: { label: "火山引擎", brand: "doubao", color: "#00a486" },
 };
 
 /** 本地日期 YYYY-MM-DD，避免 UTC 偏移。 */
