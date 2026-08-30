@@ -914,7 +914,16 @@ pub const EFFECTS_JS_VERSION: u32 = 5;
 /// 第二遍渲染前统一读 --zbar-usage-turn-bar（变量缺失视为开启，兼容旧
 /// variables.css），关闭时对全部轮节点 removeRow 并跳过 renderOne，估
 /// 算管线 syncDyn 与会话条不受影响。
-pub const USAGE_JS_VERSION: u32 = 19;
+/// V20：配合数据端双修复——a) turns 新增子代理自身视图行（sess 为子代
+/// 理会话 id、umid 为子轮自己的用户消息 id、数值与 dur/ttft 为子轮自身
+/// 口径，带 subagent:1 标记；主轮行仍照常含并入的 sub 数值，两行并存）：
+/// 子轮 umid 进入完成索引后，已完成子代理轮不再被 findLiveNodes 误判为
+/// 活动轮（进入已完成子代理面板时此前渲染全 0 占位条、90 秒后枯萎移
+/// 除），renderOne 按 index 命中走完成态显示真实 token；会话累计
+/// sessionTotals 按 t.sess 精确匹配无任何双计路径，渲染管线零改动；
+/// b) 数据端 usage_feed 父会话保活：主轮派发子代理后自身静默不再满 10
+/// 分钟被踢出 runs，主轮条、会话累计与子代理孤儿并入保持实时值。
+pub const USAGE_JS_VERSION: u32 = 20;
 
 /// 版本标记的头部查找范围（字符数）：版本注释固定在文件头部，
 /// 限定查找范围避免误匹配正文中的同名字样。

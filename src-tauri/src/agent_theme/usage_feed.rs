@@ -18,6 +18,16 @@
 //!   req / retry / tool: 模型请求数 / 重试数 / 工具调用数（同样已并入），
 //!   dur / ttft: 主轮自身总耗时 / 首字延迟毫秒（可能 null），
 //!   sub: { n, req, in, out, cr, cw, rt } 并入的子代理聚合（可能 null），
+//!   subagent: 1          仅子代理"自身视图行"携带（V20，其余行无此键）：
+//!                         sess 为子代理会话 id、umid/数值/dur/ttft 均为
+//!                         该子轮自身口径，与其并入主轮的行（sess=主会话、
+//!                         数值含并入）并存导出。前端匹配不读取本键：
+//!                         子代理详情面板靠自身行 umid 进入完成索引
+//!                         （index）走完成态显示真实值，主会话视图按
+//!                         sess 精确匹配不会命中自身行，无双计（见下方
+//!                         子代理并入策略）；本键仅为数据侧自描述字段
+//!                         （调试/未来消费预留），旧渲染脚本忽略未知
+//!                         字段，v 保持 2
 //!   models: "GLM-5.3,..."  该轮用到的模型（去重逗号拼接，含子代理），
 //! }],
 //!   runs: [{              进行中轮实时聚合（v2 格式不变的附加字段，旧
@@ -52,20 +62,33 @@
 //! 请求落在近 10 分钟 + 组行扫近 7 天"，覆盖长轮（>10 分钟）的完整聚合。
 //! 轮完成后 turn_usage 行出现 → 该 turn_id 进入 done 集合 → runs 行消失、
 //! turn_usage 行进入 turns（渲染端最终值无缝接管）。
+//! 主会话行另有父会话保活分支（V20）：主轮派发子代理后自身静默等待，
+//! 满 10 分钟会被上述窗口整体踢出 runs（前端每轮条跌回全 0 启动窗口
+//! 占位、会话累计丢失该轮实时值，其子代理完成轮孤儿也随之失去挂载
+//! 点）。故主会话行放宽为"该轮近 10 分钟有自身请求，或名下有子代理
+//! 会话近 10 分钟在产生请求"（经 session.parent_id 查父会话集合）；
+//! 子代理行与无子代理保活的僵尸主轮（异常中断、永不落库）仍维持
+//! 10 分钟静默退出 runs。
 //!
 //! ## 子代理并入策略（实库验证结论，v3.10.1 主库实测）
 //!
-//! 子代理会话（session_id 形如 `sess_subagent_agent_<uuid>`）的轮次不单独
-//! 显示，而是并入父会话中时间覆盖它的主轮（主轮 started_at ≤ 子轮
-//! started_at 且 子轮 completed_at ≤ 主轮 completed_at；父会话经
-//! session.parent_id 查得）。曾考虑的"精确关联"方案（子代理
-//! model_usage.parent_user_message_id 指向父会话消息）经实库验证**不成立**：
-//! 该字段指向的是子代理会话自己的消息（JOIN message 后 msg_session =
-//! 子代理 session_id），无法回溯父会话，故采用时间窗口法。
+//! 子代理会话（session_id 形如 `sess_subagent_agent_<uuid>`）的轮次并入
+//! 父会话中时间覆盖它的主轮（主轮 started_at ≤ 子轮 started_at 且
+//! 子轮 completed_at ≤ 主轮 completed_at；父会话经 session.parent_id
+//! 查得），同时另导出一条"自身视图行"（V20，sess/umid 为子代理自己的、
+//! 数值为该子轮自身口径、带 subagent:1 标记（仅数据侧自描述，前端匹
+//! 配不读该键，见数据契约）供子代理详情面板显示真实值——两行并存是
+//! 预期：主轮行是"并入视图"，自身行是"自身视图"，会话累计按 sess
+//! 精确匹配各只计一次。曾考虑的"精确关联"方案（子代理
+//! model_usage.parent_user_message_id 指向父会话消息）
+//! 经实库验证**不成立**：该字段指向的是子代理会话自己的消息（JOIN
+//! message 后 msg_session = 子代理 session_id），无法回溯父会话，故并入
+//! 采用时间窗口法（自身视图行不受影响，每条完成子轮都导出）。
 //! 实测覆盖率 64/69（93%）：未命中的子轮均为合法边界——父会话轮尚未
 //! 完成落库（随后续导出周期自然并入，全量重查 7 天窗口自带此自愈性）、
 //! 父会话无 turn_usage 行（旧版本库）、子轮完成晚于父轮完成（后台代理
-//! 越界运行）。未命中的子轮直接丢弃，不单独显示。
+//! 越界运行）。未命中的子轮不并入主轮（孤儿分流给 runs 侧实时聚合，
+//! 越界完成的维持丢弃防双计，见下节），自身视图行照常导出。
 //!
 //! ## runs 侧子代理并入（V9：主轮实时条与会话累计条实时反映子代理消耗）
 //!
@@ -82,9 +105,11 @@
 //!   打 m:1 标记（其数值已并入主轮行 sub，渲染端会话累计跳过本行防
 //!   双计）；父会话暂无主轮行（主轮首笔请求未完成）时不打标，渲染端
 //!   按 psess 直接并入会话累计，主轮行出现后自动切换口径，无缝衔接；
-//! - 子代理会话自己的 DOM（详情面板，同 document）按子代理行 umid
-//!   匹配渲染自身统计，与主轮并入互不影响（同一数值两处展示是预期：
-//!   主轮行是"并入视图"，子代理行是"自身视图"；会话累计只算一次）。
+//! - 子代理会话自己的 DOM（详情面板，同 document）渲染自身统计：进行
+//!   中轮按子代理 runs 行 umid 匹配 live 条，完成轮按 turns 的自身视图
+//!   行（V20，subagent:1）umid 命中完成索引走完成态，与主轮并入互不
+//!   影响（同一数值两处展示是预期：主轮行是"并入视图"，子代理行是
+//!   "自身视图"；会话累计按 sess 精确匹配只算一次）。
 //!
 //! ## 降级与健壮性
 //!
@@ -185,6 +210,15 @@ pub(crate) struct UsageTurn {
     ttft: Option<i64>,
     /// 并入的子代理聚合（无并入为 null）
     sub: Option<SubAgg>,
+    /// 子代理自身视图行标记（V20）：1 = 本行是子代理轮的"自身视图行"
+    /// （sess 为子代理会话 id、umid/数值/dur/ttft 均为该子轮自身口径），
+    /// 与其并入主轮的行（sess=主会话、umid=主轮消息id、数值含并入）并存
+    /// 导出；前端匹配不读取本键：子代理详情面板靠自身行 umid 进入完成
+    /// 索引（index）显示真实值，本键仅为数据侧自描述字段（调试/未来
+    /// 消费预留）；主会话行无此键（None 不序列化，旧渲染脚本忽略未知
+    /// 字段，v 保持 2 向后兼容）
+    #[serde(rename = "subagent", skip_serializing_if = "Option::is_none")]
+    subagent: Option<u8>,
     /// 该轮用到的模型（去重逗号拼接，含并入子代理的模型）
     models: String,
 }
@@ -248,14 +282,27 @@ impl SubAgg {
     }
 }
 
-/// 从库中读出的子代理轮原始行（并入聚合前的中间形态）
+/// 从库中读出的子代理轮原始行（并入聚合前的中间形态）。V20 起额外
+/// 携带自身视图行所需字段（session_id / status / user_message_id /
+/// dur / ttft），见 collect_turns 的自身视图行生成。
 #[derive(Debug, Clone)]
 struct SubTurnRow {
     turn_id: String,
+    /// 子代理会话 id（自身视图行的 sess 来源）
+    session_id: String,
     /// 父会话 id（session.parent_id）
     parent_session_id: Option<String>,
+    /// 轮状态（completed / cancelled 等，原样透出到自身视图行）
+    status: String,
     started_at: i64,
     completed_at: Option<i64>,
+    /// 子轮自己的用户消息 id（自身视图行的 umid；列缺失或值为 null 时
+    /// 为 None，该轮无法与 DOM 匹配，仅保留数据）
+    user_message_id: Option<String>,
+    /// 子轮自身总耗时毫秒（自身视图行口径，列缺失为 null）
+    dur: Option<i64>,
+    /// 子轮自身首字延迟毫秒（自身视图行口径，列缺失为 null）
+    ttft: Option<i64>,
     input_tokens: i64,
     output_tokens: i64,
     cache_read: i64,
@@ -418,12 +465,12 @@ fn export_once(cache: &mut Option<String>) {
             &done,
             &sub_orphans,
         )?;
+        let dir = store::app_dir(TARGET_APP_ID)?;
+        fs::create_dir_all(&dir).map_err(|e| format!("创建主题目录失败: {e}"))?;
         let turns_json = serde_json::to_string(&turns)
             .map_err(|e| format!("序列化用量数据失败: {e}"))?;
         let runs_json =
             serde_json::to_string(&runs).map_err(|e| format!("序列化进行中轮失败: {e}"))?;
-        let dir = store::app_dir(TARGET_APP_ID)?;
-        fs::create_dir_all(&dir).map_err(|e| format!("创建主题目录失败: {e}"))?;
         write_if_changed(&dir, cache, &turns_json, &runs_json, now_ms)?;
         Ok(())
     })();
@@ -538,6 +585,7 @@ fn collect_turns(
                 ttft: row.get::<_, Option<i64>>(14)?,
                 user_message_id: row.get::<_, Option<String>>(15)?,
                 sub: None,
+                subagent: None,
                 models: String::new(),
             })
         })
@@ -553,7 +601,7 @@ fn collect_turns(
     // ---- 子代理轮（并入父会话中时间覆盖它的主轮，见模块头验证结论）----
     let mut subs: Vec<SubTurnRow> = Vec::new();
     // 时间窗口比对需要两侧 completed_at；session 表/parent_id 列缺失
-    // （老版本）时放弃并入，子轮整体不显示
+    // （老版本）时放弃子轮查询（既不并入主轮，也不产出 V20 自身视图行）
     if has_table(conn, "session")
         && crate::db::has_column(conn, "session", "parent_id")
         && crate::db::has_column(conn, "turn_usage", "completed_at")
@@ -572,8 +620,15 @@ fn collect_turns(
             num_col(conn, "turn_usage", "model_retry_count"),
             num_col(conn, "turn_usage", "tool_call_count"),
         );
+        // 自身视图行口径的可空列：umid（DOM 匹配键）与 dur/ttft，列缺失
+        // 时整列降级 NULL（老版本库按 null 透出，与主轮查询同款降级）
+        let s_umid = opt_col(conn, "turn_usage", "user_message_id");
+        let s_dur = opt_col(conn, "turn_usage", "duration_ms");
+        let s_ttft = opt_col(conn, "turn_usage", "time_to_first_token_ms");
         let sub_sql = format!(
-            "SELECT tu.turn_id, s.parent_id, tu.started_at, tu.completed_at, \
+            "SELECT tu.turn_id, tu.session_id, s.parent_id, \
+             COALESCE(tu.status, ''), tu.started_at, tu.completed_at, \
+             {s_umid}, {s_dur}, {s_ttft}, \
              {s_inp}, {s_out}, {s_rt}, {s_cw}, {s_cr}, {s_req}, {s_retry}, {s_tool} \
              FROM turn_usage tu JOIN session s ON s.id = tu.session_id \
              WHERE tu.started_at >= ?1 AND tu.session_id LIKE 'sess_subagent%'"
@@ -585,17 +640,22 @@ fn collect_turns(
             .query_map([window_start_ms], |row| {
                 Ok(SubTurnRow {
                     turn_id: row.get(0)?,
-                    parent_session_id: row.get(1)?,
-                    started_at: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                    completed_at: row.get(3)?,
-                    input_tokens: row.get::<_, i64>(4)?.max(0),
-                    output_tokens: row.get::<_, i64>(5)?.max(0),
-                    reasoning: row.get::<_, i64>(6)?.max(0),
-                    cache_write: row.get::<_, i64>(7)?.max(0),
-                    cache_read: row.get::<_, i64>(8)?.max(0),
-                    requests: row.get::<_, i64>(9)?.max(0),
-                    retries: row.get::<_, i64>(10)?.max(0),
-                    tool_calls: row.get::<_, i64>(11)?.max(0),
+                    session_id: row.get(1)?,
+                    parent_session_id: row.get(2)?,
+                    status: row.get(3)?,
+                    started_at: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                    completed_at: row.get(5)?,
+                    user_message_id: row.get(6)?,
+                    dur: row.get(7)?,
+                    ttft: row.get(8)?,
+                    input_tokens: row.get::<_, i64>(9)?.max(0),
+                    output_tokens: row.get::<_, i64>(10)?.max(0),
+                    reasoning: row.get::<_, i64>(11)?.max(0),
+                    cache_write: row.get::<_, i64>(12)?.max(0),
+                    cache_read: row.get::<_, i64>(13)?.max(0),
+                    requests: row.get::<_, i64>(14)?.max(0),
+                    retries: row.get::<_, i64>(15)?.max(0),
+                    tool_calls: row.get::<_, i64>(16)?.max(0),
                 })
             })
             .map_err(|e| format!("读取子代理轮失败: {e}"))?
@@ -603,7 +663,55 @@ fn collect_turns(
             .map_err(|e| format!("读取子代理轮失败: {e}"))?;
         subs.extend(rows);
     }
+    // ---- 子代理自身视图行（V20）：每条已完成子代理轮除并入主轮外，
+    //      额外以自身口径导出一条 turns 行（sess = 子代理会话 id、
+    //      umid = 子轮自己的用户消息 id、数值/dur/ttft 均为该子轮自身
+    //      值、带 subagent:1 标记——标记仅为数据侧自描述字段，前端
+    //      匹配不读取该键：详情面板靠自身行 umid 进入完成索引（index）
+    //      走完成态显示真实值——否则导出数据永远没有子代理会话自身
+    //      的行，前端 findLiveNodes 把已完成子代理轮误判为活动轮，面板
+    //      渲染全 0 启动窗口占位（90 秒后枯萎移除）。并入主轮的行照常
+    //      并存导出（主轮行仍含并入的 sub 数值），孤儿/越界丢弃的子轮
+    //      同样导出自身行（它们只是不并入主轮，面板显示不受取舍影响）。
+    //      防双计：会话累计 sessionTotals 按 t.sess 精确匹配，主会话
+    //      视图查主会话 id 不命中子代理自身行、子代理视图只命中自身行，
+    //      各自恰计一次；runs 侧子代理行在该轮落库后即被 done 集合
+    //      过滤，与自身行不同通道不重叠。旧渲染脚本忽略未知字段，
+    //      导出协议 v 保持 2 向后兼容。----
+    let self_view_rows: Vec<UsageTurn> = subs
+        .iter()
+        .filter(|s| s.started_at > 0 && !s.turn_id.is_empty())
+        .map(|s| UsageTurn {
+            turn_id: s.turn_id.clone(),
+            user_message_id: s.user_message_id.clone(),
+            session_id: s.session_id.clone(),
+            status: s.status.clone(),
+            start: s.started_at,
+            end: s.completed_at,
+            input_tokens: s.input_tokens,
+            output_tokens: s.output_tokens,
+            cache_read: s.cache_read,
+            cache_write: s.cache_write,
+            reasoning: s.reasoning,
+            requests: s.requests,
+            retries: s.retries,
+            tool_calls: s.tool_calls,
+            dur: s.dur,
+            ttft: s.ttft,
+            sub: None,
+            subagent: Some(1),
+            models: String::new(),
+        })
+        .collect();
     let (merged_pairs, sub_orphans) = merge_subagent_turns(&mut turns, subs);
+    // 自身视图行并入导出序列：重排保持 started_at 升序契约（截断语义
+    // "丢最旧"依赖升序；稳定排序下同刻主轮行保持在自身行之前），再统
+    // 一截断行数上限（主轮查询后的截断只限主轮序列，混合序列在此收口）
+    turns.extend(self_view_rows);
+    turns.sort_by_key(|t| t.start);
+    if turns.len() > MAX_TURNS {
+        turns.drain(..turns.len() - MAX_TURNS);
+    }
 
     // ---- 模型清单：该轮 model_usage 的去重 model_id（含并入子轮）----
     if has_table(conn, "model_usage")
@@ -653,6 +761,10 @@ fn collect_done_turn_ids(
 /// turn_id 行的轮，按 turn_id 分组输出 model_usage 合计。
 /// - recent_start_ms = now − 10 分钟（新鲜度窗口）；sweep_start_ms =
 ///   now − 7 天（组行扫查下界，覆盖长轮早期请求的完整聚合）；
+/// - 父会话保活（V20）：主会话行额外放宽为"该轮近 10 分钟有自身请求，
+///   或名下有子代理会话近 10 分钟在产生请求"（防主轮派发子代理后静默
+///   等待满 10 分钟被踢出 runs，见下方 keepalive 分支注释）；子代理行
+///   与无子代理保活的僵尸主轮仍维持 10 分钟新鲜度窗口；
 /// - sub_orphans = 游离子代理完成轮（collect_turns/merge 阶段分流输出，
 ///   所属主轮尚未落库的部分）：按 parent_session_id 并入对应主会话行
 ///   sub（与子代理 runs 行同口径聚合）；
@@ -705,15 +817,39 @@ fn collect_runs(
         ""
     };
     let psess_expr = if has_parent { "s.parent_id" } else { "NULL" };
+    // V20 父会话保活分支（修复一）：主轮派发子代理后自身静默等待，满
+    // 10 分钟会被下方新鲜度窗口整体踢出 runs——前端每轮条跌回全 0 启
+    // 动窗口占位、会话累计丢失该轮实时值，且其子代理完成轮（孤儿）失
+    // 去挂载点、消耗蒸发。主会话行放宽保留条件："该轮近 10 分钟有自身
+    // 请求，或名下有子代理会话近 10 分钟在产生请求"（经 session.parent_id
+    // 查父会话集合）。子代理行维持原 10 分钟窗口条件不变；无子代理保活
+    // 的僵尸主轮（异常中断、永不落库的轮）仍在 10 分钟静默后退出 runs。
+    // 会话级保活的已知边界：父会话保活期间，同会话更早的异常中断轮（同
+    // 样未落库）会一并回流 runs，其数值计入会话累计直到保活消失后随窗
+    // 口退出——正常中断会落 turn_usage（cancelled）进 done 集合被过滤，
+    // 此场景仅限同会话叠加异常中断，属可接受的窄边缘。session 表缺
+    // parent_id 列（老版本）时不拼入此分支，维持既有降级行为
+    //（与 psess 同源判定）。
+    let keepalive = if has_parent {
+        " OR (mu.session_id NOT LIKE 'sess_subagent%' AND mu.session_id IN \
+           (SELECT s2.parent_id FROM model_usage mu2 \
+            JOIN session s2 ON s2.id = mu2.session_id \
+            WHERE mu2.started_at >= ?1 AND mu2.session_id LIKE 'sess_subagent%' \
+            AND s2.parent_id IS NOT NULL AND s2.parent_id != ''))"
+    } else {
+        ""
+    };
     // 外层扫查限 7 天窗口（行数几万级可控），IN 子查询限定"近 10 分钟有
-    // 请求"的轮——组内聚合含窗口外的早期请求（长轮完整合计）
+    // 请求"的轮——组内聚合含窗口外的早期请求（长轮完整合计）；保活
+    // 分支按会话命中（turn_id 全局唯一，按 turn_id 分组后组行整体保留，
+    // 组内聚合同样完整含窗口外早期请求）
     let sql = format!(
         "SELECT mu.turn_id, {umid_expr}, mu.session_id, {psess_expr}, \
          SUM({inp}), SUM({out}), SUM({cr}), SUM({cw}), SUM({rt}), COUNT(*), \
          MIN(mu.started_at) \
          FROM model_usage mu {join} \
-         WHERE mu.started_at >= ?2 AND mu.turn_id IN \
-           (SELECT turn_id FROM model_usage WHERE started_at >= ?1) \
+         WHERE mu.started_at >= ?2 AND (mu.turn_id IN \
+           (SELECT turn_id FROM model_usage WHERE started_at >= ?1){keepalive}) \
          GROUP BY mu.turn_id, mu.session_id"
     );
     let mut stmt = conn
@@ -993,6 +1129,7 @@ mod tests {
             dur: Some(4000),
             ttft: Some(900),
             sub: None,
+            subagent: None,
             models: String::new(),
         }
     }
@@ -1000,16 +1137,21 @@ mod tests {
     /// 构造一条子代理轮原始行（其余字段取典型值，测试按需覆写）
     fn sub_turn(
         id: &str,
-        _sess: &str,
+        sess: &str,
         parent: &str,
         start: i64,
         end: Option<i64>,
     ) -> SubTurnRow {
         SubTurnRow {
             turn_id: id.to_string(),
+            session_id: sess.to_string(),
             parent_session_id: Some(parent.to_string()),
+            status: "completed".to_string(),
             started_at: start,
             completed_at: end,
+            user_message_id: Some(format!("msg_{id}")),
+            dur: Some(350),
+            ttft: Some(100),
             input_tokens: 30,
             output_tokens: 40,
             cache_read: 20,
@@ -1064,6 +1206,18 @@ mod tests {
         assert!(
             json.contains("\"sub\":{\"n\":2,\"req\":5,\"in\":60,\"out\":80,\"cr\":40,\"cw\":0,\"rt\":0}"),
             "sub 聚合形态不符：{json}"
+        );
+        // V20：主会话行不携带 subagent 键（skip 序列化，向后兼容旧前端）
+        assert!(!json.contains("\"subagent\""), "主会话行不应有 subagent 键：{json}");
+        // V20：子代理自身视图行的 subagent:1 短键形态
+        let mut sv = turn("turn_sv", "sess_subagent_agent_1", 1000, Some(5000));
+        sv.user_message_id = Some("msg_child".to_string());
+        sv.subagent = Some(1);
+        let sv_json = serde_json::to_string(&vec![sv]).unwrap();
+        assert!(sv_json.contains("\"subagent\":1"), "{sv_json}");
+        assert!(
+            !sv_json.contains("\"sub\":{"),
+            "自身视图行不携带 sub 并入聚合：{sv_json}"
         );
         // 完整文件形态：v/ts/turns/runs 四字段 + 分号结尾（v2 格式不变，
         // runs 为 V6 起追加的进行中轮字段；runs 为空时也输出）
@@ -1421,19 +1575,36 @@ mod tests {
         )
         .unwrap();
         let (out, orphans) = collect_turns(&conn, 0).unwrap().expect("应能读出");
-        // 子代理轮不单独出现在导出序列
-        assert_eq!(out.len(), 1, "子代理轮不应单独导出：{out:?}");
-        let t = &out[0];
-        assert_eq!(t.turn_id, "turn_m");
+        // V20：主轮行 + 子代理自身视图行两行并存导出
+        assert_eq!(out.len(), 2, "主轮行与子代理自身视图行应并存：{out:?}");
+        let t = out.iter().find(|t| t.turn_id == "turn_m").unwrap();
         // 子代理已并入（30/40/20 + 自身 100/200/50）
         assert_eq!(t.input_tokens, 130);
         assert_eq!(t.output_tokens, 240);
         assert_eq!(t.cache_read, 70);
         assert_eq!(t.requests, 3);
+        assert_eq!(t.subagent, None, "主轮行不带 subagent 标记");
         let sub = t.sub.as_ref().expect("应有子聚合");
         assert_eq!(sub.n, 1);
         // 模型清单：主轮 + 并入子轮去重
         assert_eq!(t.models, "GLM-5.3,GLM-4.7");
+        // V20 自身视图行：sess 为子代理会话、数值为子轮自身口径（该库
+        // 无 user_message_id 列 → umid 降级 null；dur/ttft 为子轮自身值）
+        let sv = out
+            .iter()
+            .find(|t| t.turn_id == "turn_s")
+            .expect("子代理自身视图行应导出");
+        assert_eq!(sv.session_id, "sess_subagent_agent_1");
+        assert_eq!(sv.subagent, Some(1));
+        assert_eq!(sv.user_message_id, None);
+        assert_eq!(sv.input_tokens, 30, "自身视图行数值应为子轮自身值");
+        assert_eq!(sv.output_tokens, 40);
+        assert_eq!(sv.cache_read, 20);
+        assert_eq!(sv.requests, 1);
+        assert_eq!(sv.sub, None, "自身视图行不携带并入聚合");
+        assert_eq!(sv.dur, Some(350), "自身视图行 dur 应为子轮自身口径");
+        assert_eq!(sv.ttft, Some(100), "自身视图行 ttft 应为子轮自身口径");
+        assert_eq!(sv.models, "GLM-4.7", "自身视图行的模型清单为自己的");
         // 子轮已整轮并入 turns → 不应再分流到 runs 侧（防双计）
         assert!(orphans.is_empty(), "已并入 turns 的子轮不应进游离集合：{orphans:?}");
         drop(conn);
@@ -1722,14 +1893,28 @@ mod tests {
         ))
         .unwrap();
         let (turns, orphans) = collect_turns(&conn, sweep).unwrap().expect("应有输出");
-        // 完成侧：仅主会话完成轮，其子轮已整轮并入（sub.n=1, in=70）
-        assert_eq!(turns.len(), 1, "{turns:?}");
-        let done_turn = &turns[0];
-        assert_eq!(done_turn.turn_id, "turn_m_done");
+        // 完成侧：主会话完成轮（其子轮已整轮并入，sub.n=1, in=70）+
+        // 两条子代理自身视图行（V20：turn_s_orphan 与 turn_s_merged 均
+        // 已落 turn_usage，无论并入/孤儿/越界取舍都导出自身行）
+        assert_eq!(turns.len(), 3, "{turns:?}");
+        let done_turn = turns.iter().find(|t| t.turn_id == "turn_m_done").unwrap();
         let done_sub = done_turn.sub.as_ref().expect("完成轮应有子聚合");
         assert_eq!(done_sub.n, 1);
         assert_eq!(done_sub.input_tokens, 70);
         assert_eq!(done_sub.requests, 5);
+        let orphan_self = turns
+            .iter()
+            .find(|t| t.turn_id == "turn_s_orphan")
+            .expect("孤儿子轮也应有自身视图行");
+        assert_eq!(orphan_self.session_id, "sess_subagent_a");
+        assert_eq!(orphan_self.subagent, Some(1));
+        assert_eq!(orphan_self.input_tokens, 50, "自身视图行数值为子轮自身值");
+        let merged_self = turns
+            .iter()
+            .find(|t| t.turn_id == "turn_s_merged")
+            .expect("已并入主轮的子轮也应有自身视图行");
+        assert_eq!(merged_self.input_tokens, 70);
+        assert_eq!(merged_self.subagent, Some(1));
         // 游离子代理完成轮：仅未落库主轮的 turn_s_orphan
         assert_eq!(orphans.len(), 1, "{orphans:?}");
         assert_eq!(orphans[0].turn_id, "turn_s_orphan");
@@ -1784,6 +1969,221 @@ mod tests {
             "父会话无主轮行时不打 m（会话条按 psess 兜底并入）"
         );
         assert_eq!(runs[0].sub, None);
+        drop(conn);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn runs_父会话保活_主轮静默超10分钟但子代理活跃时保留() {
+        // 修复一：主轮派发子代理后自身静默等待，首笔请求已超出 10 分钟
+        // 新鲜度窗口；子代理近 10 分钟在产生请求 → 父会话保活，主轮行
+        // 不从 runs 消失（否则前端每轮条跌回全 0 启动窗口占位、会话累计
+        // 丢失该轮），子代理行正常打 m:1 并入主轮行 sub
+        let (conn, path) = v9_db("v20-keepalive");
+        let now = 7_000_000_000_i64;
+        let recent = now - RUN_WINDOW_MS;
+        let sweep = now - WINDOW_MS;
+        conn.execute_batch(&format!(
+            "INSERT INTO session VALUES
+               ('sess_main', NULL), ('sess_subagent_agent_1', 'sess_main');
+             -- 主轮：仅一笔请求在 20 分钟前（超出新鲜度窗口，长轮早期
+             -- 请求仍应完整计入组内聚合）
+             INSERT INTO model_usage (session_id, turn_id, started_at,
+                parent_user_message_id, input_tokens, model_id) VALUES
+               ('sess_main', 'turn_m', {m1}, 'msg_main', 100, 'GLM-5.3');
+             -- 子代理进行中轮：近 1 分钟有请求 → sess_main 进保活集合
+             INSERT INTO model_usage (session_id, turn_id, started_at,
+                parent_user_message_id, input_tokens, model_id) VALUES
+               ('sess_subagent_agent_1', 'turn_s', {s1}, 'msg_child', 30, 'GLM-4.7');",
+            m1 = now - 1_200_000,
+            s1 = now - 60_000,
+        ))
+        .unwrap();
+        let done = collect_done_turn_ids(&conn, sweep).unwrap();
+        let runs = collect_runs(&conn, recent, sweep, &done, &[]).unwrap();
+        assert_eq!(runs.len(), 2, "保活主轮行与子代理行都应在 runs：{runs:?}");
+        let main = runs
+            .iter()
+            .find(|r| r.session_id == "sess_main")
+            .expect("主轮行应被父会话保活保留");
+        // 组内聚合仍含新鲜度窗口外的早期请求（长轮完整合计）
+        assert_eq!(main.input_tokens, 100);
+        assert_eq!(main.start, now - 1_200_000);
+        assert_eq!(main.merged, None, "主会话行不打 m");
+        // 子代理行打 m:1（数值已并入主轮行 sub，渲染端会话累计跳过防双计）
+        let sub_run = runs
+            .iter()
+            .find(|r| r.session_id == "sess_subagent_agent_1")
+            .unwrap();
+        assert_eq!(sub_run.merged, Some(1), "子代理行应带 m:1：{runs:?}");
+        let main_sub = main.sub.as_ref().expect("保活主轮行应有 sub 聚合");
+        assert_eq!(main_sub.n, 1);
+        assert_eq!(main_sub.input_tokens, 30);
+        drop(conn);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn runs_父会话保活_无子代理活动时僵尸主轮仍退出() {
+        // 修复一的反向契约：无子代理保活的僵尸主轮（异常中断、turn_usage
+        // 永不落库）仍在 10 分钟静默后退出 runs（新鲜度窗口防陈旧语义
+        // 不因保活分支放宽）
+        let (conn, path) = v9_db("v20-keepalive-off");
+        let now = 7_100_000_000_i64;
+        let recent = now - RUN_WINDOW_MS;
+        let sweep = now - WINDOW_MS;
+        conn.execute_batch(&format!(
+            "INSERT INTO session VALUES ('sess_main', NULL);
+             -- 僵尸主轮：请求全部在 20 分钟前，会话名下无任何子代理活动
+             INSERT INTO model_usage (session_id, turn_id, started_at,
+                parent_user_message_id, input_tokens, model_id) VALUES
+               ('sess_main', 'turn_zombie', {m1}, 'msg_main', 100, 'GLM-5.3');",
+            m1 = now - 1_200_000,
+        ))
+        .unwrap();
+        let done = collect_done_turn_ids(&conn, sweep).unwrap();
+        let runs = collect_runs(&conn, recent, sweep, &done, &[]).unwrap();
+        assert!(
+            runs.is_empty(),
+            "无子代理保活的僵尸主轮应在 10 分钟静默后退出 runs：{runs:?}"
+        );
+        drop(conn);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn runs_孤儿并入保活主轮_子代理完成主轮未落库时不悬空() {
+        // 修复一 + 根因二：主轮静默超窗（15 分钟前首笔请求），子代理轮
+        // 已完成落 turn_usage（其最后一笔 model_usage 请求在窗口内 → 保
+        // 活父会话）而主轮尚未落库 → 子轮分流为孤儿，应并入保留的主轮
+        // 行 sub 而非悬空蒸发
+        let (conn, path) = v9_db("v20-orphan");
+        let now = 8_000_000_000_i64;
+        let recent = now - RUN_WINDOW_MS;
+        let sweep = now - WINDOW_MS;
+        conn.execute_batch(&format!(
+            "INSERT INTO session VALUES
+               ('sess_main', NULL), ('sess_subagent_agent_1', 'sess_main');
+             -- 主轮：仅一笔请求在 15 分钟前（超出新鲜度窗口），无
+             -- turn_usage 行（派发子代理后静默等待）
+             INSERT INTO model_usage (session_id, turn_id, started_at,
+                parent_user_message_id, input_tokens, model_id) VALUES
+               ('sess_main', 'turn_m', {m1}, 'msg_main', 100, 'GLM-5.3');
+             -- 子代理完成轮：最后一笔请求 6 分钟前（窗口内 → 保活），
+             -- turn_usage 已落库但主轮 turn_m 未落库
+             INSERT INTO model_usage (session_id, turn_id, started_at,
+                parent_user_message_id, input_tokens, model_id) VALUES
+               ('sess_subagent_agent_1', 'turn_s', {s1}, 'msg_child', 50, 'GLM-4.7');
+             INSERT INTO turn_usage VALUES
+               ('sess_subagent_agent_1', 'turn_s', 'completed', {s2}, {s3},
+                'msg_child', 50, 60, 0, 0, 20, 3, 0, 0);",
+            m1 = now - 900_000,
+            s1 = now - 360_000,
+            s2 = now - 400_000,
+            s3 = now - 360_000,
+        ))
+        .unwrap();
+        let (turns, orphans) = collect_turns(&conn, sweep).unwrap().expect("应有输出");
+        // 主轮未落库 → turns 仅子代理自身视图行（V20），无主会话行
+        assert_eq!(turns.len(), 1, "{turns:?}");
+        assert_eq!(turns[0].session_id, "sess_subagent_agent_1");
+        assert_eq!(turns[0].subagent, Some(1));
+        // 孤儿分流：父会话无覆盖子轮开始时刻的完成主轮（主轮不在 turns）
+        assert_eq!(orphans.len(), 1, "{orphans:?}");
+        assert_eq!(orphans[0].turn_id, "turn_s");
+        // runs：子代理行被 done 集合过滤（turn_usage 已落库），保活主轮
+        // 行保留且孤儿并入其 sub（有挂载点，不悬空蒸发）
+        let done = collect_done_turn_ids(&conn, sweep).unwrap();
+        assert!(done.contains("turn_s"), "已落库子轮应进 done 集合");
+        let runs = collect_runs(&conn, recent, sweep, &done, &orphans).unwrap();
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert_eq!(runs[0].session_id, "sess_main", "保活主轮行应保留");
+        let sub = runs[0].sub.as_ref().expect("孤儿应并入保活主轮行 sub");
+        assert_eq!(sub.n, 1);
+        assert_eq!(sub.input_tokens, 50, "孤儿数值取子轮 turn_usage 自身值");
+        assert_eq!(sub.requests, 3);
+        drop(conn);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn turns_子代理自身视图行_并存导出且主会话聚合不双计() {
+        // 修复二：子代理完成轮除并入主轮外，额外导出"自身视图行"
+        // （sess/umid 为子代理自己的、数值/dur/ttft 为子轮自身口径、带
+        // subagent:1 标记），主轮行仍照常含并入的 sub 数值；主会话 turns
+        // 聚合（前端 sessionTotals 按 t.sess 精确匹配）不因自身行双计
+        let (conn, path) = v9_db("v20-selfview");
+        let now = 9_000_000_000_i64;
+        let sweep = now - WINDOW_MS;
+        conn.execute_batch(&format!(
+            "INSERT INTO session VALUES
+               ('sess_main', NULL), ('sess_subagent_agent_1', 'sess_main');
+             INSERT INTO model_usage (session_id, turn_id, started_at,
+                parent_user_message_id, input_tokens, model_id) VALUES
+               ('sess_main', 'turn_m', {m1}, 'msg_main', 100, 'GLM-5.3'),
+               ('sess_subagent_agent_1', 'turn_s', {s1}, 'msg_child', 30, 'GLM-4.7');
+             INSERT INTO turn_usage VALUES
+               ('sess_main', 'turn_m', 'completed', {m1}, {m2},
+                'msg_main', 100, 200, 0, 0, 50, 2, 0, 1),
+               ('sess_subagent_agent_1', 'turn_s', 'completed', {s1}, {s2},
+                'msg_child', 30, 40, 0, 0, 20, 1, 0, 0);
+             -- 补齐 dur/ttft 列并写入子轮自身口径值（自身行透出校验）
+             ALTER TABLE turn_usage ADD COLUMN duration_ms INTEGER;
+             ALTER TABLE turn_usage ADD COLUMN time_to_first_token_ms INTEGER;
+             UPDATE turn_usage SET duration_ms = 4000, time_to_first_token_ms = 900
+               WHERE turn_id = 'turn_m';
+             UPDATE turn_usage SET duration_ms = 350, time_to_first_token_ms = 100
+               WHERE turn_id = 'turn_s';",
+            m1 = now - 60_000,
+            m2 = now - 50_000,
+            s1 = now - 55_000,
+            s2 = now - 52_000,
+        ))
+        .unwrap();
+        let (turns, orphans) = collect_turns(&conn, sweep).unwrap().expect("应有输出");
+        assert!(orphans.is_empty());
+        // 两行并存：主轮行（含并入 sub）+ 子代理自身视图行（升序排列）
+        assert_eq!(turns.len(), 2, "{turns:?}");
+        assert_eq!(turns[0].turn_id, "turn_m", "按 started_at 升序排列");
+        assert_eq!(turns[1].turn_id, "turn_s");
+        let main = turns.iter().find(|t| t.turn_id == "turn_m").unwrap();
+        let self_view = turns.iter().find(|t| t.turn_id == "turn_s").unwrap();
+        // 主轮行：无 subagent 标记，数值 = 自身 + 并入子轮（100+30），
+        // dur/ttft 保持主轮自身口径
+        assert_eq!(main.subagent, None);
+        assert_eq!(main.input_tokens, 130);
+        assert_eq!(main.sub.as_ref().unwrap().n, 1);
+        assert_eq!(main.dur, Some(4000));
+        assert_eq!(main.ttft, Some(900));
+        // 自身视图行：sess/umid 为子代理自己的、数值/dur/ttft 为子轮
+        // 自身口径、带 subagent:1 标记、不携带并入聚合
+        assert_eq!(self_view.session_id, "sess_subagent_agent_1");
+        assert_eq!(self_view.user_message_id.as_deref(), Some("msg_child"));
+        assert_eq!(self_view.subagent, Some(1));
+        assert_eq!(self_view.input_tokens, 30);
+        assert_eq!(self_view.output_tokens, 40);
+        assert_eq!(self_view.cache_read, 20);
+        assert_eq!(self_view.requests, 1);
+        assert_eq!(self_view.sub, None);
+        assert_eq!(self_view.dur, Some(350));
+        assert_eq!(self_view.ttft, Some(100));
+        // 防双计（模拟前端 sessionTotals 的 t.sess 精确匹配聚合）：主会
+        // 话视图只计主轮行一次（130，不叠自身行的 30）；子代理视图只计
+        // 自身行（30）
+        let sum_in = |sess: &str| {
+            turns
+                .iter()
+                .filter(|t| t.session_id == sess)
+                .map(|t| t.input_tokens)
+                .sum::<i64>()
+        };
+        assert_eq!(sum_in("sess_main"), 130, "主会话聚合不应双计子代理自身行");
+        assert_eq!(sum_in("sess_subagent_agent_1"), 30);
+        // 序列化形态：附加 subagent:1 短键（v2 附加字段，旧前端忽略）
+        let json = serde_json::to_string(&turns).unwrap();
+        assert!(json.contains("\"subagent\":1"), "{json}");
+        let main_json = serde_json::to_string(main).unwrap();
+        assert!(!main_json.contains("\"subagent\""), "{main_json}");
         drop(conn);
         let _ = fs::remove_file(&path);
     }

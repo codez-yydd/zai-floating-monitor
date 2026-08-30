@@ -639,14 +639,38 @@ pub const EFFECTS_JS: &str = r#"// =============================================
 /// V12 的动态测量方案（getBoundingClientRect().top → fixed bottom）因
 /// 实机会压住输入框内第一行文字废弃（测量目标与可见输入卡片边缘不一
 /// 致 + 输入框单行/多行切换的时序窗口）。
+/// V20 起数据端为每条已完成子代理轮额外导出"自身视图行"（sess 为子代
+/// 理会话 id、带 subagent:1 标记）：子轮 umid 进入完成索引后，已完成子
+/// 代理面板轮走完成态显示真实 token 值（此前永无该行，误判活动轮渲染
+/// 全 0 占位并枯萎移除）；会话累计按 sess 精确匹配无任何双计路径，渲染
+/// 管线零改动。
 /// 数据源为本目录下 usage-data.js（键名契约见 usage_feed 模块头；每轮
 /// 条匹配键为 umid 字段）。版本化落盘（头部 ZBAR-THEME-V 标记，见
 /// store::ensure_versioned_template）。风格与 effects.js 同款：自愈、
 /// 静默失败、空值防御；DOM 选择器集中在头部常量，便于实机比对调整。
 pub const USAGE_JS: &str = r#"// ============================================================
-// ZBAR-THEME-V19
+// ZBAR-THEME-V20
 // ZBar Agent 对话页用量统计条（由 ZBar 落盘并随版本升级覆盖）
 // ============================================================
+// V20 变更（配合数据端 V20 双修复，渲染管线零改动即天然正确）：
+//   a) turns 新增子代理"自身视图行"（每条已完成子代理轮额外导出一条
+//      行：sess 为子代理会话 id、umid 为子轮自己的用户消息 id、数值与
+//      dur/ttft 均为子轮自身口径，带 subagent:1 标记——标记仅为数据
+//      侧自描述字段（调试/未来消费预留），前端匹配不读取该键；主轮
+//      行仍照常含并入的 sub 数值，两行并存）。子轮 umid 由此进入完成
+//      索引 index → findLiveNodes 不再把已完成子代理轮误判为活动轮
+//      （此前进入已完成子代理详情面板时，该轮 umid 永不在
+//      index/runIndex，renderOne 走启动窗口分支渲染全 0 占位条、
+//      90 秒后被枯萎判定移除，面板 token 显示全 0），renderOne 按
+//      index 命中走完成态显示真实 token 值，枯萎移除逻辑不再作用于
+//      它。会话累计无任何双计路径：sessionTotals 按 t.sess 精确匹配，
+//      主会话视图不命中子代理自身行、子代理视图只命中自身行；runs
+//      侧该轮行落库后即被后端 done 集合过滤，与自身行不同通道不重叠。
+//      数据格式仍为 v2 附加字段（旧脚本忽略未知字段）。
+//   b) 数据端父会话保活（usage_feed collect_runs）：主轮派发子代理后
+//      自身静默等待不再满 10 分钟被踢出 runs——主轮行、会话累计条与
+//      子代理孤儿并入均保持实时值（此前主轮行消失导致每轮条跌回全 0
+//      启动窗口占位、Σ 丢失该轮，孤儿数值蒸发）。本文件渲染逻辑不变。
 // V19 变更（新增每轮统计条开关参数 usage_turn_bar，默认开启）：renderAll
 //   第二遍渲染前统一读 --zbar-usage-turn-bar（variables.css 渲染 1/0，
 //   变量缺失视为开启，兼容旧 variables.css），关闭时对全部轮节点
@@ -975,9 +999,10 @@ pub const USAGE_JS: &str = r#"// ===============================================
   var POLL_HIDDEN_MS = 10000; /* 页面隐藏时降频 */
   var FALLBACK_RENDER_MS = 15000; /* 低频兜底渲染周期（死锁/漏渲染自愈） */
   var STALE_MS = 90000; /* 活动轮枯萎判定阈值（V10）：目标节点文本连续
-    无增长的时长，超时且该 umid 始终不在 index/runIndex（已完成被并入
-    主轮的子代理轮，turns/runs 永无该行）→ 移除面板残留占位行并从活
-    动轮目标中移除 */
+    无增长的时长，超时且该 umid 始终不在 index/runIndex → 移除面板残留
+    占位行并从活动轮目标中移除。V20 起已完成子代理轮有自身视图行入
+    index，常规不再触发（见 stale 记录注释），保留作永无数据节点
+    （umid null 的轮、极老版本库无子代理查询等）的兜底清理 */
 
   /* ---- 会话级实时统计条常量（V5，实机调参集中在此处） ---- */
   var SEL_SESSION_ID = "[data-session-id]"; /* 当前会话锚点（属性值为会话 id） */
@@ -1363,10 +1388,11 @@ pub const USAGE_JS: &str = r#"// ===============================================
   var EST_ZERO = { tok: 0, speed: 0 }; /* 非估算节点的空估算（共享只读） */
   /* 枯萎目标记录（V10）：sess → { id: umid, chars: 枯萎时文本长度 }。
    * 目标文本连续 STALE_MS 无增长且 umid 始终不在 index/runIndex 时写入
-   * （已完成被并入主轮的子代理轮，turns/runs 永无该行）：同会话同
-   * umid 的活动轮不再重建估算目标、不再渲染启动占位行；目标文本变化
-   * （恢复输出/虚拟列表重挂内容变化）时消费端 staleHolds 失效记录，
-   * 重新评估（无害） */
+   * （永无数据行兜底；V20 前的常规触发源——已完成被并入主轮的子代理
+   * 轮——现已有自身视图行入 index，不再触发）：同会话同 umid 的活动轮
+   * 不再重建估算目标、不再渲染启动占位行；目标文本变化（恢复输出/
+   * 虚拟列表重挂内容变化）时消费端 staleHolds 失效记录，重新评估
+   * （无害） */
   var stale = new Map();
 
   /* 枯萎记录是否仍对该节点生效：umid 相同且文本长度无变化视为仍枯萎；
@@ -1467,7 +1493,11 @@ pub const USAGE_JS: &str = r#"// ===============================================
   /* 会话累计（完成轮真实值）：按 sess 过滤 turns 原始数组聚合。该会话
    * 无任何完成轮返回 null——V6 起不再据此直接放弃渲染（V5 根因 a)：
    * 新会话首轮生成期间 totals 恒为 null，动态段从未启动），改由
-   * renderSessionBar 以 run 合计兜底 */
+   * renderSessionBar 以 run 合计兜底。
+   * V20：turns 含子代理自身视图行（sess 为子代理会话 id、带
+   * subagent:1），按 sess 精确匹配天然隔离——主会话视图不命中子代理
+   * 自身行（其数值经主轮行的并入值计入），子代理视图（面板锚点外通常
+   * 不渲染会话条）只命中自身行，无任何双计路径 */
   function sessionTotals(sessId) {
     var tin = 0,
       tout = 0,
@@ -1648,9 +1678,10 @@ pub const USAGE_JS: &str = r#"// ===============================================
    * 轮条（估算 ↓ 与速度段）与各会话条（Σ 跳动）。
    * V5 曾在此检查 data-running 属性——实机不可靠，V6 已移除，V9 沿用。
    * V10 枯萎判定：目标文本连续 STALE_MS 无增长且该 umid 始终不在
-   * index/runIndex = 已完成被并入主轮的子代理轮（turns/runs 永无该
-   * 行，面板节点永久残留启动占位行）——移除该行并从活动轮目标中移除
-   * （记录进 stale，文本再变化时消费端 staleHolds 重新评估，无害） */
+   * index/runIndex（V20 起已完成子代理轮有自身视图行入 index，常规
+   * 不再触发，此处为永无数据节点的兜底清理）——移除该行并从活动轮
+   * 目标中移除（记录进 stale，文本再变化时消费端 staleHolds 重新评
+   * 估，无害） */
   function dynTick() {
     try {
       var now = Date.now();
@@ -2408,11 +2439,15 @@ mod tests {
         assert!(!THEME_CSS.contains("ZBAR-THEME-V9"), "版本头应已升到 V10");
         assert!(EFFECTS_JS.contains("ZBAR-THEME-V5"));
         assert!(!EFFECTS_JS.contains("ZBAR-THEME-V4"), "版本头应已升到 V5");
-        // usage.js V19（新增每轮统计条开关参数 usage_turn_bar（默认
-        // 开启）：renderAll 第二遍渲染前统一读 --zbar-usage-turn-bar（变
-        // 量缺失视为开启），关闭时对全部轮节点 removeRow 并跳过 renderOne，
-        // syncDyn 与会话条不受影响）；V18 修复新建任务后（空会话）会话
-        // 累计条停留在上一个
+        // usage.js V20（配合数据端 V20 双修复：turns 新增子代理自身视图
+        // 行（subagent:1），子轮 umid 进入完成索引后已完成子代理轮不再
+        // 被误判为活动轮、面板按 index 命中显示真实 token，会话累计按
+        // sess 精确匹配无双计路径，渲染管线零改动；数据端父会话保活修
+        // 复主轮行被子代理运行静默踢出 runs 的缺陷）；V19 新增每轮统计
+        // 条开关参数 usage_turn_bar（默认开启）：renderAll 第二遍渲染前
+        // 统一读 --zbar-usage-turn-bar（变量缺失视为开启），关闭时对全
+        // 部轮节点 removeRow 并跳过 renderOne，syncDyn 与会话条不受影
+        // 响；V18 修复新建任务后（空会话）会话累计条停留在上一个
         // 会话数据：renderAll 无轮节点分支早退导致 renderSessionBar 永
         // 不执行，该分支补 removeBar；V17 修复新建任务后会话累计条不消
         // 失、数据不重置：currentSessionId 改为焦点优先+可见优先的容器
@@ -2429,9 +2464,9 @@ mod tests {
         // 占位枯萎清理；V9 子代理消耗实时化：document 级扫描 + 多容器
         // 活动轮 + 主轮 live 行 sub 合计 + 会话条 Σ 跳过 m 行；V8 启动
         // 窗口实时渲染；V7 请求图标 ⟳ → ×；V6 生成过程实时跳动）
-        assert!(USAGE_JS.contains("ZBAR-THEME-V19"));
-        assert!(!USAGE_JS.contains("ZBAR-THEME-V18"), "版本头应已升到 V19");
-        assert!(!USAGE_JS.contains("ZBAR-THEME-V17"), "版本头不应回退");
+        assert!(USAGE_JS.contains("ZBAR-THEME-V20"));
+        assert!(!USAGE_JS.contains("ZBAR-THEME-V19"), "版本头应已升到 V20");
+        assert!(!USAGE_JS.contains("ZBAR-THEME-V18"), "版本头不应回退");
         assert!(!USAGE_JS.contains("ZBAR-THEME-V10"), "版本头不应回退");
         // V19 每轮统计条开关特征：开关变量 + 镜像读取函数 + renderAll
         // 第二遍渲染循环的关闭分支（对全部轮节点 removeRow 并跳过
