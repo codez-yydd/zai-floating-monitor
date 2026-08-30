@@ -43,7 +43,10 @@
 //! 写死（见 build_default_states），states 为显式配置，用户可手改 pet.json
 //! 微调（加载时做边界收敛）。旧五状态 pet.json（V6 前导入）读取时缺
 //! tool_running/failed 键由 normalize_meta 用默认行补齐（平滑升级，无需
-//! 重新导入）。
+//! 重新导入）。V9 细分键 thinking/walking（动作语义细分）例外：有则直读
+//! 保留、缺则不补——细分映射只随内置智谱娘 pet.json 分发（经内置元数据
+//! 升级机制落到用户库），缺键形象由 pet-core.js 的 CUSTOM_STATE_FALLBACK
+//! 回退 working 帧，通用/老宠物行为与 V8 完全一致。
 //!
 //! ## 两条消费链路
 //! - **注入版**（皮肤已安装时）：PetConfig.style = `custom:<id>` 则由
@@ -57,11 +60,13 @@
 //! ## 内置形象（V8 起默认）
 //! 「智谱 Z 娘」（id = `zhipu-z-niang`）随安装包分发（src-tauri/assets/
 //! pets/ 下内嵌 pet.json + sheet.webp，编译期 include_bytes!），启动时由
-//! [`ensure_builtin_pet`] 释放到宠物库（缺失/损坏才落盘，已存在且合法
-//! 跳过——用户目录里同 id 内容可能被手改过，尊重现状不覆盖）；默认选中
-//! （pet.rs 的 DEFAULT_PET_STYLE = `custom:zhipu-z-niang`）且不可删除
-//! （delete_custom_pet 对内置 id 拒绝）。cat/bot 两个旧内建字符网格形象
-//! 已随 V8 渲染收敛移除（pet-core.js 改 customAsset-only）。
+//! [`ensure_builtin_pet`] 释放到宠物库：图集缺失/损坏才落盘（约 2.5MB
+//! 且不随版本变化，已存在不覆盖）；pet.json 的状态映射属软件管理范畴
+//! （V9 细分 thinking/walking 键等随版本演进），库内字节与内置不一致时
+//! 覆盖升级（.tmp + rename 原子写，见 [`ensure_builtin_pet_in`]）；默认
+//! 选中（pet.rs 的 DEFAULT_PET_STYLE = `custom:zhipu-z-niang`）且不可
+//! 删除（delete_custom_pet 对内置 id 拒绝）。cat/bot 两个旧内建字符网格
+//! 形象已随 V8 渲染收敛移除（pet-core.js 改 customAsset-only）。
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -128,8 +133,11 @@ pub struct CustomPetMeta {
     pub frame_h: u32,
     /// 图集文件名（sheet.webp / sheet.png）
     pub image: String,
-    /// 七状态行配置（键：sleeping/idle/working/typing/celebrating/
-    /// tool_running/failed；V6 起含后两个新状态）
+    /// 状态行配置（键：sleeping/idle/working/typing/celebrating/
+    /// tool_running/failed 七键恒在（V6 起含后两个，缺键补默认行）；
+    /// V9 细分键 thinking/walking 有则直读保留、缺不补——通用 v2 宠物
+    /// 作者自命名的行语义各不相同，细分映射只随内置 pet.json 分发，
+    /// 缺键形象由渲染端 CUSTOM_STATE_FALLBACK 回退 working 帧）
     pub states: BTreeMap<String, CustomPetStateDef>,
 }
 
@@ -191,7 +199,12 @@ pub(crate) fn build_default_states(cols: u32) -> BTreeMap<String, CustomPetState
 /// row 夹进行数、frames 夹进列数且 ≥1、frameMs 校验为正数或非空正数数组
 /// （非法回默认节奏 400 / typing [220,150,95]）。V6 兼容：旧五状态
 /// pet.json 缺 tool_running/failed 键时用默认行补齐（None => fallback，
-/// 导入老数据平滑升级，无需重新导入）。
+/// 导入老数据平滑升级，无需重新导入）。V9 细分键 thinking/walking：
+/// pet.json 有则直读收敛保留（不覆盖已有键——内置智谱娘的细分映射随
+/// 版本演进，经 ensure_builtin_pet 的元数据升级落到用户库）、缺则不补
+/// 默认行（通用 v2 宠物的行语义由作者自命名，没有可靠的默认细分行，
+/// 渲染端 pet-core.js 的 CUSTOM_STATE_FALLBACK 回退 working 帧，老宠物
+/// 与用户自定义宠物行为与 V8 完全一致）。
 pub(crate) fn normalize_meta(mut meta: CustomPetMeta) -> CustomPetMeta {
     if meta.cols == 0 {
         meta.cols = 8;
@@ -208,6 +221,20 @@ pub(crate) fn normalize_meta(mut meta: CustomPetMeta) -> CustomPetMeta {
     }
     let defaults = build_default_states(meta.cols);
     let mut states = BTreeMap::new();
+    let fix = |d: &CustomPetStateDef,
+               default_ms: serde_json::Value|
+     -> CustomPetStateDef {
+        CustomPetStateDef {
+            row: d.row.min(meta.rows.saturating_sub(1)),
+            frames: d.frames.clamp(1, meta.cols),
+            // 非法 frameMs 回该状态的内建默认节奏（sleeping 慢、typing 三档）
+            frame_ms: if frame_ms_valid(&d.frame_ms) {
+                d.frame_ms.clone()
+            } else {
+                default_ms
+            },
+        }
+    };
     for key in [
         "sleeping",
         "idle",
@@ -219,19 +246,19 @@ pub(crate) fn normalize_meta(mut meta: CustomPetMeta) -> CustomPetMeta {
     ] {
         let fallback = defaults.get(key).cloned().unwrap();
         let fixed = match meta.states.get(key) {
-            Some(d) => CustomPetStateDef {
-                row: d.row.min(meta.rows.saturating_sub(1)),
-                frames: d.frames.clamp(1, meta.cols),
-                // 非法 frameMs 回该状态的内建默认节奏（sleeping 慢、typing 三档）
-                frame_ms: if frame_ms_valid(&d.frame_ms) {
-                    d.frame_ms.clone()
-                } else {
-                    fallback.frame_ms
-                },
-            },
+            Some(d) => fix(d, fallback.frame_ms),
             None => fallback,
         };
         states.insert(key.to_string(), fixed);
+    }
+    // V9 细分键：有则直读收敛（不覆盖已有键），缺则不补（渲染端回退
+    // working；无默认行故非法 frameMs 回 400——pet-core customStateDef
+    // 的兜底节奏同值）
+    for key in ["thinking", "walking"] {
+        if let Some(d) = meta.states.get(key) {
+            let fixed = fix(d, serde_json::Value::from(400));
+            states.insert(key.to_string(), fixed);
+        }
     }
     meta.states = states;
     meta
@@ -567,8 +594,8 @@ pub(crate) fn builtin_pet_meta() -> CustomPetMeta {
 /// 确保内置形象（智谱娘）在宠物库就位（真实 ~/.zbar 路径版，应用启动
 /// setup 阶段调用，失败由调用方记日志不阻断启动）：
 /// - 库内已存在且体检通过（pet.json 可解析且 id 匹配 + 图集非空）→
-///   跳过。**不做内容比对覆盖**：用户目录里同 id 内容可能被手改过，
-///   与内置同源即尊重现状（删除保护见 delete_custom_pet_impl）；
+///   比对 pet.json 字节与内置版本，不一致则覆盖升级（V9 语义，见
+///   [`ensure_builtin_pet_in`]），一致则跳过；图集不比对覆盖；
 /// - 缺失或损坏（pet.json 解析失败/图集缺失或为空）→ 重新释放：临时
 ///   目录写全 → 移除旧目录 → 原子改名（与导入同手法，杜绝半截状态）。
 pub fn ensure_builtin_pet() -> Result<(), String> {
@@ -576,11 +603,22 @@ pub fn ensure_builtin_pet() -> Result<(), String> {
     ensure_builtin_pet_in(&root)
 }
 
-/// ensure_builtin_pet 的目录显式版（单元测试复用，不依赖真实 ~/.zbar）
+/// ensure_builtin_pet 的目录显式版（单元测试复用，不依赖真实 ~/.zbar）。
+/// 已存在且体检通过时的升级语义（V9 起）：
+/// - **pet.json 覆盖升级**：内置宠物的状态映射（states 键）属软件管理
+///   范畴，随版本演进（V9 的 thinking/walking 细分键等）需要能升级到
+///   用户库——库内字节与内嵌 BUILTIN_PET_JSON 不一致时 .tmp + rename
+///   原子覆盖（与 sync_theme_custom_pet 的 pet-custom.js 同手法），
+///   一致则跳写（mtime 不动）。因此手改内置 pet.json 的自定义内容会被
+///   升级回内置版（想自定义请导入自己的宠物）；删除保护见
+///   delete_custom_pet_impl；
+/// - **图集不覆盖**：sheet.webp 约 2.5MB 且不随版本变化，仅缺失/损坏
+///   （体检不过 → 整目录重释）时才写盘，避免每次启动无谓写盘。
 pub(crate) fn ensure_builtin_pet_in(root: &Path) -> Result<(), String> {
     fs::create_dir_all(root).map_err(|e| format!("创建宠物库目录失败：{e}"))?;
     if builtin_pet_ok_in(root, BUILTIN_PET_ID) {
-        return Ok(()); // 已就位且合法：跳过（不按内容比对覆盖）
+        upgrade_builtin_pet_meta_in(root)?;
+        return Ok(()); // 已就位且合法：仅按需升级元数据（图集不动）
     }
     let staging = root.join(format!(
         "{BUILTIN_PET_ID}.builtin-{}",
@@ -609,6 +647,25 @@ pub(crate) fn ensure_builtin_pet_in(root: &Path) -> Result<(), String> {
         format!("落盘内置形象目录失败：{e}")
     })?;
     Ok(())
+}
+
+/// 内置形象元数据升级：库内 pet.json 字节与内嵌 BUILTIN_PET_JSON 不一致
+/// 时 .tmp + rename 原子覆盖为内置版（升级语义见 ensure_builtin_pet_in
+/// 的函数注释），一致则跳写（mtime 不动，启动路径零多余写盘）。仅在
+/// 体检通过路径调用——损坏路径由上层整目录重释兜底。
+fn upgrade_builtin_pet_meta_in(root: &Path) -> Result<(), String> {
+    let dir = root.join(BUILTIN_PET_ID);
+    let meta_path = dir.join(PET_META_FILE);
+    if fs::read(&meta_path).is_ok_and(|b| b == BUILTIN_PET_JSON) {
+        return Ok(()); // 已同版：跳写
+    }
+    let tmp = dir.join(format!("{PET_META_FILE}.tmp"));
+    fs::write(&tmp, BUILTIN_PET_JSON)
+        .map_err(|e| format!("写入内置形象元信息失败：{e}"))?;
+    fs::rename(&tmp, &meta_path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("升级内置形象元信息失败：{e}")
+    })
 }
 
 // ============================================================
@@ -1619,22 +1676,48 @@ mod tests {
             BUILTIN_PET_JSON
         );
 
-        // 幂等：已存在且合法 → 跳过（不动用户目录，无 staging 残留）
-        // 用户手改过的 pet.json 同样被尊重（不按内容比对覆盖）
-        fs::write(
-            root.join(BUILTIN_PET_ID).join(PET_META_FILE),
-            text_with_name(&meta, "我的智谱娘"),
-        )
-        .unwrap();
+        // 元数据升级（V9 语义）：体检通过但 pet.json 字节与内置不一致
+        //（此处模拟手改显示名）→ 覆盖为内置版（状态映射属软件管理范畴，
+        // 想自定义请导入自己的宠物）；图集不比对覆盖（mtime 不变）、
+        // 无 staging 残留
+        let sheet_path = root.join(BUILTIN_PET_ID).join(&meta.image);
+        let sheet_mtime = fs::metadata(&sheet_path).unwrap().modified().unwrap();
+        let meta_path = root.join(BUILTIN_PET_ID).join(PET_META_FILE);
+        fs::write(&meta_path, text_with_name(&meta, "我的智谱娘")).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
         ensure_builtin_pet_in(&root).unwrap();
-        let kept = load_pet_meta_in(&root, BUILTIN_PET_ID).unwrap();
-        assert_eq!(kept.name, "我的智谱娘", "已存在且合法时不应覆盖用户内容");
+        assert_eq!(
+            fs::read(&meta_path).unwrap(),
+            BUILTIN_PET_JSON,
+            "内置 pet.json 内容不一致时应覆盖升级为内置版"
+        );
+        let upgraded = load_pet_meta_in(&root, BUILTIN_PET_ID).unwrap();
+        assert_eq!(upgraded.name, "智谱 Z 娘", "手改的显示名应随升级回内置版");
+        assert_eq!(
+            fs::metadata(&sheet_path).unwrap().modified().unwrap(),
+            sheet_mtime,
+            "体检通过时图集不应被重写（约 2.5MB，仅缺失/损坏才释放）"
+        );
         assert!(
             !fs::read_dir(&root).unwrap().flatten().any(|e| e
                 .file_name()
                 .to_string_lossy()
                 .contains(".builtin-")),
-            "跳过路径不应残留 staging 目录"
+            "升级路径不应残留 staging 目录"
+        );
+        assert!(
+            !root.join(BUILTIN_PET_ID).join("pet.json.tmp").exists(),
+            "升级成功后不应残留 .tmp 文件"
+        );
+
+        // 幂等：内容已同版 → 跳写（pet.json mtime 不动）
+        let meta_mtime = fs::metadata(&meta_path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        ensure_builtin_pet_in(&root).unwrap();
+        assert_eq!(
+            fs::metadata(&meta_path).unwrap().modified().unwrap(),
+            meta_mtime,
+            "内容已同版时不应重写 pet.json"
         );
 
         // 损坏（图集被清空）→ 重释为内置内容
@@ -1659,6 +1742,106 @@ mod tests {
         assert!(builtin.thumb.starts_with("data:image/png;base64,"), "缩略图应生成");
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn 内置元数据升级_旧版五键覆盖为新版() {
+        // V8 → V9 升级路径：用户库里是旧版 pet.json（无 thinking/walking
+        // 细分键、体检通过），启动 ensure 后应覆盖为新版——细分映射无需
+        // 用户重新导入即可生效；图集字节保持不动
+        let root = test_dir("builtin-upgrade");
+        ensure_builtin_pet_in(&root).unwrap();
+        let sheet_path = root
+            .join(BUILTIN_PET_ID)
+            .join(builtin_pet_meta().image);
+        let sheet_before = fs::read(&sheet_path).unwrap();
+
+        // 构造 V8 形态：内置 JSON 去掉细分键（旧版 states 形态）
+        let mut old: serde_json::Value = serde_json::from_slice(BUILTIN_PET_JSON).unwrap();
+        let states = old["states"].as_object_mut().unwrap();
+        states.remove("thinking");
+        states.remove("walking");
+        fs::write(
+            root.join(BUILTIN_PET_ID).join(PET_META_FILE),
+            serde_json::to_string_pretty(&old).unwrap(),
+        )
+        .unwrap();
+
+        ensure_builtin_pet_in(&root).unwrap();
+        assert_eq!(
+            fs::read(root.join(BUILTIN_PET_ID).join(PET_META_FILE)).unwrap(),
+            BUILTIN_PET_JSON,
+            "旧版 pet.json 应升级覆盖为内置新版"
+        );
+        let meta = load_pet_meta_in(&root, BUILTIN_PET_ID).unwrap();
+        assert_eq!(meta.states["thinking"].row, 9, "细分键应随升级可读");
+        assert_eq!(meta.states["thinking"].frames, 8);
+        assert_eq!(meta.states["walking"].row, 8);
+        assert_eq!(fs::read(&sheet_path).unwrap(), sheet_before, "图集不应被动");
+        assert!(builtin_pet_ok_in(&root, BUILTIN_PET_ID));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn normalize_细分键直读_缺键不补() {
+        // V9：pet.json 含 thinking/walking 键时直读保留（不覆盖已有键，
+        // 坏值照常收敛）；缺键时不补默认行（通用 v2 宠物的行语义由作者
+        // 自命名，没有可靠默认——渲染端 CUSTOM_STATE_FALLBACK 回退
+        // working 帧，老宠物行为与 V8 一致）
+        let base = CustomPetMeta {
+            id: "t9".into(),
+            name: "T9".into(),
+            format: "petdex-v2".into(),
+            cols: 8,
+            rows: 11,
+            frame_w: 192,
+            frame_h: 208,
+            image: "sheet.webp".into(),
+            states: BTreeMap::from([
+                (
+                    "thinking".into(),
+                    CustomPetStateDef { row: 9, frames: 8, frame_ms: serde_json::json!(400) },
+                ),
+                (
+                    "walking".into(),
+                    CustomPetStateDef { row: 8, frames: 6, frame_ms: serde_json::json!(300) },
+                ),
+            ]),
+        };
+        let fixed = normalize_meta(base.clone());
+        assert_eq!(fixed.states["thinking"].row, 9, "既有细分键应直读保留");
+        assert_eq!(fixed.states["thinking"].frames, 8);
+        assert_eq!(fixed.states["thinking"].frame_ms, serde_json::json!(400));
+        assert_eq!(fixed.states["walking"].row, 8);
+        assert_eq!(fixed.states["walking"].frame_ms, serde_json::json!(300));
+
+        // 坏值收敛：row 越界夹进行数、非法 frameMs 回 400
+        let mut bad = base;
+        bad.states.insert(
+            "thinking".into(),
+            CustomPetStateDef { row: 99, frames: 0, frame_ms: serde_json::json!(0) },
+        );
+        let fixed_bad = normalize_meta(bad);
+        assert_eq!(fixed_bad.states["thinking"].row, 10, "行应夹进行数上限（11 行）");
+        assert_eq!(fixed_bad.states["thinking"].frames, 1);
+        assert_eq!(fixed_bad.states["thinking"].frame_ms, serde_json::json!(400));
+
+        // 缺键不补：七键恒在 + 无 thinking/walking（合计 7 个）
+        let legacy = CustomPetMeta {
+            id: "l".into(),
+            name: "L".into(),
+            format: "petdex-v1".into(),
+            cols: 8,
+            rows: 9,
+            frame_w: 192,
+            frame_h: 208,
+            image: "sheet.webp".into(),
+            states: BTreeMap::new(),
+        };
+        let nofill = normalize_meta(legacy);
+        assert_eq!(nofill.states.len(), 7, "缺细分键时不应补默认行");
+        assert!(!nofill.states.contains_key("thinking"));
+        assert!(!nofill.states.contains_key("walking"));
     }
 
     /// 构造仅替换显示名的 pet.json 文本（模拟用户手改）

@@ -6,7 +6,9 @@
  * 测试对象为 V5 抽出的模块级纯函数 ZBarPet.decideState（状态机判定的
  * 无状态内核——预判触发与超时、working 迟滞保持与超时、celebrating
  * 优先级、pu 缺失兼容、心跳陈旧短路；V6 新增 tool_running 触发与超时、
- * failed 沮丧窗口、迟滞跨工作态语义）；DOM 依赖部分按输入侧测试：
+ * failed 沮丧窗口、迟滞跨工作态语义；V9 将原 working 三场景细分为
+ * thinking（runs 活跃但 out 不增长）/walking（pu 预判、迟滞保持），
+ * working 降为缺键形象的回退帧目标）；DOM 依赖部分按输入侧测试：
  * 用桩 DOM 创建真实实例并 feed 带 pu/ta/fe 与不带的旧数据快照，验证
  * 喂入路径（解析与容错、轮完成成败互斥分支）不抛错。V8 起形象渲染
  * 收敛为 customAsset-only（Petdex 图集），实例创建经 customAsset 桩
@@ -20,6 +22,8 @@ import { dirname, join } from "node:path";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const source = readFileSync(join(root, "public", "pet-core.js"), "utf8");
+/* 行尾归一形态（源文件行尾格式随仓库配置不定，多行契约断言统一按 LF 匹配） */
+const srcLf = source.replace(/\r\n/g, "\n");
 
 /* 加载核心：IIFE 只依赖 window 全局（document/performance 仅在实例
  * 创建后的渲染路径使用，纯判定不触碰） */
@@ -80,7 +84,11 @@ check(
   "sleeping"
 );
 check("runs 活跃 + out 增长 → typing", decide(NOW, side({ runsActive: true, outGrowing: true })), "typing");
-check("runs 活跃 + out 停滞 → working", decide(NOW, side({ runsActive: true })), "working");
+check(
+  "runs 活跃 + out 停滞 → thinking（V9：模型思考/规划，原 working 场景细分）",
+  decide(NOW, side({ runsActive: true })),
+  "thinking"
+);
 check(
   "runs 活跃 dominance：迟滞/预判不干扰",
   decide(NOW, side({ runsActive: true, outGrowing: true, pending: true, lastWorkT: NOW })),
@@ -89,16 +97,16 @@ check(
 check("runs 空 + la 新鲜 → idle（pu 缺失基线）", decide(NOW, side()), "idle");
 check("runs 空 + la 超窗 → sleeping", decide(NOW, side({ lastActivity: NOW - 120_000 })), "sleeping");
 
-/* ---- V5 预判：pu 命中 → working ---- */
+/* ---- V5 预判：pu 命中 → walking（V9：动身去干活，原输出 working） ---- */
 check(
-  "预判触发：runs 空 + pending → working（优先于 idle/sleeping）",
+  "预判触发：runs 空 + pending → walking（优先于 idle/sleeping）",
   decide(NOW, side({ pending: true })),
-  "working"
+  "walking"
 );
 check(
   "预判触发：la 超窗也不入睡（pu 即活动信号）",
   decide(NOW, side({ pending: true, lastActivity: NOW - 120_000 })),
-  "working"
+  "walking"
 );
 check(
   "预判超时（pending 已按窗口预计算为 false）→ 回落 idle",
@@ -111,16 +119,16 @@ check(
   "sleeping"
 );
 
-/* ---- V5 迟滞：工作信号消失后保持 working ---- */
+/* ---- V5 迟滞：工作信号消失后保持 walking（V9：踱步等待下一轮，原输出 working） ---- */
 check(
-  "迟滞保持：lastWorkT 10 秒前 → working",
+  "迟滞保持：lastWorkT 10 秒前 → walking",
   decide(NOW, side({ lastWorkT: NOW - 10_000 })),
-  "working"
+  "walking"
 );
 check(
-  "迟滞保持：la 超窗也在窗口内维持 working",
+  "迟滞保持：la 超窗也在窗口内维持 walking",
   decide(NOW, side({ lastWorkT: NOW - 10_000, lastActivity: NOW - 120_000 })),
-  "working"
+  "walking"
 );
 check(
   "迟滞超时：lastWorkT 50 秒前 → 回落 idle",
@@ -150,9 +158,9 @@ check(
   "celebrating"
 );
 check(
-  "庆祝结束（celebrateUntil 已过）→ 迟滞窗口内回 working",
+  "庆祝结束（celebrateUntil 已过）→ 迟滞窗口内回 walking",
   decide(NOW, side({ celebrateUntil: NOW - 1, lastWorkT: NOW - 10_000 })),
-  "working"
+  "walking"
 );
 check(
   "庆祝结束且无迟滞 → 回落 idle",
@@ -190,9 +198,9 @@ check(
   "idle"
 );
 check(
-  "failed 超时且迟滞窗口内 → 迟滞接管 working（工作类回落语义）",
+  "failed 超时且迟滞窗口内 → 迟滞接管 walking（工作类回落语义）",
   decide(NOW, side({ failedUntil: NOW - 1, lastWorkT: NOW - 10_000 })),
-  "working"
+  "walking"
 );
 check(
   "心跳陈旧 + failedUntil 在窗 → 仍 sleeping（数据源不在优先于一切）",
@@ -224,14 +232,14 @@ check(
   "idle"
 );
 check(
-  "tool_running 不触发但迟滞在窗：从工作类状态回落的迟滞保持 working",
+  "tool_running 不触发但迟滞在窗：从工作类状态回落的迟滞保持 walking",
   decide(NOW, side({ toolActive: true, lastWorkT: NOW - 10_000 })),
-  "working"
+  "walking"
 );
 check(
-  "ta 超时（toolActive 已按 TOOL_ACTIVE_MS 预计算为 false）→ working 兜底",
+  "ta 超时（toolActive 已按 TOOL_ACTIVE_MS 预计算为 false）→ thinking 兜底",
   decide(NOW, side({ runsActive: true, toolActive: false })),
-  "working"
+  "thinking"
 );
 check(
   "tool_running dominance：runs 活跃时优先于预判与迟滞分支",
@@ -269,6 +277,40 @@ check(
   true
 );
 
+/* ---- V9 源码级契约：细分判定与缺键回退（inject.rs 同款扫描） ---- */
+check(
+  "V9：runs 活跃不增长应输出 thinking（不再输出 working）",
+  source.includes('return s.outGrowing ? "typing" : "thinking";'),
+  true
+);
+check(
+  "V9：预判命中应输出 walking",
+  srcLf.includes('if (s.pending) {\n      if (s.toolActive) return "tool_running";\n      return "walking";'),
+  true
+);
+check(
+  "V9：迟滞保持应输出 walking",
+  srcLf.includes(
+    'if (s.lastWorkT > 0 && now - s.lastWorkT < WORKING_LINGER_MS) {\n      return "walking";'
+  ),
+  true
+);
+check(
+  "缺键回退：thinking → working 帧（未随细分映射升级的形象，观感同 V8）",
+  source.includes('thinking: "working"'),
+  true
+);
+check(
+  "缺键回退：walking → working 帧（未随细分映射升级的形象，观感同 V8）",
+  source.includes('walking: "working"'),
+  true
+);
+check(
+  "迟滞基准 lastWorkT 覆盖 thinking/walking（V9 细分状态同为工作类）",
+  source.includes('st === "thinking"') && source.includes('st === "walking"'),
+  true
+);
+
 /* ---- V8 源码级契约：渲染收敛 customAsset-only ---- */
 check(
   "V8：字符网格形象库 PET_STYLES 应已移除",
@@ -281,8 +323,8 @@ check(
   false
 );
 check(
-  "V8：版本头应为 ZBAR-THEME-V8",
-  source.includes("ZBAR-THEME-V8"),
+  "V9：版本头应为 ZBAR-THEME-V9",
+  source.includes("ZBAR-THEME-V9"),
   true
 );
 
@@ -335,7 +377,10 @@ function makeContainer() {
     },
   };
 }
-/* customAsset 桩（V8 渲染必需）：智谱娘同款网格形态 + 假 dataUri */
+/* customAsset 桩（V8 渲染必需）：智谱娘同款网格形态 + 假 dataUri
+ *（V9：states 含细分键 thinking/walking，与升级后的内置 pet.json 一致；
+ * 缺键形象的回退路径由上方源码级契约断言覆盖——CUSTOM_STATE_FALLBACK
+ * 是实例内部闭包，桩 DOM 无法直接观测切帧目标） */
 const STUB_ASSET = {
   meta: {
     id: "zhipu-z-niang",
@@ -349,8 +394,10 @@ const STUB_ASSET = {
     states: {
       sleeping: { row: 6, frames: 6, frameMs: 800 },
       idle: { row: 0, frames: 6, frameMs: 450 },
-      working: { row: 8, frames: 6, frameMs: 300 },
+      thinking: { row: 9, frames: 8, frameMs: 400 },
       typing: { row: 7, frames: 6, frameMs: [220, 150, 95] },
+      walking: { row: 8, frames: 6, frameMs: 300 },
+      working: { row: 8, frames: 6, frameMs: 300 },
       celebrating: { row: 4, frames: 5, frameMs: 160 },
     },
   },
@@ -423,6 +470,11 @@ try {
       v: 2, ts: NOW + 6000, la: NOW + 5000, pu: null, ta: NOW + 5000, fe: null,
       turns: [{ turn: "turn_ok", umid: "msg_ok" }], runs: [{ out: 20 }],
     });
+    /* V9 思考快照（runs 活跃但 out 停滞 → thinking 输入路径） */
+    pet.feed({
+      v: 2, ts: NOW + 7000, la: NOW + 6500, pu: null, ta: null, fe: null,
+      turns: [{ turn: "turn_ok", umid: "msg_ok" }], runs: [{ out: 20 }],
+    });
     /* fe/ta 非法值（0/负数/字符串）归 0 不抛错 */
     pet.feed({
       v: 2, ts: NOW + 8000, la: NOW + 7000, pu: 0, ta: -1, fe: "x",
@@ -455,6 +507,97 @@ if (!pet) {
   failed += 1;
   console.error("FAIL 桩 DOM 下实例应创建成功（feed 输入侧路径的前提）");
 }
+
+/* ---- V9 迟滞行为级回归（实例级，防外层守卫被误删导致永久 walking） ----
+ * 源码级断言只能证明 lastWorkT 推进列表含 walking，不能防
+ * (runsActive || pending) 外层守卫被重构误删——若迟滞期的 walking 也
+ * 回写 lastWorkT，45 秒窗口会被每次 tick 无限续期，宠物永久踱步。
+ * 方案：mock Date.now 驱动假时钟（tick 每 1 秒真实触发一次，只消费
+ * 假时刻），用记录版 canvas ctx 捕获 drawImage 的源行号（= 当前状态
+ * 行：idle=0 / typing=7 / walking=8 / thinking=9 / sleeping=6），
+ * 观测实例真实的闭包侧写输出。 */
+const realDateNow = Date.now;
+const T0 = 1_000_100_000;
+let fakeNow = T0;
+Date.now = () => fakeNow; /* 假时钟：feed 的 ts 消费与 tick 的判定共用 */
+const rowsDrawn = []; /* 最近绘制行（drawFrame 经 drawImage 透出状态行） */
+const recElement = (tag) => {
+  const el = fakeElement(tag);
+  if (tag === "canvas") {
+    const origGetContext = el.getContext;
+    el.getContext = function () {
+      const ctx = origGetContext();
+      const rec = Object.create(ctx); /* 原型链保留 clearRect/setter 等 */
+      rec.drawImage = function (img, sx, sy) {
+        rowsDrawn.push(Math.round(sy / 208)); /* STUB_ASSET.frameH=208 */
+      };
+      return rec;
+    };
+  }
+  return el;
+};
+globalThis.document = { createElement: recElement };
+const sleepReal = (ms) => new Promise((r) => setTimeout(r, ms));
+const lagPet = ZBarPet.create(makeContainer(), {
+  style: "custom:zhipu-z-niang",
+  size: 64,
+  customAsset: STUB_ASSET,
+});
+if (!lagPet) {
+  failed += 1;
+  console.error("FAIL 迟滞回归：实例应创建成功");
+} else {
+  /* 1. runs 活跃且 out 停滞（首帧 out=0 不增长）→ thinking，
+   *    tick 推进迟滞基准 lastWorkT=T0+1s */
+  lagPet.feed({
+    v: 2, ts: T0, la: T0, pu: null, ta: null, fe: null,
+    turns: [], runs: [{ out: 0 }],
+  });
+  fakeNow = T0 + 1_000;
+  lagPet.heartbeat(T0 + 1_000);
+  rowsDrawn.length = 0;
+  await sleepReal(1_200); /* 真实等待下一次 tick（TICK_MS=1000） */
+  check(
+    "迟滞回归：runs 活跃不增长 → thinking（基准随真实工作信号推进）",
+    rowsDrawn[rowsDrawn.length - 1],
+    9
+  );
+
+  /* 2. runs 清空 → 迟滞窗口内（lastWorkT 距今 11s < 45s）→ walking */
+  lagPet.feed({
+    v: 2, ts: T0 + 2_000, la: T0 + 2_000, pu: null, ta: null, fe: null,
+    turns: [], runs: [],
+  });
+  fakeNow = T0 + 12_000;
+  lagPet.heartbeat(T0 + 12_000);
+  rowsDrawn.length = 0;
+  await sleepReal(1_200);
+  check(
+    "迟滞回归：runs 清空后窗口内 → walking（踱步等待下一轮）",
+    rowsDrawn[rowsDrawn.length - 1],
+    8
+  );
+
+  /* 3. 迟滞期再喂空快照 + 假时钟越窗（距今 47s > 45s）→ 应回落 idle。
+   *    若守卫被误删（迟滞 walking 回写 lastWorkT=上拍时刻），距今仅
+   *    36s < 45s → 仍 walking（记录停留行 8），断言失败——这正是要防
+   *    的「永久踱步」回归 */
+  lagPet.feed({
+    v: 2, ts: T0 + 3_000, la: T0 + 3_000, pu: null, ta: null, fe: null,
+    turns: [], runs: [],
+  });
+  fakeNow = T0 + 48_000;
+  lagPet.heartbeat(T0 + 48_000); /* 保持心跳新鲜（防误判陈旧入沉睡） */
+  rowsDrawn.length = 0;
+  await sleepReal(1_200);
+  check(
+    "迟滞回归：越窗回落 idle（迟滞 walking 不回写 lastWorkT，防永久踱步）",
+    rowsDrawn[rowsDrawn.length - 1],
+    0
+  );
+  lagPet.destroy();
+}
+Date.now = realDateNow; /* 恢复真实时钟（后续统计与进程退出不受影响） */
 
 console.log(`pet-core 状态机测试：${passed} 通过，${failed} 失败`);
 process.exit(failed === 0 ? 0 : 1);

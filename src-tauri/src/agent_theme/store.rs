@@ -1091,7 +1091,21 @@ pub const USAGE_JS_VERSION: u32 = 20;
 ///   1 秒瞬态），资产就位后 setParams 热切换恢复；壳的 styleIdOf/
 ///   effective 回退值从 "cat" 改为空串；
 /// - 状态机与数据契约（v/ts/la/pu/ta/fe/turns/runs）零改动。
-pub const PET_JS_VERSION: u32 = 8;
+/// V9（动作语义细分，新增 thinking / walking 两状态）：
+/// - 原 working 一个动画承担三种语义不同的场景，与任务阶段对不上。
+///   V9 拆分：runs 活跃但 out 不增长（模型思考/规划）→ thinking；
+///   pu 预判命中（宠物「动身去干活」）与迟滞保持（轮间隙「踱步等待
+///   下一轮」）→ walking；
+/// - working 保留为回退状态（decideState 不再输出）：形象 states 缺
+///   thinking/walking 键时（老宠物/用户自定义宠物）经核心
+///   CUSTOM_STATE_FALLBACK 回退 working 帧，动画行为与 V8 完全一致；
+/// - 迟滞基准 lastWorkT 的推进列表补入 thinking/walking（V6 工作类
+///   状态语义的延续）；
+/// - 内置智谱娘 pet.json 随版本补 thinking（行 9，8 帧）/walking
+///   （行 8，6 帧）键，pets.rs 的内置元数据升级机制在启动时把新版
+///   pet.json 覆盖到用户库（细分映射无需用户重新导入）；数据契约
+///   （v/ts/la/pu/ta/fe/turns/runs）与全部判定常量零改动。
+pub const PET_JS_VERSION: u32 = 9;
 
 /// 版本标记的头部查找范围（字符数）：版本注释固定在文件头部，
 /// 限定查找范围避免误匹配正文中的同名字样。

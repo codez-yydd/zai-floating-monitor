@@ -23,6 +23,11 @@
       "frames": 6,
       "frameMs": 800
     },
+    "thinking": {
+      "row": 9,
+      "frames": 8,
+      "frameMs": 400
+    },
     "typing": {
       "row": 7,
       "frames": 6,
@@ -31,6 +36,11 @@
         150,
         95
       ]
+    },
+    "walking": {
+      "row": 8,
+      "frames": 6,
+      "frameMs": 300
     },
     "working": {
       "row": 8,

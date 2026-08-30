@@ -657,10 +657,10 @@ export const en: typeof zh = {
     "theme.petEnabledHint":
       "Master switch: shows the pet in the mode selected below; off hides it entirely",
     "theme.petModeLabel": "Mode",
-    "theme.petModeInjected": "Injected",
+    "theme.petModeInjected": "Built-in",
     "theme.petModeFloating": "Floating window",
     "theme.petModeHint":
-      "Injected: rendered inside the ZCode chat page, follows the skin's hot reload (~1s) and can be dragged anywhere; requires the live wallpaper skin to be installed. Floating window: a standalone transparent always-on-top pet, independent of the skin, also draggable.",
+      "Built-in: rendered inside the ZCode chat page, follows the skin's hot reload (~1s) and can be dragged anywhere; requires the live wallpaper skin to be installed. Floating window: a standalone transparent always-on-top pet, independent of the skin, also draggable.",
     "theme.petApplyFail": "Failed to apply pet settings: {msg}",
     "theme.petLoadFail": "Failed to load pet settings: {msg}",
     // Custom pets (phase 3: Petdex-format import, PetStyleSection in petStyles;
@@ -684,9 +684,10 @@ export const en: typeof zh = {
     "theme.petDeleteFail": "Failed to delete pet: {msg}",
     "theme.paramPetSize": "Pet size",
     "theme.paramPetSizeHint": "Sized by screen-height ratio (about 5.5%–15%); adapts when you switch screens or change resolution",
-    // Pet state legend (mirrors the seven states of the pet.js state machine)
+    // Pet state legend (mirrors the nine states of the pet.js state machine;
+    // V9 splits thinking/walking)
     "theme.petLegend":
-      "States: sleeping (ZCode idle for over 1 minute or ZBar not running) · idle (recent turn activity) · thinking (new turn started, no output yet) · typing (output growing; animation speed tiers by token rate) · tool running (a tool is running, e.g. command/build) · celebrating (turn finished, about 3s) · failed (turn failed or cancelled, about 3s)",
+      "States: sleeping (ZCode idle for over 1 minute or ZBar not running) · idle (recent turn activity) · thinking (model planning, no output yet) · typing (output growing; speed tiers by token rate) · tool running (a tool is executing, e.g. command/build) · walking (heading to a new turn / waiting for the next) · celebrating (turn finished, about 3s) · failed (turn failed or cancelled, about 3s)",
     "theme.currentWallpaper": "Current wallpaper",
     "theme.noWallpaper": "No wallpaper selected",
     "theme.lightWallpaperPreset": "Light wallpaper fit",

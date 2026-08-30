@@ -112,15 +112,15 @@ export const theme = {
   // variables.css 热重载约 1 秒生效） =====
   "theme.petTitle": "桌面宠物",
   "theme.petHint":
-    "养一只跟随 ZCode 工作状态实时切换动画的像素宠物：默认注入版显示在 ZCode 对话页内（需已安装皮肤、可拖拽移动），也可切换为独立悬浮窗；形象与大小对两种形态通用，改动即时生效。",
+    "养一只跟随 ZCode 工作状态实时切换动画的像素宠物：默认内置版显示在 ZCode 对话页内（需已安装皮肤、可拖拽移动），也可切换为独立悬浮窗；形象与大小对两种形态通用，改动即时生效。",
   "theme.petEnabled": "开启桌面宠物",
   "theme.petEnabledHint":
     "宠物总开关：开启后按下方选择的形态显示，关闭则全部隐藏",
   "theme.petModeLabel": "显示形态",
-  "theme.petModeInjected": "注入版",
+  "theme.petModeInjected": "内置版",
   "theme.petModeFloating": "悬浮窗",
   "theme.petModeHint":
-    "注入版：显示在 ZCode 对话页内，随皮肤参数热重载生效（约 1 秒），可直接拖拽移动位置，需已安装动态壁纸皮肤；悬浮窗：独立透明置顶小窗，不依赖皮肤安装，同样可拖动调整位置。",
+    "内置版：显示在 ZCode 对话页内，随皮肤参数热重载生效（约 1 秒），可直接拖拽移动位置，需已安装动态壁纸皮肤；悬浮窗：独立透明置顶小窗，不依赖皮肤安装，同样可拖动调整位置。",
   "theme.petApplyFail": "应用宠物设置失败：{msg}",
   "theme.petLoadFail": "读取宠物设置失败：{msg}",
   // 自定义宠物（第三阶段：Petdex 格式导入，petStyles 的 PetStyleSection；
@@ -141,9 +141,9 @@ export const theme = {
   "theme.petDeleteFail": "删除宠物失败：{msg}",
   "theme.paramPetSize": "宠物大小",
   "theme.paramPetSizeHint": "按屏幕高度比例定档（约 5.5%~15%），换屏幕或改分辨率后自动适配，高分屏低分屏观感一致",
-  // 宠物状态图例（与 pet.js 状态机七状态一一对应）
+  // 宠物状态图例（与 pet.js 状态机九状态一一对应，V9 细分思考/踱步）
   "theme.petLegend":
-    "状态：沉睡（ZCode 闲置超 1 分钟或 ZBar 未运行） · 闲坐（近期有轮次活动） · 思考中（新轮开始、尚无输出） · 奋笔疾书（输出增长中，速度随 token 增速分档） · 跑腿执行（工具运行中，如命令/构建） · 庆祝（轮次完成，约 3 秒） · 沮丧（轮次失败或被取消，约 3 秒）",
+    "状态：沉睡（ZCode 闲置超 1 分钟或 ZBar 未运行） · 闲坐（近期有轮次活动） · 思考（模型规划中，暂无输出） · 奋笔疾书（模型输出增长，速度随 token 增速分档） · 跑腿执行（工具运行中，如命令/构建） · 踱步（动身接新任务 / 等待下一轮） · 庆祝（轮次完成，约 3 秒） · 沮丧（轮次失败或被取消，约 3 秒）",
   "theme.currentWallpaper": "当前壁纸",
   "theme.noWallpaper": "未选择壁纸",
   "theme.lightWallpaperPreset": "亮色壁纸适配",

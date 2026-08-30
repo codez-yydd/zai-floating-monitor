@@ -827,11 +827,13 @@ export interface CustomPetMeta {
   frameH: number;
   /** 图集文件名（sheet.webp / sheet.png） */
   image: string;
-  /** 七状态行配置（sleeping/idle/working/typing/celebrating，V6 新增
-   *  tool_running/failed）。行映射：tool_running←行 1 running-right、
+  /** 状态行配置（sleeping/idle/working/typing/celebrating，V6 新增
+   *  tool_running/failed，V9 新增细分键 thinking/walking——有则直读、
+   *  缺不补默认行）。行映射：tool_running←行 1 running-right、
    *  failed←行 5 failed；旧五状态 pet.json 缺键时读取侧补默认行 +
-   *  pet-core.js 的缺键回退（tool_running→typing、failed→sleeping，
-   *  见 CUSTOM_STATE_FALLBACK）双保险 */
+   *  pet-core.js 的缺键回退（tool_running→typing、failed→sleeping、
+   *  thinking/walking→working，见 CUSTOM_STATE_FALLBACK）双保险；
+   *  细分键只随内置智谱娘 pet.json 分发（启动时元数据升级覆盖到库） */
   states: Record<string, CustomPetStateDef>;
 }
 

@@ -1,5 +1,5 @@
 // ============================================================
-// ZBAR-THEME-V8
+// ZBAR-THEME-V9
 // ZBar 桌面像素宠物核心（宠物状态机 + Petdex 图集 canvas 渲染器）
 // ============================================================
 // 本文件是宠物核心的唯一真相源，两个宿主消费同一份代码：
@@ -113,6 +113,25 @@
 //   - 状态机 decideState 与数据契约（v/ts/la/pu/ta/fe/turns/runs）零
 //      改动。
 //
+// V9 变更（动作语义细分：新增 thinking / walking 两状态）：
+//   原-working 一个动画承担了三种语义不同的场景，与任务阶段对不上——
+//   「runs 活跃但 out 不增长」是模型思考/规划，「pu 预判命中」是宠物
+//   动身去干活，「迟滞保持」是在轮间隙踱步等待。V9 拆分：
+//   - thinking：runs 活跃但 out 不增长（新轮刚开始/两步请求之间/模型
+//      思考中）——原 working 的第一条触发场景，语义「坐着想」；
+//   - walking：pu 预判命中（用户已发消息、runs 尚看不见，宠物「动身
+//      去干活」）与迟滞保持（轮完成后的间隙「踱步等待下一轮」）——
+//      原 working 的后两条触发场景，语义「走动」；
+//   - working 保留为回退状态：decideState 不再输出 working，但形象的
+//      states 缺 thinking/walking 键时（老宠物/用户自定义宠物）经
+//      CUSTOM_STATE_FALLBACK 回退到 working 帧——此类形象动画行为与
+//      V8 完全一致（零回归）；内置智谱娘 pet.json 已随版本补
+//      thinking/walking 键（pets.rs 升级机制自动覆盖到用户库）；
+//   - 数据契约（v/ts/la/pu/ta/fe/turns/runs）与全部判定常量零改动；
+//      迟滞基准 lastWorkT 的推进列表补入 thinking/walking（V6 工作类
+//      状态语义的延续——runs 活跃/预判命中时输出什么状态名，迟滞基准
+//      就随什么状态前进，迟滞自身仍不回写）。
+//
 // 对外接口（工厂形态，window.ZBarPet）：
 //   var pet = ZBarPet.create(container, {
 //     style: "custom:zhipu-z-niang", size: 64,
@@ -132,17 +151,23 @@
 //               pu 预判、超出工作迟滞且距最近轮活动 > IDLE_SLEEP_MS。
 //   idle        睁眼轻摆/眨眼。触发：runs 为空且无预判/迟滞，
 //               IDLE_SLEEP_MS 内有轮活动。
-//   working     身体前倾 + 头顶思考点。触发：runs 非空但 out 合计未增长
-//               （新轮刚开始/两步请求之间/模型思考中）；或 pu 预判命中
-//               （V5，用户已发消息、首笔模型请求完成落库前）；或工作
-//               迟滞保持（V5，工作信号刚消失 WORKING_LINGER_MS 内；
-//               V6 起迟滞覆盖「工作类状态 → 非工作状态」的过渡，
-//               tool_running/typing/working 之间切换不触发迟滞）。
+//   thinking    （V9）坐着思考（智谱娘：手托下巴 + 思考气泡）。触发：
+//               runs 非空但 out 合计未增长（新轮刚开始/两步请求之间/
+//               模型思考规划中）——原 working 的该场景细分而来。
+//   walking     （V9）走路踱步。触发：pu 预判命中（用户已发消息、首笔
+//               模型请求完成落库前，宠物「动身去干活」）；或工作迟滞
+//               保持（轮完成的间隙「踱步等待下一轮」，工作信号刚消失
+//               WORKING_LINGER_MS 内；V6 起迟滞覆盖「工作类状态 → 非
+//               工作状态」的过渡）——原 working 的两条触发场景细分而来。
+//   working     （V9 起 decideState 不再输出）回退状态：形象 states 缺
+//               thinking/walking 键时（老宠物/用户自定义宠物）经
+//               CUSTOM_STATE_FALLBACK 回退到 working 帧，动画行为与 V8
+//               完全一致。
 //   typing      奋笔疾书。触发：runs 非空且 out 合计在增长；动画速度按
 //               token 增速（两次数据刷新间 out 差值 / 间隔秒数）分 3 档。
 //   tool_running（V6）替主人跑腿执行。触发：ta 活跃（工具 running 行
 //               开始落库，now − ta < TOOL_ACTIVE_MS）且 runs 非空或 pu
-//               预判命中；优先于 typing/working（工具执行期间模型请求
+//               预判命中；优先于 typing/thinking（工具执行期间模型请求
 //               间隙，out 通常不增长）。自定义形象走 Petdex 行 1
 //               running-right。
 //   celebrating 跳跃庆祝约 CELEBRATE_MS 后回落。触发：turns 数组
@@ -184,9 +209,12 @@
     fe（最近一次失败/取消轮的完成时刻）距今小于此值显示 failed，
     超时自然回落（消费端按时间戳判窗，无需显式清理） */
   var SPEED_TIERS = [15, 60]; /* typing 速度分档阈值（tok/s：≥15 中档、≥60 快档） */
-  /* 状态全集（含 V6 新增状态）：全部七状态均由 meta.states 的行配置
-   * 渲染（旧五状态 pet.json 缺 tool_running/failed 键时由 Rust 侧读取
-   * 补默认行 + 本核心 customStateDef 回退双保险） */
+  /* 状态全集（V6 新增 tool_running/failed，V9 新增 thinking/walking）：
+   * 均由 meta.states 的行配置渲染（旧五状态 pet.json 缺 tool_running/
+   * failed 键时由 Rust 侧读取补默认行 + 本核心 customStateDef 回退双
+   * 保险；thinking/walking 键 Rust 侧不补默认行——通用 v2 宠物作者自
+   * 命名的行语义各不相同，细分映射只随内置 pet.json 分发，缺键一律经
+   * 下方回退表落到 working 帧，老宠物/用户自定义宠物行为与 V8 一致） */
   var STATES = [
     "sleeping",
     "idle",
@@ -194,12 +222,22 @@
     "typing",
     "celebrating",
     "tool_running",
-    "failed"
+    "failed",
+    "thinking",
+    "walking"
   ];
-  /* V6 自定义形象缺键回退（双保险：Rust 侧读取旧五状态 pet.json 时已补
-   * 默认行，此处兜底未补齐的路径——meta.states 缺新状态键时回退到
-   * 语义相近的既有键，不落到 {row:0,frames:1} 的兜底帧） */
-  var CUSTOM_STATE_FALLBACK = { tool_running: "typing", failed: "sleeping" };
+  /* 自定义形象缺键回退（双保险：Rust 侧读取旧五状态 pet.json 时已补
+   * tool_running/failed 默认行，此处兜底未补齐的路径——meta.states 缺
+   * 新状态键时回退到语义相近的既有键，不落到 {row:0,frames:1} 的兜底
+   * 帧。V9 追加：thinking/walking 缺键（未随细分映射升级的形象）回退
+   * working——原 working 的三条触发场景即这两状态的来源，观感与 V8
+   * 完全一致） */
+  var CUSTOM_STATE_FALLBACK = {
+    tool_running: "typing",
+    failed: "sleeping",
+    thinking: "working",
+    walking: "working"
+  };
   var CUSTOM_PREFIX = "custom:"; /* 形象 style 前缀（V8 起全部形象的唯一
     形态：后接宠物 id，内置智谱娘 = custom:zhipu-z-niang） */
 
@@ -247,11 +285,14 @@
    *      状态；心跳从未到达回退 ts），闲置判定用最后活动时刻 la（轮次
    *      滑出查询窗口不刷新 la，防周期性误弹闲置），V5 新增 pu 预判与
    *      working 迟滞，V6 新增 failed（失败沮丧）/tool_running（工具
-   *      执行）两状态。side 字段（纯数据，单测直测）：{ hasData, lastHb,
-   *      runsActive, outGrowing, celebrateUntil, failedUntil, toolActive,
-   *      pending, lastWorkT, lastActivity }，其中 pending/toolActive 为
-   *      调用方按 pu/PENDING_TURN_MS 与 ta/TOOL_ACTIVE_MS 预计算的布尔、
-   *      failedUntil 为按 fe + FAILED_MS 预计算的沮丧截止时刻 ---- */
+   *      执行）两状态，V9 将原 working 的三条触发场景细分为 thinking
+   *      （runs 活跃但 out 不增长）与 walking（pu 预判/迟滞保持）——
+   *      working 降为缺键形象的回退帧目标。side 字段（纯数据，单测直
+   *      测）：{ hasData, lastHb, runsActive, outGrowing, celebrateUntil,
+   *      failedUntil, toolActive, pending, lastWorkT, lastActivity }，其中
+   *      pending/toolActive 为调用方按 pu/PENDING_TURN_MS 与 ta/
+   *      TOOL_ACTIVE_MS 预计算的布尔、failedUntil 为按 fe + FAILED_MS
+   *      预计算的沮丧截止时刻 ---- */
   function decideState(now, s) {
     if (!s.hasData) return "sleeping";
     /* 心跳陈旧：数据源不在（ZBar 退出/未运行），绝不显示进行中状态
@@ -263,30 +304,34 @@
     if (s.failedUntil > now) return "failed";
     if (s.runsActive) {
       /* V6 工具执行：工具 running 行活跃（ta 在窗口内）时优先于
-       * typing/working——工具执行期间模型请求间隙，out 通常不增长，
+       * typing/thinking——工具执行期间模型请求间隙，out 通常不增长，
        * typing 自然让位（「替主人跑腿执行」观感） */
       if (s.toolActive) return "tool_running";
-      return s.outGrowing ? "typing" : "working";
+      /* V9 细分：runs 活跃但 out 不增长 = 模型正在思考/规划（新轮
+       * 刚开始、两步请求之间、长推理中）→ thinking（V8 为 working） */
+      return s.outGrowing ? "typing" : "thinking";
     }
     if (s.celebrateUntil > now) return "celebrating";
     /* V5 预判：runs 为空但最近有待处理用户消息（发送即落库、首笔模型
      * 请求完成落库前 runs 通道看不见，实测窗口 30~70 秒）→ 先行进入
-     * working，消除用户发消息后的滞后；优先级在 celebrating 之后。
+     * 动身观感，消除用户发消息后的滞后；优先级在 celebrating 之后。
      * V6：预判期间工具已开始跑（ZCode 收到消息即执行首个工具，首笔
-     * 模型请求可能仍未落库）→ tool_running 更准确 */
+     * 模型请求可能仍未落库）→ tool_running 更准确。V9：预判输出
+     * walking（「动身去干活」，V8 为 working） */
     if (s.pending) {
       if (s.toolActive) return "tool_running";
-      return "working";
+      return "walking";
     }
     /* V5 迟滞：工作信号刚消失（轮完成落库 → runs 消失且无预判）时，
-     * 距最近一次真实工作态不足 WORKING_LINGER_MS 则维持 working，抹平
+     * 距最近一次真实工作态不足 WORKING_LINGER_MS 则维持动身观感，抹平
      * 轮间隙的回落感。V6 起迟滞语义为「工作类状态（tool_running/
-     * typing/working）→ 非工作状态」的过渡——迟滞输出统一 working，
-     * 工作类状态之间的切换在上面的分支内完成、不走迟滞；celebrating
-     * 分支在前不受迟滞影响（庆祝结束后落回此处，在窗口内回 working，
-     * 否则按原规则回落） */
+     * typing/thinking/walking）→ 非工作状态」的过渡——迟滞输出统一
+     * walking（V9，「踱步等待下一轮」；V8 为 working），工作类状态之间
+     * 的切换在上面的分支内完成、不走迟滞；celebrating 分支在前不受
+     * 迟滞影响（庆祝结束后落回此处，在窗口内回 walking，否则按原规则
+     * 回落） */
     if (s.lastWorkT > 0 && now - s.lastWorkT < WORKING_LINGER_MS) {
-      return "working";
+      return "walking";
     }
     return now - s.lastActivity < IDLE_SLEEP_MS ? "idle" : "sleeping";
   }
@@ -361,7 +406,8 @@
     /* 自定义形象的逐状态行配置（缺项兜底第 0 行单帧，坏配置不抛错）。
      * V6：缺新状态键（tool_running/failed——旧五状态 pet.json 未补齐
      * 的路径）时先回退到相近状态的既有键（双保险，与 Rust 侧读取时补
-     * 默认行配合），再落到第 0 行兜底 */
+     * 默认行配合），再落到第 0 行兜底。V9：thinking/walking 键只随内置
+     * pet.json 分发（Rust 侧不补默认行），缺键形象回退 working 帧 */
     function customStateDef(name) {
       var states = custom.meta.states || {};
       var def = states[name];
@@ -551,10 +597,11 @@
 
     /* 实例侧组装：闭包侧写喂给模块级纯判定 decideState，并维护迟滞基准
      * lastWorkT（只随真实工作信号前进——runs 活跃或预判命中；迟滞自身
-     * 的 working 不回写，否则 45 秒窗口会被无限续期。V6：tool_running
-     * 也是真实工作信号——迟滞语义覆盖「工作类状态（tool_running/
-     * typing/working）→ 非工作状态」的过渡，从任一工作类状态回落时
-     * 均由迟滞窗口维持 working） */
+     * 的 walking 不回写，否则 45 秒窗口会被无限续期。V6：tool_running
+     * 也是真实工作信号——迟滞语义覆盖「工作类状态 → 非工作状态」的
+     * 过渡，从任一工作类状态回落时均由迟滞窗口维持动身观感。V9：
+     * thinking/walking 是 working 三场景的细分输出，同样随真实工作信号
+     * 推进迟滞基准；working 保留在列表中作缺键回退形态的防御） */
     function computeState(now) {
       var pending =
         pendingUser > 0 && now - pendingUser < PENDING_TURN_MS;
@@ -574,7 +621,11 @@
       });
       if (
         (runsActive || pending) &&
-        (st === "working" || st === "typing" || st === "tool_running")
+        (st === "working" ||
+          st === "typing" ||
+          st === "tool_running" ||
+          st === "thinking" ||
+          st === "walking")
       ) {
         lastWorkT = now;
       }

@@ -3061,10 +3061,10 @@ mod tests {
     fn pet_js_模板契约与帧数据完整性() {
         // 头部版本标记（store::ensure_versioned_template 的升级判据，
         // 与 theme/effects/usage 共用同一提取器）
-        assert!(PET_JS.contains("ZBAR-THEME-V8"));
+        assert!(PET_JS.contains("ZBAR-THEME-V9"));
         assert!(
-            !PET_JS.contains("ZBAR-THEME-V7"),
-            "版本头应已升到 V8（智谱娘转正默认 + 渲染收敛 customAsset-only）"
+            !PET_JS.contains("ZBAR-THEME-V8"),
+            "版本头应已升到 V9（动作语义细分：thinking/walking）"
         );
         // 单源拼接契约：PET_JS = pet-core.js（唯一真相源）+ 注入版宿主壳，
         // 核心段必须完整位于头部（版本标记提取器只看文件头部）
@@ -3170,7 +3170,8 @@ mod tests {
             core.contains("now - s.lastActivity < IDLE_SLEEP_MS"),
             "闲置判定应按最后活动时刻 la 计算（V5 纯函数化后经侧写字段消费）：{core}"
         );
-        // 状态机七状态（V6：五状态 + tool_running/failed）与关键判定常量
+        // 状态机九状态（V6：五状态 + tool_running/failed；V9：细分
+        // thinking/walking，working 降为缺键回退目标）与关键判定常量
         // （心跳新鲜度 / 闲置入睡 / 庆祝时长）
         for state in [
             "sleeping",
@@ -3180,6 +3181,8 @@ mod tests {
             "celebrating",
             "tool_running",
             "failed",
+            "thinking",
+            "walking",
         ] {
             assert!(PET_JS.contains(&format!("\"{state}\"")), "缺状态 {state}");
         }
@@ -3207,7 +3210,7 @@ mod tests {
         );
         assert!(
             core.contains("now - s.lastWorkT < WORKING_LINGER_MS"),
-            "迟滞应按 WORKING_LINGER_MS 窗口保持 working：{core}"
+            "迟滞应按 WORKING_LINGER_MS 窗口保持动身观感（V9 输出 walking）：{core}"
         );
         assert!(
             core.contains("if (s.pending) {"),
@@ -3248,6 +3251,8 @@ mod tests {
         // pet.json 缺 tool_running/failed 键时回退相近状态帧
         //（tool_running → typing 忙碌执行；failed → sleeping 蔫了），
         // 渲染路径统一经 customStateDef 消费 CUSTOM_STATE_FALLBACK；
+        // V9 细分键缺键（未随细分映射升级的形象）回退 working 帧
+        //（thinking/walking 的场景来源即原 working，观感与 V8 一致）；
         // 内建形象的 BUILTIN_STATE_FALLBACK / builtinRenderState 已随
         // V8 字符网格形象移除（负向断言防回归）
         assert!(
@@ -3257,6 +3262,14 @@ mod tests {
         assert!(
             core.contains("failed: \"sleeping\""),
             "缺键回退应将 failed 映射到 sleeping 帧：{core}"
+        );
+        assert!(
+            core.contains("thinking: \"working\""),
+            "缺键回退应将 thinking 映射到 working 帧（V9）：{core}"
+        );
+        assert!(
+            core.contains("walking: \"working\""),
+            "缺键回退应将 walking 映射到 working 帧（V9）：{core}"
         );
         assert!(
             !core.contains("builtinRenderState"),
