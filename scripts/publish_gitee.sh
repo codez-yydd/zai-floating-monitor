@@ -151,9 +151,13 @@ elif [[ "$OFF_CODE" != 404 ]]; then
   echo "错误：查询正式版 release 失败 HTTP ${OFF_CODE:-网络错误}"; exit 1
 fi
 if [[ -z "$OFFICIAL_ID" ]]; then
-  # 创建请求体走 UTF-8 JSON 文件 + jq 自检（同 latest release 的既有模式）
+  # 创建请求体走 UTF-8 JSON 文件 + jq 自检（同 latest release 的既有模式）。
+  # body 先经 jq -Rs 转义成合法 JSON 字符串（自带引号与 \n 转义）再拼接：
+  # 多行 Markdown 说明若原样拼进 heredoc 会产生非法 JSON（v1.1.0 发版踩坑）；
+  # 走 stdin 字节流也顺带规避 Windows 命令行中文的 GBK 转码问题
+  BODY_JSON=$(printf '%s' "$RELEASE_BODY" | jq -Rs .)
   cat > "$WORK/official.json" <<EOF
-{"tag_name":"v${VERSION}","target_commitish":"master","name":"ZBar v${VERSION}","body":"${RELEASE_BODY}"}
+{"tag_name":"v${VERSION}","target_commitish":"master","name":"ZBar v${VERSION}","body":${BODY_JSON}}
 EOF
   jq -e . "$WORK/official.json" >/dev/null
   OFF_CREATE=$(curl -sS --connect-timeout 20 --max-time 120 -w '\n%{http_code}' -X POST "$API?$TOKEN_PARAM" \
@@ -199,9 +203,11 @@ fi
 echo '[4/5] 创建新 latest release 并上传附件'
 # 创建请求体走 UTF-8 JSON 文件：Windows 的原生 curl 会把命令行里的中文按本地
 # 码页（GBK）转码发出，Gitee 报 invalid byte sequence in UTF-8；文件字节直传
-# 三端（macOS/Linux/Git Bash）行为一致，jq 解析兼作 UTF-8 编码自检
+# 三端（macOS/Linux/Git Bash）行为一致，jq 解析兼作 UTF-8 编码自检。
+# body 同样经 jq -Rs 转义（多行说明的换行必须转成 \n，见上方正式版处的踩坑说明）
+BODY_JSON=$(printf '%s' "$RELEASE_BODY" | jq -Rs .)
 cat > "$WORK/release.json" <<EOF
-{"tag_name":"latest","target_commitish":"master","name":"ZBar v${VERSION}（应用内更新源）","body":"${RELEASE_BODY}"}
+{"tag_name":"latest","target_commitish":"master","name":"ZBar v${VERSION}（应用内更新源）","body":${BODY_JSON}}
 EOF
 jq -e . "$WORK/release.json" >/dev/null
 RESP=$(curl -sS --connect-timeout 20 --max-time 120 -w '\n%{http_code}' -X POST "$API?$TOKEN_PARAM" \
