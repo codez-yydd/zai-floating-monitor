@@ -1,6 +1,6 @@
 // ============================================================
-// ZBAR-THEME-V6
-// ZBar 桌面像素宠物核心（宠物形象库 + 状态机 + canvas 渲染器）
+// ZBAR-THEME-V8
+// ZBar 桌面像素宠物核心（宠物状态机 + Petdex 图集 canvas 渲染器）
 // ============================================================
 // 本文件是宠物核心的唯一真相源，两个宿主消费同一份代码：
 //   - 皮肤注入版：inject.rs 的 PET_JS 经 include_str! 引用本文件，
@@ -89,24 +89,38 @@
 //      typing/working）→ 非工作状态」的过渡；工作类状态之间切换不触发
 //      迟滞逻辑（lastWorkT 随真实工作信号——含 tool_running——前进，
 //      迟滞输出保持 working，pu 预判与 V5 迟滞语义不变）；
-//   - 内建形象 fallback（cat/bot 仅五状态帧）：tool_running 复用 typing
-//      帧（忙碌执行的快节奏动作最贴近「跑腿干活」）、failed 复用
-//      sleeping 帧（闭眼垂头 = 蔫了，比 working 的思考点更贴切沮丧）
-//      ——内建形象下新状态仍正常进入（只是复用帧与节奏）；自定义形象
-//      （Petdex 9 行）默认映射 tool_running → 行 1 running-right（8 帧，
-//      跑腿语义）、failed → 行 5 failed（8 帧），旧五状态 pet.json 缺键
-//      由 Rust 侧读取时补默认行 + 本核心 customStateDef 对缺失键回退
-//      相近状态帧（双保险）；
+//   - 新状态帧映射：自定义形象（Petdex 9/11 行）默认映射 tool_running →
+//      行 1 running-right（8 帧，跑腿语义）、failed → 行 5 failed（8 帧），
+//      旧五状态 pet.json 缺键由 Rust 侧读取时补默认行 + 本核心
+//      customStateDef 对缺失键回退相近状态帧（双保险）；
 //   - ta/fe 缺失（旧数据文件 / 老版本库）行为不变：新状态不触发，
 //      行为同 V5。
 //
+// V8 变更（智谱娘转正为默认内置形象，渲染收敛 customAsset-only）：
+//   - 删除内建的 cat / bot 两个字符网格形象（PET_STYLES 常量与逐像素
+//      绘制路径、调色板、16×16 帧解析一并移除）——全部形象统一走 V3 的
+//      Petdex 图集渲染器；
+//   - 「智谱 Z 娘」（custom:zhipu-z-niang）改为软件内置形象：资产随
+//      安装包分发（Rust 侧 include_bytes 内嵌，启动时释放到 ~/.zbar/
+//      pets，见 pets.rs 的 ensure_builtin_pet），默认选中且不可删除，
+//      数据通道与用户自定义宠物完全一致（custom: 前缀同管道）；
+//   - 渲染语义变化：style 非 custom:* 或 customAsset 未就位/无效时不再
+//      回退内建形象，而是进入「空态」——实例保持存活（feed/heartbeat/
+//      setParams 照常、状态机照常运转）但不挂任何 DOM（宠物暂隐），
+//      宿主在资产就位后经 setParams 热切换重建即恢复显示。旧版壳 +
+//      新版 variables.css（或反之）的升级窗口期表现为宠物暂隐而非闪
+//      回猫脸，属预期（约 1 秒的资产加载瞬态同理）；
+//   - 状态机 decideState 与数据契约（v/ts/la/pu/ta/fe/turns/runs）零
+//      改动。
+//
 // 对外接口（工厂形态，window.ZBarPet）：
 //   var pet = ZBarPet.create(container, {
-//     style: "cat", size: 64, customAsset: { meta, dataUri }
+//     style: "custom:zhipu-z-niang", size: 64,
+//     customAsset: { meta, dataUri }
 //   });
 //   pet.feed({ v: 2, ts, la, pu, ta, fe, turns: [...], runs: [...] });
 //   pet.heartbeat(<ms>);          // 可选：喂心跳（陈旧判定改用心跳）
-//   pet.setParams({ style: "bot" });  // 或 { size: 96 } / { customAsset }，可部分传入
+//   pet.setParams({ style: "custom:boba", customAsset }); // 可部分传入
 //   pet.destroy();
 //   ZBarPet.decideState(now, side);   // 状态机纯判定（单元测试直测用，
 //                                      // 正常宿主不消费；side 字段见函数注释）
@@ -129,15 +143,14 @@
 //   tool_running（V6）替主人跑腿执行。触发：ta 活跃（工具 running 行
 //               开始落库，now − ta < TOOL_ACTIVE_MS）且 runs 非空或 pu
 //               预判命中；优先于 typing/working（工具执行期间模型请求
-//               间隙，out 通常不增长）。内建形象复用 typing 帧；自定义
-//               形象走 Petdex 行 1 running-right。
+//               间隙，out 通常不增长）。自定义形象走 Petdex 行 1
+//               running-right。
 //   celebrating 跳跃庆祝约 CELEBRATE_MS 后回落。触发：turns 数组
 //               新增且最近完成轮非失败（成败互斥，见 failed）。
 //   failed      （V6）沮丧垂头 3 秒（FAILED_MS）后回落。触发：fe 距今
 //               < FAILED_MS（最近完成轮失败/取消，数据侧 fe 只在失败轮
-//               新增时刷新）；优先级最高（心跳陈旧短路除外）。内建形象
-//               复用 sleeping 帧（蔫了）；自定义形象走 Petdex 行 5
-//               failed。
+//               新增时刷新）；优先级最高（心跳陈旧短路除外）。自定义形
+//               象走 Petdex 行 5 failed。
 // ============================================================
 (function () {
   "use strict";
@@ -170,12 +183,10 @@
   var FAILED_MS = 3000; /* V6 失败沮丧时长（与 CELEBRATE_MS 同款常量口径）：
     fe（最近一次失败/取消轮的完成时刻）距今小于此值显示 failed，
     超时自然回落（消费端按时间戳判窗，无需显式清理） */
-  var GRID = 16; /* 帧网格边长（内建形象共用） */
   var SPEED_TIERS = [15, 60]; /* typing 速度分档阈值（tok/s：≥15 中档、≥60 快档） */
-  /* 状态全集（含 V6 新增状态）：内建形象仅五状态帧，新状态经
-   * BUILTIN_STATE_FALLBACK 回退复用帧（parseFrames 对内建 frames 缺失
-   * 的键产出空帧数组，渲染路径不直接消费）；自定义形象按 meta.states
-   * 行配置渲染全部七状态 */
+  /* 状态全集（含 V6 新增状态）：全部七状态均由 meta.states 的行配置
+   * 渲染（旧五状态 pet.json 缺 tool_running/failed 键时由 Rust 侧读取
+   * 补默认行 + 本核心 customStateDef 回退双保险） */
   var STATES = [
     "sleeping",
     "idle",
@@ -185,489 +196,12 @@
     "tool_running",
     "failed"
   ];
-  /* V6 内建形象回退映射（cat/bot 仅五状态帧，新状态正常进入但复用帧）：
-   * tool_running → typing（忙碌执行的快节奏动作最贴近「跑腿干活」，
-   * 节奏走 typing 三档中的当前速度档，工具执行期通常为慢档）；
-   * failed → sleeping（闭眼垂头 = 蔫了，比 working 的思考点更贴切沮丧，
-   * 800ms 慢节奏贴合低落观感） */
-  var BUILTIN_STATE_FALLBACK = { tool_running: "typing", failed: "sleeping" };
   /* V6 自定义形象缺键回退（双保险：Rust 侧读取旧五状态 pet.json 时已补
    * 默认行，此处兜底未补齐的路径——meta.states 缺新状态键时回退到
    * 语义相近的既有键，不落到 {row:0,frames:1} 的兜底帧） */
   var CUSTOM_STATE_FALLBACK = { tool_running: "typing", failed: "sleeping" };
-  var CUSTOM_PREFIX = "custom:"; /* 自定义形象 style 前缀（后接宠物 id） */
-
-  /* 内建渲染状态：V6 新状态在内建形象下复用相近状态的帧与节奏 */
-  function builtinRenderState(st) {
-    return BUILTIN_STATE_FALLBACK[st] || st;
-  }
-
-  /* ---- 形象库 PET_STYLES（单源真相，两宿主共用） ----
-   * 帧格式：frames[状态] = 帧数组（每状态 2~4 帧），每帧为 GRID 行等长
-   * 字符串，每字符 1 像素："." = 透明，"1".."8" = palette 下标 1..8 颜色。
-   * 播放速度：frameMs[状态] = 每帧停留毫秒；typing 为 3 档数组，按 token
-   * 输出增速选档（慢 220 / 中 150 / 快 95 ms），其余状态固定速度
-   * （沉睡 800 / 闲坐 450 / 思考 300 / 庆祝 160 ms）。
-   * 新增形象：按同格式追加一个键即可，参数面板的下拉值与之对齐。 */
-  var PET_STYLES = {
-    cat: {
-      palette: [
-        null, /* 下标 0 占位（透明统一用 "." 表示） */
-        "#3f3a39", /* 1 深描边 */
-        "#f2b258", /* 2 主毛色（橘） */
-        "#ffe0a3", /* 3 浅毛高光 */
-        "#e8837a", /* 4 耳内粉 / 腮红 */
-        "#2f9e63", /* 5 眼睛绿 */
-        "#ffffff", /* 6 嘴白 */
-        "#7aa7f0", /* 7 Zzz / 思考点蓝 */
-        "#c97f3b" /* 8 跳跃阴影深橘 */
-      ],
-      frameMs: { sleeping: 800, idle: 450, working: 300, typing: [220, 150, 95], celebrating: 160 },
-      frames: {
-        sleeping: [
-          [
-            "................",
-            "...........77...",
-            "..........7.7...",
-            "...........77...",
-            "................",
-            "...11......11...",
-            "..1421....1241..",
-            "..111111111111..",
-            "..122222222221..",
-            "..121122221121..",
-            "..122222222221..",
-            ".13222222222231.",
-            ".13222222222231.",
-            ".11111111111111.",
-            "................",
-            "................"
-          ],
-          [
-            "................",
-            "...........77...",
-            "..........77....",
-            "...........77...",
-            "................",
-            "...11......11...",
-            "..1421....1241..",
-            "..111111111111..",
-            "..122222222221..",
-            "..121122221121..",
-            "..122222222221..",
-            "1322222222222231",
-            "1322222222222231",
-            ".11111111111111.",
-            "................",
-            "................"
-          ]
-        ],
-        idle: [
-          [
-            "................",
-            "...11......11...",
-            "..1221....1221..",
-            "..1421....1241..",
-            "..111111111111..",
-            "..122222222221..",
-            "..125222222521..",
-            "..122222222221..",
-            "..124422224421..",
-            "..122226622221..",
-            "..112222222211..",
-            "..132222222231..",
-            ".13222222222231.",
-            ".13222222222231.",
-            "..111111111111..",
-            "................"
-          ],
-          [
-            "................",
-            "...11......11...",
-            "..1221....1221..",
-            "..1421....1241..",
-            "..111111111111..",
-            "..122222222221..",
-            "..121222222121..",
-            "..122222222221..",
-            "..124422224421..",
-            "..122226622221..",
-            "..112222222211..",
-            "..132222222231..",
-            ".13222222222231.",
-            ".13222222222231.",
-            "..111111111111..",
-            "................"
-          ]
-        ],
-        working: [
-          [
-            ".......777......",
-            "................",
-            "...11......11...",
-            "..1421....1241..",
-            "..111111111111..",
-            ".122222222221...",
-            ".125222222521...",
-            ".122222222221...",
-            ".124422224421...",
-            ".112222222211...",
-            ".132222222231...",
-            "..132222222231..",
-            "..132222222231..",
-            "..111111111111..",
-            "................",
-            "................"
-          ],
-          [
-            "........77......",
-            "................",
-            "...11......11...",
-            "..1421....1241..",
-            "..111111111111..",
-            ".122222222221...",
-            ".125222222521...",
-            ".122222222221...",
-            ".124422224421...",
-            ".112222222211...",
-            ".132222222231...",
-            "..132222222231..",
-            "..132222222231..",
-            "..111111111111..",
-            "................",
-            "................"
-          ]
-        ],
-        typing: [
-          [
-            "................",
-            "...11......11...",
-            "..1221....1221..",
-            "..1421....1241..",
-            "..111111111111..",
-            "..122222222221..",
-            "..125222222521..",
-            "..122222222221..",
-            "..124422224421..",
-            "..122226622221..",
-            "..162222222211..",
-            "..132222222231..",
-            ".13222222222231.",
-            ".11111111111111.",
-            "................",
-            "................"
-          ],
-          [
-            "................",
-            "...11......11...",
-            "..1221....1221..",
-            "..1421....1241..",
-            "..111111111111..",
-            "..122222222221..",
-            "..125222222521..",
-            "..122222222221..",
-            "..124422224421..",
-            "..122226622221..",
-            "..112222222211..",
-            "..132222222231..",
-            ".13222222222231.",
-            ".11111111111111.",
-            "................",
-            "................"
-          ],
-          [
-            "................",
-            "...11......11...",
-            "..1221....1221..",
-            "..1421....1241..",
-            "..111111111111..",
-            "..122222222221..",
-            "..125222222521..",
-            "..122222222221..",
-            "..124422224421..",
-            "..122226622221..",
-            "..112222222621..",
-            "..132222222231..",
-            ".13222222222231.",
-            ".11111111111111.",
-            "................",
-            "................"
-          ]
-        ],
-        celebrating: [
-          [
-            "................",
-            "...11......11...",
-            "..1221....1221..",
-            "..1421....1241..",
-            "..111111111111..",
-            "..122222222221..",
-            "..125222222521..",
-            "..122222222221..",
-            "..124422224421..",
-            "..122666662221..",
-            "..112222222211..",
-            "..132222222231..",
-            ".13222222222231.",
-            ".11111111111111.",
-            "................",
-            "................"
-          ],
-          [
-            "................",
-            "...11......11...",
-            "..1221....1221..",
-            "..1421....1241..",
-            "..111111111111..",
-            "..125222222521..",
-            "..124422224421..",
-            "..112222222211..",
-            "..132222222231..",
-            "..132222222231..",
-            "..111111111111..",
-            "................",
-            "................",
-            "................",
-            "....88888888....",
-            "................"
-          ]
-        ]
-      }
-    },
-    bot: {
-      palette: [
-        null, /* 下标 0 占位（透明统一用 "." 表示） */
-        "#2f3542", /* 1 深描边 / 跳跃阴影 */
-        "#e9eef5", /* 2 机身白 */
-        "#1c2430", /* 3 屏幕深底 */
-        "#57d4e8", /* 4 屏幕眼青 */
-        "#e8574d", /* 5 天线红 */
-        "#8b98ab", /* 6 关节灰（手臂） */
-        "#ffffff", /* 7 高光 / 指示灯 */
-        "#6ea8f5" /* 8 Zzz / 思考点蓝 */
-      ],
-      frameMs: { sleeping: 800, idle: 450, working: 300, typing: [220, 150, 95], celebrating: 160 },
-      frames: {
-        sleeping: [
-          [
-            "...........88...",
-            "..........8.8...",
-            "...........88...",
-            ".......5........",
-            ".......1........",
-            "..111111111111..",
-            "..133333333331..",
-            "..133333333331..",
-            "..111111111111..",
-            "..122222222221..",
-            "..122222222221..",
-            "..162222222261..",
-            "..111111111111..",
-            "...11....11.....",
-            "...11....11.....",
-            "................"
-          ],
-          [
-            "...........88...",
-            "..........88....",
-            "...........88...",
-            ".......5........",
-            ".......1........",
-            "..111111111111..",
-            "..133333333331..",
-            "..133344333331..",
-            "..111111111111..",
-            "..122222222221..",
-            "..122222222221..",
-            "..162222222261..",
-            "..111111111111..",
-            "...11....11.....",
-            "...11....11.....",
-            "................"
-          ]
-        ],
-        idle: [
-          [
-            ".......5........",
-            ".......1........",
-            "..111111111111..",
-            "..133333333331..",
-            "..134433344331..",
-            "..133333333331..",
-            "..111111111111..",
-            "...1111111111...",
-            "..122222222221..",
-            "..122277222221..",
-            "..122222222221..",
-            "..162222222261..",
-            "..111111111111..",
-            "...11....11.....",
-            "...11....11.....",
-            "................"
-          ],
-          [
-            ".......5........",
-            ".......1........",
-            "..111111111111..",
-            "..133333333331..",
-            "..131133311331..",
-            "..133333333331..",
-            "..111111111111..",
-            "...1111111111...",
-            "..122222222221..",
-            "..122277222221..",
-            "..122222222221..",
-            "..162222222261..",
-            "..111111111111..",
-            "...11....11.....",
-            "...11....11.....",
-            "................"
-          ]
-        ],
-        working: [
-          [
-            ".......888......",
-            ".......5........",
-            ".......1........",
-            "..111111111111..",
-            "..133333333331..",
-            "..134433344331..",
-            "..133333333331..",
-            "..111111111111..",
-            "...1111111111...",
-            "..122222222221..",
-            "..122277222221..",
-            "..162222222261..",
-            "..111111111111..",
-            "...11....11.....",
-            "...11....11.....",
-            "................"
-          ],
-          [
-            "........88......",
-            ".......5........",
-            ".......1........",
-            "..111111111111..",
-            "..133333333331..",
-            "..134433344331..",
-            "..133333333331..",
-            "..111111111111..",
-            "...1111111111...",
-            "..122222222221..",
-            "..122277222221..",
-            "..162222222261..",
-            "..111111111111..",
-            "...11....11.....",
-            "...11....11.....",
-            "................"
-          ]
-        ],
-        typing: [
-          [
-            ".......5........",
-            ".......1........",
-            "..111111111111..",
-            "..133333333331..",
-            "..134433344331..",
-            "..133333333331..",
-            "..111111111111..",
-            "...1111111111...",
-            "..122222222221..",
-            "..162277222221..",
-            "..122222222221..",
-            "..122222222261..",
-            "..111111111111..",
-            "...11....11.....",
-            "...11....11.....",
-            "................"
-          ],
-          [
-            ".......5........",
-            ".......1........",
-            "..111111111111..",
-            "..133333333331..",
-            "..134433344331..",
-            "..133333333331..",
-            "..111111111111..",
-            "...1111111111...",
-            "..122222222221..",
-            "..122277222221..",
-            "..122222222221..",
-            "..162222222261..",
-            "..111111111111..",
-            "...11....11.....",
-            "...11....11.....",
-            "................"
-          ],
-          [
-            ".......5........",
-            ".......1........",
-            "..111111111111..",
-            "..133333333331..",
-            "..134433344331..",
-            "..133333333331..",
-            "..111111111111..",
-            "...1111111111...",
-            "..122222222221..",
-            "..122277222621..",
-            "..122222222221..",
-            "..162222222221..",
-            "..111111111111..",
-            "...11....11.....",
-            "...11....11.....",
-            "................"
-          ]
-        ],
-        celebrating: [
-          [
-            ".......5........",
-            ".......1........",
-            "..111111111111..",
-            "..133333333331..",
-            "..144333344331..",
-            "..133333333331..",
-            "..111111111111..",
-            "...1111111111...",
-            "..122222222221..",
-            "..122277222221..",
-            "..122222222221..",
-            "..162222222261..",
-            "..111111111111..",
-            "...11....11.....",
-            "...11....11.....",
-            "................"
-          ],
-          [
-            ".......5........",
-            ".......1........",
-            "..111111111111..",
-            "..133333333331..",
-            "..144333344331..",
-            "..133333333331..",
-            "..111111111111..",
-            "..122222222221..",
-            "..122277222221..",
-            "..162222222261..",
-            "..111111111111..",
-            "...11....11.....",
-            "................",
-            "................",
-            "....11111111....",
-            "................"
-          ]
-        ]
-      }
-    }
-  };
-
-  var firstStyleId = (function () {
-    for (var k in PET_STYLES) return k;
-    return "";
-  })();
-
-  function styleIdOf(id) {
-    return PET_STYLES[id] ? id : firstStyleId;
-  }
+  var CUSTOM_PREFIX = "custom:"; /* 形象 style 前缀（V8 起全部形象的唯一
+    形态：后接宠物 id，内置智谱娘 = custom:zhipu-z-niang） */
 
   /* 单调时钟（与 rAF 时间戳同源的 performance.now）：性能计时器缺失
    * 的极端环境兜底 Date.now（动画拍基准用，可接受） */
@@ -677,10 +211,10 @@
       : Date.now();
   }
 
-  /* ---- 自定义形象（V3，Petdex 格式图集）：style 形如 "custom:<id>" 且
-   *      宿主注入了有效资产（{ meta, dataUri }）时走图集渲染器。缺资产
-   *      一律回退内建第一形象（宿主侧文件缺失/校验失败的静默降级语义，
-   *      与 styleIdOf 对未知内建值的回退一致） ---- */
+  /* ---- 形象资产（V3 引入，V8 起唯一渲染通道）：style 形如 "custom:<id>"
+   *      且宿主注入了有效资产（{ meta, dataUri }）时走图集渲染器。缺资产
+   *      一律进入空态（不渲染，见 effectiveStyleOf——宿主侧文件缺失/
+   *      校验失败的静默降级语义，资产就位后经 setParams 热切换恢复） ---- */
   function customAssetValid(asset) {
     return !!(
       asset &&
@@ -696,11 +230,15 @@
     );
   }
 
+  /* 形象归一（V8 语义）：custom 前缀且资产有效 → 原值直通（渲染）；
+   * 其余（非 custom 前缀 / 资产缺失或无效）→ 空串（空态，不渲染）。
+   * 不再有内建回退值——升级窗口期（新版壳 + 旧 variables.css 的
+   * cat/bot 残留值等）表现为宠物暂隐而非闪错形象 */
   function effectiveStyleOf(raw, asset) {
     if (typeof raw === "string" && raw.indexOf(CUSTOM_PREFIX) === 0) {
-      return customAssetValid(asset) ? raw : firstStyleId;
+      return customAssetValid(asset) ? raw : "";
     }
-    return styleIdOf(raw);
+    return "";
   }
 
   /* ---- 状态机（V5 拆为模块级纯函数 decideState + 实例侧组装）：
@@ -753,47 +291,22 @@
     return now - s.lastActivity < IDLE_SLEEP_MS ? "idle" : "sleeping";
   }
 
-  /* ---- 渲染：DOM 容器 + canvas 逐像素绘制。帧数据创建实例时预解析为
-   *      二维调色板下标缓存（drawFrame 热路径零解析）；非法字符解析
-   *      为 0（透明），坏帧不抛错。画布逻辑尺寸 = 帧网格（GRID×GRID），
-   *      CSS 尺寸由 size 参数内联驱动 + image-rendering:pixelated
-   *      最近邻放大（像素风关键），改大小零重建成本 ---- */
-  function parseFrames(style) {
-    var out = {};
-    for (var s = 0; s < STATES.length; s++) {
-      var name = STATES[s];
-      var raw = (style.frames && style.frames[name]) || [];
-      var list = [];
-      for (var f = 0; f < raw.length; f++) {
-        var rows = raw[f] || [];
-        var grid = [];
-        for (var y = 0; y < GRID; y++) {
-          var row = rows[y] || "";
-          var cells = [];
-          for (var x = 0; x < GRID; x++) {
-            var ch = row.charAt(x);
-            cells.push(ch === "." ? 0 : parseInt(ch, 10) || 0);
-          }
-          grid.push(cells);
-        }
-        list.push(grid);
-      }
-      out[name] = list;
-    }
-    return out;
-  }
-
+  /* ---- 渲染：DOM 容器 + canvas 图集切帧（V8 起 customAsset 唯一路径）。
+   *      画布逻辑尺寸 = 帧尺寸（meta.frameW × frameH），CSS 尺寸由 size
+   *      参数内联驱动 + image-rendering:pixelated 最近邻放大（像素风关
+   *      键），改大小零重建成本 ---- */
   /**
    * 创建宠物实例并挂载到 container。
    * @param container 挂载点元素（宠物的定位方式由宿主环境负责：
    *                  注入版宿主给容器配 fixed 定位样式，独立窗口版
    *                  挂进占满窗口的普通 div）
-   * @param opts { style: 形象 id（内建键或 "custom:<id>"）,
+   * @param opts { style: 形象值（custom:<id>，V8 起唯一合法形态）,
    *              size: 显示边长 px,
-   *              customAsset: 自定义形象资产 { meta, dataUri }（V3，
-   *              style 为 custom:* 时必需，缺省回退内建第一形象） }
+   *              customAsset: 形象资产 { meta, dataUri }（V8 起渲染必需，
+   *              缺失时进入空态——实例存活但不挂 DOM，等待宿主在资产
+   *              就位后 setParams 热切换重建） }
    * @returns 实例：{ feed(data), setParams({style,size,customAsset}),
-   *          heartbeat(ms), destroy() }
+   *          heartbeat(ms), destroy() }；container 不可用时返回 null
    */
   function create(container, opts) {
     if (!container || !container.appendChild) return null;
@@ -802,11 +315,9 @@
     var root = null;
     var canvas = null;
     var ctx = null;
-    var curStyleId = "";
-    var curPalette = null;
-    var curFrames = null; /* 解析后的帧：状态 → 帧数组 → 行 × 列下标 */
+    var curStyleId = ""; /* 当前生效形象（空串 = 空态未渲染，V8 语义） */
     var curSize = 0;
-    /* ---- 自定义形象状态（V3）：custom = 当前资产引用；customImg 为已
+    /* ---- 形象资产状态（V3 引入）：custom = 当前资产引用；customImg 为已
      *      解码图集 Image；customRatio = frameH/frameW（CSS 高按宽等比
      *      缩放，保持 Petdex 帧 192×208 的非正方形比例不拉伸） ---- */
     var custom = null;
@@ -865,52 +376,32 @@
 
     function drawFrame() {
       if (!ctx) return;
-      /* ---- 自定义形象（V3）：按网格切帧 drawImage（像素锐利关键：
+      /* ---- 图集切帧 drawImage（V8 起唯一渲染路径；像素锐利关键：
        *      imageSmoothingEnabled = false 最近邻采样）；图集未就绪
        *      （异步 decode 中/加载失败）保持空白帧，就绪后 onload 触发
        *      重绘 ---- */
-      if (custom) {
-        if (!customImgOk || !customImg) return;
-        var def = customStateDef(state);
-        var fw = custom.meta.frameW;
-        var fh = custom.meta.frameH;
-        var col = frameIdx % def.frames;
-        ctx.clearRect(0, 0, fw, fh);
-        ctx.imageSmoothingEnabled = false;
-        try {
-          ctx.drawImage(
-            customImg,
-            col * fw,
-            def.row * fh,
-            fw,
-            fh,
-            0,
-            0,
-            fw,
-            fh
-          );
-        } catch (e) {
-          /* 坏图（截断/尺寸不符）静默保持空白 */
-        }
-        return;
-      }
-      if (!curFrames) return;
-      /* V6：内建形象下新状态（tool_running/failed）回退复用相近状态帧 */
-      var frames = curFrames[builtinRenderState(state)];
-      if (!frames || !frames.length) return;
-      var grid = frames[Math.min(frameIdx, frames.length - 1)];
-      if (!grid) return;
-      ctx.clearRect(0, 0, GRID, GRID);
-      for (var y = 0; y < GRID; y++) {
-        var row = grid[y];
-        for (var x = 0; x < GRID; x++) {
-          var ci = row[x];
-          if (!ci) continue;
-          var color = curPalette[ci];
-          if (!color) continue;
-          ctx.fillStyle = color;
-          ctx.fillRect(x, y, 1, 1);
-        }
+      if (!custom) return;
+      if (!customImgOk || !customImg) return;
+      var def = customStateDef(state);
+      var fw = custom.meta.frameW;
+      var fh = custom.meta.frameH;
+      var col = frameIdx % def.frames;
+      ctx.clearRect(0, 0, fw, fh);
+      ctx.imageSmoothingEnabled = false;
+      try {
+        ctx.drawImage(
+          customImg,
+          col * fw,
+          def.row * fh,
+          fw,
+          fh,
+          0,
+          0,
+          fw,
+          fh
+        );
+      } catch (e) {
+        /* 坏图（截断/尺寸不符）静默保持空白 */
       }
     }
 
@@ -922,25 +413,14 @@
       drawFrame();
     }
 
-    /* 当前状态的每帧停留毫秒（typing 按速度档选；自定义形象读
-     * meta.states 的 frameMs，同样支持 typing 数组分档；V6 内建形象下
-     * 新状态经 builtinRenderState 回退后取相近状态的节奏——
-     * tool_running 走 typing 三档（工具执行期通常慢档）、failed 走
-     * sleeping 的 800ms 慢节奏） */
+    /* 当前状态的每帧停留毫秒（typing 按速度档选；读 meta.states 的
+     * frameMs，同样支持 typing 数组分档） */
     function frameMsOf() {
-      if (custom) {
-        var fmC = customStateDef(state).frameMs;
-        if (state === "typing" && Array.isArray(fmC)) {
-          return fmC[Math.min(speedTier, fmC.length - 1)] || 150;
-        }
-        return typeof fmC === "number" && fmC > 0 ? fmC : 400;
+      var fmC = customStateDef(state).frameMs;
+      if (state === "typing" && Array.isArray(fmC)) {
+        return fmC[Math.min(speedTier, fmC.length - 1)] || 150;
       }
-      var fm = (PET_STYLES[curStyleId] || {}).frameMs || {};
-      var st = builtinRenderState(state);
-      if (st === "typing" && Array.isArray(fm.typing)) {
-        return fm.typing[Math.min(speedTier, fm.typing.length - 1)] || 150;
-      }
-      return typeof fm[st] === "number" ? fm[st] : 400;
+      return typeof fmC === "number" && fmC > 0 ? fmC : 400;
     }
 
     /* 动画轮询循环（V4：setInterval 驱动，不再依赖 rAF——ZCode 注入
@@ -951,36 +431,21 @@
     function loop() {
       if (destroyed) return;
       try {
-        if (!root) return;
+        if (!root) return; /* 空态（V8）：未挂 DOM 时无帧可推 */
         var t = nowMs();
-        if (custom) {
-          /* 自定义形象：帧数来自 meta.states（图集就绪前空转等待） */
-          if (customImgOk) {
-            var fmsC = frameMsOf();
-            if (lastFrameT === 0 || t - lastFrameT > 1000) lastFrameT = t;
-            frameAcc += t - lastFrameT;
-            lastFrameT = t;
-            if (frameAcc >= fmsC) {
-              frameIdx = (frameIdx + 1) % customStateDef(state).frames;
-              frameAcc = 0;
-              drawFrame();
-            }
-          } else {
-            lastFrameT = t; /* 未就绪：不吃时间债，就绪后从当前拍起 */
+        /* 自定义形象：帧数来自 meta.states（图集就绪前空转等待） */
+        if (customImgOk) {
+          var fmsC = frameMsOf();
+          if (lastFrameT === 0 || t - lastFrameT > 1000) lastFrameT = t;
+          frameAcc += t - lastFrameT;
+          lastFrameT = t;
+          if (frameAcc >= fmsC) {
+            frameIdx = (frameIdx + 1) % customStateDef(state).frames;
+            frameAcc = 0;
+            drawFrame();
           }
-          return;
-        }
-        if (!curFrames) return;
-        var fms = frameMsOf();
-        if (lastFrameT === 0 || t - lastFrameT > 1000) lastFrameT = t;
-        frameAcc += t - lastFrameT;
-        lastFrameT = t;
-        if (frameAcc >= fms) {
-          /* V6：内建形象下新状态回退复用相近状态帧（与 drawFrame 同源） */
-          var frames = curFrames[builtinRenderState(state)];
-          frameIdx = frames && frames.length ? (frameIdx + 1) % frames.length : 0;
-          frameAcc = 0;
-          drawFrame();
+        } else {
+          lastFrameT = t; /* 未就绪：不吃时间债，就绪后从当前拍起 */
         }
       } catch (e) {
         /* 静默 */
@@ -1118,7 +583,8 @@
 
     /* 状态机轮询：核心自治（宿主只管喂参数与数据）。不做页面隐藏降频
      * （V4）：注入环境的 visibility 判定与视觉可见性脱节，应用层降频会
-     * 造成状态切换滞后；隐藏时的省电交给浏览器定时器限流 */
+     * 造成状态切换滞后；隐藏时的省电交给浏览器定时器限流。空态（V8，
+     * 资产未就位）下照常运转——状态照判，仅无渲染 */
     function tick() {
       if (destroyed) return;
       try {
@@ -1134,10 +600,10 @@
       if (!isFinite(n) || n <= 0 || n === curSize || !canvas) return;
       curSize = n;
       canvas.style.width = n + "px";
-      /* 自定义形象帧为 192×208 非正方形：CSS 高按宽等比缩放（Petdex
+      /* 图集帧常为 192×208 非正方形：CSS 高按宽等比缩放（Petdex
        * 桌面端 aspect-ratio 192/208 同款口径），不拉伸变形 */
       canvas.style.height =
-        (custom ? Math.round(n * customRatio * 100) / 100 : n) + "px";
+        Math.round(n * customRatio * 100) / 100 + "px";
     }
 
     function build(styleId, size, asset) {
@@ -1145,8 +611,17 @@
         typeof styleId === "string" &&
         styleId.indexOf(CUSTOM_PREFIX) === 0 &&
         customAssetValid(asset);
-      var style = PET_STYLES[styleId];
-      if (!wantCustom && !style) return false;
+      if (!wantCustom) {
+        /* ---- V8 空态：style 非 custom:* 或资产未就位/无效 → 不渲染。
+         *    清掉一切残留 DOM 与资产状态，实例保持存活（返回 true，
+         *    tick/feed/heartbeat 照常运转），curStyleId 置空串——宿主
+         *    在资产就位后 setParams（want 从 "" 变为 custom:<id>）
+         *    即触发重建热切换恢复显示 ---- */
+        teardownDom();
+        var emptySize = parseInt(size, 10);
+        curSize = isFinite(emptySize) && emptySize > 0 ? emptySize : 0;
+        return true;
+      }
       /* 防重复挂载：清理任何残留的旧容器（正常不发生，防御性） */
       var old = container.querySelector
         ? container.querySelector("[" + ATTR_ROOT + "]")
@@ -1156,39 +631,25 @@
       root.setAttribute(ATTR_ROOT, "");
       root.style.display = "block";
       canvas = document.createElement("canvas");
-      if (wantCustom) {
-        /* ---- 自定义形象：画布逻辑尺寸 = 帧尺寸，加载图集后按网格切帧 ---- */
-        var meta = asset.meta;
-        var fw = Math.max(1, parseInt(meta.frameW, 10) || 1);
-        var fh = Math.max(1, parseInt(meta.frameH, 10) || 1);
-        canvas.width = fw;
-        canvas.height = fh;
-        custom = asset;
-        customRatio = fh / fw;
-        customImgOk = false;
-        customImg = new Image();
-        customImg.onload = function () {
-          if (destroyed || custom !== asset) return;
-          customImgOk = true;
-          drawFrame();
-        };
-        customImg.onerror = function () {
-          customImgOk = false; /* 坏图静默保持空白（不回退内建） */
-        };
-        customImg.src = asset.dataUri;
-        curPalette = null;
-        curFrames = null;
-      } else {
-        /* ---- 内建形象：16×16 字符网格逐像素绘制（既有路径零改动） ---- */
-        canvas.width = GRID;
-        canvas.height = GRID;
-        custom = null;
-        customImg = null;
-        customImgOk = false;
-        customRatio = 1;
-        curPalette = style.palette;
-        curFrames = parseFrames(style);
-      }
+      /* ---- 图集形象：画布逻辑尺寸 = 帧尺寸，加载图集后按网格切帧 ---- */
+      var meta = asset.meta;
+      var fw = Math.max(1, parseInt(meta.frameW, 10) || 1);
+      var fh = Math.max(1, parseInt(meta.frameH, 10) || 1);
+      canvas.width = fw;
+      canvas.height = fh;
+      custom = asset;
+      customRatio = fh / fw;
+      customImgOk = false;
+      customImg = new Image();
+      customImg.onload = function () {
+        if (destroyed || custom !== asset) return;
+        customImgOk = true;
+        drawFrame();
+      };
+      customImg.onerror = function () {
+        customImgOk = false; /* 坏图静默保持空白 */
+      };
+      customImg.src = asset.dataUri;
       /* 像素风关键：canvas CSS 尺寸由 size 内联放大 +
        * image-rendering:pixelated 最近邻采样 */
       canvas.style.cssText = "display:block;image-rendering:pixelated;";
@@ -1223,7 +684,6 @@
       root = null;
       canvas = null;
       ctx = null;
-      curFrames = null;
       curStyleId = "";
       custom = null;
       customImg = null;
@@ -1240,7 +700,8 @@
       /* 更新参数（可部分传入：{style} / {size} / {customAsset}），形象
        * 热切换重建画布。custom 样式必须配 customAsset（宿主在选中/
        * 重导入后传入新资产对象）；同一 custom id 的资产对象变化（重导
-       * 入替换）同样触发重建，保证帧数据即时刷新 */
+       * 入替换）同样触发重建，保证帧数据即时刷新；资产从无到有（空态
+       * → 渲染）经 want 变化同样触发重建 */
       setParams: function (params) {
         if (destroyed || !params) return;
         var raw =

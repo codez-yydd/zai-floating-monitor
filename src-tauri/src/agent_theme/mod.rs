@@ -1417,8 +1417,9 @@ fn install_steps(
     // ---------- ④ 注入 + 首次落盘主题资产 ----------
     prog.emit("inject", 30.0, None);
     store::ensure_theme_assets(app.id(), resource_wallpapers)?;
-    // 自定义宠物物化：重装/升级皮肤后主题目录重建，选中 custom:<id> 时
-    // 重新写 pet-custom.js（失败不阻断安装，注入版壳回退内建形象）
+    // 自定义宠物物化：重装/升级皮肤后主题目录重建，宠物选中形象
+    // （pet.json）为 custom:<id> 时重新写 pet-custom.js（失败不阻断
+    // 安装，注入版壳读不到资产时宠物暂隐，下次保存参数会重试）
     if let Err(e) = crate::pets::sync_theme_custom_pet() {
         eprintln!("[zbar-agent-theme] 安装后同步自定义宠物物化失败: {e}");
     }
@@ -1876,10 +1877,10 @@ pub async fn set_agent_theme_params(
         store::save_params(&app_id, &params)?;
         // ensure：模板版本升级检查 + 按最新参数重渲 variables.css
         store::ensure_theme_assets(&app_id, None)?;
-        // 自定义宠物物化：pet_style 切到 custom:<id> 时把该宠物写为主题
-        // 目录的 pet-custom.js（选中变更才重写，见 pets 模块头）；物化
-        // 失败不阻断参数保存（注入版壳对缺失文件回退内建形象，下次
-        // 保存参数会重试）
+        // 自定义宠物物化：宠物选中形象（pet.json/PetConfig）为 custom:<id>
+        // 时把该宠物写为主题目录的 pet-custom.js（选中变更才重写，见
+        // pets 模块头）；物化失败不阻断参数保存（注入版壳对缺失文件回退
+        // 内建形象，下次保存参数会重试）
         if app_id == "zcode" {
             if let Err(e) = crate::pets::sync_theme_custom_pet() {
                 eprintln!("[zbar-agent-theme] 同步自定义宠物物化失败: {e}");
@@ -1995,7 +1996,8 @@ pub async fn select_agent_wallpaper(app_id: String, path: String) -> Result<(), 
         store::ensure_theme_assets(&app_id, None)?;
         let dir = store::app_dir(&app_id)?;
         let wp_dir = store::wallpapers_dir(&app_id)?;
-        store::select_wallpaper_in(&dir, &wp_dir, &path)
+        let pet = crate::pet::load_pet_config().clamped();
+        store::select_wallpaper_in(&dir, &wp_dir, &path, &pet)
     })
     .await
     .map_err(|e| format!("切换壁纸任务失败：{e}"))?

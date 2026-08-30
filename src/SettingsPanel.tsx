@@ -1,12 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import type { CursorConfig, PetConfig, ShortcutConfig } from "./types";
+import type { CursorConfig, ShortcutConfig } from "./types";
 import {
   fetchFxRate,
   getCursorConfig,
-  getPetConfig,
   getShortcutConfig,
   setCursorConfig,
-  setPetConfig,
   setShortcutConfig,
 } from "./api";
 import {
@@ -56,15 +54,7 @@ import {
   type AgentId,
   type AgentVisibility,
 } from "./agentVisibility";
-import {
-  PET_IMPORT_FILE_RE,
-  PET_IMPORT_IMAGE_RE,
-  PetSizeLevelPicker,
-  PetStyleSection,
-  useCustomPets,
-} from "./petStyles";
 import { useI18n } from "./i18n";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
 
 interface Props {
   onBack: () => void;
@@ -140,76 +130,6 @@ export function SettingsPanel({
   // 汇率手动输入草稿：失焦再解析，避免清空输入时被 parseFloat(NaN) 立即跳回默认值
   const [fxDraft, setFxDraft] = useState<string | null>(null);
 
-  // ===== 独立桌面宠物（第二阶段：不依赖皮肤的透明悬浮窗宠物）=====
-  const [petCfg, setPetCfg] = useState<PetConfig | null>(null);
-  // 最新完整配置镜像：卸载冲刷闭包同样读不到最新 state（依赖数组为空）
-  const petCfgRef = useRef<PetConfig | null>(null);
-  // 自定义宠物（第三阶段）：清单/拖放导入/删除共享控制器；导入或删除
-  // 后重拉配置（删除正在使用的宠物时 Rust 侧会把选中回退内建默认形象）
-  const customPets = useCustomPets(() => {
-    getPetConfig()
-      .then((c) => {
-        petCfgRef.current = c;
-        setPetCfg(c);
-      })
-      .catch(() => {});
-  });
-  // 拖放导入路由（onDragDropEvent 的 effect 闭包只注册一次，经 ref 转发
-  // 到最新处理函数——与 ThemePanel 的壁纸拖放同款模式）：zip/pet.json/
-  // 裸图集（png/webp）都路由到宠物导入（设置页无壁纸导入语义，图集
-  // 投放不存在归属歧义）
-  const petDropHandlerRef = useRef<(paths: string[]) => void>(() => {});
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    let disposed = false;
-    getCurrentWebview()
-      .onDragDropEvent((event) => {
-        if (event.payload.type === "drop") {
-          petDropHandlerRef.current(event.payload.paths);
-        }
-      })
-      .then((fn) => {
-        if (disposed) fn();
-        else unlisten = fn;
-      })
-      .catch(() => {
-        /* 订阅失败仅失去拖放导入，按钮与既有功能不受影响 */
-      });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, []);
-  petDropHandlerRef.current = (paths: string[]) => {
-    const path = paths[0];
-    if (!path) return;
-    const fileName = path.split(/[\\/]/).pop() ?? "";
-    if (PET_IMPORT_FILE_RE.test(fileName) || PET_IMPORT_IMAGE_RE.test(fileName)) {
-      void customPets.importFromPath(path);
-    }
-  };
-
-  // 应用宠物配置（乐观更新 + 失败回读回滚；Rust 侧即时生效：
-  // 开关建/关窗、形象/大小热切换）
-  const applyPet = async (next: PetConfig) => {
-    petCfgRef.current = next;
-    setPetCfg(next);
-    try {
-      const back = await setPetConfig(next);
-      petCfgRef.current = back;
-      setPetCfg(back);
-    } catch (e) {
-      setError(t("settings.petApplyFail", { msg: String(e) }));
-      try {
-        const back = await getPetConfig();
-        petCfgRef.current = back;
-        setPetCfg(back);
-      } catch {
-        /* 回读失败保持当前态（下次切换再对齐） */
-      }
-    }
-  };
-
   // 卸载时冲掉未落盘的透明度防抖（离开设置页前保证最后一次调整已持久化）
   useEffect(() => {
     return () => {
@@ -227,16 +147,6 @@ export function SettingsPanel({
         setShortcutDraft(s.accelerator);
         setCursorCfg(cc);
         setLoaded(true);
-      })
-      .catch((e) => setError(String(e)));
-  }, []);
-
-  // 独立宠物配置加载（失败不阻塞其它设置项，卡片停在本地面板不渲染）
-  useEffect(() => {
-    getPetConfig()
-      .then((c) => {
-        petCfgRef.current = c;
-        setPetCfg(c);
       })
       .catch((e) => setError(String(e)));
   }, []);
@@ -457,72 +367,8 @@ export function SettingsPanel({
           </PillGroup>
         </SettingsCard>
 
-        {/* 独立桌面宠物（第二阶段）：不依赖皮肤的透明悬浮窗宠物，开关/
-            形象/大小改完即生效（Rust 侧即时建窗/关窗/热切换），与
-            ThemePanel 的皮肤注入版宠物互不影响（可同时开启） */}
-        {petCfg && (
-          <SettingsCard
-            title={t("settings.petCard")}
-            hint={t("settings.petHint")}
-            action={
-              <span className="text-[9px] text-slate-500">
-                {t("settings.instant")}
-              </span>
-            }
-          >
-            <div className="flex flex-col gap-2.5">
-              {/* 宠物开关：开 → 建悬浮窗 + 启独立轮询；关 → 停轮询 + 关窗 */}
-              <label className="flex items-center justify-between gap-2 cursor-pointer">
-                <span className="min-w-0">
-                  <span className="block text-[10px] text-slate-600">
-                    {t("settings.petEnabled")}
-                  </span>
-                  <span className="block text-[9px] text-slate-500 leading-relaxed">
-                    {t("settings.petEnabledHint")}
-                  </span>
-                </span>
-                <input
-                  type="checkbox"
-                  checked={petCfg.enabled}
-                  onChange={(e) =>
-                    void applyPet({ ...petCfg, enabled: e.target.checked })
-                  }
-                  className="accent-sky-500 h-3 w-3 shrink-0"
-                />
-              </label>
-
-              {/* 形象选择（内建 + 自定义）+ 大小滑杆：宠物关闭时降透明度
-                  并阻断交互（保留设置值，重新开启即恢复） */}
-              <div
-                className={`flex flex-col gap-2.5 pt-2 border-t border-slate-900/6 ${
-                  petCfg.enabled ? "" : "opacity-40 pointer-events-none"
-                }`}
-              >
-                <PetStyleSection
-                  value={petCfg.style}
-                  onSelect={(id) => void applyPet({ ...petCfg, style: id })}
-                  controller={customPets}
-                />
-
-                {/* 尺寸档位（屏高比例 1~5）：离散点击即时生效（无滑杆
-                    拖动的防抖需求），px 换算在 Rust 侧按窗口所在屏幕完成 */}
-                <PetSizeLevelPicker
-                  labelKey="settings.petSize"
-                  value={petCfg.size}
-                  onSelect={(level) => void applyPet({ ...petCfg, size: level })}
-                />
-                <p className="text-[9px] text-slate-500 leading-relaxed">
-                  {t("settings.petSizeHint")}
-                </p>
-              </div>
-
-              {/* 状态图例：与皮肤注入版共用同一份五状态说明 */}
-              <p className="text-[9px] text-slate-500 leading-relaxed break-words">
-                {t("theme.petLegend")}
-              </p>
-            </div>
-          </SettingsCard>
-        )}
+        {/* 桌面宠物设置已收敛到皮肤页（ThemePanel）的宠物卡：总开关 +
+            注入版/悬浮窗形态二选一（pet.json 唯一真相源），本页不再重复 */}
 
         <SettingsCard
           title={t("settings.autostart")}

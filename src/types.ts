@@ -706,20 +706,6 @@ export interface ThemeParams {
    *  （↑输入 ↓输出 · ⟲缓存读 · ×请求数 · 速度 · TTFT）；经 variables.css
    *  --zbar-usage-turn-bar（1/0）热重载生效 */
   usageTurnBar: boolean;
-  /** 桌面像素宠物开关（默认 false，新功能默认关闭）：在 ZCode 对话页
-   *  右下角显示按工作状态实时切换动画的像素宠物（沉睡/闲坐/思考/
-   *  奋笔疾书/庆祝）；经 variables.css --zbar-pet-enabled（1/0）热重载
-   *  即时生效 */
-  petEnabled: boolean;
-  /** 桌面像素宠物形象 id（默认 "cat"）：可选值与注入脚本内嵌形象库
-   *  一致（cat 像素小猫 / bot 像素小机器人）；经 --zbar-pet-style
-   *  热重载切换 */
-  petStyle: string;
-  /** 桌面像素宠物尺寸档位（1~5，默认 3 = 10% 屏高，见 PET_SIZE_LEVEL_PCT）：
-   *  Rust 侧渲染 variables.css 时按主显示器逻辑高换算成整数 px 写入
-   *  --zbar-pet-size 热重载即时生效（像素风最近邻放大），高分屏低分屏
-   *  观感一致 */
-  petSize: number;
   /** 当前壁纸指向（未设置为 null）。相对文件名 = wallpapers/ 目录内
    *  文件（如 "default.mp4"）；绝对路径 = 直接引用 */
   wallpaperFile: string | null;
@@ -767,6 +753,10 @@ export const PET_SIZE_LEVEL_PCT: ReadonlyArray<number> = [5.5, 7.5, 10.0, 12.5, 
 /** 默认档位（10% 屏高；与 Rust 侧 DEFAULT_PET_SIZE_LEVEL 一致） */
 export const DEFAULT_PET_SIZE_LEVEL = 3;
 
+/** 默认宠物形象（与 Rust 侧 pet.rs 的 DEFAULT_PET_STYLE 同源：内置
+ *  「智谱 Z 娘」，V8 起合法值恒为 custom:<id> 图集形态） */
+export const DEFAULT_PET_STYLE = "custom:zhipu-z-niang";
+
 /** 取不到屏幕信息时的兜底逻辑屏高（1080p@100%，与 Rust 侧一致） */
 export const PET_SIZE_FALLBACK_SCREEN_H = 1080;
 
@@ -785,20 +775,33 @@ export function petSizePx(level: number, screenH: number): number {
   return Math.round((h * PET_SIZE_LEVEL_PCT[lv - 1]) / 100);
 }
 
-/** 独立悬浮窗宠物配置（get/set_pet_config 的契约，~/.zbar/pet.json） */
+/**
+ * 桌面宠物配置（get/set_pet_config 的契约，~/.zbar/pet.json）——宠物
+ * 设置的唯一真相源（皮肤页宠物卡读写），注入版与悬浮窗两形态共用。
+ */
 export interface PetConfig {
-  /** 悬浮窗开关：true = 创建透明悬浮窗并启动独立状态轮询 */
+  /** 宠物总开关：false = 全关；true 时按 mode 决定形态 */
   enabled: boolean;
-  /** 宠物形象 id：内建（cat / bot，默认 "cat"）或自定义 "custom:<id>"
-   *  （Petdex 导入，见 pets 模块） */
+  /** 宠物形态："injected" 注入版（默认，渲染在 ZCode 对话页，需已安装
+   *  皮肤，参数经 variables.css 热重载）/ "floating" 悬浮窗（独立透明
+   *  置顶窗 + 轮询） */
+  mode: PetMode;
+  /** 宠物形象 id：custom:<id>（V8 起唯一形态，Petdex 图集渲染——
+   *  默认 custom:zhipu-z-niang 为内置「智谱 Z 娘」，随安装包分发且
+   *  不可删除；用户自定义宠物见 pets 模块） */
   style: string;
   /** 宠物尺寸档位（1~5，默认 3 = 10% 屏高，见 PET_SIZE_LEVEL_PCT）：
-   *  悬浮窗边长 = 档位 × 窗口所在屏幕逻辑高（Rust 侧建窗/同步时换算） */
+   *  悬浮窗边长 = 档位 × 窗口所在屏幕逻辑高（Rust 侧建窗/同步时换算）；
+   *  注入版由 variables.css 渲染同口径换算的 px */
   size: number;
-  /** 窗口左上角位置（逻辑坐标，拖动结束持久化，重启恢复）；
-   *  null = 从未拖动过（默认主显示器右下角） */
+  /** 悬浮窗左上角位置（逻辑坐标，拖动结束持久化，重启恢复）；
+   *  null = 从未拖动过（默认主显示器右下角）。仅悬浮窗形态消费（注入
+   *  版位置存 ZCode 页面 localStorage，不经本字段） */
   pos: [number, number] | null;
 }
+
+/** 宠物形态字面量（与 Rust 侧 PET_MODE_INJECTED / PET_MODE_FLOATING 契约一致） */
+export type PetMode = "injected" | "floating";
 
 // ===== 自定义宠物（第三阶段：Petdex 格式导入）=====
 
@@ -825,9 +828,10 @@ export interface CustomPetMeta {
   /** 图集文件名（sheet.webp / sheet.png） */
   image: string;
   /** 七状态行配置（sleeping/idle/working/typing/celebrating，V6 新增
-   *  tool_running/failed）。自定义形象行映射：tool_running←行 1 running-right、
-   *  failed←行 5 failed；内建形象 fallback：tool_running→typing 帧、
-   *  failed→sleeping 帧（见 pet-core.js BUILTIN_STATE_FALLBACK） */
+   *  tool_running/failed）。行映射：tool_running←行 1 running-right、
+   *  failed←行 5 failed；旧五状态 pet.json 缺键时读取侧补默认行 +
+   *  pet-core.js 的缺键回退（tool_running→typing、failed→sleeping，
+   *  见 CUSTOM_STATE_FALLBACK）双保险 */
   states: Record<string, CustomPetStateDef>;
 }
 
@@ -838,13 +842,16 @@ export interface CustomPetAsset {
   dataUri: string;
 }
 
-/** 自定义宠物清单项（list_custom_pets 契约，两处设置卡选择器消费） */
+/** 宠物清单项（list_custom_pets 契约，含内置形象，皮肤页选择器消费） */
 export interface CustomPetEntry {
   id: string;
   name: string;
   format: string;
   /** idle 行首帧缩略图（64×70 内等比 PNG dataUri；生成失败为空串） */
   thumb: string;
+  /** 是否内置形象（智谱娘，id=zhipu-z-niang）：内建分组渲染、无删除
+   *  按钮；Rust 侧 delete_custom_pet 对内置 id 同样拒绝（双保险） */
+  builtin: boolean;
 }
 
 // ===== 项目 / 会话浏览器（与后端 projects 模块结构一一对应）=====

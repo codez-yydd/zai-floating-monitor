@@ -1,0 +1,41 @@
+{
+  "id": "zhipu-z-niang",
+  "name": "智谱 Z 娘",
+  "format": "petdex-v2",
+  "cols": 8,
+  "rows": 11,
+  "frameW": 192,
+  "frameH": 208,
+  "image": "sheet.webp",
+  "states": {
+    "celebrating": {
+      "row": 4,
+      "frames": 5,
+      "frameMs": 160
+    },
+    "idle": {
+      "row": 0,
+      "frames": 6,
+      "frameMs": 450
+    },
+    "sleeping": {
+      "row": 6,
+      "frames": 6,
+      "frameMs": 800
+    },
+    "typing": {
+      "row": 7,
+      "frames": 6,
+      "frameMs": [
+        220,
+        150,
+        95
+      ]
+    },
+    "working": {
+      "row": 8,
+      "frames": 6,
+      "frameMs": 300
+    }
+  }
+}

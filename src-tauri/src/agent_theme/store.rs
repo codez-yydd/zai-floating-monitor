@@ -8,8 +8,9 @@
 //!   zcode/effects.js      壁纸运行时脚本（版本化落盘，同上）
 //!   zcode/usage.js        对话页用量统计条脚本（版本化落盘，同上）
 //!   zcode/pet.js          对话页桌面像素宠物脚本（版本化落盘，同上）
-//!   zcode/pet-custom.js   自定义宠物物化资产（仅 pet_style 为 custom:<id> 时
-//!                         存在，pets::sync_theme_custom_pet 写出，非模板）
+//!   zcode/pet-custom.js   自定义宠物物化资产（仅 PetConfig.style 为
+//!                         custom:<id> 时存在，pets::sync_theme_custom_pet
+//!                         写出，非模板）
 //!   zcode/usage-data.js   用量数据（usage_feed 后台任务周期导出，非模板）
 //!   zcode/usage-data-hb.js 宠物心跳小文件（仅注入版宠物开启时每周期重写）
 //!   zcode/wallpapers/     壁纸视频库（卸载还原时保留）
@@ -130,23 +131,13 @@ pub const DEFAULT_USAGE_SESSION_BAR: bool = true;
 /// TTFT），默认开启；usage.js V19 起消费 --zbar-usage-turn-bar（1/0）
 /// 决定渲染，随热重载即时生效
 pub const DEFAULT_USAGE_TURN_BAR: bool = true;
-/// 桌面像素宠物默认开关（用户可调参数 pet_enabled）：对话页右下角按
-/// ZCode 工作状态实时切换动画的像素宠物（沉睡/闲坐/思考/奋笔疾书/庆祝
-/// 五状态，数据源为 usage-data.js）。默认关闭：新功能不惊扰现有用户，
-/// 皮肤页开启后经 variables.css 的 --zbar-pet-enabled（1/0）随热重载
-/// 即时生效（pet.js 侧变量缺失/值非 "1" 均视为关闭，语义一致）
-pub const DEFAULT_PET_ENABLED: bool = false;
-/// 桌面像素宠物默认形象 id（用户可调参数 pet_style）：PET_STYLES 的键，
-/// 与 inject::PET_JS 内嵌形象库的第一形象保持一致（cat = 像素小猫，
-/// bot = 像素小机器人）；pet.js 对未知值回退第一形象，Rust 侧仅防空串
-pub const DEFAULT_PET_STYLE: &str = "cat";
-/// 桌面像素宠物默认尺寸档位（用户可调参数 pet_size，1~5，屏高百分比
-/// 见 pet::PET_SIZE_LEVEL_PCT，默认 3 = 10%）：渲染时按 ZBar 主显示器
-/// 逻辑高换算成 px 写入 --zbar-pet-size（如 81px），pet.js 画布 CSS 尺寸
-/// 直接消费该 px 值（image-rendering:pixelated 最近邻放大），改档位随
-/// 热重载即时生效。档位换算/迁移口径与独立版 pet.json 的 size 共用
-/// pet 模块实现。
-pub const DEFAULT_PET_SIZE: u32 = crate::pet::DEFAULT_PET_SIZE_LEVEL;
+/* 宠物参数（开关/形象/尺寸）自本版起从 ThemeParams 移除：宠物配置统一
+收敛到 pet::PetConfig（~/.zbar/pet.json，含总开关与形态二选一，默认注入
+版），注入版渲染由 refresh_variables_css_in 按 PetConfig 计算
+--zbar-pet-* 三变量，变量名与语义保持不变（旧 pet.js 壳读新 CSS 仍兼容，
+本次升级同批把壳升到 V7 可拖拽）；旧 params.json 残留的 petEnabled /
+petStyle / petSize 键由 serde 默认忽略（未开 deny_unknown_fields，已核
+实），无需迁移脚本 */
 
 /// 参数范围常量：(最小, 最大)
 pub const WP_BRIGHTNESS_RANGE: (f64, f64) = (0.4, 1.1);
@@ -218,26 +209,10 @@ pub struct ThemeParams {
     pub usage_session_bar: bool,
     /// 每轮末尾统计条开关（默认 true）：控制 ZCode 对话内每轮回复下方
     /// 统计条（↑输入 ↓输出 · ⟲缓存读 · ×请求数 · t/s · TTFT）的渲染，
-    /// 字号/不透明度复用 usage_font_size / usage_opacity；开关经
-    /// variables.css 的 --zbar-usage-turn-bar（1/0）热重载即时生效
+    /// 字号/不透明度复用 usage_font_size / usage_opacity；开关经 variables.css
+    /// 的 --zbar-usage-turn-bar（1/0）热重载即时生效
     /// （usage.js 侧变量缺失视为开启，兼容旧 variables.css）
     pub usage_turn_bar: bool,
-    /// 桌面像素宠物开关（默认 false，新功能默认关闭不惊扰现有用户）：
-    /// 对话页右下角按 ZCode 工作状态实时切换动画的像素宠物；开关经
-    /// variables.css 的 --zbar-pet-enabled（1/0）热重载即时生效（pet.js
-    /// 侧值非 "1"/变量缺失均视为关闭，与本默认值语义一致）
-    pub pet_enabled: bool,
-    /// 桌面像素宠物形象 id（默认 "cat" = 第一形象）：PET_STYLES 的键
-    /// （cat 像素小猫 / bot 像素小机器人），经 --zbar-pet-style 透出，
-    /// pet.js 对未知值回退第一形象；Rust 侧 clamp 仅防空串/空白回默认
-    pub pet_style: String,
-    /// 桌面像素宠物尺寸档位（1~5，默认 3 = 10% 屏高，见
-    /// pet::PET_SIZE_LEVEL_PCT）：渲染时按主显示器逻辑高换算成 px 写入
-    /// --zbar-pet-size（如 81px——恒为整数 px，绝不写 vh 等单位，旧版
-    /// pet.js 的 sizeOf 用 parseInt 解析该变量），pet.js 画布 CSS 尺寸
-    /// 直接消费该变量（image-rendering:pixelated 最近邻放大），改档位
-    /// 随热重载即时生效
-    pub pet_size: u32,
     /// 当前壁纸指向。语义（V3 起扩展）：
     /// - 绝对路径（以 / 或 Windows 盘符开头）→ 直接引用该文件
     /// - 相对文件名 → wallpapers/ 目录下的文件（如 "default.mp4"）
@@ -264,9 +239,6 @@ impl Default for ThemeParams {
             usage_opacity: DEFAULT_USAGE_OPACITY,
             usage_session_bar: DEFAULT_USAGE_SESSION_BAR,
             usage_turn_bar: DEFAULT_USAGE_TURN_BAR,
-            pet_enabled: DEFAULT_PET_ENABLED,
-            pet_style: DEFAULT_PET_STYLE.to_string(),
-            pet_size: DEFAULT_PET_SIZE,
             wallpaper_file: Some(DEFAULT_WALLPAPER_FILE.to_string()),
             wallpaper_dir: None,
         }
@@ -292,16 +264,6 @@ impl ThemeParams {
         self.text_shadow = clamp(self.text_shadow, TEXT_SHADOW_RANGE);
         self.usage_font_size = clamp(self.usage_font_size, USAGE_FONT_SIZE_RANGE);
         self.usage_opacity = clamp(self.usage_opacity, USAGE_OPACITY_RANGE);
-        // 宠物参数收敛：尺寸归一到档位 1..=5（旧版 px 值按缓存屏高换算
-        // 最近档位迁移，与 pet.json 的迁移口径一致，见 pet::normalize_pet_size）；
-        // 形象 id 防空串/空白回默认（形象合法性由 pet.js 按内嵌形象库
-        // 回退第一形象，Rust 侧不重复维护形象清单，避免两处漂移）
-        self.pet_size = crate::pet::normalize_pet_size(self.pet_size, crate::pet::cached_screen_height());
-        if !self.pet_style.trim().is_empty() {
-            self.pet_style = self.pet_style.trim().to_string();
-        } else {
-            self.pet_style = DEFAULT_PET_STYLE.to_string();
-        }
         if !self.wallpaper_file.as_deref().is_some_and(|s| !s.trim().is_empty()) {
             self.wallpaper_file = Some(DEFAULT_WALLPAPER_FILE.to_string());
         }
@@ -361,9 +323,8 @@ fn resolve_wallpaper_path(dir: &Path, name: &str) -> (PathBuf, bool) {
 }
 
 /// 读取参数；文件不存在或内容损坏时静默返回默认值（皮肤页首开无 params.json）。
-/// 旧版 px 语义的 pet_size（48~128）在首次读取时按缓存屏高一次性迁移
-/// 为最近档位并落盘（与 pet.json 的迁移口径一致；迁移后值域 1..=5，
-/// 后续读取直读不再写盘）。
+/// 旧 params.json 残留的宠物键（petEnabled/petStyle/petSize）被 serde
+/// 忽略——宠物配置已统一收敛到 pet::PetConfig。
 pub fn load_params(app_id: &str) -> ThemeParams {
     let Ok(path) = params_path(app_id) else {
         return ThemeParams::default();
@@ -371,19 +332,9 @@ pub fn load_params(app_id: &str) -> ThemeParams {
     load_params_at(&path)
 }
 
-/// load_params 的路径显式版（单元测试复用，不依赖真实 ~/.zbar）：
-/// 读 → pet_size 归一（旧 px 迁移档位）→ 变化则落盘。
+/// load_params 的路径显式版（单元测试复用，不依赖真实 ~/.zbar）。
 pub(crate) fn load_params_at(path: &Path) -> ThemeParams {
-    let Some(mut params) = read_params_file(path) else {
-        return ThemeParams::default();
-    };
-    let level = crate::pet::normalize_pet_size(params.pet_size, crate::pet::cached_screen_height());
-    if level != params.pet_size {
-        params.pet_size = level;
-        // 迁移落盘失败静默（下次读取重试）；仅动 pet_size 不夹其它字段
-        let _ = write_params_file(path, &params);
-    }
-    params
+    read_params_file(path).unwrap_or_default()
 }
 
 /// 从指定路径读参数（供单元测试复用）。失败返回 None。
@@ -657,26 +608,41 @@ fn pet_asset_stamp(dir: &Path) -> String {
 }
 
 /// 指定目录内的 variables.css 重渲（ensure_theme_assets / apply_wallpaper
-/// / pets::sync_theme_custom_pet 内部调用与单元测试共用，不依赖真实 ~/.zbar）。
+/// / pets::sync_theme_custom_pet 内部调用与单元测试共用，不依赖真实 ~/.zbar
+/// ——宠物配置经参数显式传入，测试目录不受真实 pet.json 影响）。
 /// wallpaperFile 语义（V3）：绝对路径直接 file_url 引用；相对文件名拼
 /// wallpapers/ 目录；缺失/为空时回落 default.mp4。文件不存在时由
 /// effects.js 对加载失败静默移除、退回原生观感（指向信息不丢失）。
 /// --zbar-pet-asset-ver 按当前 pet-custom.js 内容计算（见 pet_asset_stamp）。
-/// pet_size 按缓存屏高换算成 px 渲染（ZBar 重启/改档位后缓存刷新，皮肤
-/// 页状态轮询触发的本函数重渲即静默按新屏高重写 px——换屏自适应时机
-/// 为下次重渲，不实时监听屏幕变化）。
+/// --zbar-pet-* 三变量按 pet（PetConfig，唯一真相源）渲染：注入版开关 =
+/// enabled && mode==injected（悬浮窗形态/总开关关 → 0，注入壳移除 DOM），
+/// 尺寸档位按缓存屏高换算成 px（ZBar 重启/改档位后缓存刷新，皮肤页状态
+/// 轮询触发的本函数重渲即静默按新屏高重写 px——换屏自适应时机为下次
+/// 重渲，不实时监听屏幕变化）；pos 不参与渲染（注入版位置存 ZCode 页面
+/// localStorage）。
 /// 幂等优化：内容无变化时跳过写盘——皮肤页状态轮询会反复触发本函数，
 /// 而 effects.js 每秒热重载重读 variables.css，无谓的重写只添噪。
-pub(crate) fn refresh_variables_css_in(dir: &Path) -> Result<(), String> {
-    let mut params = read_params_file(&dir.join(PARAMS_FILE)).unwrap_or_default();
-    // 渲染口径归一：params.json 可能仍是未迁移的旧 px 值（迁移落盘由
-    // load_params 负责），此处按同口径换算档位再渲染 px
-    params.pet_size =
-        crate::pet::normalize_pet_size(params.pet_size, crate::pet::cached_screen_height());
+pub(crate) fn refresh_variables_css_in(
+    dir: &Path,
+    pet: &crate::pet::PetConfig,
+) -> Result<(), String> {
+    let params = read_params_file(&dir.join(PARAMS_FILE)).unwrap_or_default();
     let (wp_path, _) = resolve_wallpaper_path(dir, params.wallpaper_name());
     let url = inject::file_url(&wp_path);
     let stamp = pet_asset_stamp(dir);
-    let css = inject::render_variables_css(&params, &url, &stamp, crate::pet::cached_screen_height());
+    let pet_enabled = if pet.wants_injected_pet() { 1 } else { 0 };
+    let pet_size_px = crate::pet::pet_size_px(
+        crate::pet::normalize_pet_size(pet.size, crate::pet::cached_screen_height()),
+        crate::pet::cached_screen_height(),
+    );
+    let css = inject::render_variables_css(
+        &params,
+        &url,
+        &stamp,
+        pet_enabled,
+        &pet.style,
+        pet_size_px,
+    );
     let path = dir.join(VARIABLES_CSS);
     if fs::read_to_string(&path).is_ok_and(|old| old == css) {
         return Ok(());
@@ -687,21 +653,28 @@ pub(crate) fn refresh_variables_css_in(dir: &Path) -> Result<(), String> {
 /// 把新指向写入 params.json 的 wallpaperFile，再按新参数重渲 variables.css，
 /// CSS 变量即指向新壁纸。换壁纸的指向切换由导入命令全权负责完成。
 /// `file_ref` 为相对文件名（wallpapers/ 下）或绝对路径，语义同字段注释。
+/// 重渲的宠物参数取真实 pet.json（PetConfig 是宠物唯一真相源）。
 pub fn apply_wallpaper(app_id: &str, file_ref: &str) -> Result<(), String> {
     let dir = app_dir(app_id)?;
     fs::create_dir_all(&dir).map_err(|e| format!("创建主题目录失败: {e}"))?;
-    apply_wallpaper_in(&dir, file_ref)
+    let pet = crate::pet::load_pet_config().clamped();
+    apply_wallpaper_in(&dir, file_ref, &pet)
 }
 
-/// 指定目录内的"更新壁纸指向 + 重渲"核心（app_id 版与单元测试共用）。
-pub(crate) fn apply_wallpaper_in(dir: &Path, file_ref: &str) -> Result<(), String> {
+/// 指定目录内的"更新壁纸指向 + 重渲"核心（app_id 版与单元测试共用，
+/// 宠物参数显式传入保持测试目录纯净）。
+pub(crate) fn apply_wallpaper_in(
+    dir: &Path,
+    file_ref: &str,
+    pet: &crate::pet::PetConfig,
+) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|e| format!("创建主题目录失败: {e}"))?;
     let path = dir.join(PARAMS_FILE);
     let mut params = read_params_file(&path).unwrap_or_default();
     params.wallpaper_file = Some(file_ref.to_string());
     // 与 save_params 同样先 clamp，越界脏数据不落盘
     write_params_file(&path, &params.clamped())?;
-    refresh_variables_css_in(dir)
+    refresh_variables_css_in(dir, pet)
 }
 
 // ============================================================
@@ -816,16 +789,22 @@ pub(crate) fn resolve_selectable_wallpaper_in(
     }
 }
 
-/// 壁纸库选择核心（select_agent_wallpaper 的目录显式版，单元测试共用）：
+/// 壁纸库选择核心（select_agent_wallpaper 的目录显式版，单元测试共用，
+/// 宠物参数显式传入保持测试目录纯净）：
 /// - `raw == "default"` → 指向回落 default.mp4
 /// - 其余 → 越界/类型校验后把绝对路径写入 params.wallpaper_file 并重渲
-pub(crate) fn select_wallpaper_in(dir: &Path, wp_dir: &Path, raw: &str) -> Result<(), String> {
+pub(crate) fn select_wallpaper_in(
+    dir: &Path,
+    wp_dir: &Path,
+    raw: &str,
+    pet: &crate::pet::PetConfig,
+) -> Result<(), String> {
     let raw = raw.trim();
     if raw == "default" {
-        return apply_wallpaper_in(dir, DEFAULT_WALLPAPER_FILE);
+        return apply_wallpaper_in(dir, DEFAULT_WALLPAPER_FILE, pet);
     }
     let target = resolve_selectable_wallpaper_in(dir, wp_dir, raw)?;
-    apply_wallpaper_in(dir, &target.to_string_lossy())
+    apply_wallpaper_in(dir, &target.to_string_lossy(), pet)
 }
 
 /// 设置/清除用户壁纸目录（set_agent_wallpaper_dir 的落盘实现；
@@ -1086,7 +1065,33 @@ pub const USAGE_JS_VERSION: u32 = 20;
 /// running-right / 行 5 failed（pets::build_default_states），旧五状态
 /// pet.json 读取时补齐（pets::normalize_meta）+ 渲染端 customStateDef
 /// 缺键回退（双保险）。ta/fe 缺失（旧数据文件/老版本库）行为同 V5。
-pub const PET_JS_VERSION: u32 = 6;
+/// V7（注入版可拖拽 + 位置持久化 + 参数源切换）：
+/// - 宿主壳定位样式去掉 right/bottom 固定右下角与 pointer-events:none，
+///   容器（div[data-zbar-pet]）改为可接收鼠标事件：pointerdown 捕获 →
+///   move 实时 clamp 视口内移动 → up/cancel 释放并把最终位置存
+///   localStorage（__zbarPetPos）；无记录时默认右下角（边距与旧版
+///   right:18px/bottom:14px 观感一致）；每 tick 轻量 clamp（窗口 resize
+///   后拉回可见区），尺寸热切换后同样 clamp；
+/// - 容器重挂封装（create/setParams 形象切换会重建容器 div，身份比对
+///   后重新应用位置并绑定拖拽；开关关开走 create/destroy 重建后位置从
+///   localStorage 恢复）；
+/// - 动画不受拖拽影响（核心 setInterval 驱动继续跑）；
+/// - 参数语义不变：仍每秒读 variables.css 的 --zbar-pet-*（本次配套把
+///   宠物配置从 ThemeParams 收敛到 pet.json/PetConfig，variables.css
+///   变量名与取值语义保持不变，旧壳读新 CSS 兼容；本版壳升级需用户
+///   重启 ZCode 完全重载 pet.js 生效）。
+/// V8（智谱娘转正为默认内置形象，渲染收敛 customAsset-only）：
+/// - 删除内建的 cat/bot 字符网格形象（PET_STYLES 常量、调色板与逐像素
+///   绘制路径一并移除），全部形象统一走 Petdex 图集渲染器；
+/// - 「智谱 Z 娘」（custom:zhipu-z-niang）随安装包分发（pets.rs 的
+///   ensure_builtin_pet 启动时释放到宠物库）、默认选中（pet.rs 的
+///   DEFAULT_PET_STYLE）、不可删除，数据通道与用户自定义宠物一致；
+/// - 资产未就位（custom 缺资产/旧 variables.css 的 cat 残留值）不再
+///   回退内建形象：核心进入空态——实例存活但不挂 DOM（宠物暂隐约
+///   1 秒瞬态），资产就位后 setParams 热切换恢复；壳的 styleIdOf/
+///   effective 回退值从 "cat" 改为空串；
+/// - 状态机与数据契约（v/ts/la/pu/ta/fe/turns/runs）零改动。
+pub const PET_JS_VERSION: u32 = 8;
 
 /// 版本标记的头部查找范围（字符数）：版本注释固定在文件头部，
 /// 限定查找范围避免误匹配正文中的同名字样。
@@ -1135,7 +1140,8 @@ pub(crate) fn ensure_versioned_template(
 /// - theme.css / effects.js / usage.js / pet.js：版本化覆盖（头部版本低于
 ///   内置模板时升级，见 ensure_versioned_template；实机调优过的当前版本
 ///   不动）
-/// - variables.css：按当前参数重渲（内容无变化时跳过写盘）
+/// - variables.css：按当前参数重渲（内容无变化时跳过写盘；宠物三变量
+///   按真实 pet.json 渲染——PetConfig 是宠物唯一真相源）
 /// - 默认壁纸：wallpapers/ 无 default.mp4 且应用打包资源里有则拷入
 ///
 /// 调用时机：安装主流程（携带打包资源壁纸）；皮肤页状态查询与参数/
@@ -1145,14 +1151,17 @@ pub(crate) fn ensure_versioned_template(
 pub fn ensure_theme_assets(app_id: &str, resource_wallpapers: Option<&Path>) -> Result<(), String> {
     let dir = app_dir(app_id)?;
     let wp_dir = wallpapers_dir(app_id)?;
-    ensure_theme_assets_in(&dir, &wp_dir, resource_wallpapers)
+    let pet = crate::pet::load_pet_config().clamped();
+    ensure_theme_assets_in(&dir, &wp_dir, resource_wallpapers, &pet)
 }
 
-/// ensure_theme_assets 的目录显式版（单元测试复用，不依赖真实 ~/.zbar）。
+/// ensure_theme_assets 的目录显式版（单元测试复用，宠物参数显式传入
+/// 不依赖真实 ~/.zbar）。
 pub(crate) fn ensure_theme_assets_in(
     dir: &Path,
     wp_dir: &Path,
     resource_wallpapers: Option<&Path>,
+    pet: &crate::pet::PetConfig,
 ) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|e| format!("创建主题目录失败: {e}"))?;
     fs::create_dir_all(wp_dir).map_err(|e| format!("创建壁纸目录失败: {e}"))?;
@@ -1175,7 +1184,7 @@ pub(crate) fn ensure_theme_assets_in(
         }
     }
 
-    refresh_variables_css_in(dir)
+    refresh_variables_css_in(dir, pet)
 }
 
 /// 清理主题目录但保留 wallpapers/（卸载还原后调用：壁纸素材属于用户数据）。
@@ -1219,6 +1228,12 @@ mod tests {
         d
     }
 
+    /// 测试用宠物配置（默认：总开关关 + 注入版形态）——variables.css
+    /// 的宠物三变量按此渲染，与真实 pet.json 解耦保持测试纯净
+    fn test_pet() -> crate::pet::PetConfig {
+        crate::pet::PetConfig::default()
+    }
+
     #[test]
     fn params_默认值读写() {
         let dir = test_dir("params-default");
@@ -1246,26 +1261,26 @@ mod tests {
         assert_eq!(default.usage_opacity, DEFAULT_USAGE_OPACITY);
         assert_eq!(default.usage_session_bar, DEFAULT_USAGE_SESSION_BAR);
         assert_eq!(default.usage_turn_bar, DEFAULT_USAGE_TURN_BAR);
-        assert_eq!(default.pet_enabled, DEFAULT_PET_ENABLED);
-        assert_eq!(default.pet_style, DEFAULT_PET_STYLE);
-        assert_eq!(default.pet_size, DEFAULT_PET_SIZE);
         assert_eq!(default.wallpaper_file.as_deref(), Some(DEFAULT_WALLPAPER_FILE));
         assert_eq!(default.wallpaper_dir, None);
 
         write_params_file(&path, &default).unwrap();
         assert_eq!(read_params_file(&path), Some(default));
 
-        // camelCase 序列化：前端契约字段名一字不差
+        // camelCase 序列化：前端契约字段名一字不差（宠物参数已收敛到
+        // pet.json/PetConfig，不再出现在 params.json）
         let text = fs::read_to_string(&path).unwrap();
         for key in [
             "wpBrightness", "wpSaturate", "wpBlur", "maskStrength",
             "panelOpacity", "sidebarOpacity", "sidebarRightOpacity",
             "playbackRate", "baseAlpha", "textShadow",
             "usageFontSize", "usageOpacity", "usageSessionBar", "usageTurnBar",
-            "petEnabled", "petStyle", "petSize",
             "wallpaperFile", "wallpaperDir",
         ] {
             assert!(text.contains(key), "params.json 缺少字段 {key}");
+        }
+        for gone in ["petEnabled", "petStyle", "petSize"] {
+            assert!(!text.contains(gone), "params.json 不应再含宠物字段 {gone}");
         }
 
         // 修改后读写
@@ -1301,116 +1316,92 @@ mod tests {
         assert_eq!(p.usage_session_bar, DEFAULT_USAGE_SESSION_BAR);
         // V19 每轮统计条开关：旧版 params.json 缺字段按默认开启补齐
         assert_eq!(p.usage_turn_bar, DEFAULT_USAGE_TURN_BAR);
-        // 桌面宠物三参数：旧版 params.json 缺字段按默认补齐
-        // （开关默认关闭不惊扰现有用户；形象回第一形象；档位回默认 3）
-        assert_eq!(p.pet_enabled, DEFAULT_PET_ENABLED);
-        assert_eq!(p.pet_style, DEFAULT_PET_STYLE);
-        assert_eq!(p.pet_size, DEFAULT_PET_SIZE);
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn pet_参数序列化与收敛() {
-        let dir = test_dir("pet-params");
+    fn params_旧宠物键被忽略不迁移() {
+        // 宠物配置收敛到 pet.json 后，旧版 params.json 残留的 pet* 键
+        // 读取不炸、按未知字段忽略（未开 deny_unknown_fields），落盘
+        // 再写时自然清除——无需迁移脚本
+        let dir = test_dir("params-legacy-pet-keys");
         let path = dir.join(PARAMS_FILE);
-
-        // 显式开启 + 自定义形象/档位 → 落盘读回原样保持（不被默认关闭覆盖）
-        let mut p = ThemeParams::default();
-        p.pet_enabled = true;
-        p.pet_style = "bot".into();
-        p.pet_size = 5;
+        fs::write(
+            &path,
+            r#"{"wpBrightness":0.9,"wallpaperFile":"a.mp4","petEnabled":true,"petStyle":"bot","petSize":64}"#,
+        )
+        .unwrap();
+        let p = read_params_file(&path).unwrap();
+        assert_eq!(p.wp_brightness, 0.9, "壁纸参数不受残留宠物键影响");
+        assert_eq!(p.wallpaper_file.as_deref(), Some("a.mp4"));
+        // 落盘读回：宠物键清除，壁纸参数保持
         write_params_file(&path, &p).unwrap();
-        let back = read_params_file(&path).unwrap();
-        assert!(back.pet_enabled, "显式开启的宠物开关读回应保持 true");
-        assert_eq!(back.pet_style, "bot");
-        assert_eq!(back.pet_size, 5);
-        // camelCase 键名与值形态落盘（前端契约）
         let text = fs::read_to_string(&path).unwrap();
-        assert!(
-            text.contains("\"petEnabled\": true"),
-            "params.json 应含 camelCase 键 petEnabled 且值为 true：{text}"
-        );
-        assert!(text.contains("\"petStyle\": \"bot\""), "{text}");
-        assert!(text.contains("\"petSize\": 5"), "{text}");
-
-        // clamp 收敛：档位直读、旧 px 值迁移（缓存屏高未初始化 → 1080
-        // 兜底口径：8/48 → 档 1，9999/128 → 档 4）、空白形象回默认、
-        // 开关原样保留
-        let mut q = ThemeParams::default();
-        q.pet_enabled = true;
-        q.pet_size = 8; // 旧 px 越界值：夹回 48 → 4.44% → 档 1
-        q.pet_style = "   ".into();
-        let c = q.clone().clamped();
-        assert_eq!(c.pet_size, 1, "旧过小 px 值应迁移到最小档 1");
-        assert!(c.pet_enabled, "clamped 不应改动开关值");
-        assert_eq!(c.pet_style, DEFAULT_PET_STYLE, "空白形象应回默认");
-        q.pet_size = 9999; // 旧 px 越界值：夹回 128 → 11.85% → 档 4
-        assert_eq!(
-            q.clone().clamped().pet_size,
-            4,
-            "旧过大 px 值应迁移到最近档 4"
-        );
-        q.pet_size = 3; // 档位值直读
-        assert_eq!(q.clone().clamped().pet_size, 3);
-
-        // 旧版 params.json 缺宠物字段 → serde default 按默认关闭补齐
-        fs::write(&path, r#"{"wpBrightness":0.9,"wallpaperFile":"a.mp4"}"#).unwrap();
-        let legacy = read_params_file(&path).unwrap();
-        assert!(!legacy.pet_enabled, "旧版文件缺 petEnabled 应按默认关闭补齐");
-        assert_eq!(legacy.pet_style, DEFAULT_PET_STYLE);
-        assert_eq!(legacy.pet_size, DEFAULT_PET_SIZE);
+        for gone in ["petEnabled", "petStyle", "petSize"] {
+            assert!(!text.contains(gone), "重写后宠物键 {gone} 应被清除：{text}");
+        }
+        assert!(text.contains("\"wpBrightness\": 0.9"), "{text}");
+        assert_eq!(read_params_file(&path).unwrap(), p);
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn pet_size_旧px值load时一次性迁移档位() {
-        let dir = test_dir("pet-migrate");
-        let path = dir.join(PARAMS_FILE);
-        // 旧版 px 值（64）落盘 → load 迁移为最近档位并写回（测试环境
-        // 缓存屏高未初始化 → 1080 兜底口径：64 ≈ 5.93% → 档 1），
-        // 其它字段原样保留
-        let mut p = ThemeParams::default();
-        p.pet_enabled = true;
-        p.pet_style = "bot".into();
-        p.pet_size = 64;
-        write_params_file(&path, &p).unwrap();
-        let loaded = load_params_at(&path);
-        assert_eq!(loaded.pet_size, 1, "64px@1080 应迁移到档 1");
-        assert!(loaded.pet_enabled, "迁移不应动开关");
-        assert_eq!(loaded.pet_style, "bot", "迁移不应动形象");
-        let back = read_params_file(&path).unwrap();
-        assert_eq!(back.pet_size, 1, "迁移结果应已落盘");
-        // 二次读取：档位值直读幂等（不再改写）
-        assert_eq!(load_params_at(&path), back);
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn variables_css_档位按屏高换算px渲染() {
+    fn variables_css_宠物变量按PetConfig渲染() {
         // refresh_variables_css_in 走缓存屏高（测试环境未初始化 → 1080）：
         // 档 4 × 1080 = 135px，恒为整数 px 形态（旧版 pet.js 的 sizeOf 用
-        // parseInt 解析，非整数 px 会把宠物缩成蚂蚁）
-        let dir = test_dir("vars-pet-size");
+        // parseInt 解析，非整数 px 会把宠物缩成蚂蚁）。注入版开启 =
+        // enabled && mode==injected；悬浮窗形态/总开关关 → 0
+        let dir = test_dir("vars-pet");
         let wp_dir = dir.join(WALLPAPERS_DIR);
         fs::create_dir_all(&wp_dir).unwrap();
         fs::write(wp_dir.join(DEFAULT_WALLPAPER_FILE), b"v").unwrap();
-        let mut p = ThemeParams::default();
-        p.pet_enabled = true;
-        p.pet_size = 4;
-        write_params_file(&dir.join(PARAMS_FILE), &p).unwrap();
-        refresh_variables_css_in(&dir).unwrap();
+        write_params_file(&dir.join(PARAMS_FILE), &ThemeParams::default()).unwrap();
+
+        // 注入版开启：内置智谱娘（默认形象）/ 档 4
+        let pet = crate::pet::PetConfig {
+            enabled: true,
+            mode: crate::pet::PET_MODE_INJECTED.into(),
+            style: crate::pet::DEFAULT_PET_STYLE.into(),
+            size: 4,
+            ..crate::pet::PetConfig::default()
+        };
+        refresh_variables_css_in(&dir, &pet).unwrap();
         let css = fs::read_to_string(dir.join(VARIABLES_CSS)).unwrap();
+        assert!(css.contains("--zbar-pet-enabled: 1;"), "{css}");
+        assert!(
+            css.contains(&format!("--zbar-pet-style: {};", crate::pet::DEFAULT_PET_STYLE)),
+            "{css}"
+        );
         assert!(css.contains("--zbar-pet-size: 135px;"), "{css}");
 
-        // params.json 仍是未迁移的旧 px 值（迁移落盘由 load_params 负责）
-        // 时，渲染口径同样归一：64 → 档 1 → 59px（5.5% × 1080 = 59.4）
-        let mut p = ThemeParams::default();
-        p.pet_size = 64;
-        write_params_file(&dir.join(PARAMS_FILE), &p).unwrap();
-        refresh_variables_css_in(&dir).unwrap();
+        // 悬浮窗形态：总开关开但形态非注入版 → 0（注入壳移除 DOM）
+        let floating = crate::pet::PetConfig {
+            mode: crate::pet::PET_MODE_FLOATING.into(),
+            ..pet.clone()
+        };
+        refresh_variables_css_in(&dir, &floating).unwrap();
+        let css = fs::read_to_string(dir.join(VARIABLES_CSS)).unwrap();
+        assert!(css.contains("--zbar-pet-enabled: 0;"), "{css}");
+
+        // 总开关关：注入版同样关闭
+        let off = crate::pet::PetConfig {
+            enabled: false,
+            ..pet
+        };
+        refresh_variables_css_in(&dir, &off).unwrap();
+        let css = fs::read_to_string(dir.join(VARIABLES_CSS)).unwrap();
+        assert!(css.contains("--zbar-pet-enabled: 0;"), "{css}");
+
+        // cfg.size 为旧 px 脏值（未经 load 迁移）时渲染口径归一：
+        // 64 → 档 1 → 59px（5.5% × 1080 = 59.4）
+        let legacy = crate::pet::PetConfig {
+            enabled: true,
+            size: 64,
+            ..crate::pet::PetConfig::default()
+        };
+        refresh_variables_css_in(&dir, &legacy).unwrap();
         let css = fs::read_to_string(dir.join(VARIABLES_CSS)).unwrap();
         assert!(css.contains("--zbar-pet-size: 59px;"), "{css}");
 
@@ -1496,9 +1487,6 @@ mod tests {
             usage_opacity: 5.0,
             usage_session_bar: false,
             usage_turn_bar: false,
-            pet_enabled: true,
-            pet_style: "  ".into(),
-            pet_size: 9999,
             wallpaper_file: Some("  ".into()),
             wallpaper_dir: None,
         }
@@ -1515,11 +1503,6 @@ mod tests {
         assert_eq!(p.text_shadow, TEXT_SHADOW_RANGE.0);
         assert_eq!(p.usage_font_size, USAGE_FONT_SIZE_RANGE.1);
         assert_eq!(p.usage_opacity, USAGE_OPACITY_RANGE.1);
-        // 宠物参数收敛：旧 px 越界值（9999 → 夹回 128 → 11.85%@1080）
-        // 迁移到最近档 4、空白形象回默认、开关原样保留
-        assert_eq!(p.pet_size, 4);
-        assert_eq!(p.pet_style, DEFAULT_PET_STYLE);
-        assert!(p.pet_enabled);
         // 空白文件名回默认
         assert_eq!(p.wallpaper_name(), DEFAULT_WALLPAPER_FILE);
         p.wallpaper_file = None;
@@ -1536,7 +1519,7 @@ mod tests {
 
         // 无 params.json（首装后未动过设置）→ 从默认值切到 my.mp4：
         // 指向落盘 + variables.css 重渲均指向新文件
-        apply_wallpaper_in(&dir, "my.mp4").unwrap();
+        apply_wallpaper_in(&dir, "my.mp4", &test_pet()).unwrap();
         let params = read_params_file(&dir.join(PARAMS_FILE)).unwrap();
         assert_eq!(params.wallpaper_file.as_deref(), Some("my.mp4"));
         let css = fs::read_to_string(dir.join(VARIABLES_CSS)).unwrap();
@@ -1550,7 +1533,7 @@ mod tests {
         let mut p = ThemeParams::default();
         p.wp_brightness = 0.66;
         write_params_file(&dir.join(PARAMS_FILE), &p).unwrap();
-        apply_wallpaper_in(&dir, DEFAULT_WALLPAPER_FILE).unwrap();
+        apply_wallpaper_in(&dir, DEFAULT_WALLPAPER_FILE, &test_pet()).unwrap();
         let params = read_params_file(&dir.join(PARAMS_FILE)).unwrap();
         assert_eq!(params.wp_brightness, 0.66);
         assert_eq!(params.wallpaper_file.as_deref(), Some(DEFAULT_WALLPAPER_FILE));
@@ -1668,7 +1651,7 @@ mod tests {
         fs::write(dir.join(THEME_CSS), "/* 旧版 theme，无版本头 */").unwrap();
         fs::write(dir.join(EFFECTS_JS), "// 旧版 effects，无版本头").unwrap();
         // usage.js / pet.js 为功能模板：老用户目录里不存在 → 首次 ensure 落盘
-        ensure_theme_assets_in(&dir, &wp_dir, None).unwrap();
+        ensure_theme_assets_in(&dir, &wp_dir, None, &test_pet()).unwrap();
         assert!(
             fs::read_to_string(dir.join(THEME_CSS))
                 .unwrap()
@@ -1697,7 +1680,7 @@ mod tests {
         // 场景一补充：usage.js / pet.js 为旧版本（头部标记低于内置版本）→ 覆盖升级
         fs::write(dir.join(USAGE_JS), "// ZBAR-THEME-V0 旧版占位\n").unwrap();
         fs::write(dir.join(PET_JS), "// ZBAR-THEME-V0 旧版占位\n").unwrap();
-        ensure_theme_assets_in(&dir, &wp_dir, None).unwrap();
+        ensure_theme_assets_in(&dir, &wp_dir, None, &test_pet()).unwrap();
         assert!(
             fs::read_to_string(dir.join(USAGE_JS))
                 .unwrap()
@@ -1719,7 +1702,7 @@ mod tests {
             "// ZBAR-THEME-V3 旧版无 theme.css 热重载\n",
         )
         .unwrap();
-        ensure_theme_assets_in(&dir, &wp_dir, None).unwrap();
+        ensure_theme_assets_in(&dir, &wp_dir, None, &test_pet()).unwrap();
         assert!(
             fs::read_to_string(dir.join(EFFECTS_JS))
                 .unwrap()
@@ -1732,7 +1715,7 @@ mod tests {
         let tuned_effects = format!("{}\n// 用户实机调优追加\n", inject::EFFECTS_JS);
         fs::write(dir.join(THEME_CSS), &tuned_theme).unwrap();
         fs::write(dir.join(EFFECTS_JS), &tuned_effects).unwrap();
-        ensure_theme_assets_in(&dir, &wp_dir, None).unwrap();
+        ensure_theme_assets_in(&dir, &wp_dir, None, &test_pet()).unwrap();
         assert_eq!(
             fs::read_to_string(dir.join(THEME_CSS)).unwrap(),
             tuned_theme,
@@ -1758,14 +1741,14 @@ mod tests {
     #[test]
     fn variables_css_重渲幂等_内容不变不写盘() {
         let dir = test_dir("refresh-idempotent");
-        refresh_variables_css_in(&dir).unwrap();
+        refresh_variables_css_in(&dir, &test_pet()).unwrap();
         let path = dir.join(VARIABLES_CSS);
         let content = fs::read_to_string(&path).unwrap();
         let mtime = fs::metadata(&path).unwrap().modified().unwrap();
 
         // 内容无变化 → 跳过写盘（mtime 不变）
         std::thread::sleep(std::time::Duration::from_millis(50));
-        refresh_variables_css_in(&dir).unwrap();
+        refresh_variables_css_in(&dir, &test_pet()).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), content);
         assert_eq!(
             fs::metadata(&path).unwrap().modified().unwrap(),
@@ -1777,7 +1760,7 @@ mod tests {
         let mut p = ThemeParams::default();
         p.wp_brightness = 0.5;
         write_params_file(&dir.join(PARAMS_FILE), &p).unwrap();
-        refresh_variables_css_in(&dir).unwrap();
+        refresh_variables_css_in(&dir, &test_pet()).unwrap();
         assert!(fs::read_to_string(&path).unwrap().contains("--zbar-wp-brightness: 0.5;"));
 
         let _ = fs::remove_dir_all(&dir);
@@ -1796,7 +1779,7 @@ mod tests {
         let mut p = ThemeParams::default();
         p.wallpaper_file = Some("rel.mp4".into());
         write_params_file(&dir.join(PARAMS_FILE), &p).unwrap();
-        refresh_variables_css_in(&dir).unwrap();
+        refresh_variables_css_in(&dir, &test_pet()).unwrap();
         let css = fs::read_to_string(dir.join(VARIABLES_CSS)).unwrap();
         assert!(css.contains(&inject::file_url(&wp_dir.join("rel.mp4"))));
         assert!(css.contains("rel.mp4"));
@@ -1804,7 +1787,7 @@ mod tests {
         // 绝对路径（含中文与空格）：直接引用，不拼 wallpapers/
         p.wallpaper_file = Some(external.to_string_lossy().to_string());
         write_params_file(&dir.join(PARAMS_FILE), &p).unwrap();
-        refresh_variables_css_in(&dir).unwrap();
+        refresh_variables_css_in(&dir, &test_pet()).unwrap();
         let css = fs::read_to_string(dir.join(VARIABLES_CSS)).unwrap();
         assert!(
             css.contains(&inject::file_url(&external)),
@@ -1872,7 +1855,7 @@ mod tests {
         // 目录内文件：wallpapers/ 与用户目录（含子目录）均可选中，
         // params 存 canonicalize 后的绝对路径并重渲 variables.css
         let inner = wp_dir.join("inner.mp4");
-        select_wallpaper_in(&dir, &wp_dir, &inner.to_string_lossy()).unwrap();
+        select_wallpaper_in(&dir, &wp_dir, &inner.to_string_lossy(), &test_pet()).unwrap();
         let params = read_params_file(&dir.join(PARAMS_FILE)).unwrap();
         let expected_inner = inject::strip_verbatim_prefix(inner.canonicalize().unwrap())
             .to_string_lossy()
@@ -1882,12 +1865,12 @@ mod tests {
         assert!(css.contains("inner.mp4"), "variables.css 应指向选中壁纸：{css}");
 
         let deep = user_dir.join("sub/deep.webp");
-        select_wallpaper_in(&dir, &wp_dir, &deep.to_string_lossy()).unwrap();
+        select_wallpaper_in(&dir, &wp_dir, &deep.to_string_lossy(), &test_pet()).unwrap();
         let css = fs::read_to_string(dir.join(VARIABLES_CSS)).unwrap();
         assert!(css.contains("deep.webp"));
 
         // "default" → 指向回落 default.mp4（相对名语义）
-        select_wallpaper_in(&dir, &wp_dir, "default").unwrap();
+        select_wallpaper_in(&dir, &wp_dir, "default", &test_pet()).unwrap();
         let params = read_params_file(&dir.join(PARAMS_FILE)).unwrap();
         assert_eq!(params.wallpaper_file.as_deref(), Some(DEFAULT_WALLPAPER_FILE));
         // 其余参数（含 wallpaper_dir）不受切换影响

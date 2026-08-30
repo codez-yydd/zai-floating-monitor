@@ -107,28 +107,33 @@ export const theme = {
   "theme.usageLegend":
     "↑ 输入（非缓存） · ↓ 输出 · ⟲ 缓存读 · × 模型请求数 · t/s 输出速度 · TTFT 首字延迟 · Σ 会话总 Token（输入+输出+缓存读） · ≈ 生成中输出估算（未计入累计）",
 
-  // ===== 桌面宠物区（pet.js V1：对话页右下角按工作状态实时切换动画的
-  // 像素宠物，开关/形象/大小经 variables.css 热重载约 1 秒生效） =====
+  // ===== 桌面宠物区（宠物设置唯一入口：总开关 + 注入版/悬浮窗形态
+  // 二选一 + 形象/尺寸，配置存 pet.json，改完即时生效；注入版参数经
+  // variables.css 热重载约 1 秒生效） =====
   "theme.petTitle": "桌面宠物",
   "theme.petHint":
-    "在 ZCode 对话页右下角养一只像素宠物，它会跟随 ZCode 的工作状态实时切换动画；不捕获鼠标、不遮挡输入区，改动约 1 秒热生效。升级 ZBar 后首次使用需重新安装一次皮肤。切换形象后若未变化，重启一次 ZCode 生效。",
-  "theme.petEnabled": "启用桌面宠物",
+    "养一只跟随 ZCode 工作状态实时切换动画的像素宠物：默认注入版显示在 ZCode 对话页内（需已安装皮肤、可拖拽移动），也可切换为独立悬浮窗；形象与大小对两种形态通用，改动即时生效。",
+  "theme.petEnabled": "开启桌面宠物",
   "theme.petEnabledHint":
-    "开启后在 ZCode 对话页右下角显示像素宠物（ZCode 需已安装动态壁纸）",
-  // 形象名称（与 pet.js 内嵌形象库 PET_STYLES 的键一一对应）
-  "theme.petStyleCat": "像素小猫",
-  "theme.petStyleBot": "像素小机器人",
-  // 自定义宠物（第三阶段：Petdex 格式导入，petStyles 的 PetStyleSection）
+    "宠物总开关：开启后按下方选择的形态显示，关闭则全部隐藏",
+  "theme.petModeLabel": "显示形态",
+  "theme.petModeInjected": "注入版",
+  "theme.petModeFloating": "悬浮窗",
+  "theme.petModeHint":
+    "注入版：显示在 ZCode 对话页内，随皮肤参数热重载生效（约 1 秒），可直接拖拽移动位置，需已安装动态壁纸皮肤；悬浮窗：独立透明置顶小窗，不依赖皮肤安装，同样可拖动调整位置。",
+  "theme.petApplyFail": "应用宠物设置失败：{msg}",
+  "theme.petLoadFail": "读取宠物设置失败：{msg}",
+  // 自定义宠物（第三阶段：Petdex 格式导入，petStyles 的 PetStyleSection；
+  // V8 起内建组为内置「智谱 Z 娘」图集形象，名称来自清单数据的 meta.name）
   "theme.petGroupBuiltin": "内建形象",
   "theme.petGroupCustom": "自定义形象（Petdex 宠物）",
+  "theme.petBuiltinLoading": "内置形象加载中…",
   "theme.petCustomEmpty": "还没有自定义宠物。把 Petdex 宠物包拖到窗口即可导入。",
-  "theme.petImportHint":
-    "导入自定义宠物：将 Petdex 宠物包拖入窗口（zip 包 / pet.json / 精灵图集 png·webp）",
-  // 皮肤页形态：png/webp 投放在皮肤页路由给壁纸导入，提示只列 zip/json
+  // 皮肤页形态：已安装时 png/webp 投放路由给壁纸导入；未安装时路由宠物导入
   "theme.petImportHintSkin":
-    "导入自定义宠物：将 Petdex 宠物包拖入窗口（zip 包 / pet.json；裸图集 png/webp 请在设置页宠物卡导入）",
+    "导入自定义宠物：将 Petdex 宠物包拖入窗口（zip 包 / pet.json 与图集同目录；裸图集 png/webp 请打包为 zip 后导入，未安装皮肤时可直接拖入）",
   "theme.petImporting": "正在导入宠物…",
-  "theme.petImportDone": "宠物已导入 ✓ 重启 ZCode 后可在对话页选用",
+  "theme.petImportDone": "宠物已导入 ✓ 在宠物卡点击即可选用",
   "theme.petImportFail": "导入宠物失败：{msg}",
   "theme.petDelete": "删除",
   "theme.petDeleteConfirm":

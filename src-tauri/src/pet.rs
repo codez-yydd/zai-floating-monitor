@@ -1,23 +1,28 @@
-//! 独立桌面宠物（宠物功能第二阶段）：不依赖皮肤安装的透明悬浮窗宠物。
+//! 桌面宠物配置中心 + 独立悬浮窗形态宿主。
 //!
-//! 与第一阶段（皮肤注入版，见 agent_theme::inject::PET_JS）的关系：
-//! 两端共用同一份宠物核心（public/pet-core.js 的 ZBarPet 工厂），区别
-//! 仅在宿主——
-//! - 注入版：ZCode 对话页内，参数经 variables.css 热重载、数据经
-//!   window.__ZBAR_USAGE__（usage_feed 只在皮肤已安装时导出）；
-//! - 独立版（本模块）：ZBar 自己的透明无边框置顶窗口（加载 pet.html
-//!   多入口页面），参数经 set_pet_config 命令直接下发（Tauri 事件）、
-//!   数据经本模块的独立轮询器（下方）推流。
+//! 本模块是宠物配置的唯一真相源：PetConfig（~/.zbar/pet.json）承载
+//! 总开关 enabled、形态 mode（注入版 / 悬浮窗二选一，默认注入版）、
+//! 形象 style 与尺寸档位 size——皮肤页的宠物卡经 set_pet_config 保存，
+//! 注入版渲染（agent_theme::store 的 variables.css）与悬浮窗窗口均
+//! 从本模块读取。两种形态共用同一份宠物核心（public/pet-core.js 的
+//! ZBarPet 工厂），区别仅在宿主：
+//! - 注入版（mode = "injected"，默认）：ZCode 对话页内，参数经
+//!   variables.css 的 --zbar-pet-* 变量热重载（约 1 秒生效，皮肤需已
+//!   安装）、数据经 window.__ZBAR_USAGE__（usage_feed 仅在注入版开启
+//!   时导出）；容器支持鼠标拖拽移位，位置经 localStorage 持久化；
+//! - 悬浮窗（mode = "floating"，本模块的窗口部分）：ZBar 自己的透明
+//!   无边框置顶窗口（加载 pet.html 多入口页面），参数经 set_pet_config
+//!   命令直接下发（Tauri 事件）、数据经本模块的独立轮询器推流。
 //!
 //! 组成：
-//! 1. PetConfig 配置持久化（~/.zbar/pet.json）：开关/形象/大小 + 窗口
-//!    位置（逻辑坐标，拖动结束落盘，重启恢复；无记录时默认主显示器
-//!    右下角）；
+//! 1. PetConfig 配置持久化（~/.zbar/pet.json）：总开关/形态/形象/大小
+//!    + 悬浮窗位置（逻辑坐标，拖动结束落盘，重启恢复；无记录时默认
+//!    主显示器右下角）；
 //! 2. 透明悬浮窗（label "pet"）：transparent + 无边框 + 置顶 + 创建不
 //!    抢焦点 + skipTaskbar，尺寸随 size 档位按窗口所在屏幕逻辑高换算
 //!    的 px，容器支持拖动移位（页面 data-tauri-drag-region），宠物本体
 //!    无点击交互；
-//! 3. 独立状态轮询器：宠物窗口开启时启动、关闭即停（无常驻开销），
+//! 3. 独立状态轮询器：悬浮窗开启时启动、关闭即停（无常驻开销），
 //!    每 2 秒查 ZCode 主库，产出与 usage-data.js 同构的 runs/turns 摘要
 //!    （仅保留宠物状态机消费的字段，见 PetTurnBrief/PetRunBrief）与
 //!    pu（待处理用户消息，V5：用户发消息后首笔模型请求完成落库前的
@@ -52,6 +57,12 @@ pub const PET_USAGE_EVENT: &str = "zbar://pet-usage";
 /// 参数变更事件（宠物窗口 listen，payload = { style, size }）
 pub const PET_PARAMS_EVENT: &str = "zbar://pet-params";
 
+/// 宠物形态：注入版（默认）——渲染在 ZCode 对话页内（皮肤注入的
+/// pet.js，参数经 variables.css 热重载），不建独立窗口
+pub const PET_MODE_INJECTED: &str = "injected";
+/// 宠物形态：悬浮窗——ZBar 自己的透明置顶独立窗口（本模块管理）
+pub const PET_MODE_FLOATING: &str = "floating";
+
 /// 宠物尺寸档位（屏幕高度百分比，%）：size 字段语义自此版本起由逻辑
 /// px 改为档位 1~5，实际显示边长 px = 屏幕逻辑高 × 档位百分比（四舍五
 /// 入取整）。逻辑 px 只随 DPI 缩放、不随物理分辨率，固定 px 在高分屏
@@ -71,8 +82,15 @@ pub const DEFAULT_PET_SIZE_LEVEL: u32 = 3;
 pub const PET_SIZE_LEGACY_PX_RANGE: (u32, u32) = (48, 128);
 /// 取不到屏幕信息时的兜底逻辑屏高（1080p@100%）：换算永不失败
 pub const PET_SIZE_FALLBACK_SCREEN_H: f64 = 1080.0;
-/// 宠物默认形象（与 pet-core.js 的 PET_STYLES 第一形象一致）
-pub const DEFAULT_PET_STYLE: &str = "cat";
+/// 宠物默认形象：内置「智谱 Z 娘」（随安装包分发、启动时由
+/// pets::ensure_builtin_pet 释放到宠物库、永不可删除）。V8 起核心不再
+/// 内嵌字符网格形象（cat/bot 已移除），custom:* 图集渲染是唯一路径。
+/// 【契约】字面量 = pets::CUSTOM_STYLE_PREFIX + pets::BUILTIN_PET_ID
+///（concat! 不接受常量路径故写字面量，单测锁定与两常量拼接一致防漂移）
+pub const DEFAULT_PET_STYLE: &str = "custom:zhipu-z-niang";
+/// 旧版（V8 前）内建形象值：clamped/load 读取时迁移为默认智谱娘
+///（升级用户 pet.json 里残留的 "cat"/"bot" 在 V8 核心下已无渲染路径）
+const LEGACY_BUILTIN_STYLES: [&str; 2] = ["cat", "bot"];
 /// 宠物窗口默认边距（px，逻辑坐标）：无持久化位置时贴主显示器右下角。
 /// Windows 留出任务栏高度（与 toggle_panel 的 48px 余量同口径再加边距）；
 /// macOS 无底部任务栏，仅留呼吸边距
@@ -212,20 +230,30 @@ fn pet_size_px_for(app: &AppHandle, win: Option<&tauri::WebviewWindow>, level: u
 // 配置持久化（~/.zbar/pet.json，与项目其它配置同目录）
 // ============================================================
 
-/// 独立桌面宠物配置。serde camelCase：与前端契约字段（enabled/style/
-/// size/pos）一一对应；`#[serde(default)]`：旧版文件缺字段时按默认补齐。
+/// 桌面宠物配置（唯一真相源，皮肤页宠物卡读写）。serde camelCase：
+/// 与前端契约字段（enabled/mode/style/size/pos）一一对应；
+/// `#[serde(default)]`：旧版文件缺字段时按默认补齐（含 mode，旧文件
+/// 补默认注入版）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PetConfig {
-    /// 悬浮窗开关：true = 创建窗口并启动轮询；false = 关闭窗口停轮询
+    /// 宠物总开关：false = 全关（注入版不渲染、悬浮窗关闭停轮询）；
+    /// true 时按 mode 决定形态
     pub enabled: bool,
-    /// 宠物形象 id（pet-core.js 的 PET_STYLES 键：cat / bot）
+    /// 宠物形态（"injected" 注入版 / "floating" 悬浮窗，默认注入版）：
+    /// enabled && floating → 独立窗口 + 轮询；enabled && injected →
+    /// 注入版（variables.css 渲染 --zbar-pet-enabled: 1）
+    pub mode: String,
+    /// 宠物形象 id：custom:<id>（Petdex 图集，V8 起唯一渲染路径；默认
+    /// custom:zhipu-z-niang 内置智谱娘，见 DEFAULT_PET_STYLE）
     pub style: String,
     /// 宠物尺寸档位（1~5，屏高百分比见 PET_SIZE_LEVEL_PCT）：悬浮窗
-    /// 边长 = 档位 × 窗口所在屏幕逻辑高（建窗/同步尺寸时换算）
+    /// 边长 = 档位 × 窗口所在屏幕逻辑高（建窗/同步尺寸时换算）；注入
+    /// 版由 variables.css 渲染同口径换算的 px
     pub size: u32,
-    /// 窗口左上角位置（逻辑坐标 x/y，拖动结束落盘，重启恢复）；
-    /// None = 从未拖动过，创建时默认主显示器右下角
+    /// 悬浮窗左上角位置（逻辑坐标 x/y，拖动结束落盘，重启恢复）；
+    /// None = 从未拖动过，创建时默认主显示器右下角。仅悬浮窗形态消费
+    /// （注入版位置存 ZCode 页面 localStorage，不经本字段）
     pub pos: Option<(f64, f64)>,
 }
 
@@ -233,6 +261,7 @@ impl Default for PetConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            mode: PET_MODE_INJECTED.to_string(),
             style: DEFAULT_PET_STYLE.to_string(),
             size: DEFAULT_PET_SIZE_LEVEL,
             pos: None,
@@ -240,20 +269,57 @@ impl Default for PetConfig {
     }
 }
 
+/// 形象 id 白名单：`[A-Za-z0-9_:-]+`（覆盖 custom:<id> 的合法字符域）。
+/// variables.css 的 --zbar-pet-style 以裸值内插写入 CSS，含空格/引号/
+/// 分号等字符的脏值会破坏 CSS 结构——不合法值统一收敛回默认形象（悬浮窗
+/// push_pet_params 同样消费 clamped 后的值，合法 id 不受影响；形象真实
+/// 存在性仍由 pet-core.js 按资产校验，Rust 侧不重复维护形象清单）
+fn valid_style_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '-'))
+}
+
+/// 形象值读取归一（clamped 与 load 迁移共用）：
+/// - 旧内建值 "cat"/"bot"（V8 前版本落盘的残留，核心已无对应渲染路径）
+///   → 迁移为默认智谱娘；
+/// - 白名单合法值（含 custom:zhipu-z-niang 与用户自定义 custom:<id>）
+///   → 原样保留（仅首尾空白修剪）；
+/// - 空/白名单外脏值 → 默认智谱娘（防脏值破坏 CSS 结构）。
+fn normalize_style(raw: &str) -> String {
+    let style = raw.trim();
+    if LEGACY_BUILTIN_STYLES.contains(&style) || !valid_style_id(style) {
+        DEFAULT_PET_STYLE.to_string()
+    } else {
+        style.to_string()
+    }
+}
+
 impl PetConfig {
     /// 把越界参数收敛到合法范围（保存前的防御，脏数据不落盘）：
     /// 档位归一到 1..=5（旧版 px 值按缓存屏高换算最近档位迁移，见
-    /// normalize_pet_size）；形象 id 防空串/空白回默认（形象合法性由
-    /// pet-core.js 按内嵌形象库回退第一形象，Rust 侧不重复维护形象
-    /// 清单，避免两处漂移）
+    /// normalize_pet_size）；形象 id 经 normalize_style 归一（旧内建值
+    /// 迁移 + 白名单校验，非法回默认智谱娘）；mode 归一到两个合法值
+    /// （非 "floating" 一律归默认注入版，大小写/空串/脏值兜底）
     pub fn clamped(mut self) -> Self {
         self.size = normalize_pet_size(self.size, cached_screen_height());
-        if self.style.trim().is_empty() {
-            self.style = DEFAULT_PET_STYLE.to_string();
-        } else {
-            self.style = self.style.trim().to_string();
+        self.style = normalize_style(&self.style);
+        if self.mode != PET_MODE_FLOATING {
+            self.mode = PET_MODE_INJECTED.to_string();
         }
         self
+    }
+
+    /// 悬浮窗是否应存在/创建（总开关开 + 形态为悬浮窗）：窗口与轮询
+    /// 的启停判定统一走本口径
+    pub fn wants_floating_window(&self) -> bool {
+        self.enabled && self.mode == PET_MODE_FLOATING
+    }
+
+    /// 注入版是否应渲染（总开关开 + 形态为注入版）：variables.css 的
+    /// --zbar-pet-enabled 与心跳小文件写出条件统一走本口径
+    pub fn wants_injected_pet(&self) -> bool {
+        self.enabled && self.mode == PET_MODE_INJECTED
     }
 }
 
@@ -262,8 +328,9 @@ fn pet_config_path() -> Result<PathBuf, String> {
 }
 
 /// 读取宠物配置；文件不存在或内容损坏时静默返回默认值（首开无文件）。
-/// 旧版 px 语义的 size（48~128）在首次读取时按缓存屏高一次性迁移为
-/// 最近档位并落盘（迁移后值域 1..=5，后续读取直读不再写盘）。
+/// 旧版 px 语义的 size（48~128）与旧内建形象值（cat/bot）在首次读取时
+/// 一次性迁移（档位 + 默认智谱娘）并落盘（迁移后值合法，后续读取直读
+/// 不再写盘）。
 pub fn load_pet_config() -> PetConfig {
     let Ok(path) = pet_config_path() else {
         return PetConfig::default();
@@ -272,14 +339,17 @@ pub fn load_pet_config() -> PetConfig {
 }
 
 /// load_pet_config 的路径显式版（单元测试复用，不依赖真实 ~/.zbar）：
-/// 读 → size 归一（旧 px 迁移档位）→ 变化则落盘。
+/// 读 → size 归一（旧 px 迁移档位）+ style 归一（cat/bot 迁移智谱娘）
+/// → 任一变化则落盘。
 fn load_pet_config_at(path: &std::path::Path) -> PetConfig {
     let Some(mut cfg) = read_pet_config_file(path) else {
         return PetConfig::default();
     };
     let size = normalize_pet_size(cfg.size, cached_screen_height());
-    if size != cfg.size {
+    let style = normalize_style(&cfg.style);
+    if size != cfg.size || style != cfg.style {
         cfg.size = size;
+        cfg.style = style;
         let _ = write_pet_config_file(path, &cfg); // 迁移落盘失败静默（下次读取重试）
     }
     cfg
@@ -317,8 +387,11 @@ pub fn get_pet_config() -> Result<PetConfig, String> {
 }
 
 /// 保存并应用宠物配置（改完即生效，无保存按钮）：
-/// - 开关切换：开 → 建窗 + 启轮询；关 → 停轮询 + 关窗；
-/// - 形象/大小变化：窗口存在时同步尺寸 + 推参数事件（页面调 setParams）。
+/// - 总开关/形态切换：enabled && floating → 建窗 + 启轮询；否则（切到
+///   注入版或总开关关）→ 停轮询 + 关闭已存在的悬浮窗；
+/// - 形象/大小变化：悬浮窗存在时同步尺寸 + 推参数事件（页面调
+///   setParams）；注入版经 sync_theme_custom_pet 重渲 variables.css
+///   热重载生效（皮肤未安装时为 no-op，装完皮肤即出现）。
 ///
 /// async 命令（工作线程执行），窗口操作经 run_on_main_thread 投递主线程
 /// 事件循环执行：async 上下文直接调窗口 API 会 panic（非主线程）；而改回
@@ -328,23 +401,31 @@ pub fn get_pet_config() -> Result<PetConfig, String> {
 /// channel 回传，recv_timeout 兜底。
 ///
 /// 配置先落盘再动窗口：窗口操作失败配置不丢（下次启动 start_if_enabled
-/// 按 enabled 恢复）；关闭分支先写 enabled=false 再关窗，Destroyed 复位
-/// 路径（handle_pet_window_destroyed）读到已关状态不再改写，幂等语义
-/// 与原实现一致。
+/// 按 enabled+mode 恢复）；关闭分支先落盘再关窗，Destroyed 复位路径
+/// （handle_pet_window_destroyed）读到已非悬浮窗形态不再改写开关，
+/// 幂等语义与原实现一致。
 #[tauri::command]
 pub async fn set_pet_config(config: PetConfig, app: AppHandle) -> Result<PetConfig, String> {
     let next = config.clamped();
     let prev = load_pet_config();
     let push_params = should_push_params(&prev, &next);
 
-    // 关闭分支先停轮询（原顺序：停数据流优先于关窗；只是置位原子标志，
-    // 线程安全；Destroyed 挂点还会再停一次，幂等）
-    if !next.enabled {
+    // 非悬浮窗形态先停轮询（原顺序：停数据流优先于关窗；只是置位原子
+    // 标志，线程安全；Destroyed 挂点还会再停一次，幂等）
+    if !next.wants_floating_window() {
         stop_feed();
     }
 
     // 先落盘再动窗口（见函数 doc：失败可恢复 + Destroyed 幂等前提）
     save_pet_config(&next)?;
+
+    // 注入版联动：皮肤已安装时物化自定义宠物资产 + 按新配置重渲
+    // variables.css（--zbar-pet-enabled 随总开关/形态变化，注入壳每秒
+    // 热重载生效）。失败静默不阻断配置保存（与 mod.rs 的
+    // set_agent_theme_params 同口径），下次保存或皮肤页状态轮询重试
+    if let Err(e) = crate::pets::sync_theme_custom_pet() {
+        eprintln!("[zbar-pet] 保存配置后同步注入版宠物渲染失败: {e}");
+    }
 
     // 窗口创建/尺寸同步/关闭全部投递主线程事件循环执行
     let (tx, rx) = mpsc::channel::<Result<(), String>>();
@@ -354,15 +435,15 @@ pub async fn set_pet_config(config: PetConfig, app: AppHandle) -> Result<PetConf
         // 主线程顺带刷新屏高缓存（macOS 的 monitor 查询要求主线程；
         // 改档位时机同步注入版渲染基准，换屏后改档位即按新屏高换算）
         remember_screen_height(&app_main);
-        let outcome = if cfg_main.enabled {
+        let outcome = if cfg_main.wants_floating_window() {
             ensure_pet_window(&app_main, &cfg_main)
         } else if let Some(win) = app_main.get_webview_window(PET_WINDOW_LABEL) {
-            let _ = win.close(); // 关窗失败不报错（窗口可能已不在）
+            let _ = win.close(); // 切到注入版/总开关关：关窗失败不报错
             Ok(())
         } else {
             Ok(())
         };
-        // 参数变化（含窗口已存在的开关保持开）：推给页面即时热切换
+        // 参数变化（含悬浮窗已存在的开关保持开）：推给页面即时热切换
         // （ensure_pet_window 的已存在分支也会推，双推幂等无害）
         if outcome.is_ok() && push_params {
             let size_px = pet_size_px_for(
@@ -382,18 +463,20 @@ pub async fn set_pet_config(config: PetConfig, app: AppHandle) -> Result<PetConf
         Err(e) => return Err(format!("宠物窗口操作超时: {e}")),
     }
 
-    // 开启分支：建窗成功后才喂数据（原顺序保持；失败即不启动，下次开可重试）
-    if next.enabled {
+    // 悬浮窗开启分支：建窗成功后才喂数据（原顺序保持；失败即不启动，
+    // 下次开可重试）
+    if next.wants_floating_window() {
         start_feed(app.clone());
     }
 
     Ok(next)
 }
 
-/// 是否需要向宠物窗口热推参数：仅开启状态且形象或尺寸变化（位置变化
-/// 由 Moved 挂点持久化，不经参数事件）。
+/// 是否需要向悬浮窗热推参数：仅悬浮窗开启状态且形象或尺寸变化（位置
+/// 变化由 Moved 挂点持久化，不经参数事件；注入版参数走 variables.css
+/// 热重载，不经参数事件）。
 fn should_push_params(prev: &PetConfig, next: &PetConfig) -> bool {
-    next.enabled && (prev.style != next.style || prev.size != next.size)
+    next.wants_floating_window() && (prev.style != next.style || prev.size != next.size)
 }
 
 /// 向宠物窗口推送当前参数（setParams 的 { style, size } 载荷）。
@@ -418,14 +501,15 @@ pub(crate) fn push_pet_params(app: &AppHandle, cfg: &PetConfig, size_px: u32) {
     );
 }
 
-/// 应用启动挂点：配置开启时恢复悬浮窗与轮询（未开启零开销）。
+/// 应用启动挂点：悬浮窗形态开启时恢复窗口与轮询（注入版/未开启零
+/// 开销——注入版渲染由皮肤目录的静态文件承担，无需启动期动作）。
 /// 入口顺带刷新屏高缓存（注入版 variables.css 渲染换算消费；ZBar
 /// 重启后换屏/改分辨率即按新屏高重算——皮肤页状态轮询触发的
 /// ensure_theme_assets 重渲会静默写入新 px）。
 pub fn start_if_enabled(app: &AppHandle) {
     remember_screen_height(app);
     let cfg = load_pet_config().clamped();
-    if !cfg.enabled {
+    if !cfg.wants_floating_window() {
         return;
     }
     if let Err(e) = ensure_pet_window(app, &cfg) {
@@ -556,10 +640,10 @@ fn bottom_right_xy(mon_w: f64, mon_h: f64, size: u32) -> (f64, f64) {
     )
 }
 
-/// 宠物窗口宽高比：内建形象帧为正方形（1:1）；自定义形象（custom:<id>）
+/// 宠物窗口宽高比：custom:<id>（含内置智谱娘，全部形象 V8 起均为图集）
 /// 按其图集帧宽高比（Petdex 帧 192×208 ≈ 1:1.083）——窗口恒正方形会在
-/// overflow:hidden 下上下各裁约 4% 画面（P2-1）。meta 不可读（宠物已删
-/// 等）回退 1:1，窗口形态与内建一致。
+/// overflow:hidden 下上下各裁约 4% 画面（P2-1）。meta 不可读（库损坏等）
+/// 回退 1:1。
 fn aspect_in(root: &std::path::Path, style: &str) -> f64 {
     crate::pets::custom_style_id(style)
         .and_then(|id| crate::pets::load_pet_meta_in(root, id).ok())
@@ -633,8 +717,9 @@ pub fn handle_pet_window_moved(win: &tauri::Window, pos: tauri::PhysicalPosition
 }
 
 /// 宠物窗口 Destroyed 事件挂点：冲刷最终位置（无节流）+ 停轮询 +
-/// 配置开关复位为关（窗口没了 = 功能关闭，防设置页显示与实况脱节；
-/// 用户 alt+F4 等旁路关闭后设置开关能如实回读为关）。
+/// 悬浮窗形态时的总开关复位（窗口没了 = 该形态关闭，防面板显示与
+/// 实况脱节；用户 alt+F4 等旁路关闭后开关能如实回读为关）。注入版
+/// 形态下关窗是 set_pet_config 切换形态的正常路径，不复位总开关。
 pub fn handle_pet_window_destroyed(_app: &AppHandle) {
     stop_feed();
     let pos = pet_pos_slot()
@@ -648,10 +733,11 @@ pub fn handle_pet_window_destroyed(_app: &AppHandle) {
         );
         persist_pet_pos(p);
     }
-    // 开关复位：读到的若已是关闭则不动（正常关闭流程 set_pet_config
-    // 已先落盘，此处幂等）
+    // 开关复位：仅悬浮窗形态（旁路关闭如实反映）；切到注入版/已关的
+    // 正常关闭流程 set_pet_config 已先落盘新形态，此处读到的非悬浮窗
+    // 形态不动（幂等）
     let mut cfg = load_pet_config();
-    if cfg.enabled {
+    if cfg.wants_floating_window() {
         cfg.enabled = false;
         let _ = save_pet_config(&cfg);
     }
@@ -990,6 +1076,7 @@ mod tests {
         // 默认值写出 → 读回一致
         let default = PetConfig::default();
         assert!(!default.enabled);
+        assert_eq!(default.mode, PET_MODE_INJECTED, "默认形态应为注入版");
         assert_eq!(default.style, DEFAULT_PET_STYLE);
         assert_eq!(default.size, DEFAULT_PET_SIZE_LEVEL);
         assert_eq!(default.pos, None);
@@ -998,13 +1085,14 @@ mod tests {
 
         // camelCase 键名（前端契约）
         let text = fs::read_to_string(&path).unwrap();
-        for key in ["\"enabled\"", "\"style\"", "\"size\"", "\"pos\""] {
+        for key in ["\"enabled\"", "\"mode\"", "\"style\"", "\"size\"", "\"pos\""] {
             assert!(text.contains(key), "pet.json 缺少字段 {key}：{text}");
         }
 
-        // 显式值读写往返（含位置；size 为档位值原样透传，读写不经 clamp）
+        // 显式值读写往返（含形态与位置；size 为档位值原样透传，读写不经 clamp）
         let p = PetConfig {
             enabled: true,
+            mode: PET_MODE_FLOATING.into(),
             style: "bot".into(),
             size: 5,
             pos: Some((120.5, 340.25)),
@@ -1014,11 +1102,19 @@ mod tests {
         let round = fs::read_to_string(&path).unwrap();
         assert!(round.contains("\"pos\""), "位置应持久化：{round}");
         assert!(round.contains("120.5") && round.contains("340.25"), "{round}");
+        assert!(
+            round.contains(&format!("\"mode\": \"{PET_MODE_FLOATING}\"")),
+            "形态应持久化：{round}"
+        );
 
-        // 旧版文件缺字段 → serde default 补默认
+        // 旧版文件缺字段 → serde default 补默认（mode 补默认注入版）
         fs::write(&path, r#"{"enabled":true}"#).unwrap();
         let legacy = read_pet_config_file(&path).unwrap();
         assert!(legacy.enabled, "缺字段时 enabled 以文件值为准");
+        assert_eq!(
+            legacy.mode, PET_MODE_INJECTED,
+            "旧版文件缺 mode 应按默认注入版补齐"
+        );
         assert_eq!(legacy.style, DEFAULT_PET_STYLE);
         assert_eq!(legacy.size, DEFAULT_PET_SIZE_LEVEL);
 
@@ -1100,6 +1196,7 @@ mod tests {
             style: "   ".into(),
             size: 48, // 旧 px 值：夹域后按 1080 屏换算 → 档 1
             pos: None,
+            ..PetConfig::default()
         };
         let c = p.clone().clamped();
         assert_eq!(c.size, 1, "旧 px 值应迁移为最近档位");
@@ -1109,21 +1206,122 @@ mod tests {
         assert_eq!(p.clone().clamped().size, 4, "过大旧值应迁移为最近档 4");
         p.size = 3; // 新档位直读
         assert_eq!(p.clone().clamped().size, 3);
-        // 形象首尾空白修剪
+        // 形象首尾空白修剪（合法 custom 值仅去空白）
         let c = PetConfig {
-            style: " cat ".into(),
+            style: " custom:boba ".into(),
             ..PetConfig::default()
         }
         .clamped();
-        assert_eq!(c.style, "cat");
+        assert_eq!(c.style, "custom:boba");
+    }
+
+    #[test]
+    fn 配置_style白名单与旧内建迁移() {
+        // 默认值即内置智谱娘（custom: 前缀 + BUILTIN_PET_ID 拼接，字面量
+        // 与两常量的同源契约，防漂移）
+        assert_eq!(
+            DEFAULT_PET_STYLE,
+            format!("{}{}", crate::pets::CUSTOM_STYLE_PREFIX, crate::pets::BUILTIN_PET_ID),
+            "DEFAULT_PET_STYLE 应等于 custom: 前缀 + BUILTIN_PET_ID"
+        );
+        assert_eq!(crate::pets::BUILTIN_PET_ID, "zhipu-z-niang");
+        // 合法值原样保留（首尾空白修剪）：内置智谱娘、用户自定义
+        // custom:<id>、含下划线/连字符/大写的 id
+        for ok in [
+            DEFAULT_PET_STYLE,
+            "custom:boba",
+            "custom:my_pet-1",
+            "Custom:UPPER",
+        ] {
+            let c = PetConfig {
+                style: format!(" {ok} "),
+                ..PetConfig::default()
+            }
+            .clamped();
+            assert_eq!(c.style, *ok, "合法形象 {ok:?} 应保持（仅修剪空白）");
+        }
+        // 旧内建值（V8 前落盘的 cat/bot，核心已无渲染路径）→ 迁移智谱娘
+        for legacy in ["cat", "bot", " cat ", "\nbot"] {
+            let c = PetConfig {
+                style: legacy.into(),
+                ..PetConfig::default()
+            }
+            .clamped();
+            assert_eq!(
+                c.style, DEFAULT_PET_STYLE,
+                "旧内建形象 {legacy:?} 应迁移为默认智谱娘"
+            );
+        }
+        // 非法值回默认：空/空白、含空格、CSS 结构字符（分号/引号/花括号/
+        // 反斜杠）、CSS 注释注入形态——--zbar-pet-style 以裸值内插写入
+        // variables.css，脏值会破坏 CSS 结构
+        for bad in [
+            "",
+            "   ",
+            "ca t",
+            "cat;",
+            "cat{}",
+            "\"cat\"",
+            "cat/*x*/",
+            "cat\\",
+            "cat\n",
+            "<img>",
+        ] {
+            let c = PetConfig {
+                style: bad.into(),
+                ..PetConfig::default()
+            }
+            .clamped();
+            assert_eq!(
+                c.style, DEFAULT_PET_STYLE,
+                "非法形象 {bad:?} 应回默认（防脏值破坏 CSS）"
+            );
+        }
+        // 白名单函数直测（含多字节字符）
+        assert!(valid_style_id("custom:boba"));
+        assert!(!valid_style_id(""));
+        assert!(!valid_style_id("形象"));
+    }
+
+    #[test]
+    fn 配置_mode归一与形态判定() {
+        // clamped：合法 "floating" 保持、其余（空串/大小写/脏值）一律归
+        // 默认注入版（clamped 归一后 wants_* 判定只依赖两个合法值）
+        let floating = PetConfig {
+            mode: PET_MODE_FLOATING.into(),
+            ..PetConfig::default()
+        }
+        .clamped();
+        assert_eq!(floating.mode, PET_MODE_FLOATING);
+        for bad in ["", "Floating", "FLOATING", "float", "window", "注入版"] {
+            let c = PetConfig {
+                mode: bad.into(),
+                ..PetConfig::default()
+            }
+            .clamped();
+            assert_eq!(c.mode, PET_MODE_INJECTED, "非法形态 {bad:?} 应归注入版");
+        }
+        // 形态判定矩阵（窗口启停与注入版渲染的统一口径）
+        let mk = |enabled: bool, mode: &str| PetConfig {
+            enabled,
+            mode: mode.into(),
+            ..PetConfig::default()
+        };
+        assert!(mk(true, PET_MODE_FLOATING).wants_floating_window());
+        assert!(!mk(false, PET_MODE_FLOATING).wants_floating_window());
+        assert!(!mk(true, PET_MODE_INJECTED).wants_floating_window());
+        assert!(mk(true, PET_MODE_INJECTED).wants_injected_pet());
+        assert!(!mk(false, PET_MODE_INJECTED).wants_injected_pet());
+        assert!(!mk(true, PET_MODE_FLOATING).wants_injected_pet());
     }
 
     #[test]
     fn 配置迁移_load时落盘一次性() {
         let dir = test_dir("migrate");
         let path = dir.join("pet.json");
-        // 旧版 px 值（64）落盘 → load 迁移为档位并写回文件（测试环境
-        // 缓存屏高未初始化 → 1080 兜底口径：64px ≈ 5.93% → 档 1）
+        // 旧版形态落盘（px 语义 size + 旧内建形象 bot）→ load 一次性迁移
+        // 并写回文件（测试环境缓存屏高未初始化 → 1080 兜底口径：
+        // 64px ≈ 5.93% → 档 1；cat/bot → 默认智谱娘）
         write_pet_config_file(
             &path,
             &PetConfig {
@@ -1131,16 +1329,19 @@ mod tests {
                 style: "bot".into(),
                 size: 64,
                 pos: Some((10.0, 20.0)),
+                ..PetConfig::default()
             },
         )
         .unwrap();
         let cfg = load_pet_config_at(&path);
         assert_eq!(cfg.size, 1, "64px@1080 应迁移到档 1");
+        assert_eq!(cfg.style, DEFAULT_PET_STYLE, "旧内建形象应迁移为智谱娘");
         assert_eq!(cfg.pos, Some((10.0, 20.0)), "迁移不应动其它字段");
         assert!(cfg.enabled, "迁移不应动开关");
         let back = read_pet_config_file(&path).unwrap();
         assert_eq!(back.size, 1, "迁移结果应已落盘");
-        // 二次读取：档位值直读幂等（不再改写）
+        assert_eq!(back.style, DEFAULT_PET_STYLE, "形象迁移结果应已落盘");
+        // 二次读取：合法值直读幂等（不再改写）
         let again = load_pet_config_at(&path);
         assert_eq!(again.size, 1);
         assert_eq!(again, back, "已迁移配置二次读取应完全一致");
@@ -1563,6 +1764,7 @@ mod tests {
             style: "bot".into(),
             size: 96,
             pos: None,
+            ..PetConfig::default()
         };
         write_pet_config_file(&path, &base).unwrap();
 
@@ -1586,20 +1788,20 @@ mod tests {
     }
 
     #[test]
-    fn 参数推送判定_仅开启且形象或尺寸变化() {
+    fn 参数推送判定_仅悬浮窗开启且形象或尺寸变化() {
         let base = PetConfig {
             enabled: true,
+            mode: PET_MODE_FLOATING.into(),
             style: "cat".into(),
             size: 64,
             pos: None,
         };
-        // 开启 + 无参数变化 → 不推（原 set_pet_config 的推送条件回归）
+        // 悬浮窗开启 + 无参数变化 → 不推（set_pet_config 的推送条件回归）
         assert!(!should_push_params(&base, &base.clone()));
-        // 开启 + 尺寸变化 → 推
+        // 悬浮窗开启 + 尺寸/形象变化 → 推
         let mut next = base.clone();
         next.size = 96;
         assert!(should_push_params(&base, &next));
-        // 开启 + 形象变化 → 推
         let mut next = base.clone();
         next.style = "bot".into();
         assert!(should_push_params(&base, &next));
@@ -1607,6 +1809,16 @@ mod tests {
         let mut next = base.clone();
         next.pos = Some((10.0, 20.0));
         assert!(!should_push_params(&base, &next));
+        // 注入版形态：参数事件只服务悬浮窗，注入版走 variables.css
+        // 热重载，不推
+        let mut injected_prev = base.clone();
+        injected_prev.mode = PET_MODE_INJECTED.into();
+        let mut injected_next = injected_prev.clone();
+        injected_next.size = 96;
+        assert!(
+            !should_push_params(&injected_prev, &injected_next),
+            "注入版形态不应推悬浮窗参数事件"
+        );
         // 关闭状态即使参数变化也不推（窗口已关/将关，无热切换对象）
         let mut off_prev = base.clone();
         off_prev.enabled = false;
@@ -1643,7 +1855,7 @@ mod tests {
             r#"{"id":"boba","name":"Boba","format":"petdex-v1","cols":8,"rows":9,"frameW":192,"frameH":208,"image":"sheet.png","states":{}}"#,
         )
         .unwrap();
-        assert_eq!(aspect_in(&root, "cat"), 1.0, "内建形象应为正方形");
+        assert_eq!(aspect_in(&root, "cat"), 1.0, "旧内建残留值（非 custom）应回退 1:1");
         assert_eq!(aspect_in(&root, "bot"), 1.0);
         assert_eq!(aspect_in(&root, "custom:missing"), 1.0, "缺失宠物回退 1:1");
         assert_eq!(aspect_in(&root, "custom:../etc"), 1.0, "非法 id 回退 1:1");

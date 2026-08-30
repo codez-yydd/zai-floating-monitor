@@ -1997,13 +1997,14 @@ pub const USAGE_JS: &str = r#"// ===============================================
 ///   usage.js 每 2 秒重载的 window.__ZBAR_USAGE__ 喂数据给 feed；每
 ///   2 秒经 script 时间戳重载心跳小文件 usage-data-hb.js 喂 heartbeat
 ///   （大文件保持内容不变跳写，存活信号由独立小文件承担，见
-///   usage_feed 模块头）；形象值为 custom:<id>（V3 自定义宠物）时按需
-///   加载同目录物化文件 pet-custom.js 取 window.__ZBAR_PET_CUSTOM__
-///   作为 customAsset 传入核心（静态资产不轮询，资产缺失回退内建
-///   第一形象）；并注入对话页右下角的 fixed 定位样式
-///   （pointer-events:none 不捕获鼠标）。独立悬浮窗版宿主（ZBar 透明
-///   宠物窗口页面）同样加载 pet-core.js，参数直接调 setParams、数据
-///   监听 Tauri 事件喂 feed。
+///   usage_feed 模块头）；形象值为 custom:<id>（V3 自定义宠物，V8 起
+///   含内置智谱娘的全部形象）时按需加载同目录物化文件 pet-custom.js
+///   取 window.__ZBAR_PET_CUSTOM__ 作为 customAsset 传入核心（静态资产
+///   不轮询，V8 起资产缺失不再回退内建形象——核心进入空态，宠物暂隐，
+///   资产就位后下个 tick 自动热切换）；并注入对话页右下角的 fixed
+///   定位样式（pointer-events:none 不捕获鼠标）。独立悬浮窗版宿主
+///   （ZBar 透明宠物窗口页面）同样加载 pet-core.js，参数直接调
+///   setParams、数据监听 Tauri 事件喂 feed。
 /// 版本头（ZBAR-THEME-V 标记）写在 pet-core.js 首行，两段拼接后位于
 /// 落盘文件头部，ensure_versioned_template 的提取器无感知。
 pub const PET_JS: &str = concat!(
@@ -2025,15 +2026,21 @@ pub const PET_JS: &str = concat!(
 //   "内容不变跳写"（防写放大），存活信号由独立小文件承担；心跳文件
 //   缺失（旧版 ZBar / 宠物关闭中）时加载失败静默，核心回退用数据 ts
 //   判陈旧（V1 行为）；
-// - 自定义形象（V3）：--zbar-pet-style 形如 custom:<id> 时，按需加载
-//   同目录 pet-custom.js（静态资产，不轮询——ZBar 侧仅选中变更/导入
-//   删除时重写该文件），校验 window.__ZBAR_PET_CUSTOM__.meta.id 与
-//   选中 id 一致后作为 customAsset 传入核心；资产缺失/不匹配（加载
-//   未完成/文件缺失/选中已删除）时回退内建第一形象并静默，资产就绪
-//   后下个 tick 自动热切换；
-// - 定位样式：宠物 fixed 悬浮于对话页右下角（right 留 18px 避开滚动条），
-//   z-index 20 低于会话累计条（usage.js 为 30）与弹窗层，
-//   pointer-events:none 不捕获鼠标、不遮挡对话输入区。
+// - 自定义形象（V3 引入，V8 起为全部形象的唯一通道）：--zbar-pet-style
+//   形如 custom:<id> 时，按需加载同目录 pet-custom.js（静态资产，不
+//   轮询——ZBar 侧仅选中变更/导入删除时重写该文件），校验
+//   window.__ZBAR_PET_CUSTOM__.meta.id 与选中 id 一致后作为
+//   customAsset 传入核心；资产缺失/不匹配（加载未完成/文件缺失/选中
+//   已删除）时核心进入空态——宠物暂隐（V8 起无内建回退，不再闪猫脸），
+//   资产就绪后下个 tick 自动热切换；
+// - 定位与拖拽（V7）：宠物 fixed 悬浮于对话页内（默认右下角，边距与
+//   旧版 right:18px/bottom:14px 观感一致），支持鼠标拖拽移动，位置经
+//   localStorage（__zbarPetPos）持久化、每 tick 轻量 clamp 进视口
+//   （窗口 resize 后拉回可见区）；容器接收鼠标事件（旧的鼠标事件遮蔽
+//   已移除），z-index 20 低于会话累计条（usage.js 为 30）与弹窗层。
+//   拖拽状态三重收尾：容器自身 pointerup/cancel、容器重建时
+//   ensurePetContainer 的同步复位、window 级兜底监听——防止 dragging
+//   标志卡死挡死后续拖拽。
 // ============================================================
 (function () {
   "use strict";
@@ -2053,6 +2060,10 @@ pub const PET_JS: &str = concat!(
     同 id 的热刷新信号，见下方资产同步说明） */
   var TICK_MS = 1000; /* 参数与数据轮询周期（不做页面隐藏降频，见 tick） */
   var HB_TICKS = 2; /* 心跳重载周期 = 2 个 tick（与数据重载同节奏） */
+  var ATTR_DRAGGING = "data-zbar-pet-dragging"; /* 拖拽进行中标记（光标态） */
+  var POS_KEY = "__zbarPetPos"; /* 位置持久化键（{"l":n,"t":n} 视口 px） */
+  var POS_MARGIN_R = 18; /* 默认位置右边距（px，与旧版 right:18px 一致） */
+  var POS_MARGIN_B = 14; /* 默认位置下边距（px，与旧版 bottom:14px 一致） */
 
   function readVar(name) {
     try {
@@ -2074,7 +2085,8 @@ pub const PET_JS: &str = concat!(
 
   function styleIdOf() {
     var id = readVar(VAR_STYLE);
-    return id && window.ZBarPet ? id : "cat"; /* 核心对未知值回退第一形象 */
+    return id && window.ZBarPet ? id : ""; /* 空串 = 资产未就位（V8 起
+      无内建回退：变量缺失/非法值一律视为未渲染，核心空态暂隐） */
   }
 
   /* ---- 自定义形象资产（V3）：校验 window.__ZBAR_PET_CUSTOM__ 的 id 与
@@ -2118,7 +2130,7 @@ pub const PET_JS: &str = concat!(
         done();
       };
       s.onerror = function () {
-        customFails++; /* 文件缺失（未物化/被清理）静默，回退内建形象 */
+        customFails++; /* 文件缺失（未物化/被清理）静默，核心空态暂隐 */
         done();
       };
       s.src = url;
@@ -2134,20 +2146,212 @@ pub const PET_JS: &str = concat!(
     return isFinite(n) && n > 0 ? n : 64;
   }
 
-  /* 对话页定位样式：fixed 右下角 + pointer-events:none（防挡输入区） */
+  /* 对话页定位样式：fixed + 可拖拽（V7）。选择器精确到 div——本壳注入
+   * 行的 script 标签同样带 data-zbar-pet 属性（ATTR_SELF），不带 div
+   * 限定会误命中。容器需要接收鼠标事件（移除了旧的鼠标事件遮蔽），
+   * touch-action:none 阻止触摸拖拽触发滚动，user-select:none 防拖拽
+   * 选中页面文字 */
   function ensureStyle() {
     if (document.getElementById(STYLE_ID)) return;
     var st = document.createElement("style");
     st.id = STYLE_ID;
     st.textContent =
-      "[data-zbar-pet]{position:fixed;right:18px;bottom:14px;" +
-      "z-index:20;pointer-events:none;" +
-      "user-select:none;-webkit-user-select:none;}";
+      "div[data-zbar-pet]{position:fixed;z-index:20;" +
+      "cursor:grab;touch-action:none;" +
+      "user-select:none;-webkit-user-select:none;}" +
+      "div[data-zbar-pet][" + ATTR_DRAGGING + "]{cursor:grabbing;}";
     (document.head || document.documentElement).appendChild(st);
   }
 
+  /* ---- 位置管理与拖拽（V7）：位置存 localStorage（读写 try/catch 静默，
+   *      隐私模式/配额满不炸）；坐标实时 clamp 进视口，窗口 resize 后由
+   *      tick 的轻量 clamp 拉回可见区。核心的 create 与 setParams 形象
+   *      切换都会重建容器 div——容器获取 + 位置应用 + 拖拽绑定封装为
+   *      ensurePetContainer，每 tick 比对容器身份，变化即重挂 ---- */
+  var petEl = null; /* 当前已应用位置并绑定拖拽的容器（div[data-zbar-pet]） */
+  var dragging = false; /* 拖拽进行中（视口 clamp 让位，不抢实时位置） */
+  var dragEl = null; /* 拖拽进行中的容器（window 级兜底复位用；容器重建
+    /指针捕获失败时 el 自身的 up 监听不再触达，靠全局兜底收尾） */
+
+  function readPos() {
+    try {
+      var raw = window.localStorage.getItem(POS_KEY);
+      if (!raw) return null;
+      var v = JSON.parse(raw);
+      if (
+        v &&
+        typeof v.l === "number" &&
+        isFinite(v.l) &&
+        typeof v.t === "number" &&
+        isFinite(v.t)
+      ) {
+        return { l: v.l, t: v.t };
+      }
+    } catch (e) {
+      /* 静默 */
+    }
+    return null;
+  }
+
+  function savePos(l, t) {
+    try {
+      window.localStorage.setItem(POS_KEY, JSON.stringify({ l: l, t: t }));
+    } catch (e) {
+      /* 静默 */
+    }
+  }
+
+  /* 坐标 clamp 进视口（负值/超出均拉回；视口小于容器时夹到 0 起点） */
+  function clampPos(l, t, w, h) {
+    var vw = window.innerWidth || 0;
+    var vh = window.innerHeight || 0;
+    return {
+      l: Math.min(Math.max(l, 0), Math.max(0, vw - w)),
+      t: Math.min(Math.max(t, 0), Math.max(0, vh - h)),
+    };
+  }
+
+  function applyPos(el, pos) {
+    el.style.left = Math.round(pos.l) + "px";
+    el.style.top = Math.round(pos.t) + "px";
+  }
+
+  function elSize(el) {
+    return {
+      w: el.offsetWidth || sizeOf(),
+      h: el.offsetHeight || sizeOf(),
+    };
+  }
+
+  /* 默认位置：视口右下角留边距（与旧版 right:18px/bottom:14px 观感一致；
+   * 高度取容器实际值——自定义形象帧为 192×208 非正方形） */
+  function defaultPos(el) {
+    var s = elSize(el);
+    var vw = window.innerWidth || 0;
+    var vh = window.innerHeight || 0;
+    return {
+      l: Math.max(0, vw - s.w - POS_MARGIN_R),
+      t: Math.max(0, vh - s.h - POS_MARGIN_B),
+    };
+  }
+
+  /* 容器重挂（create/setParams 重建后调用）：应用持久化位置（clamp 进
+   * 视口；无记录用默认右下角）并绑定拖拽。幂等——同一容器不重复绑。
+   * 容器身份变化说明旧容器已被核心移除：若其上有进行中的拖拽，旧容器
+   * 不再派发 pointerup/pointercancel，必须在此复位 dragging——否则
+   * dragging 永真会挡死新容器的 pointerdown 与每 tick 的视口 clamp */
+  function ensurePetContainer() {
+    if (!pet) return;
+    var el = null;
+    try {
+      el = document.querySelector("div[data-zbar-pet]");
+    } catch (e) {
+      /* 静默 */
+    }
+    if (!el || el === petEl) return;
+    if (petEl && dragging) {
+      /* 拖拽中容器被重建：按旧容器最后位置兜底持久化一次（用户松手前
+       * 的落点），再复位拖拽状态 */
+      savePos(parseFloat(petEl.style.left) || 0, parseFloat(petEl.style.top) || 0);
+    }
+    dragging = false;
+    dragEl = null;
+    petEl = el;
+    var s = elSize(el);
+    var pos = readPos();
+    applyPos(el, pos ? clampPos(pos.l, pos.t, s.w, s.h) : defaultPos(el));
+    bindDrag(el);
+  }
+
+  /* 鼠标/触摸拖拽：pointerdown 捕获 → move 实时更新（clamp 视口内）→
+   * up/cancel 释放并把最终位置持久化。拖拽期间打 ATTR_DRAGGING 标记
+   * （光标态切换），动画由核心的 interval 驱动不受影响。up 处理器与
+   * window 级兜底（globalDragEnd）双保险：正常路径 el 的 up 先触发并
+   * 置 dragEl = null，兜底随后空转（幂等） */
+  function bindDrag(el) {
+    el.addEventListener("pointerdown", function (ev) {
+      if (dragging || ev.button !== 0) return; /* 仅主键，防重入 */
+      dragging = true;
+      dragEl = el;
+      el.setAttribute(ATTR_DRAGGING, "");
+      try {
+        el.setPointerCapture(ev.pointerId);
+      } catch (e) {
+        /* 捕获失败仍可拖（事件不离开元素区间即继续；up 若只到达
+         * window，由 globalDragEnd 兜底收尾） */
+      }
+      var baseL = parseFloat(el.style.left) || 0;
+      var baseT = parseFloat(el.style.top) || 0;
+      var ox = ev.clientX;
+      var oy = ev.clientY;
+      var move = function (e) {
+        var s = elSize(el);
+        applyPos(
+          el,
+          clampPos(baseL + (e.clientX - ox), baseT + (e.clientY - oy), s.w, s.h)
+        );
+      };
+      var up = function (e) {
+        el.removeEventListener("pointermove", move);
+        el.removeEventListener("pointerup", up);
+        el.removeEventListener("pointercancel", up);
+        try {
+          el.releasePointerCapture(e.pointerId);
+        } catch (err) {
+          /* 静默 */
+        }
+        el.removeAttribute(ATTR_DRAGGING);
+        dragging = false;
+        dragEl = null; /* 先于 window 兜底收尾（冒泡到达时已空转） */
+        savePos(parseFloat(el.style.left) || 0, parseFloat(el.style.top) || 0);
+      };
+      el.addEventListener("pointermove", move);
+      el.addEventListener("pointerup", up);
+      el.addEventListener("pointercancel", up);
+      ev.preventDefault(); /* 防拖拽触发原生选中文本/触摸滚动 */
+    });
+  }
+
+  /* window 级拖拽兜底：指针捕获失败或拖拽容器被移出 DOM（形象热切换
+   * 重建等）时，pointerup/pointercancel 可能不再触达容器自身的监听——
+   * 全局兜底复位 dragging，防止标志永久卡死挡死后续拖拽与视口 clamp。
+   * 初始化时一次性注册、宠物销毁不解绑（handler 按 dragging/dragEl
+   * 状态判定，无拖拽时为空转，幂等）。容器重建路径另有 ensurePetContainer
+   * 的同步复位（tick 内即时），本兜底覆盖事件丢失的残余窗口 */
+  function globalDragEnd() {
+    if (!dragging || !dragEl) return;
+    dragging = false;
+    var el = dragEl;
+    dragEl = null;
+    try {
+      el.removeAttribute(ATTR_DRAGGING);
+    } catch (e) {
+      /* 静默（容器已 detach 也可安全操作 style/属性） */
+    }
+    savePos(parseFloat(el.style.left) || 0, parseFloat(el.style.top) || 0);
+  }
+  try {
+    window.addEventListener("pointerup", globalDragEnd);
+    window.addEventListener("pointercancel", globalDragEnd);
+  } catch (e) {
+    /* 注册失败退化为仅容器自身监听（现有行为） */
+  }
+
+  /* 轻量视口 clamp（每 tick 一次）：仅越界才改 style（resize 后拉回可见
+   * 区；拖拽中与宠物未挂载时让位）。尺寸热切换（curSize 变化）后同样
+   * 经本函数把放大的容器拉回视口 */
+  function clampPetIntoView() {
+    if (!pet || !petEl || dragging) return;
+    var l = parseFloat(petEl.style.left);
+    var t = parseFloat(petEl.style.top);
+    if (!isFinite(l) || !isFinite(t)) return;
+    var s = elSize(petEl);
+    var p = clampPos(l, t, s.w, s.h);
+    if (p.l !== l || p.t !== t) applyPos(petEl, p);
+  }
+
   var pet = null;
-  var curStyle = ""; /* 核心当前生效形象（custom 资产缺失时为内建回退值） */
+  var curStyle = ""; /* 核心当前生效形象（V8：资产未就位时为空串 = 空态暂隐） */
   var seenStyle = ""; /* 上次消费的原始选中值（含 custom:<id>，变更检测） */
   var curAsset = null; /* 上次消费的自定义资产对象（身份比对：重复导入同 id
     后物化文件重载产生新对象，触发核心按资产身份重建） */
@@ -2191,8 +2395,10 @@ pub const PET_JS: &str = concat!(
    *      心 DATA_FRESH_MS 新鲜度，否则宠物误沉睡）；隐藏时的省电交给
    *      浏览器对隐藏页定时器的限流。
    *      V3 自定义形象：want 为 custom:<id> 且资产有效时把资产随
-   *      create/setParams 传入核心；资产缺失时 effective 回退内建第一
-   *      形象（curStyle 记 effective，资产就绪后下一 tick 热切换）。
+   *      create/setParams 传入核心；V8 起资产缺失（加载中/物化失败/
+   *      旧 variables.css 的 cat 残留值）不再回退内建形象——effective
+   *      为空串，核心进入空态宠物暂隐（约 1 秒的瞬态，优于闪错形象），
+   *      资产就绪后下一 tick effective 变化触发 setParams 热切换。
    *      资产同步（P1-2）：--zbar-pet-asset-ver 内容戳随 variables.css
    *      每秒热重载到达（ZBar 侧仅在物化内容变化时改写它），值变化
    *      说明 pet-custom.js 已更新（重复导入同 id）——强制重载一次，
@@ -2205,11 +2411,7 @@ pub const PET_JS: &str = concat!(
         var want = styleIdOf();
         var isCustom = want.indexOf(CUSTOM_PREFIX) === 0;
         var asset = customAssetFor(want);
-        var effective = asset
-          ? want
-          : isCustom
-            ? "cat"
-            : want;
+        var effective = asset ? want : "";
         var size = sizeOf();
         if (isCustom) {
           var ver = readVar(VAR_ASSET_VER);
@@ -2234,6 +2436,7 @@ pub const PET_JS: &str = concat!(
           curAsset = asset;
           seenStyle = want;
           curSize = size;
+          ensurePetContainer(); /* 应用持久化位置并绑定拖拽（V7） */
           reloadHeartbeat(); /* 创建即取一次心跳（下个整周期再刷新） */
         } else {
           if (
@@ -2241,22 +2444,27 @@ pub const PET_JS: &str = concat!(
             effective !== curStyle ||
             (asset && curAsset !== asset)
           ) {
-            /* 选中变化（custom↔内建/custom 间切换）、资产就绪回退态
-             * 热切换、或资产对象被替换（重复导入）都走 setParams
-             * 重建（核心对同 id 的新资产对象按身份重建） */
+            /* 选中变化（custom 间切换）、资产就绪（空态 → 渲染）热
+             * 切换、或资产对象被替换（重复导入）都走 setParams 重建
+             * （核心对同 id 的新资产对象按身份重建），容器 div 随之
+             * 重建——下一 tick 的 ensurePetContainer 重挂 */
             pet.setParams({ style: effective, customAsset: asset });
             seenStyle = want;
             curStyle = effective;
             curAsset = asset;
+            ensurePetContainer();
           }
           if (size !== curSize) {
             pet.setParams({ size: size }); /* 大小热切换（内联画布尺寸） */
             curSize = size;
+            clampPetIntoView(); /* 档位变化后按新尺寸 clamp 回视口 */
           }
+          ensurePetContainer(); /* 容器被核心重建（防御）时重挂 */
         }
       } else if (pet) {
         pet.destroy(); /* 开关关闭：销毁宠物实例并移除 DOM */
         pet = null;
+        petEl = null;
         seenStyle = "";
         curStyle = "";
         curAsset = null;
@@ -2265,6 +2473,7 @@ pub const PET_JS: &str = concat!(
       if (pet && window.__ZBAR_USAGE__) {
         pet.feed(window.__ZBAR_USAGE__);
       }
+      clampPetIntoView(); /* 每秒轻量 clamp：resize 后拉回可见区 */
       tickCount++;
       if (pet && tickCount % HB_TICKS === 0) {
         reloadHeartbeat();
@@ -2372,19 +2581,22 @@ pub fn file_url(path: &Path) -> String {
 /// usage_turn_bar 渲染 1/0）：usage.js V19 起 renderAll 第二遍渲染前读它
 /// 决定是否渲染每轮条（变量缺失视为开启，与默认值 true 一致），同样随
 /// 每秒热重载即时生效。
-/// --zbar-pet-enabled 为桌面像素宠物的开关（由用户参数 pet_enabled 渲染
-/// 1/0，默认 0）：pet.js 读它决定渲染（值非 "1" 一律视为关闭——宠物默认
-/// 关闭不惊扰现有用户，与 usage_* 开关的"缺失视为开启"语义相反），关闭
-/// 移除宠物 DOM、开启重建，随每秒热重载约 1 秒生效。
-/// --zbar-pet-style 为宠物形象 id（由用户参数 pet_style 渲染，如 cat 或
-/// 自定义宠物的 custom:<id>，原样透传）：pet.js 读它选形象（内建未知值/
-/// custom 缺资产均回退第一形象），形象变化热切换（重建画布）。
+/// --zbar-pet-enabled 为桌面像素宠物的开关（由 PetConfig 的
+/// enabled && mode==injected 渲染 1/0，默认 0——宠物配置统一收敛到
+/// pet.json 后，ThemeParams 不再承载宠物参数）：pet.js 读它决定渲染
+/// （值非 "1" 一律视为关闭——宠物默认关闭不惊扰现有用户，与 usage_*
+/// 开关的"缺失视为开启"语义相反），关闭移除宠物 DOM、开启重建，随
+/// 每秒热重载约 1 秒生效。
+/// --zbar-pet-style 为宠物形象 id（由 PetConfig.style 渲染，V8 起合法
+/// 值恒为 custom:<id>——默认内置智谱娘，原样透传）：pet.js 读它选形象
+/// （未知值/缺资产均进入空态暂隐，资产就位后热切换），形象变化热切换
+/// （重建画布）。
 /// --zbar-pet-asset-ver 为自定义宠物物化资产的内容戳（pets::sync_theme_
 /// custom_pet 物化/清除后重渲本文件时计算，非用户参数）：pet.js 壳每秒
 /// 随热重载读取，值变化（重复导入同 id 更新了 pet-custom.js）即重载资产
 /// 并按资产对象身份热重建（P1-2，无此变量时壳按缺失处理、不触发）。
-/// --zbar-pet-size 为宠物显示边长（由用户参数 pet_size 档位按 screen_h
-/// 屏幕逻辑高换算的整数 px，如 81px）：pet.js 的画布 CSS 尺寸直接消费
+/// --zbar-pet-size 为宠物显示边长（PetConfig.size 档位由调用方按屏幕
+/// 逻辑高换算好的整数 px，如 81px）：pet.js 的画布 CSS 尺寸直接消费
 /// 该变量（image-rendering:pixelated 最近邻放大），改档位零 JS 成本、
 /// 随热重载即时生效。兼容硬约束：值恒为整数 px——ZCode 页面可能仍运行
 /// 旧版 pet.js（sizeOf 用 parseInt 解析），写 vh/百分比等非 px 值会被
@@ -2393,7 +2605,9 @@ pub fn render_variables_css(
     params: &ThemeParams,
     wallpaper_url: &str,
     pet_asset_ver: &str,
-    screen_h: f64,
+    pet_enabled: u8,
+    pet_style: &str,
+    pet_size_px: u32,
 ) -> String {
     format!(
         "/* ZBar 自动生成的主题变量，请勿手工编辑 */\n\
@@ -2433,9 +2647,9 @@ pub fn render_variables_css(
         usage_opacity = params.usage_opacity,
         usage_session_bar = if params.usage_session_bar { 1 } else { 0 },
         usage_turn_bar = if params.usage_turn_bar { 1 } else { 0 },
-        pet_enabled = if params.pet_enabled { 1 } else { 0 },
-        pet_style = params.pet_style,
-        pet_size = crate::pet::pet_size_px(params.pet_size, screen_h),
+        pet_enabled = pet_enabled,
+        pet_style = pet_style,
+        pet_size = pet_size_px,
         pet_asset_ver = pet_asset_ver,
         rate = params.playback_rate,
     )
@@ -2681,7 +2895,9 @@ mod tests {
     fn variables_css_渲染含全部变量与壁纸地址() {
         let params = ThemeParams::default();
         let url = "file:///Users/z/.zbar/agent-themes/zcode/wallpapers/my%20wall.mp4";
-        let css = render_variables_css(&params, url, "", 1080.0);
+        // 宠物三变量改由显式入参渲染（PetConfig 统一收敛后 ThemeParams
+        // 不再承载宠物参数；此处模拟注入版开启：cat / 档 3@1080 = 108px）
+        let css = render_variables_css(&params, url, "", 1, crate::pet::DEFAULT_PET_STYLE, 108);
         for var in [
             "--zbar-wallpaper-url",
             "--zbar-wp-brightness",
@@ -2707,7 +2923,7 @@ mod tests {
         }
         // P1-2：资产内容戳变量按入参渲染（空 = 未物化；壳按缺失处理）
         assert!(css.contains("--zbar-pet-asset-ver: ;"), "{css}");
-        let stamped = render_variables_css(&params, url, "0123456789abcdef", 1080.0);
+        let stamped = render_variables_css(&params, url, "0123456789abcdef", 1, crate::pet::DEFAULT_PET_STYLE, 108);
         assert!(
             stamped.contains("--zbar-pet-asset-ver: 0123456789abcdef;"),
             "{stamped}"
@@ -2739,7 +2955,7 @@ mod tests {
         let mut p = ThemeParams::default();
         p.base_alpha = 0.4;
         p.text_shadow = 0.8;
-        let css = render_variables_css(&p, url, "", 1080.0);
+        let css = render_variables_css(&p, url, "", 1, crate::pet::DEFAULT_PET_STYLE, 108);
         assert!(css.contains("--zbar-base-alpha: 0.4;"), "{css}");
         assert!(css.contains("--zbar-text-shadow: 0.8;"), "{css}");
 
@@ -2748,7 +2964,7 @@ mod tests {
         let mut p = ThemeParams::default();
         p.usage_font_size = 13.0;
         p.usage_opacity = 0.8;
-        let css = render_variables_css(&p, url, "", 1080.0);
+        let css = render_variables_css(&p, url, "", 1, crate::pet::DEFAULT_PET_STYLE, 108);
         assert!(css.contains("--zbar-usage-font-size: 13px;"), "{css}");
         assert!(css.contains("--zbar-usage-opacity: 0.8;"), "{css}");
 
@@ -2756,42 +2972,49 @@ mod tests {
         // 即不渲染会话条，随热重载约 1 秒生效）
         let mut p = ThemeParams::default();
         p.usage_session_bar = false;
-        let css = render_variables_css(&p, url, "", 1080.0);
+        let css = render_variables_css(&p, url, "", 1, crate::pet::DEFAULT_PET_STYLE, 108);
         assert!(css.contains("--zbar-usage-session-bar: 0;"), "{css}");
         p.usage_session_bar = true;
-        let css = render_variables_css(&p, url, "", 1080.0);
+        let css = render_variables_css(&p, url, "", 1, crate::pet::DEFAULT_PET_STYLE, 108);
         assert!(css.contains("--zbar-usage-session-bar: 1;"), "{css}");
 
         // V19：每轮统计条开关同样按参数渲染 1/0（关闭时 renderAll 对
         // 全部轮节点 removeRow 并跳过 renderOne，随热重载约 1 秒生效）
         let mut p = ThemeParams::default();
         p.usage_turn_bar = false;
-        let css = render_variables_css(&p, url, "", 1080.0);
+        let css = render_variables_css(&p, url, "", 1, crate::pet::DEFAULT_PET_STYLE, 108);
         assert!(css.contains("--zbar-usage-turn-bar: 0;"), "{css}");
         p.usage_turn_bar = true;
-        let css = render_variables_css(&p, url, "", 1080.0);
+        let css = render_variables_css(&p, url, "", 1, crate::pet::DEFAULT_PET_STYLE, 108);
         assert!(css.contains("--zbar-usage-turn-bar: 1;"), "{css}");
 
-        // 桌面宠物参数按参数渲染真值：默认关闭（pet.js 读值非 "1" 一律
-        // 视为关闭，含变量缺失的旧 variables.css），开启后形象与大小随
-        // 参数透出（热重载约 1 秒生效的前提）。pet_size 为档位语义：
-        // 默认档 3 × 1080 逻辑高 = 108px（整数 px，绝不出现小数/非 px 单位）
-        assert!(css.contains("--zbar-pet-enabled: 0;"), "{css}");
-        assert!(css.contains("--zbar-pet-style: cat;"), "{css}");
-        assert!(css.contains("--zbar-pet-size: 108px;"), "{css}");
-        let mut p = ThemeParams::default();
-        p.pet_enabled = true;
-        p.pet_style = "bot".to_string();
-        p.pet_size = 5;
-        let css = render_variables_css(&p, url, "", 1080.0);
+        // 桌面宠物三变量按显式入参渲染真值（PetConfig 统一后 store.rs
+        // 传入 pet_enabled/style/size_px）：默认关闭渲染 0（pet.js 读值
+        // 非 "1" 一律视为关闭，含变量缺失的旧 variables.css），开启后
+        // 形象与大小随配置透出（热重载约 1 秒生效的前提）
+        let closed = render_variables_css(&params, url, "", 0, crate::pet::DEFAULT_PET_STYLE, 108);
+        assert!(closed.contains("--zbar-pet-enabled: 0;"), "{closed}");
+        assert!(
+            closed.contains(&format!(
+                "--zbar-pet-style: {};",
+                crate::pet::DEFAULT_PET_STYLE
+            )),
+            "{closed}"
+        );
+        assert!(closed.contains("--zbar-pet-size: 108px;"), "{closed}");
+        let css = render_variables_css(&params, url, "", 1, crate::pet::DEFAULT_PET_STYLE, 162);
         assert!(css.contains("--zbar-pet-enabled: 1;"), "{css}");
-        assert!(css.contains("--zbar-pet-style: bot;"), "{css}");
+        assert!(
+            css.contains(&format!(
+                "--zbar-pet-style: {};",
+                crate::pet::DEFAULT_PET_STYLE
+            )),
+            "{css}"
+        );
         assert!(css.contains("--zbar-pet-size: 162px;"), "{css}");
         // V3：自定义形象值 custom:<id> 原样透传（冒号为 CSS 自定义属性的
         // 合法值字符，注入壳按前缀识别）
-        let mut p = ThemeParams::default();
-        p.pet_style = "custom:boba".to_string();
-        let css = render_variables_css(&p, url, "", 1080.0);
+        let css = render_variables_css(&params, url, "", 1, "custom:boba", 108);
         assert!(css.contains("--zbar-pet-style: custom:boba;"), "{css}");
     }
 
@@ -2799,14 +3022,15 @@ mod tests {
     fn variables_css_pet_size档位换算px断言() {
         // 兼容硬约束回归：--zbar-pet-size 恒为「整数 + px」——旧版 pet.js
         // 的 sizeOf 用 parseInt 解析该值，任何非整数 px 形态（小数、
-        // 无单位、vh/百分比）都会把宠物缩成蚂蚁
+        // 无单位、vh/百分比）都会把宠物缩成蚂蚁。档位换算已上移到
+        // store.rs（PetConfig.size → pet_size_px），此处断言入参 px
+        // 原样整数落盘
         let url = "file:///x/y.mp4";
         for screen_h in [800.0, 1080.0, 1440.0, 2160.0] {
             for level in 1..=crate::pet::PET_SIZE_LEVEL_PCT.len() as u32 {
-                let mut p = ThemeParams::default();
-                p.pet_size = level;
-                let css = render_variables_css(&p, url, "", screen_h);
+                let p = ThemeParams::default();
                 let expect = crate::pet::pet_size_px(level, screen_h);
+                let css = render_variables_css(&p, url, "", 1, crate::pet::DEFAULT_PET_STYLE, expect);
                 let want = format!("--zbar-pet-size: {expect}px;");
                 assert!(css.contains(&want), "档{level}@{screen_h} 应渲染 {want}：{css}");
                 // 值主体必为纯整数（无小数点、无 vh/% 等单位变体）
@@ -2823,10 +3047,12 @@ mod tests {
                 assert!(v.trim_end_matches("px").parse::<u32>().is_ok(), "去掉 px 后必须是纯整数：{v}");
             }
         }
-        // 屏高非法兜底 1080：默认档 3 → 108px
+        // 屏高非法兜底 1080：默认档 3 → 108px（换算由 pet::pet_size_px
+        // 保证，渲染端只消费换算结果）
         for bad in [0.0, f64::NAN, f64::INFINITY] {
             let p = ThemeParams::default();
-            let css = render_variables_css(&p, url, "", bad);
+            let expect = crate::pet::pet_size_px(3, bad);
+            let css = render_variables_css(&p, url, "", 1, crate::pet::DEFAULT_PET_STYLE, expect);
             assert!(css.contains("--zbar-pet-size: 108px;"), "{css}");
         }
     }
@@ -2835,10 +3061,10 @@ mod tests {
     fn pet_js_模板契约与帧数据完整性() {
         // 头部版本标记（store::ensure_versioned_template 的升级判据，
         // 与 theme/effects/usage 共用同一提取器）
-        assert!(PET_JS.contains("ZBAR-THEME-V6"));
+        assert!(PET_JS.contains("ZBAR-THEME-V8"));
         assert!(
-            !PET_JS.contains("ZBAR-THEME-V5"),
-            "版本头应已升到 V6（tool_running / failed 两状态 + ta/fe 信号）"
+            !PET_JS.contains("ZBAR-THEME-V7"),
+            "版本头应已升到 V8（智谱娘转正默认 + 渲染收敛 customAsset-only）"
         );
         // 单源拼接契约：PET_JS = pet-core.js（唯一真相源）+ 注入版宿主壳，
         // 核心段必须完整位于头部（版本标记提取器只看文件头部）
@@ -2883,6 +3109,51 @@ mod tests {
         assert!(
             !shell.contains("usage-data.js\"") && !shell.contains("usage-data.js`"),
             "壳不应自行重载大文件 usage-data.js（usage.js 的职责）：{shell}"
+        );
+        // V7 拖拽与位置持久化契约：localStorage 持久化键 + 指针捕获拖拽
+        // + 容器重挂（create/setParams 重建后）+ 视口 clamp
+        assert!(
+            shell.contains("\"__zbarPetPos\""),
+            "壳应以 localStorage 键 __zbarPetPos 持久化位置：{shell}"
+        );
+        assert!(
+            shell.contains("setPointerCapture"),
+            "拖拽应使用 pointer capture（移出容器仍跟随）：{shell}"
+        );
+        assert!(
+            shell.contains("releasePointerCapture"),
+            "拖拽结束应释放指针捕获：{shell}"
+        );
+        assert!(
+            shell.contains("ensurePetContainer"),
+            "容器重挂入口应存在（开关开合/形象切换重建容器后重绑拖拽）：{shell}"
+        );
+        assert!(
+            shell.contains("clampPetIntoView"),
+            "每 tick 的视口 clamp 应存在（resize 后拉回可见区）：{shell}"
+        );
+        // 拖拽状态防卡死契约（P1-2）：容器重建时同步复位 dragging +
+        // window 级 pointerup/cancel 兜底（容器 detach/捕获失败时自救）
+        assert!(
+            shell.contains("dragging = false") && shell.contains("dragEl = null"),
+            "容器重挂与拖拽收尾应复位 dragging/dragEl：{shell}"
+        );
+        assert!(
+            shell.contains("window.addEventListener(\"pointerup\"")
+                && shell.contains("window.addEventListener(\"pointercancel\""),
+            "window 级拖拽兜底监听应存在（pointerup/cancel 双通道）：{shell}"
+        );
+        assert!(
+            shell.contains("globalDragEnd"),
+            "兜底处理器应具名存在且幂等（无拖拽时空转）：{shell}"
+        );
+        assert!(
+            shell.contains("div[data-zbar-pet]"),
+            "定位样式选择器应精确到 div（壳注入行 script 同带 data-zbar-pet 属性）：{shell}"
+        );
+        assert!(
+            !shell.contains("pointer-events:none"),
+            "V7 容器需接收鼠标事件，不应再写 pointer-events:none：{shell}"
         );
         // 核心（壳之前的公共段）：心跳回退 ts（旧数据文件 V1 兼容）+
         // 闲置判定消费 la（缺失回退 ts，防窗口滑动误弹闲置）
@@ -2973,20 +3244,23 @@ mod tests {
             core.contains("failedUntil = now + FAILED_MS;"),
             "轮完成且 fe 新鲜时应置位沮丧截止时刻：{core}"
         );
-        // V6 内建 fallback 契约：内建形象仅五状态帧，新状态复用相近帧
+        // V6 状态回退契约（V8 起仅剩自定义形象的缺键回退）：旧五状态
+        // pet.json 缺 tool_running/failed 键时回退相近状态帧
         //（tool_running → typing 忙碌执行；failed → sleeping 蔫了），
-        // 渲染路径（drawFrame/frameMsOf/loop）统一经 builtinRenderState
+        // 渲染路径统一经 customStateDef 消费 CUSTOM_STATE_FALLBACK；
+        // 内建形象的 BUILTIN_STATE_FALLBACK / builtinRenderState 已随
+        // V8 字符网格形象移除（负向断言防回归）
         assert!(
             core.contains("tool_running: \"typing\""),
-            "内建 fallback 应将 tool_running 映射到 typing 帧：{core}"
+            "缺键回退应将 tool_running 映射到 typing 帧：{core}"
         );
         assert!(
             core.contains("failed: \"sleeping\""),
-            "内建 fallback 应将 failed 映射到 sleeping 帧：{core}"
+            "缺键回退应将 failed 映射到 sleeping 帧：{core}"
         );
         assert!(
-            core.contains("function builtinRenderState"),
-            "内建渲染路径应经 builtinRenderState 回退新状态帧：{core}"
+            !core.contains("builtinRenderState"),
+            "内建渲染回退函数应已移除（V8 无字符网格形象）：{core}"
         );
         // V6 迟滞跨工作态：lastWorkT 随 tool_running 前进（迟滞覆盖
         // 「工作类状态 → 非工作状态」的过渡）
@@ -3016,17 +3290,22 @@ mod tests {
             !PET_JS.contains("document.hidden ?"),
             "宠物脚本不应做 hidden 降频判断（visibility 与视觉可见性脱节）"
         );
-        // 形象库：至少两个形象（cat + bot），帧数据按状态组织
-        assert!(PET_JS.contains("var PET_STYLES = {"));
-        assert!(PET_JS.contains("cat: {"));
-        assert!(PET_JS.contains("bot: {"));
-        // 渲染契约：防重复挂载标记 + 不捕获鼠标 + 像素风放大
+        // 形象库：V8 起内建字符网格形象（cat/bot）与 PET_STYLES 常量已
+        // 整体移除——全部形象统一走 Petdex 图集渲染器（负向断言防回归；
+        // 帧数据的合法性由 pets.rs 的内嵌资产单测把关）
+        assert!(
+            !PET_JS.contains("var PET_STYLES"),
+            "字符网格形象库应已移除（V8 渲染收敛 customAsset-only）"
+        );
+        assert!(!PET_JS.contains("cat: {"));
+        assert!(!PET_JS.contains("bot: {"));
+        // 渲染契约：防重复挂载标记 + 像素风放大（V7 起容器可拖拽、
+        // 需接收鼠标事件，不再要求 pointer-events 遮蔽样式）
         assert!(PET_JS.contains("\"data-zbar-pet\""));
-        assert!(PET_JS.contains("pointer-events:none"));
         assert!(PET_JS.contains("image-rendering:pixelated"));
         // V3 自定义形象契约（Petdex 图集渲染器）：style 前缀 custom: +
         // customAsset 资产 + drawImage 按网格切帧（最近邻采样保锐利）
-        // + 缺资产回退内建第一形象
+        // + 缺资产进入空态（V8 起无内建回退）
         assert!(
             PET_JS.contains("CUSTOM_PREFIX = \"custom:\""),
             "核心应识别 custom:<id> 形象前缀"
@@ -3036,7 +3315,7 @@ mod tests {
         assert!(PET_JS.contains("ctx.drawImage("));
         assert!(
             PET_JS.contains("function effectiveStyleOf"),
-            "custom 缺资产应回退内建第一形象（effectiveStyleOf）"
+            "custom 缺资产应进入空态不渲染（effectiveStyleOf）"
         );
         // 注入壳（V3）：custom 选中时按需加载同目录物化文件
         // pet-custom.js（静态资产不轮询），按 meta.id 比对选中 id
@@ -3077,56 +3356,18 @@ mod tests {
             shell_v3.contains("curAsset !== asset"),
             "壳应按资产对象身份变化触发核心重建（重复导入同 id）"
         );
-        // 帧数据静态完整性：每帧行数必须为 GRID=16（行内长度与字符
-        // 合法性已由设计期校验脚本保证，此处防手改截断）。帧行的判定
-        // 特征：恰好 16 字符且全为 "."/数字（palette 颜色、STATES 等
-        // 普通字符串自然排除，无需脆弱的文本边界）
-        for style in ["cat", "bot"] {
-            let style_lo = PET_JS.find(&format!("{style}: {{")).expect("形象应存在");
-            let style_body = &PET_JS[style_lo..];
-            let frames_lo = style_body.find("frames: {").expect("frames 应存在");
-            let frames_body = &style_body[frames_lo..];
-            let bytes = frames_body.as_bytes();
-            let is_pixel_row = |s: &str| s.len() == 16 && s.chars().all(|c| c == '.' || c.is_ascii_digit());
-            let mut frame_count = 0;
-            let mut i = 0;
-            while i < bytes.len() {
-                if bytes[i] != b'[' {
-                    i += 1;
-                    continue;
-                }
-                // 帧开始：数到匹配 "]" 前的像素行数（帧内不嵌套数组）
-                let mut rows = 0;
-                let mut j = i + 1;
-                while j < bytes.len() && bytes[j] != b']' {
-                    if bytes[j] == b'"' {
-                        let start = j + 1;
-                        let mut k = start;
-                        while k < bytes.len() && bytes[k] != b'"' {
-                            k += 1;
-                        }
-                        if k < bytes.len() {
-                            let row = &frames_body[start..k];
-                            if is_pixel_row(row) {
-                                rows += 1;
-                            }
-                        }
-                        j = k + 1;
-                        continue;
-                    }
-                    j += 1;
-                }
-                if rows > 0 {
-                    frame_count += 1;
-                    assert_eq!(rows, 16, "{style} 存在 {rows} 行的坏帧（应 16 行）");
-                }
-                i = j + 1;
-            }
-            assert!(
-                frame_count >= 10,
-                "{style} 帧数异常：{frame_count}（五状态 × 2~4 帧）"
-            );
-        }
+        // V8 壳无内建回退契约：styleIdOf/effective 的回退值为空串（资产
+        // 未就位 → 核心空态暂隐），壳全文不应再出现 "cat" 回退字面量——
+        // 升级窗口期（新版壳 + 旧 variables.css 的 cat 残留值）表现为
+        // 宠物暂隐而非闪猫脸
+        assert!(
+            !shell_v3.contains("\"cat\""),
+            "壳不应再回退内建 cat 形象（V8 无内建渲染路径）：{shell_v3}"
+        );
+        assert!(
+            shell_v3.contains("var effective = asset ? want : \"\";"),
+            "壳的 effective 回退应为空串（资产未就位 = 空态暂隐）：{shell_v3}"
+        );
     }
 
     #[test]

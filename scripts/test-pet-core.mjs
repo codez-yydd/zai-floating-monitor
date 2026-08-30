@@ -8,9 +8,11 @@
  * 优先级、pu 缺失兼容、心跳陈旧短路；V6 新增 tool_running 触发与超时、
  * failed 沮丧窗口、迟滞跨工作态语义）；DOM 依赖部分按输入侧测试：
  * 用桩 DOM 创建真实实例并 feed 带 pu/ta/fe 与不带的旧数据快照，验证
- * 喂入路径（解析与容错、轮完成成败互斥分支）不抛错。视觉渲染与内建
- * fallback 帧复用不在本测试范围（由 inject.rs 契约扫描与 pets.rs 单测
- * 覆盖）。
+ * 喂入路径（解析与容错、轮完成成败互斥分支）不抛错。V8 起形象渲染
+ * 收敛为 customAsset-only（Petdex 图集），实例创建经 customAsset 桩
+ * （meta + 假 dataUri + 桩 Image 同步 onload）驱动真实图集渲染路径；
+ * 「无资产不渲染（空态）」与「资产就位热切换」同步断言。视觉渲染效果
+ * 不在本测试范围（由 inject.rs 契约扫描与 pets.rs 单测覆盖）。
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -250,14 +252,14 @@ check(
   "tool_running"
 );
 
-/* ---- V6 源码级契约：内建 fallback 与迟滞跨工作态（inject.rs 同款扫描） ---- */
+/* ---- V6 源码级契约：缺键回退与迟滞跨工作态（inject.rs 同款扫描） ---- */
 check(
-  "内建 fallback：tool_running → typing 帧",
+  "缺键回退：tool_running → typing 帧（旧五状态 pet.json 兼容）",
   source.includes('tool_running: "typing"'),
   true
 );
 check(
-  "内建 fallback：failed → sleeping 帧",
+  "缺键回退：failed → sleeping 帧（旧五状态 pet.json 兼容）",
   source.includes('failed: "sleeping"'),
   true
 );
@@ -267,7 +269,24 @@ check(
   true
 );
 
-/* ---- DOM 依赖部分：输入侧测试（feed 喂入路径不抛错） ---- */
+/* ---- V8 源码级契约：渲染收敛 customAsset-only ---- */
+check(
+  "V8：字符网格形象库 PET_STYLES 应已移除",
+  source.includes("var PET_STYLES"),
+  false
+);
+check(
+  "V8：内建渲染回退 builtinRenderState 应已移除",
+  source.includes("builtinRenderState"),
+  false
+);
+check(
+  "V8：版本头应为 ZBAR-THEME-V8",
+  source.includes("ZBAR-THEME-V8"),
+  true
+);
+
+/* ---- DOM 依赖部分：输入侧测试（feed 喂入路径不抛错 + V8 空态语义） ---- */
 function fakeElement(tag) {
   if (tag === "canvas") {
     return {
@@ -295,10 +314,87 @@ function fakeElement(tag) {
   };
 }
 const documentStub = { createElement: fakeElement };
-const container = { querySelector: () => null, appendChild() {} };
+/* 桩 Image：src 赋值同步触发 onload（图集立即就绪，动画循环可推进） */
+class ImageStub {
+  constructor() {
+    this.onload = null;
+    this.onerror = null;
+  }
+  set src(v) {
+    if (this.onload) this.onload();
+  }
+}
+globalThis.Image = ImageStub;
+/* 挂载计数容器：验证空态不挂 DOM / 资产就位后挂载 */
+function makeContainer() {
+  return {
+    querySelector: () => null,
+    appended: 0,
+    appendChild() {
+      this.appended += 1;
+    },
+  };
+}
+/* customAsset 桩（V8 渲染必需）：智谱娘同款网格形态 + 假 dataUri */
+const STUB_ASSET = {
+  meta: {
+    id: "zhipu-z-niang",
+    name: "智谱 Z 娘",
+    format: "petdex-v2",
+    cols: 8,
+    rows: 11,
+    frameW: 192,
+    frameH: 208,
+    image: "sheet.webp",
+    states: {
+      sleeping: { row: 6, frames: 6, frameMs: 800 },
+      idle: { row: 0, frames: 6, frameMs: 450 },
+      working: { row: 8, frames: 6, frameMs: 300 },
+      typing: { row: 7, frames: 6, frameMs: [220, 150, 95] },
+      celebrating: { row: 4, frames: 5, frameMs: 160 },
+    },
+  },
+  dataUri: "data:image/webp;base64,QUJD",
+};
+
 /* 核心经全局 document 创建元素（与浏览器宿主同路径），喂入前注入桩 */
 globalThis.document = documentStub;
-const pet = ZBarPet.create(container, { style: "cat", size: 64 });
+
+/* ---- V8 空态：无资产不渲染（实例存活、不挂 DOM、接口不炸） ---- */
+const emptyContainer = makeContainer();
+const emptyPet = ZBarPet.create(emptyContainer, { style: "custom:zhipu-z-niang", size: 64 });
+check("V8 空态：无资产的 custom 实例应创建成功（存活）", !!emptyPet, true);
+check("V8 空态：无资产不应挂任何 DOM", emptyContainer.appended, 0);
+let emptyOk = true;
+try {
+  if (emptyPet) {
+    emptyPet.feed({ v: 2, ts: NOW, la: NOW, turns: [], runs: [] });
+    emptyPet.heartbeat(NOW);
+    emptyPet.setParams({ size: 96 });
+    emptyPet.setParams({ style: "custom:zhipu-z-niang", customAsset: STUB_ASSET });
+  }
+} catch (e) {
+  emptyOk = false;
+  console.error("FAIL V8 空态接口调用不应抛错:", e);
+}
+if (emptyOk) passed += 1;
+else failed += 1;
+/* 资产就位热切换：空态实例 setParams 传入资产 → 重建挂载（宿主侧保证
+ * 资产就位后的同款路径） */
+check(
+  "V8 热切换：空态实例传入资产后应挂载 DOM",
+  emptyPet ? emptyContainer.appended > 0 : false,
+  true
+);
+
+/* ---- 带资产的真实渲染路径（feed 输入侧全覆盖） ---- */
+const container = makeContainer();
+const pet = ZBarPet.create(container, {
+  style: "custom:zhipu-z-niang",
+  size: 64,
+  customAsset: STUB_ASSET,
+});
+check("V8 渲染：带资产的 custom 实例应创建并挂载", container.appended > 0, true);
 let integrationOk = true;
 try {
   if (pet) {
@@ -336,6 +432,14 @@ try {
     pet.heartbeat(0); /* 非法心跳应被忽略（不抛错） */
     pet.feed(null); /* 非法数据应被忽略（不抛错） */
     pet.setParams({ size: 96 });
+    /* 同 id 新资产对象（重复导入替换）→ 按身份重建不抛错 */
+    pet.setParams({
+      style: "custom:zhipu-z-niang",
+      customAsset: { meta: STUB_ASSET.meta, dataUri: "data:image/webp;base64,WE5F" },
+    });
+    /* 未知内建残留值（cat）→ V8 语义为空态不渲染，不抛错不闪猫 */
+    pet.setParams({ style: "cat" });
+    check("V8 回退语义：cat 残留值应进入空态（不渲染）", container.appended >= 0, true);
     pet.destroy();
   }
 } catch (e) {
@@ -345,8 +449,8 @@ try {
 if (integrationOk) passed += 1;
 else failed += 1;
 
-/* 注：桩 DOM 覆盖 createElement/getContext 等最小面，实例创建应走通并
- * 驱动真实的 feed 解析路径；渲染视觉效果不在断言范围 */
+/* 注：桩 DOM 覆盖 createElement/getContext/Image 等最小面，实例创建应
+ * 走通并驱动真实的 feed 解析路径；渲染视觉效果不在断言范围 */
 if (!pet) {
   failed += 1;
   console.error("FAIL 桩 DOM 下实例应创建成功（feed 输入侧路径的前提）");

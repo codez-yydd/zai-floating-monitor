@@ -443,22 +443,13 @@ export const en: typeof zh = {
     "settings.resetDisplayHint":
       "How quota reset time is shown; both can be on at once. Exact times use MM-DD HH:mm.",
 
-    // Standalone desktop pet (phase 2: transparent floating pet, independent of the skin)
-    "settings.petCard": "Desktop pet",
-    "settings.petHint":
-      "A transparent always-on-top floating pet independent of the live-wallpaper skin: it animates with ZCode's live work state, can be dragged anywhere (position is remembered), and does not interfere with the injected pet — both can be enabled at once.",
-    "settings.petEnabled": "Enable floating pet",
-    "settings.petEnabledHint":
-      "Shows a transparent floating pet in the bottom-right of the screen (no wallpaper skin install required)",
-    "settings.petSize": "Pet size",
-    "settings.petSizeHint":
-      "Sized by screen-height ratio (about 5.5%–15%); adapts when you switch screens or change resolution",
+    // Desktop pet size level names (shared by PetSizeLevelPicker in petStyles;
+    // pet settings themselves now live in the skin page pet card only)
     "settings.petSizeLevel1": "Small",
     "settings.petSizeLevel2": "Medium",
     "settings.petSizeLevel3": "Default",
     "settings.petSizeLevel4": "Large",
     "settings.petSizeLevel5": "XL",
-    "settings.petApplyFail": "Failed to apply pet settings: {msg}",
 
     "settings.fontSize": "Font size",
     "settings.fontSmall": "Small",
@@ -655,30 +646,37 @@ export const en: typeof zh = {
     "theme.usageLegend":
       "↑ input (non-cached) · ↓ output · ⟲ cache read · × model requests · t/s output speed · TTFT time to first token · Σ session total tokens (input+output+cache read) · ≈ in-flight output estimate (excluded from totals)",
 
-    // Desktop pet section (pet.js V1: pixel pet pinned at the bottom-right of
-    // the ZCode chat page, animating with the live work state; toggle/style/
-    // size apply live within ~1s via variables.css hot reload)
+    // Desktop pet section (the single entry for pet settings: master toggle
+    // + injected/floating mode + style/size, persisted in pet.json, applies
+    // instantly; injected-pet parameters apply within ~1s via variables.css
+    // hot reload)
     "theme.petTitle": "Desktop Pet",
     "theme.petHint":
-      "Keeps a pixel pet in the bottom-right corner of the ZCode chat page that animates with ZCode's live work state; it never captures the mouse or blocks the composer, and changes apply live within ~1s. After upgrading ZBar, reinstall the skin once before first use. If the style does not change after switching, restart ZCode once to apply.",
+      "Keeps a pixel pet that animates with ZCode's live work state: by default it lives inside the ZCode chat page (requires the skin installed, draggable), or switch it to a standalone floating window; style and size apply to both modes and take effect immediately.",
     "theme.petEnabled": "Enable desktop pet",
     "theme.petEnabledHint":
-      "Shows the pixel pet in the bottom-right of the ZCode chat page (requires the live wallpaper to be installed)",
-    // Pet styles (mirrors the PET_STYLES keys embedded in pet.js)
-    "theme.petStyleCat": "Pixel Cat",
-    "theme.petStyleBot": "Pixel Bot",
-    // Custom pets (phase 3: Petdex-format import, PetStyleSection in petStyles)
+      "Master switch: shows the pet in the mode selected below; off hides it entirely",
+    "theme.petModeLabel": "Mode",
+    "theme.petModeInjected": "Injected",
+    "theme.petModeFloating": "Floating window",
+    "theme.petModeHint":
+      "Injected: rendered inside the ZCode chat page, follows the skin's hot reload (~1s) and can be dragged anywhere; requires the live wallpaper skin to be installed. Floating window: a standalone transparent always-on-top pet, independent of the skin, also draggable.",
+    "theme.petApplyFail": "Failed to apply pet settings: {msg}",
+    "theme.petLoadFail": "Failed to load pet settings: {msg}",
+    // Custom pets (phase 3: Petdex-format import, PetStyleSection in petStyles;
+    // since V8 the built-in group is the bundled Zhipu girl sheet pet, whose
+    // name comes from the list data's meta.name)
     "theme.petGroupBuiltin": "Built-in styles",
     "theme.petGroupCustom": "Custom pets (Petdex)",
+    "theme.petBuiltinLoading": "Loading built-in pet…",
     "theme.petCustomEmpty":
       "No custom pets yet. Drop a Petdex pet package onto the window to import one.",
-    "theme.petImportHint":
-      "Import a custom pet: drop a Petdex package onto the window (zip / pet.json / spritesheet png·webp)",
-    // Skin page variant: png/webp drops route to wallpaper import there
+    // Skin page variant: png/webp drops route to wallpaper import once the
+    // skin is installed; before that they route to pet import
     "theme.petImportHintSkin":
-      "Import a custom pet: drop a Petdex package onto the window (zip / pet.json; for bare png/webp sheets use the pet card in Settings)",
+      "Import a custom pet: drop a Petdex package onto the window (zip / pet.json with its spritesheet alongside; pack bare png/webp sheets into a zip first — or drop them directly before the skin is installed)",
     "theme.petImporting": "Importing pet…",
-    "theme.petImportDone": "Pet imported ✓ Restart ZCode to pick it on the chat page",
+    "theme.petImportDone": "Pet imported ✓ Tap it in the pet card to use",
     "theme.petImportFail": "Failed to import pet: {msg}",
     "theme.petDelete": "Delete",
     "theme.petDeleteConfirm":

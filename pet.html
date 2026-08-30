@@ -8,8 +8,8 @@
       独立桌面宠物窗口入口（宠物功能第二阶段）：透明无边框置顶悬浮窗，
       与主面板（index.html）互不影响。页面为极简薄壳——
       - /pet-core.js：宠物核心（与皮肤注入版 pet.js 共用的同一份单源文件，
-        含形象库/状态机/canvas 渲染器与 ZBarPet 工厂），Vite 从 public/
-        原样拷贝服务；
+        含状态机/Petdex 图集渲染器与 ZBarPet 工厂，形象资产由宿主喂入），
+        Vite 从 public/ 原样拷贝服务；
       - /src/pet-main.ts：宿主壳（监听 Tauri 事件喂数据/参数）。
       样式内联：窗口即宠物（尺寸 = pet_size），根容器铺满并作为拖动区
       （data-tauri-drag-region，拖动改窗口位置由 Rust 侧持久化）。

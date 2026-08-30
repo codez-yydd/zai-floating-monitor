@@ -46,12 +46,22 @@
 //! 重新导入）。
 //!
 //! ## 两条消费链路
-//! - **注入版**（皮肤已安装时）：选中 pet_style = `custom:<id>` 则由
+//! - **注入版**（皮肤已安装时）：PetConfig.style = `custom:<id>` 则由
 //!   [`sync_theme_custom_pet`] 把该宠物物化为主题目录的 `pet-custom.js`
 //!   （`window.__ZBAR_PET_CUSTOM__ = { v:1, meta, dataUri }`），注入版壳读到
 //!   custom:* 形象时按需加载一次并作为 customAsset 传入 pet-core。
-//! - **独立版**：`get_custom_pet_asset` 命令按 id 读回 meta + dataUri，
+//! - **悬浮窗**：`get_custom_pet_asset` 命令按 id 读回 meta + dataUri，
 //!   pet-main.ts 在 style 为 custom:* 时 invoke 获取后传给 pet-core。
+//!   （宠物配置已统一收敛到 pet.json/PetConfig，两形态共用同一份选中形象。）
+//!
+//! ## 内置形象（V8 起默认）
+//! 「智谱 Z 娘」（id = `zhipu-z-niang`）随安装包分发（src-tauri/assets/
+//! pets/ 下内嵌 pet.json + sheet.webp，编译期 include_bytes!），启动时由
+//! [`ensure_builtin_pet`] 释放到宠物库（缺失/损坏才落盘，已存在且合法
+//! 跳过——用户目录里同 id 内容可能被手改过，尊重现状不覆盖）；默认选中
+//! （pet.rs 的 DEFAULT_PET_STYLE = `custom:zhipu-z-niang`）且不可删除
+//! （delete_custom_pet 对内置 id 拒绝）。cat/bot 两个旧内建字符网格形象
+//! 已随 V8 渲染收敛移除（pet-core.js 改 customAsset-only）。
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -79,6 +89,15 @@ pub const MAX_SHEET_BYTES: u64 = 16 * 1024 * 1024;
 /// （zip bomb 解压膨胀），必须先封顶再读，避免全量膨胀进内存后才被
 /// 体积校验拒绝
 pub const MAX_READ_BYTES: u64 = 64 * 1024 * 1024;
+
+/// 内置宠物 id（「智谱 Z 娘」）：随安装包分发、默认选中、不可删除。
+/// 对应的内置 style 值为 `custom:zhipu-z-niang`（见 pet.rs 的
+/// DEFAULT_PET_STYLE，两处经 concat! 同源拼接）
+pub const BUILTIN_PET_ID: &str = "zhipu-z-niang";
+/// 内置宠物元信息（编译期从 src-tauri/assets/pets/ 内嵌）
+const BUILTIN_PET_JSON: &[u8] = include_bytes!("../assets/pets/zhipu-z-niang/pet.json");
+/// 内置宠物精灵图集（同上，约 2.5MB webp）
+const BUILTIN_PET_SHEET: &[u8] = include_bytes!("../assets/pets/zhipu-z-niang/sheet.webp");
 
 // ============================================================
 // 内部格式数据结构
@@ -518,6 +537,81 @@ pub(crate) fn import_pet_in(
 }
 
 // ============================================================
+// 内置形象释放（「智谱 Z 娘」随安装包分发，启动时确保库内就位）
+// ============================================================
+
+/// 库目录内某只宠物是否完整可用（pet.json 可解析且 id 匹配 + 图集存在
+/// 且非空）：内置形象的体检口径，同时被「已存在跳过」与单测复用。
+fn builtin_pet_ok_in(root: &Path, id: &str) -> bool {
+    match load_pet_meta_in(root, id) {
+        Ok(meta) => {
+            meta.id == id
+                && fs::metadata(root.join(id).join(&meta.image))
+                    .is_ok_and(|m| m.len() > 0)
+        }
+        Err(_) => false,
+    }
+}
+
+/// 内置宠物元信息（内嵌字节的解析形态；损坏即 panic 于编译资产，正常
+/// 构建不应出现——发布前有单测兜底校验）。id 与 BUILTIN_PET_ID 一致。
+pub(crate) fn builtin_pet_meta() -> CustomPetMeta {
+    let text = std::str::from_utf8(BUILTIN_PET_JSON)
+        .expect("内置宠物 pet.json 应为 UTF-8 文本");
+    let meta: CustomPetMeta =
+        serde_json::from_str(text).expect("内置宠物 pet.json 应可解析");
+    assert_eq!(meta.id, BUILTIN_PET_ID, "内置宠物 id 应与常量一致");
+    meta
+}
+
+/// 确保内置形象（智谱娘）在宠物库就位（真实 ~/.zbar 路径版，应用启动
+/// setup 阶段调用，失败由调用方记日志不阻断启动）：
+/// - 库内已存在且体检通过（pet.json 可解析且 id 匹配 + 图集非空）→
+///   跳过。**不做内容比对覆盖**：用户目录里同 id 内容可能被手改过，
+///   与内置同源即尊重现状（删除保护见 delete_custom_pet_impl）；
+/// - 缺失或损坏（pet.json 解析失败/图集缺失或为空）→ 重新释放：临时
+///   目录写全 → 移除旧目录 → 原子改名（与导入同手法，杜绝半截状态）。
+pub fn ensure_builtin_pet() -> Result<(), String> {
+    let root = pets_root()?;
+    ensure_builtin_pet_in(&root)
+}
+
+/// ensure_builtin_pet 的目录显式版（单元测试复用，不依赖真实 ~/.zbar）
+pub(crate) fn ensure_builtin_pet_in(root: &Path) -> Result<(), String> {
+    fs::create_dir_all(root).map_err(|e| format!("创建宠物库目录失败：{e}"))?;
+    if builtin_pet_ok_in(root, BUILTIN_PET_ID) {
+        return Ok(()); // 已就位且合法：跳过（不按内容比对覆盖）
+    }
+    let staging = root.join(format!(
+        "{BUILTIN_PET_ID}.builtin-{}",
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default() & 0xffff_ffff
+    ));
+    fs::create_dir_all(&staging).map_err(|e| format!("创建内置形象临时目录失败：{e}"))?;
+    let write = || -> Result<(), String> {
+        fs::write(staging.join(PET_META_FILE), BUILTIN_PET_JSON)
+            .map_err(|e| format!("写入内置形象元信息失败：{e}"))?;
+        fs::write(staging.join(builtin_pet_meta().image), BUILTIN_PET_SHEET)
+            .map_err(|e| format!("写入内置形象图集失败：{e}"))?;
+        Ok(())
+    };
+    if let Err(e) = write() {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(e);
+    }
+    let final_dir = root.join(BUILTIN_PET_ID);
+    if final_dir.exists() {
+        // 损坏/半截的旧目录：整体移除后由内置资产重建
+        fs::remove_dir_all(&final_dir)
+            .map_err(|e| format!("清理损坏的内置形象目录失败：{e}"))?;
+    }
+    fs::rename(&staging, &final_dir).map_err(|e| {
+        let _ = fs::remove_dir_all(&staging);
+        format!("落盘内置形象目录失败：{e}")
+    })?;
+    Ok(())
+}
+
+// ============================================================
 // 读取与缩略图
 // ============================================================
 
@@ -586,9 +680,12 @@ pub struct CustomPetEntryDto {
     pub format: String,
     /// idle 行首帧缩略图（64×70 内等比，PNG dataUri；生成失败为空串）
     pub thumb: String,
+    /// 是否内置形象（智谱娘）：前端据此归入「内建形象」分组且不渲染
+    /// 删除按钮；delete_custom_pet 对内置 id 同样拒绝（双保险）
+    pub builtin: bool,
 }
 
-/// 列出库内全部自定义宠物（按 id 排序；坏目录跳过不阻塞清单）
+/// 列出库内全部宠物（含内置智谱娘，按 id 排序；坏目录跳过不阻塞清单）
 pub(crate) fn list_custom_pets_in(root: &Path) -> Vec<CustomPetEntryDto> {
     let Ok(entries) = fs::read_dir(root) else {
         return Vec::new();
@@ -605,11 +702,13 @@ pub(crate) fn list_custom_pets_in(root: &Path) -> Vec<CustomPetEntryDto> {
         let thumb = fs::read(root.join(&name).join(&meta.image))
             .map(|bytes| thumb_data_uri(&bytes, &meta))
             .unwrap_or_default();
+        let builtin = name == BUILTIN_PET_ID;
         out.push(CustomPetEntryDto {
             id: meta.id,
             name: meta.name,
             format: meta.format,
             thumb,
+            builtin,
         });
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -630,30 +729,32 @@ pub(crate) fn materialize_js(meta: &CustomPetMeta, data_uri: &str) -> String {
 
 /// 同步注入版物化文件（真实 ~/.zbar 路径版）：
 /// - 皮肤主题目录不存在（未安装/已卸载）→ 无注入版可消费，直接返回；
-/// - 当前 pet_style 为 custom:<id> 且宠物可读 → 内容无变化跳写，有变化
-///   .tmp + rename 原子重写；
+/// - 当前 PetConfig.style 为 custom:<id> 且宠物可读 → 内容无变化跳写，
+///   有变化 .tmp + rename 原子重写；
 /// - 其余情形（非 custom 选中 / 宠物缺失）→ 删除残留物化文件。
+/// 选中形象与重渲参数统一取 pet.json（宠物配置唯一真相源）。
 pub fn sync_theme_custom_pet() -> Result<(), String> {
     let theme_dir = crate::agent_theme::store::app_dir("zcode")?;
     let root = pets_root()?;
-    sync_theme_custom_pet_in(&theme_dir, &root)
+    let pet = crate::pet::load_pet_config().clamped();
+    sync_theme_custom_pet_in(&theme_dir, &root, &pet)
 }
 
-/// sync_theme_custom_pet 的目录显式版（单元测试复用）：参数取主题目录
-/// 自身的 params.json（该目录即物化目标，参数与文件同源不漂移）。
+/// sync_theme_custom_pet 的目录显式版（单元测试复用）：宠物配置显式
+/// 传入（选中形象与 variables.css 重渲共用一份，不依赖真实 pet.json）。
 /// 物化/清除后重渲 variables.css：`--zbar-pet-asset-ver` 内容戳随之
 /// 更新，注入版壳经每秒热重载读到新值即重载资产（P1-2：重复导入同 id
 /// 时物化文件已变但页面无感知，旧图集滞留至重载——内容戳是变化信号）。
-pub(crate) fn sync_theme_custom_pet_in(theme_dir: &Path, root: &Path) -> Result<(), String> {
+pub(crate) fn sync_theme_custom_pet_in(
+    theme_dir: &Path,
+    root: &Path,
+    pet: &crate::pet::PetConfig,
+) -> Result<(), String> {
     if !theme_dir.is_dir() {
         return Ok(()); // 皮肤未安装：注入版本不存在，无需物化
     }
-    let params = crate::agent_theme::store::read_params_file(
-        &theme_dir.join(crate::agent_theme::store::PARAMS_FILE),
-    )
-    .unwrap_or_default();
     let target = theme_dir.join(PET_CUSTOM_JS);
-    if let Some(id) = custom_style_id(&params.pet_style).map(str::to_string) {
+    if let Some(id) = custom_style_id(&pet.style).map(str::to_string) {
         match build_asset_in(root, &id) {
             Ok((meta, data_uri)) => {
                 let content = materialize_js(&meta, &data_uri);
@@ -668,7 +769,9 @@ pub(crate) fn sync_theme_custom_pet_in(theme_dir: &Path, root: &Path) -> Result<
                 }
             }
             Err(_) => {
-                // 选中宠物已缺失（被删除等）：移除物化文件，壳回退内建形象
+                // 选中宠物已缺失（被删除等）：移除物化文件——V8 起核心无
+                // 内建回退，壳读不到资产即宠物暂隐（默认智谱娘受删除保护
+                // 永在库中，此路径实际只剩库目录损坏的极端情形）
                 let _ = fs::remove_file(&target);
             }
         }
@@ -678,7 +781,7 @@ pub(crate) fn sync_theme_custom_pet_in(theme_dir: &Path, root: &Path) -> Result<
     // 无论上面走哪条分支都重渲 variables.css（内容不变时其自身跳写）：
     // 内容戳与物化文件状态保持同步（含从旧版 variables.css 补出该变量的
     // 场景——skip-write 路径不能跳过重渲）
-    crate::agent_theme::store::refresh_variables_css_in(theme_dir)
+    crate::agent_theme::store::refresh_variables_css_in(theme_dir, pet)
 }
 
 // ============================================================
@@ -789,11 +892,13 @@ fn import_pet_impl(path: &str, app: &tauri::AppHandle) -> Result<CustomPetEntryD
     push_pet_refresh_if_selected(app, &meta.id);
 
     let thumb = thumb_data_uri(&sheet_bytes, &meta);
+    let builtin = meta.id == BUILTIN_PET_ID;
     Ok(CustomPetEntryDto {
         id: meta.id,
         name: meta.name,
         format: meta.format,
         thumb,
+        builtin,
     })
 }
 
@@ -835,9 +940,11 @@ pub struct CustomPetAssetDto {
     pub data_uri: String,
 }
 
-/// 删除自定义宠物。若两条管道（独立版 PetConfig / 注入版 ThemeParams）正
-/// 选中该宠物，先回退内建默认形象（各自落盘并热生效），再清理注入版物化
-/// 文件与库目录。
+/// 删除自定义宠物。内置形象（智谱娘）不可删除（返回中文错误，前端
+/// 的删除按钮对 builtin 项同样不渲染——双保险）。若宠物配置（pet.json
+/// 唯一真相源，注入版/悬浮窗共用）正选中该宠物，先回退默认形象（内置
+/// 智谱娘——它永在库中，回退必达；落盘 + 悬浮窗热推参数 + 注入版重渲
+/// variables.css 热生效），再清理注入版物化文件与库目录。
 #[tauri::command]
 pub async fn delete_custom_pet(id: String, app: tauri::AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || delete_custom_pet_impl(&id, &app))
@@ -845,14 +952,25 @@ pub async fn delete_custom_pet(id: String, app: tauri::AppHandle) -> Result<(), 
         .map_err(|e| format!("删除任务失败：{e}"))?
 }
 
-fn delete_custom_pet_impl(id: &str, app: &tauri::AppHandle) -> Result<(), String> {
+/// 删除前置校验（纯函数，单测直测）：id 合法性 + 内置形象保护
+fn check_deletable(id: &str) -> Result<(), String> {
     if !valid_pet_id(id) {
         return Err(format!("非法宠物 id：{id}"));
     }
+    if id == BUILTIN_PET_ID {
+        return Err("内置形象不可删除".to_string());
+    }
+    Ok(())
+}
+
+fn delete_custom_pet_impl(id: &str, app: &tauri::AppHandle) -> Result<(), String> {
+    check_deletable(id)?;
     let custom_style = format!("{CUSTOM_STYLE_PREFIX}{id}");
 
-    // 独立版回退：选中该宠物时重置为内建默认形象并热推参数（size 按
-    // 缓存屏高换算 px 推送，同 push_pet_refresh_if_selected 的线程口径）
+    // 选中回退：重置为默认形象（内置智谱娘，永在库中）并落盘（悬浮窗
+    // 热推参数——size 按缓存屏高换算 px，同 push_pet_refresh_if_selected
+    // 的线程口径；注入版经下方 sync_theme_custom_pet 重渲 variables.css
+    // 热生效）
     let mut pet_cfg = crate::pet::load_pet_config();
     if pet_cfg.style == custom_style {
         pet_cfg.style = crate::pet::DEFAULT_PET_STYLE.to_string();
@@ -863,19 +981,11 @@ fn delete_custom_pet_impl(id: &str, app: &tauri::AppHandle) -> Result<(), String
         crate::pet::push_pet_params(app, &cfg, size_px);
     }
 
-    // 注入版回退：选中该宠物时重置参数并重渲 variables.css（热重载生效）
-    let mut params = crate::agent_theme::store::load_params("zcode");
-    if params.pet_style == custom_style {
-        params.pet_style = crate::agent_theme::store::DEFAULT_PET_STYLE.to_string();
-        crate::agent_theme::store::save_params("zcode", &params)?;
-        let _ = crate::agent_theme::store::ensure_theme_assets("zcode", None);
-    }
-
     // 清理：库目录 + 注入版物化残留
     let root = pets_root()?;
     let dir = root.join(id);
     if dir.exists() {
-        fs::remove_dir_all(&dir).map_err(|e| format!("删除宠物目录失败：{e}"))?;
+        fs::remove_dir_all(&dir).map_err(|e| format!("删除宠物目录失败: {e}"))?;
     }
     sync_theme_custom_pet()?;
     Ok(())
@@ -1154,7 +1264,12 @@ mod tests {
     fn 物化_内容格式与原子写跳写() {
         let theme_dir = test_dir("materialize");
         // 皮肤未安装（目录不存在）→ no-op
-        sync_theme_custom_pet_in(&theme_dir.parent().unwrap().join("no-such"), &theme_dir).unwrap();
+        sync_theme_custom_pet_in(
+            &theme_dir.parent().unwrap().join("no-such"),
+            &theme_dir,
+            &crate::pet::PetConfig::default(),
+        )
+        .unwrap();
         assert!(!theme_dir.join(PET_CUSTOM_JS).exists());
 
         // 直接测物化内容格式（meta + dataUri）
@@ -1188,19 +1303,21 @@ mod tests {
         // 导入一只真实宠物（图集生成 → 内部格式落盘）
         import_pet_in(&root, None, &make_sheet_png(1536, 1872), "Boba").unwrap();
 
-        // 主题目录无 params.json（未选中自定义）→ 无物化文件
-        sync_theme_custom_pet_in(&theme_dir, &root).unwrap();
+        // 未选中自定义（非 custom 前缀的 style 值，如迁移前的旧内建残留）
+        // → 无物化文件
+        let builtin_cfg = crate::pet::PetConfig {
+            style: "legacy-value".into(),
+            ..crate::pet::PetConfig::default()
+        };
+        sync_theme_custom_pet_in(&theme_dir, &root, &builtin_cfg).unwrap();
         assert!(!theme_dir.join(PET_CUSTOM_JS).exists());
 
         // 选中 custom:boba → 物化完整资产（meta + base64 图集）
-        let mut params = crate::agent_theme::store::ThemeParams::default();
-        params.pet_style = "custom:boba".into();
-        crate::agent_theme::store::write_params_file(
-            &theme_dir.join(crate::agent_theme::store::PARAMS_FILE),
-            &params,
-        )
-        .unwrap();
-        sync_theme_custom_pet_in(&theme_dir, &root).unwrap();
+        let custom_cfg = crate::pet::PetConfig {
+            style: "custom:boba".into(),
+            ..crate::pet::PetConfig::default()
+        };
+        sync_theme_custom_pet_in(&theme_dir, &root, &custom_cfg).unwrap();
         let js = fs::read_to_string(theme_dir.join(PET_CUSTOM_JS)).unwrap();
         assert!(js.starts_with("window.__ZBAR_PET_CUSTOM__ = { v: 1,"), "{js}");
         assert!(js.contains("\"id\":\"boba\""), "{js}");
@@ -1232,7 +1349,7 @@ mod tests {
         let path = theme_dir.join(PET_CUSTOM_JS);
         let mtime = fs::metadata(&path).unwrap().modified().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(50));
-        sync_theme_custom_pet_in(&theme_dir, &root).unwrap();
+        sync_theme_custom_pet_in(&theme_dir, &root, &custom_cfg).unwrap();
         assert_eq!(
             fs::metadata(&path).unwrap().modified().unwrap(),
             mtime,
@@ -1242,7 +1359,7 @@ mod tests {
         // P1-2：重复导入同 id（同名、图集换成 2 倍 clean scale）→ 物化
         // 重写 + 内容戳变化
         import_pet_in(&root, None, &make_sheet_png(3072, 1872), "Boba").unwrap();
-        sync_theme_custom_pet_in(&theme_dir, &root).unwrap();
+        sync_theme_custom_pet_in(&theme_dir, &root, &custom_cfg).unwrap();
         let css2 = fs::read_to_string(theme_dir.join(crate::agent_theme::store::VARIABLES_CSS))
             .unwrap();
         let stamp2: String = css2
@@ -1256,14 +1373,8 @@ mod tests {
             .to_string();
         assert_ne!(stamp1, stamp2, "重复导入后内容戳应变化（壳据此热刷新）");
 
-        // 换选中内建形象 → 物化文件被清除，内容戳清空（壳不再持有旧资产）
-        params.pet_style = "cat".into();
-        crate::agent_theme::store::write_params_file(
-            &theme_dir.join(crate::agent_theme::store::PARAMS_FILE),
-            &params,
-        )
-        .unwrap();
-        sync_theme_custom_pet_in(&theme_dir, &root).unwrap();
+        // 换选中非自定义形象 → 物化文件被清除，内容戳清空（壳不再持有旧资产）
+        sync_theme_custom_pet_in(&theme_dir, &root, &builtin_cfg).unwrap();
         assert!(!theme_dir.join(PET_CUSTOM_JS).exists());
         let css3 = fs::read_to_string(theme_dir.join(crate::agent_theme::store::VARIABLES_CSS))
             .unwrap();
@@ -1272,14 +1383,13 @@ mod tests {
             "物化清除后内容戳应为空：{css3}"
         );
 
-        // 选中已删除的宠物 → 同样清除（壳回退内建）
-        params.pet_style = "custom:gone".into();
-        crate::agent_theme::store::write_params_file(
-            &theme_dir.join(crate::agent_theme::store::PARAMS_FILE),
-            &params,
-        )
-        .unwrap();
-        sync_theme_custom_pet_in(&theme_dir, &root).unwrap();
+        // 选中已删除的宠物 → 同样清除（V8 起核心无内建回退，壳读不到
+        // 资产即宠物暂隐，资产就位后热切换恢复）
+        let gone_cfg = crate::pet::PetConfig {
+            style: "custom:gone".into(),
+            ..crate::pet::PetConfig::default()
+        };
+        sync_theme_custom_pet_in(&theme_dir, &root, &gone_cfg).unwrap();
         assert!(!theme_dir.join(PET_CUSTOM_JS).exists());
 
         // 资产读回（独立版 get_custom_pet_asset 的核心路径）
@@ -1304,6 +1414,8 @@ mod tests {
         let list = list_custom_pets_in(&root);
         let ids: Vec<&str> = list.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(ids, vec!["alpha", "beta"], "{ids:?}");
+        // 导入宠物非内置（builtin 标志为 false，前端据此渲染删除按钮）
+        assert!(list.iter().all(|e| !e.builtin), "{list:?}");
         // 缩略图生成成功（PNG dataUri）
         assert!(list[0].thumb.starts_with("data:image/png;base64,"), "{:?}",
             list[0].thumb.chars().take(40).collect::<String>());
@@ -1457,14 +1569,112 @@ mod tests {
         assert!(json.contains("\"frameW\":192"), "{json}");
         assert!(json.contains("\"frameH\":208"), "{json}");
         assert!(json.contains("\"frameMs\":800"), "{json}");
-        // 清单项 DTO 形状（thumb 键）
+        // 清单项 DTO 形状（thumb + builtin 键）
         let entry = CustomPetEntryDto {
             id: "boba".into(),
             name: "Boba".into(),
             format: "petdex-v1".into(),
             thumb: "data:image/png;base64,QQ==".into(),
+            builtin: false,
         };
         let ej = serde_json::to_string(&entry).unwrap();
         assert!(ej.contains("\"thumb\":\"data:image/png;base64,QQ==\""), "{ej}");
+        assert!(ej.contains("\"builtin\":false"), "{ej}");
+    }
+
+    // ===== 内置形象（智谱娘）=====
+
+    #[test]
+    fn 内置资产_编译期内嵌字节为合法petdex() {
+        // 内嵌资产发布前体检：pet.json 可解析且 id/网格与图集字节一致
+        //（校验复用导入链路的 sniff_sheet/grid_of，与用户导入同口径）
+        let text = std::str::from_utf8(BUILTIN_PET_JSON).expect("应为 UTF-8");
+        let meta: CustomPetMeta = serde_json::from_str(text).expect("pet.json 应可解析");
+        assert_eq!(meta.id, BUILTIN_PET_ID);
+        assert_eq!(meta.format, "petdex-v2");
+        let (ext, w, h) = sniff_sheet(BUILTIN_PET_SHEET).expect("内嵌图集应可嗅探");
+        assert_eq!(ext, "webp");
+        let version = if meta.format == "petdex-v2" { Some(2) } else { Some(1) };
+        let (rows, fmt) = grid_of(w, h, version).expect("内嵌图集网格应合法");
+        assert_eq!(fmt, meta.format);
+        assert_eq!(meta.rows, rows, "pet.json 行数应与图集一致");
+        assert_eq!(meta.frame_w, w / 8);
+        assert_eq!(meta.frame_h, h / rows);
+        assert_eq!(meta.image, "sheet.webp", "释放时的图集文件名应与之对应");
+    }
+
+    #[test]
+    fn 内置形象_释放_幂等与损坏重释() {
+        let root = test_dir("builtin");
+        // 首次：释放完整目录（pet.json + 图集）
+        ensure_builtin_pet_in(&root).unwrap();
+        assert!(builtin_pet_ok_in(&root, BUILTIN_PET_ID));
+        let meta = load_pet_meta_in(&root, BUILTIN_PET_ID).unwrap();
+        assert_eq!(meta.id, BUILTIN_PET_ID);
+        assert_eq!(meta.name, "智谱 Z 娘");
+        let sheet = fs::read(root.join(BUILTIN_PET_ID).join(&meta.image)).unwrap();
+        assert_eq!(sheet, BUILTIN_PET_SHEET, "释放的图集应与内嵌字节一致");
+        assert_eq!(
+            fs::read(root.join(BUILTIN_PET_ID).join(PET_META_FILE)).unwrap(),
+            BUILTIN_PET_JSON
+        );
+
+        // 幂等：已存在且合法 → 跳过（不动用户目录，无 staging 残留）
+        // 用户手改过的 pet.json 同样被尊重（不按内容比对覆盖）
+        fs::write(
+            root.join(BUILTIN_PET_ID).join(PET_META_FILE),
+            text_with_name(&meta, "我的智谱娘"),
+        )
+        .unwrap();
+        ensure_builtin_pet_in(&root).unwrap();
+        let kept = load_pet_meta_in(&root, BUILTIN_PET_ID).unwrap();
+        assert_eq!(kept.name, "我的智谱娘", "已存在且合法时不应覆盖用户内容");
+        assert!(
+            !fs::read_dir(&root).unwrap().flatten().any(|e| e
+                .file_name()
+                .to_string_lossy()
+                .contains(".builtin-")),
+            "跳过路径不应残留 staging 目录"
+        );
+
+        // 损坏（图集被清空）→ 重释为内置内容
+        fs::write(root.join(BUILTIN_PET_ID).join(&meta.image), b"").unwrap();
+        ensure_builtin_pet_in(&root).unwrap();
+        assert!(builtin_pet_ok_in(&root, BUILTIN_PET_ID));
+        assert_eq!(
+            fs::read(root.join(BUILTIN_PET_ID).join(&meta.image)).unwrap(),
+            BUILTIN_PET_SHEET,
+            "损坏后应重释为内置图集"
+        );
+
+        // pet.json 损坏（不可解析）→ 同样重释
+        fs::write(root.join(BUILTIN_PET_ID).join(PET_META_FILE), "{broken").unwrap();
+        ensure_builtin_pet_in(&root).unwrap();
+        assert!(builtin_pet_ok_in(&root, BUILTIN_PET_ID));
+
+        // 清单含内置项且带 builtin 标志（前端据此归内建分组、禁删除）
+        let list = list_custom_pets_in(&root);
+        let builtin = list.iter().find(|e| e.id == BUILTIN_PET_ID).expect("内置项应在清单");
+        assert!(builtin.builtin);
+        assert!(builtin.thumb.starts_with("data:image/png;base64,"), "缩略图应生成");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 构造仅替换显示名的 pet.json 文本（模拟用户手改）
+    fn text_with_name(meta: &CustomPetMeta, name: &str) -> String {
+        let mut m = meta.clone();
+        m.name = name.to_string();
+        serde_json::to_string_pretty(&m).unwrap()
+    }
+
+    #[test]
+    fn 内置形象_删除被拒绝() {
+        assert!(check_deletable("boba").is_ok());
+        let err = check_deletable(BUILTIN_PET_ID).unwrap_err();
+        assert!(err.contains("内置形象不可删除"), "{err}");
+        // 非法 id 照旧拒绝（路径遍历防护不受内置保护影响）
+        assert!(check_deletable("../etc").is_err());
+        assert!(check_deletable("").is_err());
     }
 }

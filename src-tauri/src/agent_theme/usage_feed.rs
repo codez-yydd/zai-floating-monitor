@@ -140,8 +140,9 @@
 //! 壳每 2 秒经 script 时间戳重载读取喂给宠物核心（heartbeat 接口），
 //! 核心缺失心跳时回退用 ts 判陈旧（V1 行为）。
 //! - usage-data.js 恢复"内容不变跳写"原策略（ts 保持最后数据变化语义）；
-//! - 心跳文件仅当注入版宠物开启（ThemeParams.pet_enabled）时每周期
-//!   重写；宠物关闭时停止写并顺带清理残留文件（无常驻开销）；
+//! - 心跳文件仅当注入版宠物开启（PetConfig.enabled && mode==injected，
+//!   宠物配置统一收敛到 pet.json 后不再读 ThemeParams）时每周期重写；
+//!   宠物关闭/悬浮窗形态时停止写并顺带清理残留文件（无常驻开销）；
 //! - 写放大权衡：几十字节每 2 秒原子写可忽略；"降低心跳粒度"不可行
 //!   （宠物阈值 10s 下粗粒度会在阈值边缘抖动误判）。
 //! - 独立悬浮窗宠物（pet.rs 轮询器）经 Tauri 事件推流，事件本身自带
@@ -576,7 +577,10 @@ fn export_once(cache: &mut Option<String>) {
         )?;
         let dir = store::app_dir(TARGET_APP_ID)?;
         fs::create_dir_all(&dir).map_err(|e| format!("创建主题目录失败: {e}"))?;
-        let pet_enabled = store::load_params(TARGET_APP_ID).pet_enabled;
+        // 心跳写出条件：注入版形态开启（宠物配置统一收敛到 pet.json，
+        // ThemeParams 不再承载宠物参数；悬浮窗形态经 Tauri 事件推流不
+        // 消费心跳文件）
+        let pet_enabled = crate::pet::load_pet_config().wants_injected_pet();
         // pu（待处理用户消息）：与 turns 同轮询周期读出；完成轮匹配复用
         // 已聚合的 turns umid 集合（内存比对，不回查库）。查询失败按无
         // 信号降级（unwrap_or(None)）——pu 是附加信号，失败不阻塞

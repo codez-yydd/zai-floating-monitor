@@ -6,6 +6,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   getAgentThemeParams,
   getAgentThemeState,
+  getPetConfig,
   installAgentTheme,
   listAgentWallpapers,
   restartZcode,
@@ -14,6 +15,7 @@ import {
   setAgentWallpaper,
   setAgentWallpaperDir,
   setPanelSticky,
+  setPetConfig,
   uninstallAgentTheme,
 } from "./api";
 import {
@@ -24,12 +26,15 @@ import {
   PageBody,
   PageHeader,
   PageShell,
+  PillButton,
+  PillGroup,
   SettingsCard,
   StatusBadge,
 } from "./layout";
 import { useI18n, type MessageKey } from "./i18n";
 import {
   PET_IMPORT_FILE_RE,
+  PET_IMPORT_IMAGE_RE,
   PetSizeLevelPicker,
   PetStyleSection,
   useCustomPets,
@@ -37,6 +42,8 @@ import {
 import type {
   AgentThemeProgress,
   AgentThemeState,
+  PetConfig,
+  PetMode,
   ThemeParams,
   WallpaperEntry,
 } from "./types";
@@ -84,12 +91,7 @@ const STAGE_KEYS: Record<string, MessageKey> = {
 interface SliderDef {
   key: keyof Omit<
     ThemeParams,
-    | "wallpaperFile"
-    | "wallpaperDir"
-    | "usageSessionBar"
-    | "usageTurnBar"
-    | "petEnabled"
-    | "petStyle"
+    "wallpaperFile" | "wallpaperDir" | "usageSessionBar" | "usageTurnBar"
   >;
   labelKey: MessageKey;
   /** 可选滑块说明（渲染在滑块下方的小字；仅部分参数提供） */
@@ -233,10 +235,11 @@ const USAGE_SLIDERS: ReadonlyArray<SliderDef> = [
 ];
 
 /**
- * 桌面宠物大小（petSize）：屏高比例档位 1~5（5.5%~15%），不再使用滑杆——
- * 渲染时 Rust 侧按主显示器逻辑高换算成整数 px 写入 --zbar-pet-size
- * （pet.js 画布 CSS 尺寸直接消费，换机器观感一致），UI 用
- * petStyles 的 PetSizeLevelPicker 分段控件（与设置页字号档位同风格）。
+ * 桌面宠物大小：屏高比例档位 1~5（5.5%~15%），不用滑杆——渲染时 Rust
+ * 侧按主显示器逻辑高换算成整数 px 写入 --zbar-pet-size（pet.js 画布
+ * CSS 尺寸直接消费，换机器观感一致），UI 用 petStyles 的
+ * PetSizeLevelPicker 分段控件（与字号档位同风格）；档位存 PetConfig
+ * （pet.json），改完经 setPetConfig 即时生效。
  */
 
 /** Rust 存储值 → 滑块刻度值（scale 滑块 ×scale，并消除浮点尾差如 0.85×100） */
@@ -369,15 +372,24 @@ export function ThemePanel({ onBack }: Props) {
   // onDragDropEvent 的 effect 闭包只注册一次，经 ref 转发到最新处理函数
   const dropHandlerRef = useRef<(paths: string[]) => void>(() => {});
 
+  // ===== 桌面宠物（pet.json/PetConfig 唯一真相源：总开关 + 注入版/
+  // 悬浮窗形态二选一 + 形象/尺寸，改完 setPetConfig 即时生效）=====
+  const [petCfg, setPetCfg] = useState<PetConfig | null>(null);
+  // 最新宠物配置镜像（拖放兜底等一次性闭包读不到最新 state）
+  const petCfgRef = useRef<PetConfig | null>(null);
+
   // 自定义宠物（第三阶段）：清单/拖放导入/删除共享控制器；导入或删除
-  // 后重拉参数（删除正在使用的宠物时 Rust 侧会把 petStyle 回退内建并
-  // 重渲 variables.css，面板需要重新读取才能同步高亮）
-  const refreshParamsQuiet = () => {
-    getAgentThemeParams("zcode")
-      .then(setParams)
+  // 后重拉宠物配置（删除正在使用的宠物时 Rust 侧会把选中回退内建默认
+  // 形象并热生效，面板需要重新读取才能同步高亮）
+  const refreshPetCfgQuiet = () => {
+    getPetConfig()
+      .then((c) => {
+        petCfgRef.current = c;
+        setPetCfg(c);
+      })
       .catch(() => {});
   };
-  const customPets = useCustomPets(refreshParamsQuiet);
+  const customPets = useCustomPets(refreshPetCfgQuiet);
 
   /** 刷新壁纸库列表（打开面板 / 设目录 / 导入后调用） */
   const refreshWallpapers = () => {
@@ -449,6 +461,19 @@ export function ThemePanel({ onBack }: Props) {
       disposed = true;
       unlisten?.();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 宠物配置加载（挂载即拉取；失败不阻塞页面其余功能，宠物卡停在本地
+  // 面板不渲染——悬浮窗形态不依赖皮肤安装，未安装皮肤也可设置，选注入
+  // 版时装完皮肤即出现）
+  useEffect(() => {
+    getPetConfig()
+      .then((c) => {
+        petCfgRef.current = c;
+        setPetCfg(c);
+      })
+      .catch((e) => setError(t("theme.petLoadFail", { msg: String(e) })));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -599,30 +624,29 @@ export function ThemePanel({ onBack }: Props) {
   };
 
   /**
-   * 桌面宠物开关变更（布尔参数）：本地即时反馈，防抖保存管道与滑块
-   * 共用；Rust 侧落盘后经 variables.css 的 --zbar-pet-enabled（1/0）
-   * 热重载透传给注入侧 pet.js（约 1 秒生效：关闭移除宠物 DOM、开启
-   * 重建，无需重启 ZCode）。
+   * 应用宠物配置（pet.json 唯一真相源，set_pet_config 改完即生效，不走
+   * 参数防抖管道）：乐观更新 + 失败回读回滚——
+   * - 总开关/形态切换：注入版经 variables.css 热重载约 1 秒生效（需已
+   *   安装皮肤）；悬浮窗即时建/关窗；
+   * - 形象/尺寸变化：注入版热切换重建画布，悬浮窗同步尺寸热推参数。
    */
-  const handlePetEnabled = (checked: boolean) => {
-    const cur = paramsRef.current;
-    if (!cur) return;
-    const next = { ...cur, petEnabled: checked };
-    setParams(next);
-    scheduleParamsSave(next);
-  };
-
-  /**
-   * 桌面宠物形象切换（string 参数，不走滑块刻度换算）：本地即时反馈，
-   * 防抖保存管道共用；经 --zbar-pet-style 热重载，pet.js 检测到形象
-   * 变化即重建画布与帧缓存（热切换，约 1 秒生效）。
-   */
-  const handlePetStyle = (id: string) => {
-    const cur = paramsRef.current;
-    if (!cur || cur.petStyle === id) return;
-    const next = { ...cur, petStyle: id };
-    setParams(next);
-    scheduleParamsSave(next);
+  const applyPet = async (next: PetConfig) => {
+    petCfgRef.current = next;
+    setPetCfg(next);
+    try {
+      const back = await setPetConfig(next);
+      petCfgRef.current = back;
+      setPetCfg(back);
+    } catch (e) {
+      setError(t("theme.petApplyFail", { msg: String(e) }));
+      try {
+        const back = await getPetConfig();
+        petCfgRef.current = back;
+        setPetCfg(back);
+      } catch {
+        /* 回读失败保持当前态（下次切换再对齐） */
+      }
+    }
   };
 
   /**
@@ -630,33 +654,44 @@ export function ThemePanel({ onBack }: Props) {
    * 不可见，且其模态等待会阻塞主线程导致所有 IPC 瘫痪，故改为接收 Tauri
    * 拖放事件给出的文件路径。多文件时只取第一个，按内容分流：
    * - 宠物导入文件（zip / pet.json）→ 自定义宠物导入（Petdex 包，见
-   *   petStyles 的 PetStyleSection；png/webp 投放保留壁纸导入语义，
-   *   裸图集导入请在设置页的宠物卡或改名为 zip 投放）；
+   *   petStyles 的 PetStyleSection），不依赖皮肤安装，路由在壁纸守卫
+   * （active = 已安装）之前；
+   * - 裸图集 png/webp → 皮肤未安装时（壁纸导入本就不可用）路由给宠物
+   *   导入（与原设置页拖放语义一致，保留裸图集入口）；已安装时保持
+   *   壁纸导入语义不变（避免抢占壁纸主流程）；
    * - 壁纸白名单扩展名（大小写不敏感）→ 导入 wallpapers/ 并切换指向；
    * - 其余（无壁纸扩展名）→ 按文件夹处理，交给 Rust 侧校验真实目录性
    *   后设为壁纸目录（非目录时由后端报出明确错误）
    * 任何异常都必须落到 setError。
    */
+  const importPetFromDrop = async (path: string) => {
+    dragGuardRef.current = { ...dragGuardRef.current, locked: true };
+    try {
+      const err = await customPets.importFromPath(path);
+      // P2-3：宠物卡未渲染（配置读取失败）时导入结果无展示位，经
+      // 全局反馈通道兜底（成功走 flash、失败走 error 条）
+      if (petCfgRef.current === null) {
+        if (err === null) showFlash(t("theme.petImportDone"));
+        else setError(err);
+      }
+    } finally {
+      dragGuardRef.current.locked = false;
+    }
+  };
   const handleDropWallpaper = async (paths: string[]) => {
     const guard = dragGuardRef.current;
     if (guard.locked || paths.length === 0) return;
     const path = paths[0];
     const fileName = baseName(path);
     if (PET_IMPORT_FILE_RE.test(fileName)) {
-      // 宠物导入不依赖皮肤安装（独立悬浮窗同样可用），路由在壁纸守卫
-      // （active = 已安装）之前，未安装皮肤也可导入
-      dragGuardRef.current = { ...guard, locked: true };
-      try {
-        const err = await customPets.importFromPath(path);
-        // P2-3：宠物卡未渲染（皮肤未安装，params 为空）时导入结果无
-        // 展示位，经全局反馈通道兜底（成功走 flash、失败走 error 条）
-        if (paramsRef.current === null) {
-          if (err === null) showFlash(t("theme.petImportDone"));
-          else setError(err);
-        }
-      } finally {
-        dragGuardRef.current.locked = false;
-      }
+      await importPetFromDrop(path);
+      return;
+    }
+    // 皮肤未安装时 png/webp 投放路由给宠物导入（裸图集是 Petdex 导入
+    // 支持的三种形态之一，设置页宠物卡删除后这里是唯一裸图集入口；
+    // guard.active = false = 未安装/需重装，壁纸导入本就不可用）
+    if (!guard.active && PET_IMPORT_IMAGE_RE.test(fileName)) {
+      await importPetFromDrop(path);
       return;
     }
     if (!guard.active) return;
@@ -1270,25 +1305,25 @@ export function ThemePanel({ onBack }: Props) {
             </SettingsCard>
           )}
 
-          {/* 桌面宠物区：独立配置区域（开关 + 形象选择 + 大小滑杆），
-              仅已安装且参数读取成功时渲染；保存走同一防抖管道
-              （set_agent_theme_params 整体落盘），宠物参数经 variables.css
-              热重载约 1 秒生效（关闭移除 DOM、开启重建、形象/大小热切换） */}
-          {state.installed && params && (
+          {/* 桌面宠物区（宠物设置唯一入口，配置源 pet.json/PetConfig）：
+              总开关 + 注入版/悬浮窗形态二选一 + 形象选择 + 尺寸档位。
+              配置读取成功即渲染（悬浮窗形态不依赖皮肤安装，未安装皮肤
+              也能设置，选注入版时装完皮肤即出现）；改完经 set_pet_config
+              即时生效——注入版参数经 variables.css 热重载约 1 秒生效、
+              悬浮窗即时建/关窗；安装/卸载进行中禁用操作 */}
+          {petCfg && (
             <SettingsCard
               title={t("theme.petTitle")}
               hint={t("theme.petHint")}
               action={
-                paramsSavedFlash ? (
-                  <span className="text-[9px] text-emerald-600">
-                    {t("theme.paramsSavedFlash")}
-                  </span>
-                ) : undefined
+                <span className="text-[9px] text-slate-500">
+                  {t("settings.instant")}
+                </span>
               }
             >
               <div className="flex flex-col gap-2.5">
-                {/* 宠物开关（pet.js V1）：开启后在 ZCode 对话页右下角
-                    显示像素宠物，按工作状态实时切换动画 */}
+                {/* 宠物总开关：关 = 全关（注入版移除 DOM、悬浮窗关窗停
+                    轮询）；开 = 按下方形态选择生效 */}
                 <label className="flex items-center justify-between gap-2 cursor-pointer">
                   <span className="min-w-0">
                     <span className="block text-[10px] text-slate-600">
@@ -1300,42 +1335,73 @@ export function ThemePanel({ onBack }: Props) {
                   </span>
                   <input
                     type="checkbox"
-                    checked={params.petEnabled}
+                    checked={petCfg.enabled}
                     disabled={actionsDisabled}
-                    onChange={(e) => handlePetEnabled(e.target.checked)}
+                    onChange={(e) =>
+                      void applyPet({ ...petCfg, enabled: e.target.checked })
+                    }
                     className="accent-sky-500 h-3 w-3 shrink-0 disabled:opacity-40"
                   />
                 </label>
 
-                {/* 形象选择（内建 + 自定义）+ 大小滑杆：宠物关闭时降透明度
-                    并阻断交互（保留设置值，重新开启即恢复） */}
+                {/* 形态选择 + 形象 + 尺寸：总开关关闭时降透明度并阻断
+                    交互（保留设置值，重新开启即恢复） */}
                 <div
                   className={`flex flex-col gap-2.5 pt-2 border-t border-slate-900/6 ${
-                    params.petEnabled ? "" : "opacity-40 pointer-events-none"
+                    petCfg.enabled ? "" : "opacity-40 pointer-events-none"
                   }`}
                 >
+                  {/* 形态二选一（默认注入版）：注入版渲染在 ZCode 对话页
+                      （需已安装皮肤、随 variables.css 热重载，可拖拽移位）；
+                      悬浮窗为独立透明置顶窗（不依赖皮肤） */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-slate-700/55 shrink-0">
+                      {t("theme.petModeLabel")}
+                    </span>
+                    <PillGroup className="flex-1">
+                      {(
+                        [
+                          ["injected", "theme.petModeInjected"],
+                          ["floating", "theme.petModeFloating"],
+                        ] as [PetMode, MessageKey][]
+                      ).map(([mode, key]) => (
+                        <PillButton
+                          key={mode}
+                          active={petCfg.mode === mode}
+                          disabled={actionsDisabled}
+                          onClick={() => void applyPet({ ...petCfg, mode })}
+                        >
+                          {t(key)}
+                        </PillButton>
+                      ))}
+                    </PillGroup>
+                  </div>
+                  <p className="text-[9px] text-slate-500 leading-relaxed">
+                    {t("theme.petModeHint")}
+                  </p>
+
                   <PetStyleSection
-                    value={params.petStyle}
+                    value={petCfg.style}
                     disabled={actionsDisabled}
-                    onSelect={handlePetStyle}
+                    onSelect={(id) => void applyPet({ ...petCfg, style: id })}
                     controller={customPets}
-                    skinPage
                   />
 
-                  {/* 尺寸档位（屏高比例 1~5）：离散点击经 handleSlider
-                      走既有防抖保存管道，px 换算在 Rust 侧完成 */}
+                  {/* 尺寸档位（屏高比例 1~5）：离散点击即时保存（set_pet_
+                      config 本身即时生效，无需防抖），px 换算在 Rust 侧
+                      按屏幕逻辑高完成 */}
                   <PetSizeLevelPicker
                     labelKey="theme.paramPetSize"
-                    value={params.petSize}
+                    value={petCfg.size}
                     disabled={actionsDisabled}
-                    onSelect={(level) => handleSlider("petSize", level)}
+                    onSelect={(level) => void applyPet({ ...petCfg, size: level })}
                   />
                   <p className="text-[9px] text-slate-500 leading-relaxed">
                     {t("theme.paramPetSizeHint")}
                   </p>
                 </div>
 
-                {/* 状态图例：宠物五种工作状态的含义说明 */}
+                {/* 状态图例：宠物工作状态的含义说明 */}
                 <p className="text-[9px] text-slate-500 leading-relaxed break-words">
                   {t("theme.petLegend")}
                 </p>

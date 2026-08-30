@@ -584,16 +584,17 @@ export async function saveShareImage(
   return invoke<string | null>("save_share_image", { pngBytes, suggestedName });
 }
 
-// ===== 独立桌面宠物（第二阶段：不依赖皮肤的透明悬浮窗宠物）=====
+// ===== 桌面宠物（pet.json/PetConfig 唯一真相源，皮肤页宠物卡读写）=====
 
-/** 读取独立宠物配置（设置页卡片初始数据） */
+/** 读取宠物配置（皮肤页宠物卡初始数据） */
 export async function getPetConfig(): Promise<PetConfig> {
   return invoke<PetConfig>("get_pet_config");
 }
 
 /**
- * 保存并应用独立宠物配置（改完即生效）：开关切换即时建窗/关窗并启停
- * 独立状态轮询；形象/大小变化即时推送宠物窗口热切换（悬浮窗尺寸由
+ * 保存并应用宠物配置（改完即生效）：总开关/形态切换——悬浮窗即时
+ * 建窗/关窗并启停独立轮询，注入版经 variables.css 热重载约 1 秒生效
+ * （需已安装皮肤）；形象/大小变化即时推送悬浮窗热切换（悬浮窗尺寸由
  * Rust 侧同步调整）。返回收敛后的最终配置。
  */
 export async function setPetConfig(config: PetConfig): Promise<PetConfig> {
@@ -614,14 +615,15 @@ export async function importPet(srcPath: string): Promise<CustomPetEntry> {
   return invoke<CustomPetEntry>("import_pet", { srcPath });
 }
 
-/** 列出自定义宠物清单（按 id 排序，含 idle 首帧缩略图） */
+/** 列出宠物清单（按 id 排序，含 idle 首帧缩略图；内置智谱娘也在其中，
+ *  builtin 字段区分内建/自定义分组） */
 export async function listCustomPets(): Promise<CustomPetEntry[]> {
   return invoke<CustomPetEntry[]>("list_custom_pets");
 }
 
 /**
- * 删除自定义宠物（正在使用的两条管道先回退内建默认形象再删除）。
- * id 为 list_custom_pets 返回的清单项 id。
+ * 删除自定义宠物（正在使用的两条管道先回退默认形象——内置智谱娘——
+ * 再删除）。内置形象（id=zhipu-z-niang）不可删除，服务端返回中文错误。
  */
 export async function deleteCustomPet(id: string): Promise<void> {
   await invoke("delete_custom_pet", { id });

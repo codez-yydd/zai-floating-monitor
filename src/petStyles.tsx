@@ -1,15 +1,16 @@
 /**
- * 桌面宠物形象清单（共享模块）：皮肤注入版设置卡（ThemePanel）与
- * 独立悬浮窗宠物设置卡（SettingsPanel）共用同一份形象选择数据，
- * 与注入脚本/宠物窗口加载的 pet-core.js 内嵌形象库（PET_STYLES）的键
- * 保持一致（Rust 侧默认值同源）。preview 为面板预览用的精简帧数据副本
- * （每形象取 idle 首帧，16×16 字符网格："." 透明、"1".."8" 调色板
- * 下标），仅服务形象选择器的静态展示，动画帧以 pet-core.js 为准。
+ * 桌面宠物形象清单（共享模块）：皮肤页宠物卡（ThemePanel，宠物设置的
+ * 唯一入口，注入版/悬浮窗两形态共用 pet.json 配置）使用。
  *
- * 第三阶段新增自定义宠物（Petdex 格式导入）：useCustomPets 提供清单/
- * 拖放导入/删除的共享状态与操作，PetStyleSection 渲染「内建 + 自定义」
- * 分组选择器（自定义卡用 Rust 生成的 idle 首帧缩略图，不加载全量图集），
- * 两处设置卡直接复用。
+ * V8 起全部形象统一为 Petdex 图集形态（内建 cat/bot 字符网格形象已随
+ * 核心渲染收敛移除）：「智谱 Z 娘」为软件内置形象（随安装包分发、默认
+ * 选中、不可删除），与用户自定义宠物共用 custom:<id> 选中值和图集渲
+ * 染通道，缩略图统一由 Rust 侧生成（idle 行首帧）。
+ *
+ * 自定义宠物（Petdex 格式导入）：useCustomPets 提供清单/拖放导入/删除
+ * 的共享状态与操作，PetStyleSection 渲染「内建（智谱娘）+ 自定义」分组
+ * 选择器（内建卡无删除按钮；自定义卡带删除按钮与格式角标，不加载全量
+ * 图集）。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useI18n, type MessageKey } from "./i18n";
@@ -17,111 +18,14 @@ import { deleteCustomPet, importPet, listCustomPets } from "./api";
 import { PET_SIZE_LEVEL_PCT, type CustomPetEntry } from "./types";
 import { PillGroup, PillButton } from "./layout";
 
-export interface PetStyleOption {
-  id: string;
-  nameKey: MessageKey;
-  palette: ReadonlyArray<string>; // 下标 1..8 的颜色（不含透明占位）
-  preview: ReadonlyArray<string>; // idle 首帧 16 行
-}
-
-export const PET_STYLE_OPTIONS: ReadonlyArray<PetStyleOption> = [
-  {
-    id: "cat",
-    nameKey: "theme.petStyleCat",
-    palette: [
-      "#3f3a39",
-      "#f2b258",
-      "#ffe0a3",
-      "#e8837a",
-      "#2f9e63",
-      "#ffffff",
-      "#7aa7f0",
-      "#c97f3b",
-    ],
-    preview: [
-      "................",
-      "...11......11...",
-      "..1221....1221..",
-      "..1421....1241..",
-      "..111111111111..",
-      "..122222222221..",
-      "..125222222521..",
-      "..122222222221..",
-      "..124422224421..",
-      "..122226622221..",
-      "..112222222211..",
-      "..132222222231..",
-      ".13222222222231.",
-      ".13222222222231.",
-      "..111111111111..",
-      "................",
-    ],
-  },
-  {
-    id: "bot",
-    nameKey: "theme.petStyleBot",
-    palette: [
-      "#2f3542",
-      "#e9eef5",
-      "#1c2430",
-      "#57d4e8",
-      "#e8574d",
-      "#8b98ab",
-      "#ffffff",
-      "#6ea8f5",
-    ],
-    preview: [
-      ".......5........",
-      ".......1........",
-      "..111111111111..",
-      "..133333333331..",
-      "..134433344331..",
-      "..133333333331..",
-      "..111111111111..",
-      "...1111111111...",
-      "..122222222221..",
-      "..122277222221..",
-      "..122222222221..",
-      "..162222222261..",
-      "..111111111111..",
-      "...11....11.....",
-      "...11....11.....",
-      "................",
-    ],
-  },
-];
-
-/** 形象选择器的像素预览（16×16 网格按调色板着色） */
-export function PetPreview({ option }: { option: PetStyleOption }) {
-  return (
-    <div
-      className="grid"
-      style={{
-        gridTemplateColumns: "repeat(16, 1fr)",
-        width: 40,
-        height: 40,
-      }}
-      aria-hidden="true"
-    >
-      {option.preview.flatMap((row, y) =>
-        Array.from(row).map((ch, x) => {
-          const idx = ch === "." ? 0 : parseInt(ch, 10);
-          const color = idx > 0 ? option.palette[idx - 1] : undefined;
-          return (
-            <div key={`${y}-${x}`} style={color ? { backgroundColor: color } : undefined} />
-          );
-        })
-      )}
-    </div>
-  );
-}
-
 // ===== 自定义宠物（Petdex 导入）=====
 
-/** 宠物导入文件（拖放路由用）：zip 包 / pet.json 元信息 */
+/** 宠物导入文件（拖放路由用）：zip 包 / pet.json 元信息（皮肤页的
+ *  png/webp 投放已安装时保留壁纸导入语义） */
 export const PET_IMPORT_FILE_RE = /\.(zip|json)$/i;
-/** 宠物导入图集文件（拖放路由用）：仅设置页路由到宠物导入
- *  （皮肤页的 png/webp 投放保留壁纸导入语义） */
+/** 宠物导入图集文件（拖放路由用）：皮肤页仅在未安装皮肤（壁纸导入
+ *  不可用）时把 png/webp 路由给宠物导入（与原设置页语义一致），避免
+ *  抢占已安装用户的壁纸导入主流程 */
 export const PET_IMPORT_IMAGE_RE = /\.(png|webp)$/i;
 
 /** 宠物尺寸档位名词条（与 PET_SIZE_LEVEL_PCT 下标一一对应，"默认"=档 3） */
@@ -134,11 +38,10 @@ const PET_SIZE_LEVEL_NAME_KEYS: ReadonlyArray<MessageKey> = [
 ];
 
 /**
- * 宠物尺寸档位选择器（屏高比例档位 1~5）：两处设置卡共用（设置页独立
- * 悬浮窗 + 皮肤页注入版），替代旧 48~128px 滑杆——按屏幕高度百分比定
- * 档（5.5%~15%），高分屏/低分屏观感一致，px 换算在 Rust 侧完成。分段
- * 控件与设置页字号/窗口大小的 PillGroup 风格一致；离散点击即时保存
- * （无滑杆拖动的防抖需求）。
+ * 宠物尺寸档位选择器（屏高比例档位 1~5）：替代旧 48~128px 滑杆——按
+ * 屏幕高度百分比定档（5.5%~15%），高分屏/低分屏观感一致，px 换算在
+ * Rust 侧完成。分段控件与字号/窗口大小的 PillGroup 风格一致；离散点击
+ * 即时保存（set_pet_config 本身即时生效，无滑杆拖动的防抖需求）。
  */
 export function PetSizeLevelPicker({
   labelKey,
@@ -146,7 +49,7 @@ export function PetSizeLevelPicker({
   disabled,
   onSelect,
 }: {
-  /** 标签词条（设置页 "settings.petSize" / 皮肤页 "theme.paramPetSize"） */
+  /** 标签词条（当前仅皮肤页 "theme.paramPetSize" 使用） */
   labelKey: MessageKey;
   /** 当前档位（1~5；越界值不高亮任何档） */
   value: number;
@@ -177,12 +80,13 @@ export function PetSizeLevelPicker({
   );
 }
 
-/** 自定义宠物的 style 值（pet_style / PetConfig.style 持久化形态） */
+/** 宠物形象的 style 值（pet_style / PetConfig.style 持久化形态）：内建
+ *  智谱娘与用户自定义宠物共用 custom:<id> 通道（Rust 侧默认值同源） */
 export const customStyleValue = (id: string) => `custom:${id}`;
 
 /** useCustomPets 的控制器形态（PetStyleSection 与拖放路由共用） */
 export interface CustomPetsController {
-  /** 自定义宠物清单（按 id 排序） */
+  /** 宠物清单（按 id 排序，含内置智谱娘，builtin 字段区分分组） */
   pets: CustomPetEntry[];
   /** 导入进行中（拖放处理期间禁用重入） */
   importing: boolean;
@@ -193,14 +97,14 @@ export interface CustomPetsController {
   /** 拖放导入入口：null = 成功；字符串 = 中文错误信息（供宿主面板在
    *  宠物卡未渲染时经全局反馈通道兜底展示，P2-3） */
   importFromPath: (path: string) => Promise<string | null>;
-  /** 删除自定义宠物（确认浮层在内部弹出） */
+  /** 删除自定义宠物（确认浮层在内部弹出；内置形象无删除入口） */
   removeById: (id: string, name: string) => Promise<void>;
 }
 
 /**
- * 自定义宠物的共享状态与操作（两处设置卡各持一份实例，导入/删除后
- * 各自刷新清单并经 onChanged 回调让宿主面板重拉参数——删除正在使用
- * 的宠物时 Rust 侧会把两条管道的选中回退内建默认形象，面板需要重新
+ * 宠物清单的共享状态与操作（皮肤页宠物卡持一份实例，导入/删除后
+ * 刷新清单并经 onChanged 回调让宿主面板重拉宠物配置——删除正在使用
+ * 的宠物时 Rust 侧会把选中回退默认形象（内置智谱娘），面板需要重新
  * 读取才能同步高亮）。
  */
 export function useCustomPets(onChanged?: () => void): CustomPetsController {
@@ -217,7 +121,7 @@ export function useCustomPets(onChanged?: () => void): CustomPetsController {
     try {
       setPets(await listCustomPets());
     } catch {
-      /* 清单读取失败静默：选择器仍显示内建形象，不阻塞面板 */
+      /* 清单读取失败静默：选择器仍显示内置形象占位，不阻塞面板 */
     }
   }, []);
 
@@ -264,63 +168,97 @@ export function useCustomPets(onChanged?: () => void): CustomPetsController {
   return { pets, importing, error, refresh, importFromPath, removeById };
 }
 
+/** 形象缩略图（Rust 生成的 idle 行首帧，64×70 内等比 PNG）与名称 */
+function PetThumb({ entry }: { entry: CustomPetEntry }) {
+  return (
+    <>
+      {entry.thumb ? (
+        <img
+          src={entry.thumb}
+          alt=""
+          style={{ imageRendering: "pixelated" }}
+          className="max-w-[64px] max-h-[70px]"
+          draggable={false}
+        />
+      ) : (
+        /* 缩略图生成失败的占位（宠物仍可正常选用） */
+        <span className="w-10 h-10 rounded bg-slate-900/8" />
+      )}
+      <span className="text-[9px] text-slate-600 px-1 truncate max-w-full">
+        {entry.name}
+      </span>
+    </>
+  );
+}
+
 /**
- * 宠物形象选择器（内建 + 自定义分组 + 导入区）。两处设置卡复用：
- * - 内建组：像素预览卡（既有形态）；
- * - 自定义组：Rust 生成的 idle 首帧缩略图卡（带删除按钮与格式角标）；
+ * 宠物形象选择器（内建 + 自定义分组 + 导入区），皮肤页宠物卡使用：
+ * - 内建组：内置「智谱 Z 娘」缩略图卡（Rust 启动时释放到宠物库，默认
+ *   选中，无删除按钮）；
+ * - 自定义组：Rust 生成的 idle 首帧缩略图卡（带删除按钮）；
  * - 导入区：拖放目标提示（原生文件对话框在 Accessory 应用不可用，
  *   与壁纸导入同样走 Tauri 拖放事件，由宿主面板路由到
- *   controller.importFromPath）。
+ *   controller.importFromPath；png/webp 投放仅皮肤未安装时路由宠物
+ *   导入，见 PET_IMPORT_IMAGE_RE）。
  */
 export function PetStyleSection({
   value,
   disabled,
   onSelect,
   controller,
-  skinPage = false,
 }: {
-  /** 当前选中形象 id（cat / bot / custom:<id>） */
+  /** 当前选中形象 id（custom:zhipu-z-niang / custom:<id>） */
   value: string;
   /** 操作禁用（皮肤页安装进行中等） */
   disabled?: boolean;
-  /** 选中形象（内建 id 或 custom:<id>） */
+  /** 选中形象（custom:<id>，内建与自定义同通道） */
   onSelect: (id: string) => void;
-  /** 自定义宠物控制器（useCustomPets 实例） */
+  /** 宠物清单控制器（useCustomPets 实例） */
   controller: CustomPetsController;
-  /** 皮肤页形态：png/webp 投放在皮肤页路由给壁纸导入，导入提示只列
-   *  zip / pet.json（P2-2，与 ThemePanel 的拖放路由保持一致） */
-  skinPage?: boolean;
 }) {
   const { t } = useI18n();
+  const builtins = controller.pets.filter((p) => p.builtin);
+  const customs = controller.pets.filter((p) => !p.builtin);
   return (
     <div className="flex flex-col gap-2">
-      {/* 内建形象组 */}
+      {/* 内建形象组：内置智谱娘（无删除按钮——Rust 侧 delete 命令同样
+          拒绝内置 id，双保险） */}
       <span className="text-[9px] text-slate-500">{t("theme.petGroupBuiltin")}</span>
-      <div className="grid grid-cols-2 gap-1.5">
-        {PET_STYLE_OPTIONS.map((opt) => (
-          <button
-            key={opt.id}
-            onClick={() => onSelect(opt.id)}
-            disabled={disabled}
-            className={`flex flex-col items-center gap-1 rounded-md border py-2 transition-colors disabled:opacity-40 ${
-              value === opt.id
-                ? "border-sky-500 bg-sky-500/10"
-                : "border-slate-900/10 bg-slate-900/4 hover:border-slate-900/25"
-            }`}
-          >
-            <PetPreview option={opt} />
-            <span className="text-[9px] text-slate-600">{t(opt.nameKey)}</span>
-          </button>
-        ))}
-      </div>
+      {builtins.length > 0 ? (
+        <div className="grid grid-cols-2 gap-1.5">
+          {builtins.map((pet) => {
+            const styleValue = customStyleValue(pet.id);
+            return (
+              <button
+                key={pet.id}
+                onClick={() => onSelect(styleValue)}
+                disabled={disabled}
+                className={`flex flex-col items-center gap-1 rounded-md border py-2 transition-colors disabled:opacity-40 ${
+                  value === styleValue
+                    ? "border-sky-500 bg-sky-500/10"
+                    : "border-slate-900/10 bg-slate-900/4 hover:border-slate-900/25"
+                }`}
+              >
+                <PetThumb entry={pet} />
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        /* 清单未加载/释放失败的占位（Rust 启动时释放内置形象，正常
+            稍后即出现） */
+        <p className="text-[9px] text-slate-500 leading-relaxed">
+          {t("theme.petBuiltinLoading")}
+        </p>
+      )}
 
       {/* 自定义形象组（Petdex 导入） */}
       <span className="text-[9px] text-slate-500 pt-1">
         {t("theme.petGroupCustom")}
       </span>
-      {controller.pets.length > 0 ? (
+      {customs.length > 0 ? (
         <div className="grid grid-cols-2 gap-1.5">
-          {controller.pets.map((pet) => {
+          {customs.map((pet) => {
             const styleValue = customStyleValue(pet.id);
             const active = value === styleValue;
             return (
@@ -337,21 +275,7 @@ export function PetStyleSection({
                   disabled={disabled}
                   className="flex flex-col items-center gap-1 disabled:opacity-40 w-full"
                 >
-                  {pet.thumb ? (
-                    <img
-                      src={pet.thumb}
-                      alt=""
-                      style={{ imageRendering: "pixelated" }}
-                      className="max-w-[64px] max-h-[70px]"
-                      draggable={false}
-                    />
-                  ) : (
-                    /* 缩略图生成失败的占位（宠物仍可正常选用） */
-                    <span className="w-10 h-10 rounded bg-slate-900/8" />
-                  )}
-                  <span className="text-[9px] text-slate-600 px-1 truncate max-w-full">
-                    {pet.name}
-                  </span>
+                  <PetThumb entry={pet} />
                 </button>
                 <button
                   onClick={() => void controller.removeById(pet.id, pet.name)}
@@ -372,16 +296,14 @@ export function PetStyleSection({
         </p>
       )}
 
-      {/* 导入区：拖放目标提示（文件拖到面板窗口即导入，见两处设置卡的
-          onDragDropEvent 路由；皮肤页 png/webp 走壁纸导入，提示按页面
-          区分，P2-2） */}
+      {/* 导入区：拖放目标提示（文件拖到面板窗口即导入，见宿主面板的
+          onDragDropEvent 路由；皮肤页已安装时 png/webp 走壁纸导入，
+          仅未安装时路由宠物导入，见 PET_IMPORT_IMAGE_RE） */}
       <div className="rounded-md border border-dashed border-slate-900/15 px-2 py-1.5 text-center">
         <p className="text-[9px] text-slate-500 leading-relaxed">
           {controller.importing
             ? t("theme.petImporting")
-            : skinPage
-              ? t("theme.petImportHintSkin")
-              : t("theme.petImportHint")}
+            : t("theme.petImportHintSkin")}
         </p>
         {controller.error && (
           <p className="text-[9px] text-red-600 leading-relaxed break-words">
