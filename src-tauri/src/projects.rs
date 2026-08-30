@@ -830,7 +830,10 @@ fn zcode_project_sessions(
     Ok((total, page.collect()))
 }
 
-/// 合并展示路径（同键已有值不覆盖；未知项目键忽略）
+/// 合并展示路径（同键已有值不覆盖；未知项目键忽略）。
+/// 只填充已存在的项目条目，不创建新条目：展示路径查询不带时间范围
+/// （查全量历史 cwd），若在此建条目，会把时间范围外无任何用量的历史
+/// 项目以 0 token/0 会话的空行带进项目列表。
 fn merge_display_paths<I>(projects: &mut HashMap<String, ProjectAcc>, paths: I)
 where
     I: IntoIterator<Item = (String, String)>,
@@ -839,9 +842,10 @@ where
         if key == UNKNOWN_PROJECT {
             continue;
         }
-        let acc = projects.entry(key).or_default();
-        if acc.display_path.is_none() {
-            acc.display_path = Some(raw);
+        if let Some(acc) = projects.get_mut(&key) {
+            if acc.display_path.is_none() {
+                acc.display_path = Some(raw);
+            }
         }
     }
 }
@@ -940,6 +944,10 @@ fn query_projects(from_ms: i64, to_ms: i64) -> Result<Vec<ProjectSummary>, Strin
             }
         })
         .collect();
+    // 兜底过滤：时间范围内无任何使用的项目不返回（tokens/requests/sessions
+    // 任一非零即视为有使用痕迹，保留；zcode 无会话列时 sessions 恒 0 但
+    // tokens>0 的项目必须保留）。
+    out.retain(|p| p.total_tokens > 0 || p.requests > 0 || p.sessions > 0);
     out.sort_by(|a, b| {
         b.total_tokens
             .cmp(&a.total_tokens)
@@ -1251,5 +1259,28 @@ mod tests {
             "诊断: 今日 zcode tokens={zcode_tokens} requests={zcode_requests}（与主库一致，差异 0%），\
              已归属真实项目的会话数={mapped_sessions}"
         );
+    }
+
+    /// 回归：merge_display_paths 只给已存在的项目条目填充展示路径，
+    /// 不得为路径查询（全量历史、无时间范围）返回的新键创建空条目，
+    /// 否则会把时间范围外的历史项目以 0 token/0 会话空行带进列表。
+    #[test]
+    fn merge_display_paths_does_not_create_empty_projects() {
+        let mut projects: HashMap<String, ProjectAcc> = HashMap::new();
+        // 预置一个时间范围内有用量的项目条目
+        projects.entry("/users/a/proj".to_string()).or_default();
+
+        // 三条路径：预置键（应填充）、新键（不得建条目）、未知项目键（忽略）
+        let paths = vec![
+            ("/users/a/proj".to_string(), "/Users/A/Proj".to_string()),
+            ("/users/b/other".to_string(), "/Users/B/Other".to_string()),
+            (UNKNOWN_PROJECT.to_string(), "/Users/X/Unknown".to_string()),
+        ];
+        merge_display_paths(&mut projects, paths);
+
+        // 只保留预置条目，未新增空项目
+        assert_eq!(projects.len(), 1);
+        let acc = projects.get("/users/a/proj").expect("预置项目应保留");
+        assert_eq!(acc.display_path.as_deref(), Some("/Users/A/Proj"));
     }
 }
