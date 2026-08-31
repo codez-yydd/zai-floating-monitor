@@ -14,6 +14,7 @@ mod deepseek;
 mod gemini;
 mod grok;
 mod kimi;
+mod kimi_oauth;
 mod longcat;
 mod minimax;
 mod mimo;
@@ -2160,7 +2161,9 @@ pub fn run() {
             provider_credentials::reset_provider_credentials,
             provider_credentials::record_credential_check,
             provider_credentials::has_provider_credentials,
-            provider_quota::get_provider_quota
+            provider_quota::get_provider_quota,
+            kimi_oauth::start_kimi_device_auth,
+            kimi_oauth::poll_kimi_device_auth
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -23,10 +23,16 @@ export type AgentId =
   | "stepfun"
   | "doubao";
 
-/** 凭证驱动的新 provider 集合（tab 显示门槛 = 已启用或已有凭证）。 */
-export type CredentialAgentId = Exclude<AgentId, "zai" | "codex" | "claude" | "cursor" | "kimi">;
+/**
+ * 凭证驱动的新 provider 集合（tab 显示门槛 = 已启用或已有凭证）。
+ * kimi 属首批 5 个（默认开启、tab 行为不变），但其凭证体系与其他新
+ * provider 完全一致（~/.zbar/credentials/kimi.json，支持 OAuth 网页
+ * 登录/手动粘贴），故同样纳入本集合参与「有凭证自动显示」联动。
+ */
+export type CredentialAgentId = Exclude<AgentId, "zai" | "codex" | "claude" | "cursor">;
 
 export const CREDENTIAL_AGENTS: readonly CredentialAgentId[] = [
+  "kimi",
   "gemini",
   "grok",
   "qoder",
@@ -45,16 +51,32 @@ export const CREDENTIAL_AGENTS: readonly CredentialAgentId[] = [
 /**
  * presence 探测名单：CREDENTIAL_AGENTS 之外追加 claude/cursor——两者的
  * 「其他账号」额度区需要按「是否有凭证」决定补刷与 120s 轮询（探测结果
- * 进同一 credentialPresence state，DataCache 轮询自动覆盖）。
- * 注意：claude/cursor 属首批 5 个，tab 展示仍由纯偏好控制（StatsPanel 的
- * presence 门槛只对 isCredentialAgent 生效），本名单扩展不改变其 tab 行为；
- * 「有凭证自动开启」的边沿检测仍只遍历 CREDENTIAL_AGENTS。
+ * 进同一 credentialPresence state，DataCache 轮询自动覆盖；kimi 的「其他
+ * 账号」区同理，由 CREDENTIAL_AGENTS 覆盖）。
+ * tab 显隐门槛：CREDENTIAL_AGENTS 中除 PURE_PREFERENCE_AGENTS（kimi）外
+ * 均为「已启用或有凭证」；kimi 属首批 5 个，与 claude/cursor 一样纯偏好
+ * 控制——presence 只驱动「其他账号」区的补刷/轮询，不影响 tab 显隐。
  */
 export const PRESENCE_PROVIDERS: readonly string[] = [
   ...CREDENTIAL_AGENTS,
   "claude",
   "cursor",
 ];
+
+/**
+ * tab 展示纯偏好控制的首批凭证型 provider（kimi）：虽已纳入凭证体系
+ * （有「其他账号」区、presence 补刷与 120s 轮询），但 tab 显隐不对
+ * presence 让步——与 claude/cursor 同语义。否则会出现两个问题：有凭证时
+ * 设置页的 kimi 开关失效（presence 恒让 tab 显示）；删光凭证会连带隐藏
+ * 本地 CLI 主额度卡（kimi tab 承载的是 CLI 用量主面板）。tab 恒由
+ * DEFAULT_VISIBILITY / 设置页开关控制。
+ */
+export const PURE_PREFERENCE_AGENTS: readonly string[] = ["kimi"];
+
+/** id 是否为「tab 纯偏好控制」的凭证型 provider（presence 不参与门槛）。 */
+export function isPurePreferenceAgent(id: string): boolean {
+  return PURE_PREFERENCE_AGENTS.includes(id);
+}
 
 /** id 是否属于凭证驱动的新 provider（用于 tab 渲染分支与类型收窄）。 */
 export function isCredentialAgent(id: string): id is CredentialAgentId {
@@ -220,8 +242,13 @@ export const AGENT_VISIBILITY_OPTIONS: ReadonlyArray<{
 ];
 
 /** 凭证驱动 provider 的录入形态：凭证类型（决定添加弹层的输入引导）。
- *  grok 并入本地 ~/.grok/auth.json 读取，手动补充的凭证为访问 Token。 */
+ *  grok 并入本地 ~/.grok/auth.json 读取，手动补充的凭证为访问 Token。
+ *  kimi 的添加表单提供类型选择（默认 OAuth 令牌：网页登录/手动粘贴
+ *  refresh_token 存 kind=token；可切 API Key 存 kind=apiKey），服务端
+ *  同一鉴权接口，两种形态都能查额度。 */
 export const CREDENTIAL_AGENT_KIND: Record<CredentialAgentId, "apiKey" | "cookie" | "token"> = {
+  // kimi 默认形态为 OAuth 令牌（refresh_token）；API Key 为表单内可选形态
+  kimi: "token",
   gemini: "apiKey",
   grok: "token",
   qoder: "cookie",

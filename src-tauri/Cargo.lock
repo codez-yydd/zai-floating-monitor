@@ -6064,6 +6064,7 @@ dependencies = [
  "tauri-plugin-updater",
  "time",
  "ureq",
+ "uuid",
  "winreg 0.52.0",
  "zip 2.4.2",
 ]

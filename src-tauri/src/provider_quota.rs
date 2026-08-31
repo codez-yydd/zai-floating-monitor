@@ -231,6 +231,11 @@ pub(crate) fn query_provider_quota(
         "stepfun" => crate::stepfun::fetch_quota_entries(&snapshots),
         // cookie 型：必需 api-platform_serviceToken + userId 两个 cookie
         "mimo" => crate::mimo::fetch_quota_entries(&snapshots),
+        // Kimi 订阅凭证（kind=apiKey 直用 / kind=token 的 OAuth refresh_token
+        // 换新，region 分大陆/国际站域名）。本地 CLI 登录态不并入本链路
+        //（主面板 get_kimi_usage 已展示，避免双查询）；无凭证时上方空快照
+        // 早返回已给出空 Vec。
+        "kimi" => crate::kimi::fetch_quota_entries(&snapshots),
         _ => return Ok(vec![]),
     };
     // 3. 回写最近校验状态（record_check 内部短暂持锁做文件 IO；失败只记

@@ -43,6 +43,8 @@ image = { version = "0.25", default-features = false, features = ["png", "webp"]
 # 自定义宠物导入：Petdex 分发 zip 包（根目录 pet.json + spritesheet）解包；
 # 仅需 DEFLATE 与 STORED，关默认特性减体积
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# Kimi OAuth 设备码登录：无本地 device_id 时生成 UUID v4（与 Kimi Code CLI 共享）
+uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-autostart = "2.5.1"

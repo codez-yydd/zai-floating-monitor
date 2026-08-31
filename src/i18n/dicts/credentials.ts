@@ -130,6 +130,36 @@ export const credentials = {
   "credentials.guideBrief.stepfun":
     "登录阶跃星辰开放平台（platform.stepfun.com）。",
   "credentials.guideBrief.doubao": "在火山引擎（火山方舟）获取 API Key 后粘贴保存。",
+  "credentials.guideBrief.kimi":
+    "推荐使用 OAuth 网页登录（凭证自动保存）；也可手动粘贴 OAuth 令牌（refresh_token）或 API Key。",
+  "credentials.guide.kimi":
+    "点击「网页登录」按提示在浏览器完成 Kimi 授权，凭证将以 refresh_token 形态自动保存（无需安装 Kimi Code CLI）；也可在「凭证类型」切换为 API Key 后粘贴保存。区域需与账号所属站点一致（国际站账号请选国际站，网页登录同理），成功后自动展示该账号的 5 小时/本周/本月额度与加油包余额。",
+  // ===== Kimi OAuth 网页登录（设备码流程）=====
+  "credentials.oauthEntryTitle": "网页登录（推荐）",
+  "credentials.oauthEntryButton": "网页登录",
+  "credentials.oauthEntryHint":
+    "在浏览器完成 Kimi 授权，凭证自动保存，无需手动粘贴 Token；国际站账号请先在下方选择「国际站」区域",
+  "credentials.oauthTitle": "Kimi 网页登录",
+  "credentials.oauthStepHint":
+    "1. 点击「打开授权页面」在浏览器完成登录授权；2. 若页面要求输入，请粘贴下方确认码。",
+  "credentials.oauthRegionCurrent": "当前区域：{region}",
+  "credentials.oauthCopy": "复制确认码",
+  "credentials.oauthCopied": "已复制",
+  "credentials.oauthCopyFail": "复制失败，请手动复制",
+  "credentials.oauthStarting": "正在发起登录…",
+  "credentials.oauthWaiting": "等待授权中，请在新打开的页面完成确认…",
+  "credentials.oauthValidFor": "（确认码 {minutes} 分钟内有效）",
+  "credentials.oauthSuccess": "登录成功，凭证已保存",
+  "credentials.oauthDenied": "已拒绝授权，如需登录请重新发起",
+  "credentials.oauthExpired": "授权码已过期，请重新发起",
+  "credentials.oauthBack": "返回手动填写",
+  "credentials.oauthOpen": "打开授权页面",
+  "credentials.oauthRetry": "重新发起",
+  "credentials.oauthDone": "网页登录成功，凭证已保存",
+  // ===== Kimi 凭证类型切换（OAuth 令牌 / API Key）=====
+  "credentials.kindLabel": "凭证类型",
+  "credentials.kindOAuthToken": "OAuth 令牌",
+  "credentials.secretPlaceholderOauthToken": "粘贴 OAuth 令牌（refresh_token）",
   "credentials.guide.claude":
     "从本机 ~/.claude/.credentials.json（或另一台已登录该账号机器的同路径文件）复制 claudeAiOauth.accessToken（sk-ant-oat 开头的 OAuth Access Token）粘贴保存，即可在此查看该账号的订阅额度。",
   "credentials.guide.cursor":

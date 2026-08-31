@@ -591,6 +591,29 @@ export interface ProviderQuotaEntry {
   updatedAt: number;
 }
 
+// ===== Kimi OAuth 设备码登录（与 Rust kimi_oauth 模块结构一一对应）=====
+
+/** 发起设备码登录的结果：展示 user_code 并打开验证地址。
+ *  device_code 留在后端会话表，前端只持 sessionId。 */
+export interface KimiDeviceAuthInfo {
+  sessionId: string;
+  userCode: string;
+  verificationUri: string;
+  /** 带 user_code 参数的完整地址（后端未给时打开 verificationUri） */
+  verificationUriComplete?: string;
+  /** 设备码有效期（秒；超时提示用） */
+  expiresIn: number;
+  /** 建议轮询间隔（秒） */
+  interval: number;
+}
+
+/** 单次轮询结果：pending=等待确认（继续轮询）/ success=成功（凭证已保存）/
+ *  denied=用户拒绝 / expired=设备码过期（重新发起）/ error=其他错误 */
+export interface KimiDevicePollResult {
+  status: "pending" | "success" | "denied" | "expired" | "error";
+  message?: string;
+}
+
 // ===== Codex 用量统计（与 Rust codex 模块结构一一对应）=====
 
 /** Codex（OpenAI Codex CLI）速率限制（解析本地 ~/.codex 会话得到） */

@@ -302,7 +302,10 @@ fn has_credentials(provider: &str) -> Result<bool, String> {
     Ok(!load_provider(provider)?.entries.is_empty())
 }
 
-fn add_entry(
+/// 添加一条凭证的内部内核（command 与 kimi_oauth 设备码登录共用）：
+/// kind/region/secret 全量校验后持锁写入。pub(crate)：kimi_oauth 登录
+/// 成功后经此落凭证，与手动添加路径共用同一存储护栏与原子写。
+pub(crate) fn add_entry(
     provider: &str,
     label: &str,
     kind: &str,
@@ -466,9 +469,9 @@ fn remove_entry(provider: &str, id: &str) -> Result<(), String> {
 pub(crate) struct CredentialQuerySnapshot {
     pub id: String,
     pub label: String,
-    /// "apiKey" | "cookie" | "token"（当前余额型 provider 只用 apiKey；
-    /// 后续 cookie/token 型 provider 接入时按类型分支，快照保持完整）
-    #[allow(dead_code)]
+    /// "apiKey" | "cookie" | "token"（kimi 凭证链路按类型分支：apiKey 直接
+    /// 作 Bearer，token 视为 OAuth refresh_token 换新；其余余额型 provider
+    /// 只用 apiKey，快照保持完整供后续接入）
     pub kind: String,
     pub secret: String,
     /// Some("cn") | Some("global") | None（区分国内/国际站的 provider 用）

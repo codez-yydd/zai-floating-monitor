@@ -1269,8 +1269,9 @@ pub struct KimiRateLimits {
 /// Kimi Code CLI 根目录（.kimi-code，与 sessions 的环境变量口径对齐）：
 /// $ZBAR_KIMI_HOME（指向 .kimi-code 根）优先，其次 $KIMI_CODE_HOME
 /// （CLI 自身变量），最后 ~/.kimi-code。region 文件与 credentials 目录
-/// 都挂在这个根下。
-fn kimi_code_root() -> PathBuf {
+/// 都挂在这个根下。pub(crate)：kimi_oauth 模块的设备头 device_id 与
+/// CLI 共享同一根目录下的 device_id 文件。
+pub(crate) fn kimi_code_root() -> PathBuf {
     for key in ["ZBAR_KIMI_HOME", "KIMI_CODE_HOME"] {
         if let Ok(home) = std::env::var(key) {
             let home = home.trim();
@@ -1472,7 +1473,8 @@ fn token_usable(expires_at_ms: i64, now_ms: i64) -> bool {
 }
 
 /// OAuth 刷新端点的 client_id（Kimi Code CLI 内置值，从 CLI 源码提取实测可用）。
-const KIMI_OAUTH_CLIENT_ID: &str = "17e5f671-d194-4dfb-9706-5516cb48c098";
+/// pub(crate)：kimi_oauth 模块的设备码登录共用同一 client_id。
+pub(crate) const KIMI_OAUTH_CLIENT_ID: &str = "17e5f671-d194-4dfb-9706-5516cb48c098";
 
 /// POST {oauth_host}/api/oauth/token 的响应结构。响应里的 refresh_token
 /// 实测为非 rotation 型（旧值可重复使用），且应用绝不写回凭据文件，
@@ -1487,7 +1489,8 @@ struct OAuthTokenResponse {
 
 /// 构建额度/刷新请求共用的 ureq Agent（10s 超时；复用 Codex 模块的代理
 /// 探测——环境变量 > 系统代理 > 直连，Kimi API 在部分网络需代理才可达）。
-fn build_kimi_agent() -> ureq::Agent {
+/// pub(crate)：kimi_oauth 模块的设备码登录/轮询请求复用同一套超时与代理。
+pub(crate) fn build_kimi_agent() -> ureq::Agent {
     let mut builder =
         ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(10));
     if let Some(url) = crate::codex::resolve_proxy() {
@@ -1950,6 +1953,356 @@ fn fetch_live_rate_limits_uncached() -> Result<Option<KimiRateLimits>, String> {
         entry.plan_type = fetch_user_level_name().or(entry.plan_type.take());
     }
     Ok(limits)
+}
+
+// ===== 通用凭证体系链路（provider="kimi"，~/.zbar/credentials/kimi.json）=====
+//
+// 与上方 CLI 链路的关系（对齐 claude/cursor 先例）：本地 CLI 登录态继续走
+// resolve_request_token / fetch_live_rate_limits*（主面板额度卡，带缓存与
+// 历史采样），凭证体系的每条凭证独立走本链路（get_provider_quota("kimi")，
+// 面板「其他账号」区），两路互不并入、避免双查询。
+//
+// 凭证语义：
+// - kind=apiKey：secret 即 API Key，直接作 Bearer（服务端与 OAuth token
+//   同一 usages 接口，不区分鉴权形态）；
+// - kind=token：secret 是 OAuth refresh_token（网页登录/CLI 凭据的
+//   refresh_token，实测非 rotation 型可复用），先换新 access_token 再查询；
+// - region：凭证所属区域决定域名组（None/空按大陆 .com，与 CLI region
+//   文件语义一致）。
+
+/// 凭证链路的 access_token 内存缓存（key = credential_id）：token 型凭证
+/// 的 secret 是长效 refresh_token，access_token 短效（15 分钟），仅在缓存
+/// 缺失/过期时换新。并发口径与 CLI 链路 OAUTH_TOKEN_CACHE 一致——锁只保护
+/// 哈希表读写，换新 HTTP 在锁外执行，偶发重复换新无害（refresh_token 可复用）。
+static CREDENTIAL_TOKEN_CACHE: OnceLock<Mutex<HashMap<String, OAuthTokenCache>>> =
+    OnceLock::new();
+
+fn credential_token_cache() -> &'static Mutex<HashMap<String, OAuthTokenCache>> {
+    CREDENTIAL_TOKEN_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 清空某条凭证的缓存（usages 对换新后的 access_token 仍返回 401/403 时
+/// 调用：token 可能已被服务端吊销，置空使下次查询重新走换新路径，避免
+/// 无效 token 在缓存有效期内反复 401）。
+fn clear_credential_token_cache(credential_id: &str) {
+    credential_token_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(credential_id);
+}
+
+/// 凭证链路 refresh_token 换新失败分类。
+#[derive(Debug)]
+enum CredentialTokenFailure {
+    /// refresh_token 被服务端拒绝（401/403）→ 条目按 expired 处理，引导重新登录
+    Rejected,
+    /// 网络/服务不可用或响应异常 → 条目按 error 处理（不误导为过期）
+    Network(String),
+}
+
+/// 用 refresh_token 换新 access_token（指定 oauth_host：凭证区域可能与
+/// CLI region 文件不同，域名随凭证 region 走）。返回的缓存条目由调用方
+/// 决定只进内存，本函数不碰任何文件（凭证 secret 本身就是 refresh_token）。
+fn refresh_credential_token(
+    oauth_host: &str,
+    refresh_token: &str,
+) -> Result<OAuthTokenCache, CredentialTokenFailure> {
+    let resp = build_kimi_agent()
+        .post(&format!("{oauth_host}/api/oauth/token"))
+        .send_form(&[
+            ("client_id", KIMI_OAUTH_CLIENT_ID),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+        ]);
+    let resp = match resp {
+        Ok(resp) => resp,
+        // refresh_token 被服务端拒绝：明确引导重新登录
+        Err(ureq::Error::Status(401, _)) | Err(ureq::Error::Status(403, _)) => {
+            return Err(CredentialTokenFailure::Rejected);
+        }
+        Err(e) => {
+            return Err(CredentialTokenFailure::Network(format!(
+                "刷新登录凭证失败（网络错误或服务不可用）: {e}"
+            )));
+        }
+    };
+    let body: OAuthTokenResponse = resp
+        .into_json()
+        .map_err(|e| CredentialTokenFailure::Network(format!("解析刷新响应失败: {e}")))?;
+    let access_token = body
+        .access_token
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .ok_or(CredentialTokenFailure::Network(
+            "刷新响应缺少 access_token".to_string(),
+        ))?;
+    // expires_in 缺失按 CLI 实测值 900 秒兜底（与 CLI 链路同口径）
+    let expires_in_s = body.expires_in.unwrap_or(900).max(0);
+    let expires_at_ms = chrono::Utc::now().timestamp_millis() + expires_in_s.saturating_mul(1000);
+    Ok(OAuthTokenCache {
+        access_token,
+        expires_at_ms,
+    })
+}
+
+/// 解析单条凭证查询用的 Bearer token（apiKey 直接用；token 型查缓存/换新，
+/// 换新成功写入内存缓存。锁内只做读写判断，换新 HTTP 在锁外）。
+fn resolve_credential_token(
+    credential_id: &str,
+    kind: &str,
+    secret: &str,
+    oauth_host: &str,
+) -> Result<String, CredentialTokenFailure> {
+    let secret = secret.trim();
+    if secret.is_empty() {
+        // 存储层已拦截空 secret，防御性兜底（不暴露任何内容）
+        return Err(CredentialTokenFailure::Network("凭证内容为空".to_string()));
+    }
+    if kind == "apiKey" {
+        return Ok(secret.to_string());
+    }
+    // token 型：secret 视为 refresh_token，先查缓存（60 秒过期提前量同 CLI 链路）
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    {
+        let cache = credential_token_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(cached) = cache.get(credential_id) {
+            if token_usable(cached.expires_at_ms, now_ms) {
+                return Ok(cached.access_token.clone());
+            }
+        }
+    }
+    let fresh = refresh_credential_token(oauth_host, secret)?;
+    let token = fresh.access_token.clone();
+    credential_token_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(credential_id.to_string(), fresh);
+    Ok(token)
+}
+
+/// GET {api_base}/usages 单凭证查询（展平为 (HTTP 状态码, 响应体)；
+/// 网络层彻底失败变 Err 中文原因）。结构与 CLI 链路的同名请求一致，
+/// 独立成函数以便凭证循环复用 provider_quota::flatten_response 口径。
+fn fetch_credential_usages_raw(
+    api_base: &str,
+    token: &str,
+) -> Result<(u16, Option<String>), String> {
+    let result = build_kimi_agent()
+        .get(&format!("{api_base}/usages"))
+        .set("Authorization", &format!("Bearer {token}"))
+        .set("Accept", "application/json")
+        .call();
+    crate::provider_quota::flatten_response(result)
+}
+
+/// usages 响应 → 单个展示窗口（KimiUsageBlock → ProviderQuotaWindow 的
+/// 公共部分；key/title 由调用方按窗口槽补齐）。
+fn credential_window_from_block(
+    block: &KimiUsageBlock,
+) -> crate::provider_quota::ProviderQuotaWindow {
+    crate::provider_quota::ProviderQuotaWindow {
+        key: String::new(),
+        title: String::new(),
+        used_percent: pct_from_limit_remaining(block.limit, block.remaining),
+        // 已用 = limit - remaining（remaining 超出 limit 时按 0 兜底）
+        used: match (block.limit, block.remaining) {
+            (Some(limit), Some(remaining)) => Some((limit - remaining).max(0.0)),
+            _ => None,
+        },
+        total: block.limit,
+        // 服务端未提供明确的数量单位口径，不标注（前端只展示数值与百分比）
+        unit: None,
+        resets_at: block
+            .reset_time
+            .as_deref()
+            .and_then(parse_reset_time_ms),
+    }
+}
+
+/// usages 响应 → 展示条目（纯函数，单测覆盖）：
+/// - limits[] 按 window 折算秒数归类：≥2 天 → 周窗，其余 → 5 小时窗
+///   （同槽后出现的覆盖先出现的，与 rate_limits_from_response 同口径）；
+/// - 顶层 usage 为周额度权威口径，有值（pct/reset 任一非 None）时覆盖周窗；
+/// - totalQuota（会员月总额度）→ 月窗（空对象 {} 自然全 None，不产出窗口）；
+/// - boosterWallet.balance.amountLeft → balance（币种 ¥；口径与主面板
+///   KimiRateLimits.booster_balance 一致，不做单位换算）；
+/// - plan_name 取 user.membership.level（内部枚举值；凭证链路不为档位名
+///   额外调 /me，主面板已展示官方名）。
+fn quota_entry_from_response(
+    credential_id: &str,
+    label: &str,
+    resp: &KimiUsagesResponse,
+) -> crate::provider_quota::ProviderQuotaEntry {
+    use crate::provider_quota::{now_ms, ProviderQuotaBalance, ProviderQuotaEntry};
+
+    let mut hour5: Option<crate::provider_quota::ProviderQuotaWindow> = None;
+    let mut weekly: Option<crate::provider_quota::ProviderQuotaWindow> = None;
+    for entry in &resp.limits {
+        let (Some(window), Some(detail)) = (entry.window.as_ref(), entry.detail.as_ref()) else {
+            continue;
+        };
+        let win = credential_window_from_block(detail);
+        if window_seconds(window).unwrap_or(0) >= 2 * 86_400 {
+            weekly = Some(win);
+        } else {
+            hour5 = Some(win);
+        }
+    }
+    // 顶层 usage 优先（权威周口径）
+    if let Some(usage) = resp.usage.as_ref() {
+        let win = credential_window_from_block(usage);
+        if win.used_percent.is_some() || win.resets_at.is_some() {
+            weekly = Some(win);
+        }
+    }
+
+    let mut windows = Vec::new();
+    if let Some(mut win) = hour5 {
+        win.key = "hour5".to_string();
+        win.title = "5h".to_string();
+        windows.push(win);
+    }
+    if let Some(mut win) = weekly {
+        win.key = "weekly".to_string();
+        win.title = "本周".to_string();
+        windows.push(win);
+    }
+    if let Some(quota) = resp.total_quota.as_ref() {
+        let win = credential_window_from_block(quota);
+        // 空对象（服务端当前普遍形态）全 None：不产出空窗口
+        if win.used_percent.is_some() || win.total.is_some() || win.resets_at.is_some() {
+            windows.push(crate::provider_quota::ProviderQuotaWindow {
+                key: "monthly".to_string(),
+                title: "本月".to_string(),
+                ..win
+            });
+        }
+    }
+
+    let balance = resp
+        .booster_wallet
+        .as_ref()
+        .and_then(|w| w.balance.as_ref())
+        .and_then(|b| b.amount_left)
+        .map(|amount| ProviderQuotaBalance {
+            amount,
+            currency: "¥".to_string(),
+            granted: None,
+            topped_up: None,
+        });
+    let plan_name = resp
+        .user
+        .as_ref()
+        .and_then(|u| u.membership.as_ref())
+        .and_then(|m| m.level.clone());
+
+    ProviderQuotaEntry {
+        credential_id: credential_id.to_string(),
+        label: label.to_string(),
+        status: "ok".to_string(),
+        windows,
+        balance,
+        plan_name,
+        message: None,
+        updated_at: now_ms(),
+    }
+}
+
+/// 单凭证查询原始结果 → 展示条目（纯函数，单测覆盖）。分支对齐 claude.rs
+/// entry_from_usage_raw：401/403(expired「登录已失效」引导重新登录) >
+/// 网络失败(error) > 非 200(error) > 解析失败/缺用量(error) > 成功(ok)。
+fn quota_entry_from_raw(
+    credential_id: &str,
+    label: &str,
+    raw: &Result<(u16, Option<String>), String>,
+) -> crate::provider_quota::ProviderQuotaEntry {
+    use crate::provider_quota::{now_ms, ProviderQuotaEntry};
+    let fail = |status: &str, message: String| ProviderQuotaEntry {
+        credential_id: credential_id.to_string(),
+        label: label.to_string(),
+        status: status.to_string(),
+        windows: vec![],
+        balance: None,
+        plan_name: None,
+        message: Some(message),
+        updated_at: now_ms(),
+    };
+    let (status, body) = match raw {
+        Ok(pair) => pair.clone(),
+        Err(e) => return fail("error", e.clone()),
+    };
+    if status == 401 || status == 403 {
+        // 换新后的 access_token 被服务端拒绝：调用方已清该凭证的 token 缓存，
+        // 下一轮查询会重新换新（region 切换等场景可自愈），故不引导删除凭证，
+        // 只提示稍后手动刷新；refresh_token 本身失效走 Rejected 分支（另有文案）
+        return fail(
+            "expired",
+            "登录状态已重置，请稍后手动刷新重试".to_string(),
+        );
+    }
+    if status != 200 {
+        return fail("error", format!("Kimi 额度查询失败（HTTP {status}）"));
+    }
+    let resp: KimiUsagesResponse = match serde_json::from_str(body.as_deref().unwrap_or_default())
+    {
+        Ok(resp) => resp,
+        Err(e) => return fail("error", format!("Kimi 额度响应解析失败: {e}")),
+    };
+    let entry = quota_entry_from_response(credential_id, label, &resp);
+    if entry.windows.is_empty() && entry.balance.is_none() {
+        return fail("error", "Kimi 额度响应缺少用量数据".to_string());
+    }
+    entry
+}
+
+/// 查询凭证体系（provider="kimi"）全部凭证的订阅额度：逐条凭证换 token
+/// （apiKey 直用 / token 型 refresh_token 换新，按 credential_id 缓存）→
+/// 调该凭证 region 对应域名组的 usages → 映射为展示条目。单条失败产出
+/// error/expired 条目不阻塞其他条目（对齐 claude.rs fetch_manual_quota_entries）。
+pub(crate) fn fetch_quota_entries(
+    snapshots: &[crate::provider_credentials::CredentialQuerySnapshot],
+) -> Vec<crate::provider_quota::ProviderQuotaEntry> {
+    let mut entries = Vec::new();
+    for cred in snapshots {
+        // 域名组随凭证 region（None/空 = 大陆 .com，语义与 CLI region 文件一致）
+        let endpoints = endpoints_for_region(cred.region.as_deref().unwrap_or(""));
+        let entry = match resolve_credential_token(&cred.id, &cred.kind, &cred.secret, endpoints.oauth_host)
+        {
+            Ok(token) => {
+                let raw = fetch_credential_usages_raw(endpoints.api_base, &token);
+                let entry = quota_entry_from_raw(&cred.id, &cred.label, &raw);
+                // 换新后的 access_token 仍被服务端拒绝：清该凭证缓存，下一轮
+                // 查询重新换新（token 可能已被吊销，避免缓存有效期内反复 401）
+                if entry.status == "expired" {
+                    clear_credential_token_cache(&cred.id);
+                }
+                entry
+            }
+            Err(failure) => {
+                let (status, message) = match &failure {
+                    CredentialTokenFailure::Rejected => (
+                        "expired",
+                        "登录已失效，请删除该凭证后重新添加（支持网页登录）".to_string(),
+                    ),
+                    CredentialTokenFailure::Network(m) => ("error", m.clone()),
+                };
+                crate::provider_quota::ProviderQuotaEntry {
+                    credential_id: cred.id.clone(),
+                    label: cred.label.clone(),
+                    status: status.to_string(),
+                    windows: vec![],
+                    balance: None,
+                    plan_name: None,
+                    message: Some(message),
+                    updated_at: crate::provider_quota::now_ms(),
+                }
+            }
+        };
+        entries.push(entry);
+    }
+    entries
 }
 
 // ===== 诊断 =====
@@ -2687,5 +3040,147 @@ mod tests {
         open_kimi_db_at(&db_path).expect("二次 open（幂等迁移）失败");
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ===== 通用凭证体系链路（quota_entry_from_response / quota_entry_from_raw）=====
+
+    /// 凭证条目窗口映射：5h 窗（<2 天）→ "hour5"/"5h"、周窗（≥2 天 limits +
+    /// 顶层 usage 优先覆盖）→ "weekly"/"本周"、totalQuota → "monthly"/"本月"、
+    /// 加油包余额（¥，与主面板口径一致）与档位名。
+    #[test]
+    fn credential_entry_window_mapping() {
+        let resp: KimiUsagesResponse = serde_json::from_str(
+            r#"{
+                "user": {"membership":{"level":"LEVEL_PLUS"}},
+                "usage": {"limit":"2000","remaining":"500","resetTime":"2026-08-31T00:00:00Z"},
+                "limits": [
+                    {"window":{"duration":300,"timeUnit":"TIME_UNIT_MINUTE"},
+                     "detail":{"limit":"100","remaining":"25","resetTime":"2026-08-27T10:58:45Z"}},
+                    {"window":{"duration":7,"timeUnit":"TIME_UNIT_DAY"},
+                     "detail":{"limit":800,"remaining":600,"resetTime":"2026-09-01T00:00:00.5Z"}}
+                ],
+                "boosterWallet": {"balance":{"amountLeft":"12.5"},"monthlyUsed":"3"},
+                "totalQuota": {"limit":"10000","remaining":"2500","resetTime":"2026-09-01T00:00:00Z"}
+            }"#,
+        )
+        .expect("响应解析失败");
+        let entry = quota_entry_from_response("cred-1", "主账号", &resp);
+        assert_eq!(entry.credential_id, "cred-1");
+        assert_eq!(entry.label, "主账号");
+        assert_eq!(entry.status, "ok");
+        // 窗口顺序：5h → 周 → 月
+        assert_eq!(entry.windows.len(), 3);
+        assert_eq!(entry.windows[0].key, "hour5");
+        assert_eq!(entry.windows[0].title, "5h");
+        assert_eq!(entry.windows[0].used_percent, Some(75.0));
+        assert_eq!(entry.windows[0].used, Some(75.0));
+        assert_eq!(entry.windows[0].total, Some(100.0));
+        assert_eq!(entry.windows[0].resets_at, Some(1_787_828_325_000));
+        // 顶层 usage 覆盖 limits 的周窗：(2000-500)/2000 = 75%
+        assert_eq!(entry.windows[1].key, "weekly");
+        assert_eq!(entry.windows[1].title, "本周");
+        assert_eq!(entry.windows[1].used_percent, Some(75.0));
+        assert_eq!(entry.windows[1].used, Some(1500.0));
+        assert_eq!(entry.windows[1].total, Some(2000.0));
+        assert_eq!(entry.windows[1].resets_at, Some(1_788_134_400_000));
+        // totalQuota → 月窗：(10000-2500)/10000 = 75%
+        assert_eq!(entry.windows[2].key, "monthly");
+        assert_eq!(entry.windows[2].title, "本月");
+        assert_eq!(entry.windows[2].used_percent, Some(75.0));
+        // 加油包余额：amountLeft 原样（¥，与主面板口径一致）；档位为内部枚举
+        assert_eq!(entry.balance.as_ref().map(|b| b.amount), Some(12.5));
+        assert_eq!(entry.balance.as_ref().map(|b| b.currency.as_str()), Some("¥"));
+        assert_eq!(entry.plan_name.as_deref(), Some("LEVEL_PLUS"));
+    }
+
+    /// 凭证条目退化形态：无顶层 usage 时周窗来自 limits；totalQuota 空对象
+    /// 不产出月窗；全空响应 windows 空且 balance None（调用方按缺数据报错）。
+    #[test]
+    fn credential_entry_degenerate_shapes() {
+        // 周窗仅来自 limits（7 天窗口），无顶层 usage、无月窗数据
+        let resp: KimiUsagesResponse = serde_json::from_str(
+            r#"{
+                "limits": [
+                    {"window":{"duration":7,"timeUnit":"TIME_UNIT_DAY"},
+                     "detail":{"limit":"800","remaining":"600","resetTime":"2026-09-01T00:00:00Z"}}
+                ],
+                "totalQuota": {}
+            }"#,
+        )
+        .expect("响应解析失败");
+        let entry = quota_entry_from_response("cred-2", "备用号", &resp);
+        assert_eq!(entry.windows.len(), 1);
+        assert_eq!(entry.windows[0].key, "weekly");
+        assert_eq!(entry.windows[0].used_percent, Some(25.0));
+        assert!(entry.balance.is_none());
+        assert_eq!(entry.plan_name, None);
+
+        // 全空响应：windows 空 + balance None → quota_entry_from_raw 判 error
+        let empty: KimiUsagesResponse = serde_json::from_str("{}").expect("空响应解析失败");
+        let entry = quota_entry_from_response("cred-3", "x", &empty);
+        assert!(entry.windows.is_empty());
+        assert!(entry.balance.is_none());
+    }
+
+    /// 凭证条目 raw 分支：网络失败(error) > 401/403(expired 引导重新登录) >
+    /// 非 200(error) > 解析失败(error) > 200 缺用量(error) > 成功(ok)。
+    #[test]
+    fn credential_entry_raw_status_branches() {
+        let entry = quota_entry_from_raw("c", "L", &Err("网络错误或服务不可用: timeout".to_string()));
+        assert_eq!(entry.status, "error");
+        assert!(entry.message.as_deref().unwrap_or_default().contains("网络错误"));
+
+        for status in [401u16, 403] {
+            let entry =
+                quota_entry_from_raw("c", "L", &Ok((status, Some("unauthorized".to_string()))));
+            assert_eq!(entry.status, "expired", "HTTP {status} 应判过期");
+            assert!(
+                entry
+                    .message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("稍后手动刷新"),
+                "expired 应提示重置后稍后刷新（不引导删除凭证）"
+            );
+        }
+
+        let entry = quota_entry_from_raw("c", "L", &Ok((500, None)));
+        assert_eq!(entry.status, "error");
+        assert!(entry.message.as_deref().unwrap_or_default().contains("500"));
+
+        let entry = quota_entry_from_raw("c", "L", &Ok((200, Some("not json".to_string()))));
+        assert_eq!(entry.status, "error");
+        assert!(entry
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("解析失败"));
+
+        // 200 但全空响应（totalQuota {}）→ 缺少用量数据
+        let entry = quota_entry_from_raw("c", "L", &Ok((200, Some(r#"{"totalQuota":{}}"#.to_string()))));
+        assert_eq!(entry.status, "error");
+        assert!(entry
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("缺少用量数据"));
+
+        // 成功：单 5h 窗即成立
+        let entry = quota_entry_from_raw(
+            "c",
+            "L",
+            &Ok((
+                200,
+                Some(
+                    r#"{"limits":[{"window":{"duration":300,"timeUnit":"TIME_UNIT_MINUTE"},
+                        "detail":{"limit":"100","remaining":"25"}}]}"#
+                        .to_string(),
+                ),
+            )),
+        );
+        assert_eq!(entry.status, "ok");
+        assert_eq!(entry.windows.len(), 1);
+        assert_eq!(entry.windows[0].key, "hour5");
+        assert_eq!(entry.windows[0].used_percent, Some(75.0));
     }
 }

@@ -17,6 +17,8 @@ import type {
   CursorSnapshot,
   DeviceInfo,
   KimiSnapshot,
+  KimiDeviceAuthInfo,
+  KimiDevicePollResult,
   MergeResult,
   ModelInfo,
   PricingConfig,
@@ -717,4 +719,24 @@ export async function fetchProviderQuota(
   provider: string
 ): Promise<ProviderQuotaEntry[]> {
   return invoke<ProviderQuotaEntry[]>("get_provider_quota", { provider });
+}
+
+// ===== Kimi OAuth 设备码登录（Rust kimi_oauth 模块，凭证体系用）=====
+
+/** 发起设备码登录：返回 user_code 与验证地址（device_code 留在后端，
+ *  前端只持 sessionId）。region 为凭证区域（null = 默认大陆站）。 */
+export async function startKimiDeviceAuth(
+  region: string | null
+): Promise<KimiDeviceAuthInfo> {
+  return invoke<KimiDeviceAuthInfo>("start_kimi_device_auth", {
+    region: region ?? null,
+  });
+}
+
+/** 单次轮询设备码授权结果（前端按 interval 定时调用；success 时后端已
+ *  把 refresh_token 落为一条凭证，pending 之外的状态均应停止轮询） */
+export async function pollKimiDeviceAuth(
+  sessionId: string
+): Promise<KimiDevicePollResult> {
+  return invoke<KimiDevicePollResult>("poll_kimi_device_auth", { sessionId });
 }

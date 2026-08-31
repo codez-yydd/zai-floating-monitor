@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { UPDATE_READY_KEY, UPDATE_READY_EVENT } from "./updater";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { Currency, PricingConfig, StatsTab } from "./types";
+import type { CredentialKind, Currency, PricingConfig, StatsTab } from "./types";
 import { fetchPin, setPin } from "./api";
 import { useDataCache } from "./DataCache";
 import { QuotaPanel } from "./QuotaPanel";
@@ -17,15 +17,21 @@ import { GenericQuotaPanel } from "./GenericQuotaPanel";
 import { AddServiceMenu } from "./AddServiceMenu";
 import {
   CredentialFormDialog,
+  type CredentialOAuthFlow,
   type CredentialRegionOption,
 } from "./CredentialsCard";
-import { addProviderCredential } from "./api";
+import {
+  addProviderCredential,
+  pollKimiDeviceAuth,
+  startKimiDeviceAuth,
+} from "./api";
 import { BrandIcon, type BrandIconName } from "./BrandIcon";
 import {
   AGENT_VISIBILITY_OPTIONS,
   CREDENTIAL_AGENT_KIND,
   enableAgentByCredential,
   isCredentialAgent,
+  isPurePreferenceAgent,
   notifyCredentialsChanged,
   type AgentVisibility,
   type CredentialAgentId,
@@ -35,8 +41,10 @@ import { useI18n, type TFn } from "./i18n";
 import { dateLocale } from "./i18n/locale";
 
 /** 区分国内/国际站的 provider：录入凭证时提供 region 下拉（与后端
- *  host_for_region 的站点路由一致，Cookie/Key 归属站点必须匹配）。 */
+ *  host_for_region 的站点路由一致，Cookie/Key 归属站点必须匹配）。
+ *  kimi 同为双站（区域决定 usages 与 OAuth 域名组）。 */
 const REGION_PROVIDERS: readonly string[] = [
+  "kimi",
   "qoder",
   "alibaba",
   "alibabatoken",
@@ -209,6 +217,7 @@ export function StatsPanel({
     label: string;
     secret: string;
     region: string | null;
+    kind?: CredentialKind;
   }) => {
     if (!addProvider) return;
     setAddBusy(true);
@@ -216,12 +225,13 @@ export function StatsPanel({
     const provider = addProvider;
     try {
       // 无区域下拉的服务 region 初始为空串，原样提交会被后端判为非法
-      // 区域；空串/纯空白统一提交 null（未选择），对齐 CredentialsCard
+      // 区域；空串/纯空白统一提交 null（未选择），对齐 CredentialsCard。
+      // kind：kimi 表单内可选（OAuth 令牌/API Key），其余服务用默认映射
       const trimmedRegion = form.region?.trim() ?? "";
       await addProviderCredential(
         provider,
         form.label,
-        CREDENTIAL_AGENT_KIND[provider],
+        form.kind ?? CREDENTIAL_AGENT_KIND[provider],
         form.secret,
         trimmedRegion.length > 0 ? trimmedRegion : null
       );
@@ -237,13 +247,36 @@ export function StatsPanel({
     }
   };
 
+  // OAuth 网页登录流程（目前仅 kimi 提供）：与手动添加成功后的联动语义
+  // 一致——开启 tab 偏好 + 广播 presence/额度刷新 + 切到该服务 tab。
+  // useMemo 稳定引用：api 函数为模块级导入（引用恒定），仅 addProvider
+  // 变化时重建——弹层每秒重渲染（时钟等）不得让轮询定时器被反复清除重建
+  const oauthFlow: CredentialOAuthFlow | undefined = useMemo(
+    () =>
+      addProvider === "kimi"
+        ? {
+            onStart: (region) => startKimiDeviceAuth(region),
+            onPoll: (sessionId) => pollKimiDeviceAuth(sessionId),
+          }
+        : undefined,
+    [addProvider]
+  );
+  const handleOAuthSuccess = (provider: CredentialAgentId) => {
+    enableAgentByCredential(provider);
+    notifyCredentialsChanged(provider);
+    setAddProvider(null);
+    setAddError(null);
+    setTab(provider);
+  };
+
   useEffect(() => {
     if (
       tab !== "summary" &&
       tab !== "projects" &&
       !agentVisibility[tab] &&
-      // 凭证驱动的新 provider：有凭证时即使偏好未开也保留（「有凭证自动显示」）
-      !(isCredentialAgent(tab) && credentialPresence[tab]) &&
+      // 凭证驱动的新 provider：有凭证时即使偏好未开也保留（「有凭证自动显示」）；
+      // kimi 属首批 5 个（纯偏好控制，见 PURE_PREFERENCE_AGENTS），不参与该保留
+      !(isCredentialAgent(tab) && !isPurePreferenceAgent(tab) && credentialPresence[tab]) &&
       // 「＋添加服务」流程中临时保留目标 tab（添加成功前 visibility/presence
       // 均未就绪；取消添加后无此保留，tab 回落汇总——本来就没有该 tab）；
       // 设置页跳转的锚定目标同样保留（用户主动进入该面板）
@@ -273,8 +306,9 @@ export function StatsPanel({
     item.id === "summary" || item.id === "projects"
       ? true
       : // 凭证驱动的新 provider：「已启用或有凭证」才显示 tab（默认隐藏，
-        // 添加凭证 / 手动开启后出现；首批 5 个 Agent 保持纯偏好控制不变）
-        isCredentialAgent(item.id)
+        // 添加凭证 / 手动开启后出现）；kimi 属首批 5 个，tab 仍纯偏好控制
+        //（presence 只驱动「其他账号」区的补刷/轮询，见 PURE_PREFERENCE_AGENTS）
+        isCredentialAgent(item.id) && !isPurePreferenceAgent(item.id)
         ? agentVisibility[item.id] || credentialPresence[item.id]
         : agentVisibility[item.id]
   );
@@ -682,6 +716,10 @@ export function StatsPanel({
           kind={CREDENTIAL_AGENT_KIND[addProvider]}
           editing={null}
           regionOptions={regionOptionsFor(addProvider, t)}
+          // kimi 表单内可选凭证类型（OAuth 令牌 / API Key）
+          kindSelectable={addProvider === "kimi"}
+          oauth={oauthFlow}
+          onOAuthSuccess={() => handleOAuthSuccess(addProvider)}
           busy={addBusy}
           error={addError}
           titleText={`${

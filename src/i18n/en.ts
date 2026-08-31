@@ -143,6 +143,7 @@ export const en: typeof zh = {
     "stats.claudeExtraUsage": "Extra usage",
     "stats.claudeOtherAccounts": "Other accounts",
     "stats.cursorOtherAccounts": "Other accounts",
+    "stats.kimiOtherAccounts": "Other accounts",
     "stats.kimiNotFound": "No Kimi Code detected",
     "stats.kimiNotFoundHint":
       "Install and run Kimi Code CLI to create local sessions\n(~/.kimi-code/sessions), then check back",
@@ -958,6 +959,37 @@ export const en: typeof zh = {
       "Sign in to the StepFun platform (platform.stepfun.com).",
     "credentials.guideBrief.doubao":
       "Get an API key from Volcengine Ark and paste it here.",
+    "credentials.guideBrief.kimi":
+      "OAuth web sign-in is recommended (credentials are saved automatically); you can also paste an OAuth token (refresh_token) or an API key.",
+    "credentials.guide.kimi":
+      "Click \"Web sign-in\" and finish the Kimi authorization in your browser — the credential is saved automatically as a refresh_token (no Kimi Code CLI needed); or switch the credential type to API Key and paste it. The region must match the account's site (choose Global for global accounts, web sign-in included); 5-hour/weekly/monthly quota and fuel-package balance will appear automatically once added.",
+    // ===== Kimi OAuth web sign-in (device code flow) =====
+    "credentials.oauthEntryTitle": "Web sign-in (recommended)",
+    "credentials.oauthEntryButton": "Web sign-in",
+    "credentials.oauthEntryHint":
+      "Finish the Kimi authorization in your browser; the credential is saved automatically — no manual token pasting. For global accounts, select Global below first",
+    "credentials.oauthTitle": "Kimi web sign-in",
+    "credentials.oauthStepHint":
+      "1. Click \"Open authorization page\" and sign in / approve in your browser; 2. If the page asks for a code, paste the confirmation code below.",
+    "credentials.oauthRegionCurrent": "Region: {region}",
+    "credentials.oauthCopy": "Copy code",
+    "credentials.oauthCopied": "Copied",
+    "credentials.oauthCopyFail": "Copy failed — please copy manually",
+    "credentials.oauthStarting": "Starting sign-in…",
+    "credentials.oauthWaiting": "Waiting for authorization — please confirm in the newly opened page…",
+    "credentials.oauthValidFor": "(code valid for {minutes} min)",
+    "credentials.oauthSuccess": "Signed in, credential saved",
+    "credentials.oauthDenied": "Authorization denied; start again if you want to sign in",
+    "credentials.oauthExpired": "The authorization code has expired — please start again",
+    "credentials.oauthBack": "Back to manual input",
+    "credentials.oauthOpen": "Open authorization page",
+    "credentials.oauthRetry": "Start again",
+    "credentials.oauthDone": "Signed in via browser, credential saved",
+    // ===== Kimi credential type switch (OAuth token / API key) =====
+    "credentials.kindLabel": "Credential type",
+    "credentials.kindOAuthToken": "OAuth token",
+    "credentials.secretPlaceholderOauthToken":
+      "Paste the OAuth token (refresh_token)",
     "credentials.guide.claude":
       "Copy claudeAiOauth.accessToken (an sk-ant-oat OAuth access token) from ~/.claude/.credentials.json on this machine — or from another machine where the account is logged in — and paste it here to show that account's subscription quota.",
     "credentials.guide.cursor":

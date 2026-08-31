@@ -47,6 +47,7 @@ export const stats = {
   "stats.claudeExtraUsage": "超额消费",
   "stats.claudeOtherAccounts": "其他账号",
   "stats.cursorOtherAccounts": "其他账号",
+  "stats.kimiOtherAccounts": "其他账号",
   "stats.kimiNotFound": "未检测到 Kimi Code",
   "stats.kimiNotFoundHint":
     "请安装并使用 Kimi Code CLI 产生本地会话记录\n（~/.kimi-code/sessions）后再查看",
