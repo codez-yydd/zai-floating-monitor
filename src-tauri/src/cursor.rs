@@ -1021,10 +1021,18 @@ fn cursor_event_bucket(kind: Option<&str>) -> Option<&'static str> {
     }
 }
 
+/// 把今日扣费（美分）按「周期已用金额 ÷ 周期已用百分比」反推的周期额度折算成百分比。
+///
+/// 注意：usage-summary 的美元计量字段（plan.used/limit/remaining）与百分比口径
+/// （auto_pct/api_pct）在部分订阅（如 pro-legacy）下并非同源——美元口径可能已封顶
+/// （remaining=0）或远小于真实周期额度。一旦检测到两者明显不一致，返回 None，
+/// 让调用方回退到写真实 auto_pct 快照的旧口径，避免今日增量被放大数倍。
 fn daily_pct_from_cents(
     daily_cents: f64,
     cycle_used_cents: Option<i64>,
     cycle_used_pct: Option<f64>,
+    cycle_limit_cents: Option<i64>,
+    cycle_remaining_cents: Option<i64>,
 ) -> Option<f64> {
     if daily_cents <= 0.0 {
         return None;
@@ -1034,11 +1042,25 @@ fn daily_pct_from_cents(
     if used_cents <= 0.0 || used_pct <= 0.0 {
         return None;
     }
-    let cycle_limit_cents = used_cents * 100.0 / used_pct;
-    if cycle_limit_cents <= 0.0 {
+    // remaining<=0 说明美元计量已封顶，该口径失真，不能作为周期额度依据
+    if cycle_remaining_cents.map(|value| value <= 0).unwrap_or(false) {
         return None;
     }
-    Some((daily_cents / cycle_limit_cents * 100.0).clamp(0.0, 100.0))
+    // 缺少周期上限时无从校验口径一致性，宁缺毋滥
+    let limit_cents = cycle_limit_cents? as f64;
+    if limit_cents <= 0.0 {
+        return None;
+    }
+    let inferred_limit_cents = used_cents * 100.0 / used_pct;
+    if inferred_limit_cents <= 0.0 {
+        return None;
+    }
+    // 反推额度与上报上限偏差超过 10%：美元口径与百分比口径不同源，反推无意义
+    let deviation = ((inferred_limit_cents - limit_cents) / limit_cents).abs();
+    if !deviation.is_finite() || deviation > 0.10 {
+        return None;
+    }
+    Some((daily_cents / inferred_limit_cents * 100.0).clamp(0.0, 100.0))
 }
 
 fn calculate_today_quota(events: &[UsageEvent], plan: &CursorPlanInfo) -> CursorTodayQuota {
@@ -1063,8 +1085,20 @@ fn calculate_today_quota(events: &[UsageEvent], plan: &CursorPlanInfo) -> Cursor
         }
     }
     CursorTodayQuota {
-        auto_pct: daily_pct_from_cents(auto_cents, plan.used_cents, plan.auto_pct),
-        api_pct: daily_pct_from_cents(api_cents, plan.used_cents, plan.api_pct),
+        auto_pct: daily_pct_from_cents(
+            auto_cents,
+            plan.used_cents,
+            plan.auto_pct,
+            plan.limit_cents,
+            plan.remaining_cents,
+        ),
+        api_pct: daily_pct_from_cents(
+            api_cents,
+            plan.used_cents,
+            plan.api_pct,
+            plan.limit_cents,
+            plan.remaining_cents,
+        ),
     }
 }
 
@@ -1430,12 +1464,58 @@ mod tests {
             remaining_cents: Some(28808),
             total_pct: Some(3.9733333333333336),
             auto_pct: Some(3.9733333333333336),
-            api_pct: Some(2.0),
+            // 守卫要求美元口径与百分比口径同源：2.0 会反推出 59600（偏差 98.7%）被拒绝，
+            // 这里取与 used/limit 同源的 4.0（反推 29800，偏差 0.67%）
+            api_pct: Some(4.0),
         };
 
         let quota = calculate_today_quota(&events, &plan);
         assert!((quota.auto_pct.unwrap_or_default() - 1.3747).abs() < 0.01);
-        assert!((quota.api_pct.unwrap_or_default() - 0.0168).abs() < 0.01);
+        assert!((quota.api_pct.unwrap_or_default() - 0.0336).abs() < 0.01);
+    }
+
+    // ===== 今日增量折算的美元口径可信度守卫 =====
+
+    #[test]
+    fn daily_pct_guard_rejects_capped_dollar_metering() {
+        // remaining=0：美元计量已封顶（如 pro-legacy 的 used=2000/limit=2000），
+        // 与百分比口径不同源，直接拒绝折算
+        assert_eq!(
+            daily_pct_from_cents(3329.0, Some(2000), Some(27.18), Some(2000), Some(0)),
+            None
+        );
+    }
+
+    #[test]
+    fn daily_pct_guard_rejects_limit_mismatch() {
+        // 反推额度 2000*100/27.18≈7359 与 plan.limit=2000 偏差约 268%，
+        // 远超 10% 容差，说明两套口径不同源，拒绝折算
+        assert_eq!(
+            daily_pct_from_cents(3329.0, Some(2000), Some(27.18), Some(2000), Some(1000)),
+            None
+        );
+    }
+
+    #[test]
+    fn daily_pct_guard_rejects_missing_limit() {
+        // 缺少周期上限时无从校验口径一致性，宁缺毋滥
+        assert_eq!(
+            daily_pct_from_cents(3329.0, Some(2000), Some(27.18), None, Some(1000)),
+            None
+        );
+    }
+
+    #[test]
+    fn daily_pct_converts_when_denominators_consistent() {
+        // 反推额度 1000*100/(10/3)=30000 与 limit 一致 → 正常折算：150/30000*100=0.5%
+        let pct = daily_pct_from_cents(
+            150.0,
+            Some(1000),
+            Some(10.0 / 3.0),
+            Some(30000),
+            Some(29000),
+        );
+        assert!((pct.unwrap() - 0.5).abs() < 0.001);
     }
 
     // ===== 旧 cookie 迁移：决策纯函数（幂等性核心判断）=====

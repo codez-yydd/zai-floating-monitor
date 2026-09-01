@@ -74,6 +74,7 @@ import { useI18n } from "./i18n";
 import { CREDENTIALS_CHANGED_EVENT } from "./agentVisibility";
 import {
   calculateAgentQuotaDeltas,
+  filterInflatedRemoteCursorSnapshots,
   mergeAgentQuotaSnapshots,
   todayStartMs,
 } from "./agentQuota";
@@ -162,6 +163,48 @@ interface CursorEntry {
   error: string | null;
   refreshing: boolean;
   ts: number;
+}
+
+/** Cursor 锚点新鲜度门槛：localStorage 恢复的陈旧缓存不能当锚点——锚点偏低
+ *  会把锚点滞后期间真实增长的更高快照误删；实时拉取通常几分钟一轮，10 分钟
+ *  足以覆盖正常间隔，同时挡住隔夜/离线恢复的过期缓存。 */
+const CURSOR_ANCHOR_MAX_AGE_MS = 10 * 60_000;
+
+/** 从本机 Cursor 缓存构造远端失真快照的过滤锚点：取 ts 最新条目的
+ *  plan 百分比与计费周期结束时间。auto/api 两侧锚点独立取值（任一侧可能
+ *  无值，如未使用 API 时 api_pct 为 null）；条目过期、plan 缺失或两侧
+ *  百分比都无效时返回 null（锚点缺失不过滤，宁缺毋滥）。 */
+function buildCursorQuotaAnchors(
+  cache: Record<string, CursorEntry>
+): {
+  autoPct: number | null;
+  apiPct: number | null;
+  resetAtMs: number | null;
+} | null {
+  const now = Date.now();
+  let latest: CursorEntry | null = null;
+  for (const entry of Object.values(cache)) {
+    if (!entry.snapshot || entry.ts <= 0) continue;
+    if (!latest || entry.ts > latest.ts) latest = entry;
+  }
+  if (!latest || now - latest.ts > CURSOR_ANCHOR_MAX_AGE_MS) return null;
+  const snapshot = latest.snapshot;
+  if (!snapshot) return null;
+  const plan = snapshot.plan;
+  if (!plan) return null;
+  const validPct = (value: number | null): number | null =>
+    value !== null && Number.isFinite(value) && value > 0 ? value : null;
+  const autoPct = validPct(plan.auto_pct);
+  const apiPct = validPct(plan.api_pct);
+  if (autoPct === null && apiPct === null) return null;
+  const resetAtMs = snapshot.billing_cycle_end
+    ? Date.parse(snapshot.billing_cycle_end)
+    : null;
+  return {
+    autoPct,
+    apiPct,
+    resetAtMs: resetAtMs !== null && Number.isFinite(resetAtMs) ? resetAtMs : null,
+  };
 }
 
 /** Codex / Claude 快照的公共形状（两者结构完全一致，TS 结构化类型互通，
@@ -1270,7 +1313,16 @@ export function DataProvider({ pricing, credentialPresence, children }: Provider
         const localSelected = deviceFilter === "local" || deviceFilter === "all"
           ? local
           : [];
-        const merged = mergeAgentQuotaSnapshots(localSelected, remote);
+        // 旧版本设备可能仍在上传「美元/百分比口径混用」的失真 Cursor 快照
+        // （如 cursor_auto=65.02），合并前先用本机最新实时 plan 百分比作锚点过滤。
+        // cursorCacheRef 读最新值，避免把 cache 加进本回调的依赖。
+        const filteredRemote = remote.length > 0
+          ? filterInflatedRemoteCursorSnapshots(
+              remote,
+              buildCursorQuotaAnchors(cursorCacheRef.current)
+            )
+          : remote;
+        const merged = mergeAgentQuotaSnapshots(localSelected, filteredRemote);
         setAgentQuotaDeltas(calculateAgentQuotaDeltas(merged, from, to));
       })
       .catch(() => {

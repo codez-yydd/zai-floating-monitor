@@ -22,6 +22,8 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(24 * 3600);
 static LAST_CLEANUP: OnceLock<Mutex<Option<SystemTime>>> = OnceLock::new();
 static APPEND_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static LAST_TS_BY_SOURCE: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
+/// 本进程已按计费周期清理过失真 Cursor 样本的标记：(reset_at, 当时的周期已用百分比)。
+static INFLATED_CURSOR_CLEANED: OnceLock<Mutex<Option<(Option<i64>, f64)>>> = OnceLock::new();
 
 /// 一个 Agent 额度窗口的快照。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -211,6 +213,111 @@ fn try_cleanup(path: &std::path::Path) -> Result<(), String> {
     fs::rename(&tmp, path).map_err(|e| format!("替换 Agent 额度快照文件失败: {e}"))
 }
 
+/// 清理历史上被混用口径污染的 Cursor 快照。
+///
+/// 修复前的 Cursor 今日增量逻辑曾把「周期已用美元」与「周期已用百分比」两套口径
+/// 混用，合成出远超真实周期的百分比快照。此类失真值满足逻辑必然：同一计费周期内
+/// （同 reset_at），真实百分比不可能超过当前周期已用百分比，超出的必然是失真样本。
+/// 同一 reset_at 只清理一次，避免每次拉取都全量扫描重写。
+pub fn remove_inflated_cursor_samples(reset_at: Option<i64>, current_used_pct: f64) {
+    let cell = INFLATED_CURSOR_CLEANED.get_or_init(|| Mutex::new(None));
+    let Ok(marker) = cell.lock() else {
+        return;
+    };
+    if let Some((cleaned_reset_at, _)) = *marker {
+        if cleaned_reset_at == reset_at {
+            return;
+        }
+    }
+    drop(marker);
+
+    let path = match history_path() {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("[zbar-agent-history] 清理 Cursor 失真快照失败: {e}");
+            return;
+        }
+    };
+    match try_remove_inflated_cursor_samples(&path, reset_at, current_used_pct) {
+        Ok(()) => {
+            if let Some(cell) = INFLATED_CURSOR_CLEANED.get() {
+                if let Ok(mut marker) = cell.lock() {
+                    *marker = Some((reset_at, current_used_pct));
+                }
+            }
+        }
+        Err(e) => eprintln!("[zbar-agent-history] 清理 Cursor 失真快照失败: {e}"),
+    }
+}
+
+fn try_remove_inflated_cursor_samples(
+    path: &std::path::Path,
+    reset_at: Option<i64>,
+    current_used_pct: f64,
+) -> Result<(), String> {
+    let append_lock = APPEND_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = append_lock
+        .lock()
+        .map_err(|_| "Agent 额度快照写入锁已中毒".to_string())?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .open(path)
+        .map_err(|e| format!("打开 Agent 额度快照文件失败: {e}"))?;
+    let reader = BufReader::new(file);
+    let mut kept = Vec::new();
+    let mut removed = 0usize;
+    for line in reader.lines() {
+        let line = match line {
+            Ok(line) if !line.trim().is_empty() => line,
+            _ => continue,
+        };
+        let is_inflated = serde_json::from_str::<AgentQuotaSnapshot>(&line)
+            .map(|snapshot| {
+                snapshot.source == "cursor"
+                    && snapshot.windows.iter().any(|window| {
+                        window.key == "cursor_auto"
+                            && window.reset_at == reset_at
+                            && window.used_pct > current_used_pct + 0.5
+                    })
+            })
+            .unwrap_or(false);
+        if is_inflated {
+            removed += 1;
+        } else {
+            kept.push(line);
+        }
+    }
+    if removed == 0 {
+        return Ok(());
+    }
+
+    let tmp = path.with_extension("jsonl.tmp");
+    let mut out = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&tmp)
+        .map_err(|e| format!("打开 Agent 额度临时文件失败: {e}"))?;
+    for line in kept {
+        writeln!(out, "{line}").map_err(|e| format!("写入 Agent 额度临时文件失败: {e}"))?;
+    }
+    out.flush()
+        .map_err(|e| format!("刷新 Agent 额度临时文件失败: {e}"))?;
+    drop(out);
+    fs::rename(&tmp, path).map_err(|e| format!("替换 Agent 额度快照文件失败: {e}"))?;
+
+    // cursor 来源的 last ts 缓存可能指向已删除行，移除后下次 append 会正常写入
+    if let Some(seen) = LAST_TS_BY_SOURCE.get() {
+        if let Ok(mut seen) = seen.lock() {
+            seen.remove("cursor");
+        }
+    }
+    Ok(())
+}
+
 /// 读取全部快照，损坏行跳过并按时间升序返回。
 pub fn load_all() -> Result<Vec<AgentQuotaSnapshot>, String> {
     let path = history_path()?;
@@ -365,6 +472,60 @@ mod tests {
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
         assert_eq!(snapshots, vec![current]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn cursor_sample(ts: i64, key: &str, pct: f64, reset_at: Option<i64>) -> AgentQuotaSnapshot {
+        AgentQuotaSnapshot {
+            source: "cursor".into(),
+            ts,
+            plan_type: Some("pro".into()),
+            windows: vec![AgentQuotaWindow {
+                key: key.into(),
+                used_pct: pct,
+                reset_at,
+            }],
+        }
+    }
+
+    #[test]
+    fn inflated_cursor_cleanup_removes_only_inflated_samples() {
+        let path = std::env::temp_dir().join(format!(
+            "zbar-agent-history-test-{}-{}.jsonl",
+            std::process::id(),
+            // 线程名含 "::"（模块路径），Windows 文件名不允许冒号
+            std::thread::current()
+                .name()
+                .unwrap_or("inflated")
+                .replace(':', "_")
+        ));
+        let reset_at = Some(1_700_604_800_000i64);
+        // 同周期正常值：未超过当前已用百分比，保留
+        let normal = cursor_sample(1_700_000_000_000, "cursor_auto", 19.78, reset_at);
+        // 同周期失真合成值：超过当前已用百分比 + 容差，删除
+        let inflated = cursor_sample(1_700_000_100_000, "cursor_auto", 65.02, reset_at);
+        // 不同周期的高百分比：不属于本周期，保留
+        let other_cycle = cursor_sample(
+            1_700_000_200_000,
+            "cursor_auto",
+            65.02,
+            Some(1_700_864_000_000),
+        );
+        let contents = format!(
+            "{}\n{}\n{}\n",
+            serde_json::to_string(&normal).unwrap(),
+            serde_json::to_string(&inflated).unwrap(),
+            serde_json::to_string(&other_cycle).unwrap()
+        );
+        std::fs::write(&path, contents).unwrap();
+
+        try_remove_inflated_cursor_samples(&path, reset_at, 27.18).unwrap();
+        let lines = std::fs::read_to_string(&path).unwrap();
+        let snapshots: Vec<AgentQuotaSnapshot> = lines
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(snapshots, vec![normal, other_cycle]);
         let _ = std::fs::remove_file(path);
     }
 }

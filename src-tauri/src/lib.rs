@@ -570,6 +570,17 @@ async fn get_cursor_usage(req: CursorUsageRequest) -> Result<cursor::CursorSnaps
     tauri::async_runtime::spawn_blocking(move || {
         let result = cursor::fetch_cursor_snapshot(req.from_ms, req.to_ms);
         if let Ok(snapshot) = &result {
+            // 守卫上线前历史文件可能已被混用口径的合成值污染：同一计费周期内
+            // 真实百分比不可能超过当前已用百分比，超出的必然是失真样本，须清洗。
+            if let Some(plan) = &snapshot.plan {
+                if let Some(used_pct) = plan.auto_pct.filter(|pct| *pct > 0.0) {
+                    let reset_at = snapshot
+                        .billing_cycle_end
+                        .as_deref()
+                        .and_then(parse_iso_ts_ms);
+                    agent_quota_history::remove_inflated_cursor_samples(reset_at, used_pct);
+                }
+            }
             let has_today_quota = snapshot
                 .today_quota
                 .as_ref()
