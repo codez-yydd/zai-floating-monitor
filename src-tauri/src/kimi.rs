@@ -1392,7 +1392,7 @@ enum KimiCredential {
 fn scan_cli_credentials() -> Result<KimiCredential, String> {
     let dir = credentials_dir();
     if !dir.is_dir() {
-        return Err("未找到 Kimi 凭据：请先登录 Kimi Code CLI（运行一次 kimi 命令）".into());
+        return Err("未找到 Kimi 凭据：请先登录 Kimi Code CLI（运行一次 kimi 命令），或在应用内添加网页登录凭证".into());
     }
     let mut files: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&dir)
         .map(|entries| {
@@ -1428,7 +1428,7 @@ fn scan_cli_credentials() -> Result<KimiCredential, String> {
         }
     }
     Err(format!(
-        "未在 {} 中找到可用的 Kimi 凭据（apiKey/access_token 均缺失或为空），请先登录 Kimi Code CLI",
+        "未在 {} 中找到可用的 Kimi 凭据（apiKey/access_token 均缺失或为空），请先登录 Kimi Code CLI（运行一次 kimi 命令），或在应用内添加网页登录凭证",
         dir.display()
     ))
 }
@@ -1832,7 +1832,17 @@ pub fn fetch_live_rate_limits_with_freshness(
         }
     }
 
-    let result = fetch_live_rate_limits_uncached();
+    // CLI 链路失败（无 CLI 登录态/网络不通）时回退凭证体系：~/.zbar/credentials/
+    // kimi.json 里的应用内网页登录凭证。回退本身是逐凭证的真实 HTTP 查询，
+    // 与 CLI 直连同样按 Ok 缓存 60s TTL（防止与凭证体系前端 120s 轮询叠加成
+    // 高频请求），freshness 由返回值标记为 true（可进历史采样）；回退失败
+    // 维持原 CLI 错误（文案已含 CLI 与网页登录双路径引导），负缓存 15s 不变。
+    let result = match fetch_live_rate_limits_uncached() {
+        Ok(limits) => Ok(limits),
+        Err(cli_err) => fallback_limits_from_credentials()
+            .map(Some)
+            .ok_or(cli_err),
+    };
     *cache.lock().unwrap_or_else(|p| p.into_inner()) =
         Some((std::time::Instant::now(), result.clone()));
     result.map(|limits| (limits, true))
@@ -1953,6 +1963,62 @@ fn fetch_live_rate_limits_uncached() -> Result<Option<KimiRateLimits>, String> {
         entry.plan_type = fetch_user_level_name().or(entry.plan_type.take());
     }
     Ok(limits)
+}
+
+/// CLI 链路失败时的凭证体系回退：读 ~/.zbar/credentials/kimi.json 全部凭证
+/// （应用内网页登录保存的 refresh_token / 手动 API Key），复用凭证链路逐条
+/// 查询，取第一条查询成功（status=ok）且带窗口数据的条目映射为
+/// KimiRateLimits。无凭证 / 读取失败 / 全部凭证查询失败返回 None，调用方
+/// 维持原 CLI 错误。每次回退都是真实 HTTP 查询（逐凭证串行），频率由
+/// LIVE_LIMITS_CACHE 的成功 60s TTL 兜住，不会与前端凭证轮询叠加成高频请求。
+fn fallback_limits_from_credentials() -> Option<KimiRateLimits> {
+    let snapshots = crate::provider_credentials::load_query_snapshots("kimi").ok()?;
+    if snapshots.is_empty() {
+        return None;
+    }
+    let entry = fetch_quota_entries(&snapshots)
+        .into_iter()
+        .find(|e| e.status == "ok" && !e.windows.is_empty())?;
+    limits_from_quota_entry(&entry)
+}
+
+/// ProviderQuotaEntry → KimiRateLimits 纯映射（单测覆盖）：窗口按 key 归位
+/// （hour5→primary / weekly→secondary / monthly→monthly 的已用百分比与重置
+/// 时间），balance.amount → booster_balance（加油包月已用凭证条目无来源，
+/// 恒 None 不伪造），plan_name → plan_type。归位后三个窗口槽全空（key 均
+/// 无法识别 / 百分比全缺）视为回退失败返回 None——只有余额、没有任何窗口
+/// 百分比的条目撑不起额度卡的窗口行。
+fn limits_from_quota_entry(
+    entry: &crate::provider_quota::ProviderQuotaEntry,
+) -> Option<KimiRateLimits> {
+    let mut limits = KimiRateLimits {
+        plan_type: entry.plan_name.clone(),
+        booster_balance: entry.balance.as_ref().map(|b| b.amount),
+        booster_monthly_used: None,
+        ..KimiRateLimits::default()
+    };
+    for w in &entry.windows {
+        match w.key.as_str() {
+            "hour5" => {
+                limits.primary_pct = w.used_percent;
+                limits.primary_reset_at = w.resets_at;
+            }
+            "weekly" => {
+                limits.secondary_pct = w.used_percent;
+                limits.secondary_reset_at = w.resets_at;
+            }
+            "monthly" => {
+                limits.monthly_pct = w.used_percent;
+                limits.monthly_reset_at = w.resets_at;
+            }
+            // 未知 key（未来新增窗口形态）：忽略，不影响其余窗口归位
+            _ => {}
+        }
+    }
+    let usable = limits.primary_pct.is_some()
+        || limits.secondary_pct.is_some()
+        || limits.monthly_pct.is_some();
+    usable.then_some(limits)
 }
 
 // ===== 通用凭证体系链路（provider="kimi"，~/.zbar/credentials/kimi.json）=====
@@ -3182,5 +3248,90 @@ mod tests {
         assert_eq!(entry.windows.len(), 1);
         assert_eq!(entry.windows[0].key, "hour5");
         assert_eq!(entry.windows[0].used_percent, Some(75.0));
+    }
+
+    /// CLI 链路失败的凭证回退映射：窗口按 key 归位（hour5/weekly/monthly）、
+    /// balance.amount → 加油包余额、plan_name → 档位；booster_monthly_used
+    /// 凭证条目无来源恒 None；未知 key 忽略；窗口百分比全缺（仅余额）视为
+    /// 回退失败返回 None，单窗口有值即可用。
+    #[test]
+    fn fallback_limits_from_quota_entry_mapping() {
+        use crate::provider_quota::{ProviderQuotaBalance, ProviderQuotaEntry, ProviderQuotaWindow};
+        let win = |key: &str, pct: Option<f64>, reset: Option<i64>| ProviderQuotaWindow {
+            key: key.to_string(),
+            title: key.to_string(),
+            used_percent: pct,
+            used: None,
+            total: None,
+            unit: None,
+            resets_at: reset,
+        };
+        let entry = |windows: Vec<ProviderQuotaWindow>,
+                     balance: Option<ProviderQuotaBalance>|
+         -> ProviderQuotaEntry {
+            ProviderQuotaEntry {
+                credential_id: "cred-1".into(),
+                label: "网页登录".into(),
+                status: "ok".into(),
+                windows,
+                balance,
+                plan_name: Some("LEVEL_BASIC".into()),
+                message: None,
+                updated_at: 1_730_000_000_000,
+            }
+        };
+
+        // 三窗口齐全：各归其位 + 余额转加油包
+        let full = entry(
+            vec![
+                win("hour5", Some(75.0), Some(1_787_828_325_000)),
+                win("weekly", Some(25.0), Some(1_788_134_400_500)),
+                win("monthly", Some(10.0), Some(1_788_220_800_000)),
+            ],
+            Some(ProviderQuotaBalance {
+                amount: 66.5,
+                currency: "¥".into(),
+                granted: None,
+                topped_up: None,
+            }),
+        );
+        let limits = limits_from_quota_entry(&full).expect("全窗口条目应映射成功");
+        assert_eq!(limits.plan_type.as_deref(), Some("LEVEL_BASIC"));
+        assert_eq!(limits.primary_pct, Some(75.0));
+        assert_eq!(limits.primary_reset_at, Some(1_787_828_325_000));
+        assert_eq!(limits.secondary_pct, Some(25.0));
+        assert_eq!(limits.secondary_reset_at, Some(1_788_134_400_500));
+        assert_eq!(limits.monthly_pct, Some(10.0));
+        assert_eq!(limits.monthly_reset_at, Some(1_788_220_800_000));
+        assert_eq!(limits.booster_balance, Some(66.5));
+        // 凭证条目无加油包月已用来源：恒 None
+        assert_eq!(limits.booster_monthly_used, None);
+
+        // 仅余额、窗口 key 均无法识别（百分比全缺）→ 回退失败
+        let unknown_only = entry(
+            vec![win("unknown", Some(50.0), Some(1))],
+            Some(ProviderQuotaBalance {
+                amount: 10.0,
+                currency: "¥".into(),
+                granted: None,
+                topped_up: None,
+            }),
+        );
+        assert!(limits_from_quota_entry(&unknown_only).is_none());
+
+        // 单 5h 窗口（无周/月/余额）也可用，其余槽保持 None
+        let hour5_only = entry(vec![win("hour5", Some(40.0), None)], None);
+        let partial = limits_from_quota_entry(&hour5_only).expect("单窗口也应映射成功");
+        assert_eq!(partial.primary_pct, Some(40.0));
+        assert_eq!(partial.primary_reset_at, None);
+        assert_eq!(partial.secondary_pct, None);
+        assert_eq!(partial.monthly_pct, None);
+        assert_eq!(partial.booster_balance, None);
+
+        // 已知 key（hour5）但百分比缺失（仅 resets_at 有值）：窗口可归位却
+        // 填不进任何百分比槽，usable 判定 false → 整体仍视为回退失败返回
+        // None（与 unknown key 的区别在于 key 被识别，语义同为撑不起窗口行）
+        let hour5_no_pct = entry(vec![win("hour5", None, Some(1_787_828_325_000))], None);
+        assert!(limits_from_quota_entry(&hour5_no_pct).is_none());
     }
 }

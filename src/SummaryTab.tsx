@@ -11,6 +11,7 @@ import type {
   ModelStat,
   OverallStat,
   PricingConfig,
+  ProviderQuotaEntry,
   Stats,
   TrendPoint,
 } from "./types";
@@ -34,6 +35,7 @@ import type { AgentId, AgentVisibility } from "./agentVisibility";
 import { AGENT_COLOR } from "./agentVisibility";
 import { useResetDisplay } from "./resetDisplay";
 import { BrandIcon, type BrandIconName } from "./BrandIcon";
+import { QuotaEntryCard } from "./QuotaEntryCard";
 import {
   SwitchAccountButton,
   SwitchConfirmOverlay,
@@ -574,6 +576,36 @@ function AccountQuotaGroup({
   );
 }
 
+/** Kimi 凭证体系额度分组：~/.zbar/credentials/kimi.json 全部凭证
+ *  （应用内网页登录 / 手动 API Key）逐条展示，含 error/expired 条目
+ *  （失败原因由卡片内提示行表达）。与 zai 多账号分组的关键差异：Kimi 的
+ *  CLI 登录态与凭证体系是两个独立来源，CLI 可用时上方指标行被 CLI 占用
+ *  （直连或后端回退），凭证额度只有这里可见，故 1 条即分组（zai 需 ≥2）；
+ *  仅 CLI 可用且无凭证时 entries 为空、不渲染。单条复用 Kimi 页
+ *  「其他账号」区同款 QuotaEntryCard，不做账号切换（凭证在凭证页管理）。 */
+function KimiCredentialGroup({
+  entries,
+  now,
+}: {
+  entries: ProviderQuotaEntry[];
+  now: number;
+}) {
+  const resetDisplay = useResetDisplay();
+  return (
+    <div className="space-y-1.5">
+      {entries.map((entry) => (
+        <QuotaEntryCard
+          key={entry.credentialId}
+          entry={entry}
+          accent={AGENT_COLOR.kimi}
+          resetDisplay={resetDisplay}
+          now={now}
+        />
+      ))}
+    </div>
+  );
+}
+
 export function SummaryTab({
   stats,
   cost,
@@ -611,6 +643,7 @@ export function SummaryTab({
     error: zaiError,
     agentQuotaDeltas,
     accountQuotas,
+    providerQuota,
   } = useDataCache();
   // 额度监控区 ZCode 多账号分组的内嵌切换
   const sw = useAccountSwitch();
@@ -650,6 +683,11 @@ export function SummaryTab({
     0
   );
   const kimiTokens = kimi?.stats.overall.total_tokens ?? 0;
+
+  // Kimi 凭证体系条目（~/.zbar/credentials/kimi.json，应用内网页登录）：
+  // 全局 120s 轮询覆盖（与 Kimi 页「其他账号」区同源同频）；含 error/expired
+  // 条目，失败原因在分组卡片内提示行表达
+  const kimiCredentialEntries = providerQuota["kimi"]?.entries ?? [];
 
   // Cursor 花费 & token（events 口径）
   const cursorEvents = cursor?.events;
@@ -1151,6 +1189,31 @@ export function SummaryTab({
                         onCancel={sw.cancel}
                       />
                     )}
+                  </>
+                ) : a.id === "kimi" && kimiCredentialEntries.length >= 1 ? (
+                  // Kimi 凭证体系分组（1 条即分组）：CLI 链路失败时后端已回退
+                  // 凭证体系，指标行与首条凭证同源；分组提供逐凭证明细。指标行
+                  // 照常展示（CLI 直连或回退值），无值时只剩分组；仅 CLI 可用且
+                  // 无凭证时 entries 为空，不进本分支、走原有指标/空文案
+                  <>
+                    {a.metrics.length > 0 && (
+                      <div className="space-y-1.5 mb-2">
+                        {a.metrics.map((m) => (
+                          <QuotaMiniRow
+                            key={m.label}
+                            label={m.label}
+                            usedPct={m.usedPct}
+                            resetAt={m.resetAt}
+                            now={now}
+                            delta={m.delta}
+                          />
+                        ))}
+                      </div>
+                    )}
+                    <KimiCredentialGroup
+                      entries={kimiCredentialEntries}
+                      now={now}
+                    />
                   </>
                 ) : a.metrics.length > 0 ? (
                   <div className="space-y-1.5">
