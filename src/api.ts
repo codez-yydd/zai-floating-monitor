@@ -36,6 +36,7 @@ import type {
   SessionsPage,
   PetConfig,
   CustomPetEntry,
+  SessionHudConfig,
   CredentialKind,
   ProviderCredentialMeta,
   ShortcutConfig,
@@ -604,6 +605,24 @@ export async function getPetConfig(): Promise<PetConfig> {
  */
 export async function setPetConfig(config: PetConfig): Promise<PetConfig> {
   return invoke<PetConfig>("set_pet_config", { config });
+}
+
+// ===== 会话悬浮窗（session-hud.json/SessionHudConfig，皮肤页读写）=====
+
+/** 读取会话悬浮窗配置（皮肤页卡片初始数据） */
+export async function getSessionHudConfig(): Promise<SessionHudConfig> {
+  return invoke<SessionHudConfig>("get_session_hud_config");
+}
+
+/**
+ * 保存并应用会话悬浮窗配置（改完即生效）：开关切换即时建/关窗并启停
+ * 会话快照轮询；透明度/显示项/活跃档位变化经 zbar://session-hud-params
+ * 热推悬浮窗（档位影响下一轮查询）。返回收敛后的最终配置。
+ */
+export async function setSessionHudConfig(
+  config: SessionHudConfig
+): Promise<SessionHudConfig> {
+  return invoke<SessionHudConfig>("set_session_hud_config", { config });
 }
 
 // ===== 自定义宠物（第三阶段：Petdex 格式导入，Rust pets 模块契约）=====

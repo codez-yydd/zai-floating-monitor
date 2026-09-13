@@ -29,6 +29,7 @@ mod provider_quota;
 mod qoder;
 mod quota;
 mod quota_history;
+mod session_hud;
 mod shortcut;
 mod stepfun;
 mod sync;
@@ -1971,16 +1972,21 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .on_window_event(|window, event| {
             // 独立桌面宠物窗口：位置拖动节流落盘 + 销毁时停轮询复位开关
-            // （先于失焦分支处理，宠物窗口不参与面板失焦自动收起逻辑）
+            // （先于失焦分支处理，宠物窗口不参与面板失焦自动收起逻辑）。
+            // 会话悬浮窗（session_hud）同款处理，二者互不影响。
             match event {
                 WindowEvent::Moved(pos) => {
                     if window.label() == pet::PET_WINDOW_LABEL {
                         pet::handle_pet_window_moved(window, *pos);
+                    } else if window.label() == session_hud::SESSION_HUD_WINDOW_LABEL {
+                        session_hud::handle_session_hud_window_moved(window, *pos);
                     }
                 }
                 WindowEvent::Destroyed => {
                     if window.label() == pet::PET_WINDOW_LABEL {
                         pet::handle_pet_window_destroyed(window.app_handle());
+                    } else if window.label() == session_hud::SESSION_HUD_WINDOW_LABEL {
+                        session_hud::handle_session_hud_window_destroyed(window.app_handle());
                     }
                 }
                 _ => {}
@@ -2084,6 +2090,9 @@ pub fn run() {
             // 独立桌面宠物（第二阶段）：配置开启时恢复透明悬浮窗并启动
             // 独立状态轮询（未开启零开销，与皮肤安装状态互不依赖）
             pet::start_if_enabled(app.handle());
+            // 会话 Token 悬浮窗（Session HUD）：配置开启时恢复悬浮窗并
+            // 启动会话快照轮询（未开启零开销，与宠物窗互不依赖）
+            session_hud::start_if_enabled(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -2161,6 +2170,8 @@ pub fn run() {
             agent_theme::restart_zcode,
             pet::get_pet_config,
             pet::set_pet_config,
+            session_hud::get_session_hud_config,
+            session_hud::set_session_hud_config,
             pets::import_pet,
             pets::list_custom_pets,
             pets::delete_custom_pet,

@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "session-hud",
+  "description": "Minimal capability for the session HUD window (event listen + window dragging only; custom commands like get_session_hud_config are not ACL-gated)",
+  "windows": ["session-hud"],
+  "permissions": [
+    "core:event:default",
+    "core:window:allow-start-dragging"
+  ]
+}

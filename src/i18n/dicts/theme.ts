@@ -144,6 +144,33 @@ export const theme = {
   // 宠物状态图例（与 pet.js 状态机九状态一一对应，V9 细分思考/踱步）
   "theme.petLegend":
     "状态：沉睡（ZCode 闲置超 1 分钟或 ZBar 未运行） · 闲坐（近期有轮次活动） · 思考（模型规划中，暂无输出） · 奋笔疾书（模型输出增长，速度随 token 增速分档） · 跑腿执行（工具运行中，如命令/构建） · 踱步（动身接新任务 / 等待下一轮） · 庆祝（轮次完成，约 3 秒） · 沮丧（轮次失败或被取消，约 3 秒）",
+
+  // ===== 会话悬浮窗区（Session HUD：独立透明置顶悬浮窗，实时展示活跃
+  // ZCode 会话的 token 消耗；配置存 session-hud.json，不依赖皮肤安装，
+  // 改完即时生效；窗口高度随会话条数自适应，最多显示 5 条超出折叠） =====
+  "theme.hudTitle": "会话悬浮窗",
+  "theme.hudHint":
+    "独立透明置顶小窗，实时显示当前活跃 ZCode 会话的模型、状态（生成中/空闲）与累计 Token（Σ 总计 · ↑ 输入 · ↓ 输出 · ⟲ 缓存读 · × 请求 · 速度 t/s · TTFT，口径同注入版会话条），多会话并列、按最近活动排序；不依赖皮肤安装，可拖动移动位置。",
+  "theme.hudEnabled": "开启会话悬浮窗",
+  "theme.hudEnabledHint": "总开关：关闭即隐藏悬浮窗并停止数据轮询",
+  "theme.hudApplyFail": "应用会话悬浮窗设置失败：{msg}",
+  "theme.hudLoadFail": "读取会话悬浮窗设置失败：{msg}",
+  "theme.hudWindowLabel": "活跃窗口",
+  "theme.hudWindow5m": "5 分钟",
+  "theme.hudWindow10m": "10 分钟",
+  "theme.hudWindow30m": "30 分钟",
+  "theme.hudWindowAll": "不限",
+  "theme.hudWindowHint":
+    "只显示最近该时长内有活动（模型请求或发送消息）的会话；「不限」按最近 24 小时兜底，最多同时显示 5 条，超出折叠",
+  "theme.hudOpacity": "透明度",
+  "theme.hudOpacityHint": "悬浮窗内容不透明度，拖动即时生效",
+  "theme.hudWidth": "宽度",
+  "theme.hudWidthHint": "悬浮窗宽度（240~480px），拖动即时生效，内容自适应",
+  "theme.hudShowTokens": "数据行",
+  "theme.hudShowTokensHint":
+    "按注入版会话条口径显示每会话累计：Σ 总计 · ↑ 输入 · ↓ 输出 · ⟲ 缓存读 · × 请求 · 速度 t/s · TTFT 首字延迟",
+  "theme.hudShowModel": "模型名",
+  "theme.hudShowModelHint": "显示该会话最近使用的模型",
   "theme.currentWallpaper": "当前壁纸",
   "theme.noWallpaper": "未选择壁纸",
   "theme.lightWallpaperPreset": "亮色壁纸适配",

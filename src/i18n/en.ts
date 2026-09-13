@@ -715,6 +715,32 @@ export const en: typeof zh = {
     // V9 splits thinking/walking)
     "theme.petLegend":
       "States: sleeping (ZCode idle for over 1 minute or ZBar not running) · idle (recent turn activity) · thinking (model planning, no output yet) · typing (output growing; speed tiers by token rate) · tool running (a tool is executing, e.g. command/build) · walking (heading to a new turn / waiting for the next) · celebrating (turn finished, about 3s) · failed (turn failed or cancelled, about 3s)",
+
+    // Session HUD card (standalone always-on-top overlay showing active
+    // ZCode sessions; config in session-hud.json, no skin dependency)
+    "theme.hudTitle": "Session HUD",
+    "theme.hudHint":
+      "A standalone transparent always-on-top overlay showing active ZCode sessions with model, state (generating/idle) and token totals (Σ total · ↑ input · ↓ output · ⟲ cache read · × requests · speed t/s · TTFT, same convention as the in-chat session bar), one row per session sorted by recent activity; no skin required, draggable.",
+    "theme.hudEnabled": "Enable Session HUD",
+    "theme.hudEnabledHint": "Master switch: off hides the overlay and stops polling",
+    "theme.hudApplyFail": "Failed to apply Session HUD settings: {msg}",
+    "theme.hudLoadFail": "Failed to load Session HUD settings: {msg}",
+    "theme.hudWindowLabel": "Active window",
+    "theme.hudWindow5m": "5 min",
+    "theme.hudWindow10m": "10 min",
+    "theme.hudWindow30m": "30 min",
+    "theme.hudWindowAll": "All",
+    "theme.hudWindowHint":
+      "Only sessions active (model requests or sent messages) within this window are shown; \"All\" falls back to the last 24 hours, up to 5 visible rows, extras folded",
+    "theme.hudOpacity": "Opacity",
+    "theme.hudOpacityHint": "Content opacity of the overlay, applied instantly",
+    "theme.hudWidth": "Width",
+    "theme.hudWidthHint": "Overlay width (240–480px), applied instantly; content adapts",
+    "theme.hudShowTokens": "Data row",
+    "theme.hudShowTokensHint":
+      "Per-session totals in the session-bar convention: Σ total · ↑ input · ↓ output · ⟲ cache read · × requests · speed t/s · TTFT",
+    "theme.hudShowModel": "Model name",
+    "theme.hudShowModelHint": "Show the session's most recently used model",
     "theme.currentWallpaper": "Current wallpaper",
     "theme.noWallpaper": "No wallpaper selected",
     "theme.lightWallpaperPreset": "Light wallpaper fit",

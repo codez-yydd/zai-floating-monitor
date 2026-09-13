@@ -933,6 +933,29 @@ export interface PetConfig {
 /** 宠物形态字面量（与 Rust 侧 PET_MODE_INJECTED / PET_MODE_FLOATING 契约一致） */
 export type PetMode = "injected" | "floating";
 
+/**
+ * 会话悬浮窗配置（get/set_session_hud_config 的契约，
+ * ~/.zbar/session-hud.json）——Session HUD 设置的唯一真相源（皮肤页
+ * 「会话悬浮窗」卡读写），窗口高度随会话条数自适应、不持久化。
+ */
+export interface SessionHudConfig {
+  /** 总开关：false = 关窗停轮询；true = 建窗 + 启轮询 */
+  enabled: boolean;
+  /** 窗口左上角位置（逻辑坐标，拖动结束持久化，重启恢复）；
+   *  null = 从未拖动过（默认主显示器右下角、宠物窗默认区域上方） */
+  pos: [number, number] | null;
+  /** 窗口宽度基准（逻辑 px；高度随会话条数自适应） */
+  width: number;
+  /** 窗口不透明度（0.25~1.0，悬浮窗内容层 CSS opacity） */
+  opacity: number;
+  /** 活跃窗口档位（分钟）：5/10/30，0 = 不限（Rust 侧仍有 24h 兜底） */
+  windowMinutes: number;
+  /** 显示项：数据行（Σ/↑/↓/⟲/×/速度/TTFT 整行；关闭仅保留项目行） */
+  showTokens: boolean;
+  /** 显示项：模型名 */
+  showModel: boolean;
+}
+
 // ===== 自定义宠物（第三阶段：Petdex 格式导入）=====
 
 /** 自定义宠物的单状态行配置（Petdex 行 → ZBar 七状态映射的落盘形态） */

@@ -7,6 +7,7 @@ import {
   getAgentThemeParams,
   getAgentThemeState,
   getPetConfig,
+  getSessionHudConfig,
   installAgentTheme,
   listAgentWallpapers,
   restartZcode,
@@ -16,6 +17,7 @@ import {
   setAgentWallpaperDir,
   setPanelSticky,
   setPetConfig,
+  setSessionHudConfig,
   uninstallAgentTheme,
 } from "./api";
 import {
@@ -44,6 +46,7 @@ import type {
   AgentThemeState,
   PetConfig,
   PetMode,
+  SessionHudConfig,
   ThemeParams,
   WallpaperEntry,
 } from "./types";
@@ -391,6 +394,17 @@ export function ThemePanel({ onBack }: Props) {
   };
   const customPets = useCustomPets(refreshPetCfgQuiet);
 
+  // ===== 会话悬浮窗（session-hud.json/SessionHudConfig 唯一真相源：
+  // 总开关 + 活跃窗口档位 + 透明度 + 显示项，改完 setSessionHudConfig
+  // 即时生效；不依赖皮肤安装）=====
+  const [hudCfg, setHudCfg] = useState<SessionHudConfig | null>(null);
+  const hudCfgRef = useRef<SessionHudConfig | null>(null);
+  // 透明度滑块防抖 timer（拖动连续触发，300ms 合并落盘）
+  const hudSaveTimer = useRef<number | undefined>(undefined);
+  // applyHud 提交代数：仅最新一次提交的响应可写回状态，防止在途慢响
+  // 应（先发出的提交后返回）覆盖用户已提交/拖动到的新值
+  const hudApplySeq = useRef(0);
+
   /** 刷新壁纸库列表（打开面板 / 设目录 / 导入后调用） */
   const refreshWallpapers = () => {
     setWallpapersLoading(true);
@@ -477,6 +491,18 @@ export function ThemePanel({ onBack }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 会话悬浮窗配置加载（挂载即拉取；失败不阻塞页面其余功能，卡片停在
+  // 本地面板不渲染——该功能不依赖皮肤安装）
+  useEffect(() => {
+    getSessionHudConfig()
+      .then((c) => {
+        hudCfgRef.current = c;
+        setHudCfg(c);
+      })
+      .catch((e) => setError(t("theme.hudLoadFail", { msg: String(e) })));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // 卸载清理：冲掉未触发的参数保存防抖与反馈清除 timer
   useEffect(() => {
     return () => {
@@ -487,6 +513,9 @@ export function ThemePanel({ onBack }: Props) {
       }
       if (flashTimer.current !== undefined) {
         window.clearTimeout(flashTimer.current);
+      }
+      if (hudSaveTimer.current !== undefined) {
+        window.clearTimeout(hudSaveTimer.current);
       }
     };
   }, []);
@@ -647,6 +676,65 @@ export function ThemePanel({ onBack }: Props) {
         /* 回读失败保持当前态（下次切换再对齐） */
       }
     }
+  };
+
+  /**
+   * 应用会话悬浮窗配置（session-hud.json 唯一真相源，set_session_hud_
+   * config 改完即生效，不走参数防抖管道）：乐观更新 + 失败回读回滚——
+   * 总开关切换即时建/关窗并启停轮询；透明度/显示项/活跃档位经
+   * zbar://session-hud-params 热推悬浮窗即时生效（档位影响下一轮查询）。
+   */
+  const applyHud = async (next: SessionHudConfig) => {
+    hudCfgRef.current = next;
+    setHudCfg(next);
+    // 记下提交代数：返回时仅当代数仍为最新才写回（透明度滑块等快速
+    // 连续提交场景下，先发出的慢响应不得覆盖后发出的新值）
+    const seq = ++hudApplySeq.current;
+    try {
+      const back = await setSessionHudConfig(next);
+      if (seq !== hudApplySeq.current) return;
+      hudCfgRef.current = back;
+      setHudCfg(back);
+    } catch (e) {
+      if (seq !== hudApplySeq.current) return;
+      setError(t("theme.hudApplyFail", { msg: String(e) }));
+      try {
+        const back = await getSessionHudConfig();
+        if (seq !== hudApplySeq.current) return;
+        hudCfgRef.current = back;
+        setHudCfg(back);
+      } catch {
+        /* 回读失败保持当前态（下次切换再对齐） */
+      }
+    }
+  };
+
+  /**
+   * HUD 滑块共享管道：本地即时反馈 + 300ms 防抖合并落盘（与效果参数
+   * 滑块的防抖思路一致，避免拖动期间高频写配置文件与建/关窗流程）。
+   * 提交统一走 applyHud（含 hudApplySeq 防乱序守卫）。
+   */
+  const scheduleHudSave = (next: SessionHudConfig) => {
+    hudCfgRef.current = next;
+    setHudCfg(next);
+    if (hudSaveTimer.current !== undefined) {
+      window.clearTimeout(hudSaveTimer.current);
+    }
+    hudSaveTimer.current = window.setTimeout(() => {
+      if (hudCfgRef.current) void applyHud(hudCfgRef.current);
+    }, 300);
+  };
+
+  /** 透明度滑块（百分比刻度 25~100，存储值 = 刻度/100） */
+  const handleHudOpacity = (pct: number) => {
+    if (!hudCfgRef.current) return;
+    scheduleHudSave({ ...hudCfgRef.current, opacity: pct / 100 });
+  };
+
+  /** 宽度滑块（px 刻度 240~480，与 Rust 侧 HUD_WIDTH_RANGE 合法域一致） */
+  const handleHudWidth = (w: number) => {
+    if (!hudCfgRef.current) return;
+    scheduleHudSave({ ...hudCfgRef.current, width: w });
   };
 
   /**
@@ -1405,6 +1493,150 @@ export function ThemePanel({ onBack }: Props) {
                 <p className="text-[9px] text-slate-500 leading-relaxed break-words">
                   {t("theme.petLegend")}
                 </p>
+              </div>
+            </SettingsCard>
+          )}
+
+          {/* 会话悬浮窗区（Session HUD 设置唯一入口，配置源
+              session-hud.json/SessionHudConfig）：总开关 + 活跃窗口档位 +
+              透明度 + 显示项勾选。配置读取成功即渲染（不依赖皮肤安装）；
+              改完经 set_session_hud_config 即时生效——开关即时建/关窗并
+              启停轮询，其余经参数事件热推悬浮窗（透明度滑块带防抖） */}
+          {hudCfg && (
+            <SettingsCard
+              title={t("theme.hudTitle")}
+              hint={t("theme.hudHint")}
+              action={
+                <span className="text-[9px] text-slate-500">
+                  {t("settings.instant")}
+                </span>
+              }
+            >
+              <div className="flex flex-col gap-2.5">
+                {/* 总开关：关 = 关窗停轮询；开 = 建独立透明置顶悬浮窗 */}
+                <label className="flex items-center justify-between gap-2 cursor-pointer">
+                  <span className="min-w-0">
+                    <span className="block text-[10px] text-slate-600">
+                      {t("theme.hudEnabled")}
+                    </span>
+                    <span className="block text-[9px] text-slate-500 leading-relaxed">
+                      {t("theme.hudEnabledHint")}
+                    </span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={hudCfg.enabled}
+                    onChange={(e) =>
+                      void applyHud({ ...hudCfg, enabled: e.target.checked })
+                    }
+                    className="accent-sky-500 h-3 w-3 shrink-0"
+                  />
+                </label>
+
+                {/* 活跃窗口档位 + 透明度 + 显示项：总开关关闭时降透明度
+                    并阻断交互（保留设置值，重新开启即恢复） */}
+                <div
+                  className={`flex flex-col gap-2.5 pt-2 border-t border-slate-900/6 ${
+                    hudCfg.enabled ? "" : "opacity-40 pointer-events-none"
+                  }`}
+                >
+                  {/* 活跃窗口档位（离散点击即时保存，与宠物尺寸档位同
+                      交互）：判定会话"最近有活动"的时间窗 */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-slate-700/55 shrink-0">
+                      {t("theme.hudWindowLabel")}
+                    </span>
+                    <PillGroup className="flex-1">
+                      {(
+                        [
+                          [5, "theme.hudWindow5m"],
+                          [10, "theme.hudWindow10m"],
+                          [30, "theme.hudWindow30m"],
+                          [0, "theme.hudWindowAll"],
+                        ] as [number, MessageKey][]
+                      ).map(([minutes, key]) => (
+                        <PillButton
+                          key={key}
+                          active={hudCfg.windowMinutes === minutes}
+                          onClick={() =>
+                            void applyHud({ ...hudCfg, windowMinutes: minutes })
+                          }
+                        >
+                          {t(key)}
+                        </PillButton>
+                      ))}
+                    </PillGroup>
+                  </div>
+                  <p className="text-[9px] text-slate-500 leading-relaxed">
+                    {t("theme.hudWindowHint")}
+                  </p>
+
+                  {/* 透明度滑块（百分比刻度，300ms 防抖落盘热生效） */}
+                  <ParamSlider
+                    label={t("theme.hudOpacity")}
+                    hint={t("theme.hudOpacityHint")}
+                    value={Math.round(hudCfg.opacity * 100)}
+                    min={25}
+                    max={100}
+                    step={1}
+                    format={(v) => `${v}%`}
+                    onChange={handleHudOpacity}
+                  />
+
+                  {/* 宽度滑块（px 刻度 240~480，与 Rust 侧 HUD_WIDTH_RANGE
+                      合法域一致；300ms 防抖落盘后 Rust 侧建窗/轮询同步
+                      管道按新宽度调窗，前端内容 width:100% 自适应） */}
+                  <ParamSlider
+                    label={t("theme.hudWidth")}
+                    hint={t("theme.hudWidthHint")}
+                    value={Math.round(hudCfg.width)}
+                    min={240}
+                    max={480}
+                    step={5}
+                    format={(v) => `${v}px`}
+                    onChange={handleHudWidth}
+                  />
+
+                  {/* 显示项勾选（首行分隔线，样式同设置页既有 checkbox
+                      模式）：勾选即时热推悬浮窗重建列表。数据行整行开关
+                      （Σ/↑/↓/⟲/×/速度/TTFT 字段口径对齐注入版会话条，
+                      不再单设上下文条开关） */}
+                  {(
+                    [
+                      ["showTokens", "theme.hudShowTokens", "theme.hudShowTokensHint"],
+                      ["showModel", "theme.hudShowModel", "theme.hudShowModelHint"],
+                    ] as [
+                      keyof SessionHudConfig,
+                      MessageKey,
+                      MessageKey
+                    ][]
+                  ).map(([field, labelKey, hintKey]) => (
+                    <label
+                      key={field}
+                      className="flex items-center justify-between gap-2 cursor-pointer pt-2 border-t border-slate-900/6"
+                    >
+                      <span className="min-w-0">
+                        <span className="block text-[10px] text-slate-600">
+                          {t(labelKey)}
+                        </span>
+                        <span className="block text-[9px] text-slate-500 leading-relaxed">
+                          {t(hintKey)}
+                        </span>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={Boolean(hudCfg[field])}
+                        onChange={(e) =>
+                          void applyHud({
+                            ...hudCfg,
+                            [field]: e.target.checked,
+                          })
+                        }
+                        className="accent-sky-500 h-3 w-3 shrink-0"
+                      />
+                    </label>
+                  ))}
+                </div>
               </div>
             </SettingsCard>
           )}

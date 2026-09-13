@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ZBar Session HUD</title>
+    <!--
+      会话 Token 悬浮窗入口（Session HUD）：透明无边框置顶悬浮窗，与主
+      面板（index.html）/宠物窗（pet.html）互不影响。页面为极简薄壳——
+      - /src/session-hud-main.ts：宿主壳（监听 zbar://session-hud-usage
+        数据快照与 zbar://session-hud-params 配置热推，invoke 读取初始
+        配置；列表渲染在壳内完成，不引入 panel 的组件体系）。
+      - 样式内联：尺寸常量（头部 30px / 会话行 56px / 折叠行 20px /
+        底部留白 8px / 空态总高 64px）与 Rust 侧 session_hud.rs 的
+        hud_height 计算一一对应——窗口高度由 Rust 侧按会话条数自适应，
+        页面内容必须落在同样的尺寸栅格上，否则会出现裁切或空白。
+        会话行三行制：项目行（状态点·项目名·短标识·模型）+ 核心指标行
+       （Σ 累计 · × 请求 · 速度 t/s · TTFT）+ 分解行（↑ 输入 ↓ 输出
+        ⟲ 缓存读），每行 nowrap + overflow hidden 防御极端长值。
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+      }
+      /* 根节点即透明度作用层（设置卡透明度滑块 → CSS opacity） */
+      #hud-root {
+        box-sizing: border-box;
+        width: 100%;
+        height: 100%;
+        padding-bottom: 8px; /* HUD_BOTTOM_PAD */
+        display: flex;
+        flex-direction: column;
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+        color: #e2e8f0;
+        user-select: none;
+        cursor: default;
+      }
+      /* 头部拖动区：30px（HUD_HEADER_H），data-tauri-drag-region */
+      #hud-header {
+        height: 30px;
+        flex: 0 0 30px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 0 10px;
+        box-sizing: border-box;
+        background: rgba(10, 14, 24, 0.72);
+        border-radius: 12px 12px 0 0;
+        border: 1px solid rgba(148, 163, 184, 0.16);
+        border-bottom: none;
+      }
+      #hud-title {
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        color: #94a3b8;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #hud-count {
+        margin-left: auto;
+        font-size: 9px;
+        color: #64748b;
+        white-space: nowrap;
+      }
+      /* 会话列表：每行 46px（HUD_ROW_H） */
+      #hud-list {
+        flex: 0 1 auto;
+        display: flex;
+        flex-direction: column;
+        background: rgba(10, 14, 24, 0.72);
+        border-left: 1px solid rgba(148, 163, 184, 0.16);
+        border-right: 1px solid rgba(148, 163, 184, 0.16);
+        overflow: hidden;
+      }
+      .hud-row {
+        height: 56px;
+        flex: 0 0 56px;
+        box-sizing: border-box;
+        padding: 4px 10px 4px 8px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 3px;
+        border-top: 1px solid rgba(148, 163, 184, 0.1);
+        overflow: hidden;
+      }
+      .hud-row-top {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        min-width: 0;
+        line-height: 14px;
+      }
+      /* 状态点：生成中（青绿呼吸脉冲，1.2s infinite，opacity + transform
+         —— 不做位移/字号，不影响布局）/ 空闲（灰，静止） */
+      .hud-dot {
+        flex: 0 0 6px;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #64748b;
+      }
+      .hud-dot.gen {
+        background: #34d399;
+        animation: hud-pulse 1.2s ease-in-out infinite;
+      }
+      @keyframes hud-pulse {
+        0%,
+        100% {
+          opacity: 1;
+          transform: scale(1);
+        }
+        50% {
+          opacity: 0.45;
+          transform: scale(1.3);
+        }
+      }
+      .hud-project {
+        font-size: 10px;
+        font-weight: 600;
+        color: #e2e8f0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        min-width: 0;
+      }
+      .hud-short {
+        flex: none;
+        font-size: 9px;
+        color: #64748b;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas,
+          "Liberation Mono", monospace;
+      }
+      /* 子代理徽标（⟡n）：窗口内有活动的子代理数 >0 才占位，克制小号 */
+      .hud-sub {
+        flex: none;
+        font-size: 9px;
+        color: #a78bfa;
+      }
+      .hud-model {
+        margin-left: auto;
+        min-width: 0;
+        max-width: 45%;
+        font-size: 9px;
+        color: #7dd3fc;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      /* 数据行（核心指标行 + 分解行）：对齐注入版会话条口径，等宽字体
+         栈 macOS 命中 ui-monospace/SF Mono/Menlo、Windows 命中 Consolas；
+         tabular-nums 配合宿主壳的恒定宽度补位（fmtTokens 恒 5 字符 /
+         req padStart(3) / speed、ttft padStart(4)）保持行宽稳定；
+         nowrap + overflow hidden 防御极端长值（裁切而非撑破） */
+      .hud-row-data {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas,
+          "Liberation Mono", monospace;
+        font-variant-numeric: tabular-nums;
+        font-size: 9px;
+        line-height: 14px;
+        color: #94a3b8;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      /* Σ 累计（核心指标行首字段）：10px 稍放大做视觉锚点 */
+      .hud-sigma {
+        font-size: 10px;
+        font-weight: 600;
+        color: #e2e8f0;
+      }
+      /* 字段级变化高亮：数值更新瞬间提亮 + 柔和光晕，0.55s ease-out
+         渐隐回正常色。只用颜色/阴影动画（等宽 + tabular-nums 下不引起
+         行宽抖动），配色取 HUD 现有亮色（#e2e8f0 文字亮色 / #7dd3fc
+         模型强调色的光晕）。字段 span 为每帧新建节点，插入即播一次，
+         1 秒节拍下同字段连续变化可重复触发 */
+      .hud-flash {
+        animation: hud-field-flash 0.55s ease-out;
+      }
+      @keyframes hud-field-flash {
+        from {
+          color: #e2e8f0;
+          text-shadow: 0 0 6px rgba(125, 211, 252, 0.55);
+        }
+      }
+      /* 速度位"测算中"占位：生成中但尚无可测数据（单笔请求生成中的
+         实时速率页面外不可得），与生成中状态点同节奏呼吸 */
+      .hud-measuring {
+        animation: hud-measure-pulse 1.2s ease-in-out infinite;
+      }
+      @keyframes hud-measure-pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.35;
+        }
+      }
+      /* 空态提示（空列表时占满窗口，显示"暂无活跃会话"而非 0 高） */
+      #hud-empty {
+        flex: 1 1 auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        background: rgba(10, 14, 24, 0.72);
+        border-left: 1px solid rgba(148, 163, 184, 0.16);
+        border-right: 1px solid rgba(148, 163, 184, 0.16);
+        font-size: 10px;
+        color: #64748b;
+      }
+      /* 折叠提示行：20px（HUD_MORE_H） */
+      #hud-more {
+        height: 20px;
+        flex: 0 0 20px;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: rgba(10, 14, 24, 0.72);
+        border: 1px solid rgba(148, 163, 184, 0.16);
+        border-top: none;
+        border-radius: 0 0 12px 12px;
+        font-size: 9px;
+        color: #64748b;
+      }
+      /* 圆角闭环：列表区（首行/末行）与头尾容器拼接。无折叠行时列表
+         承担底部圆角（rounded-bottom 由宿主壳按折叠行显隐切换） */
+      #hud-list.rounded-bottom {
+        border-radius: 0 0 12px 12px;
+      }
+      #hud-list:not(:empty) {
+        border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+      }
+      .hidden {
+        display: none !important;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="hud-root">
+      <div id="hud-header" data-tauri-drag-region="">
+        <span id="hud-title" data-tauri-drag-region="">ZCode Sessions</span>
+        <span id="hud-count" data-tauri-drag-region=""></span>
+      </div>
+      <div id="hud-list"></div>
+      <div id="hud-empty" class="hidden"></div>
+      <div id="hud-more"></div>
+    </div>
+    <script type="module" src="/src/session-hud-main.ts"></script>
+  </body>
+</html>
