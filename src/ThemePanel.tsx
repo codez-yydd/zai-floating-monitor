@@ -731,11 +731,9 @@ export function ThemePanel({ onBack }: Props) {
     scheduleHudSave({ ...hudCfgRef.current, opacity: pct / 100 });
   };
 
-  /** 宽度滑块（px 刻度 240~480，与 Rust 侧 HUD_WIDTH_RANGE 合法域一致） */
-  const handleHudWidth = (w: number) => {
-    if (!hudCfgRef.current) return;
-    scheduleHudSave({ ...hudCfgRef.current, width: w });
-  };
+  // 注：悬浮窗宽度滑块已移除（V3）——窗口改为可自由拖拽调整大小，
+  // 尺寸由 Rust 侧 Resized 挂点持久化到 session-hud.json 的 width/
+  // height（设置卡不再提供宽度入口）
 
   /**
    * 处理拖放：原生文件对话框在无 Dock 图标的 Accessory（ZBar）应用上
@@ -1581,20 +1579,6 @@ export function ThemePanel({ onBack }: Props) {
                     step={1}
                     format={(v) => `${v}%`}
                     onChange={handleHudOpacity}
-                  />
-
-                  {/* 宽度滑块（px 刻度 240~480，与 Rust 侧 HUD_WIDTH_RANGE
-                      合法域一致；300ms 防抖落盘后 Rust 侧建窗/轮询同步
-                      管道按新宽度调窗，前端内容 width:100% 自适应） */}
-                  <ParamSlider
-                    label={t("theme.hudWidth")}
-                    hint={t("theme.hudWidthHint")}
-                    value={Math.round(hudCfg.width)}
-                    min={240}
-                    max={480}
-                    step={5}
-                    format={(v) => `${v}px`}
-                    onChange={handleHudWidth}
                   />
 
                   {/* 显示项勾选（首行分隔线，样式同设置页既有 checkbox

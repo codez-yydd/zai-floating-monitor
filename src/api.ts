@@ -21,6 +21,7 @@ import type {
   KimiDevicePollResult,
   MergeResult,
   ModelInfo,
+  ModelSpeedStat,
   PricingConfig,
   PricingDiff,
   ApplyPriceItem,
@@ -623,6 +624,27 @@ export async function setSessionHudConfig(
   config: SessionHudConfig
 ): Promise<SessionHudConfig> {
   return invoke<SessionHudConfig>("set_session_hud_config", { config });
+}
+
+/**
+ * 更新会话悬浮窗字体缩放（悬浮窗 header 滑块专用轻量命令）：只改
+ * fontScale 一个字段并落盘 + 热推，不走建/关窗流程。返回收敛后的最终
+ * 配置。
+ */
+export async function setSessionHudFontScale(
+  scale: number
+): Promise<SessionHudConfig> {
+  return invoke<SessionHudConfig>("set_session_hud_font_scale", { scale });
+}
+
+// ===== 模型速度统计（model_speed.rs，主面板"速度"tab）=====
+
+/**
+ * 查询模型速度统计（按 model_id 分组聚合主库 model_usage）。
+ * days：滚动窗口天数；0 = 今日（本地时区自然日零点起）。
+ */
+export async function getModelSpeed(days: number): Promise<ModelSpeedStat[]> {
+  return invoke<ModelSpeedStat[]>("get_model_speed", { days });
 }
 
 // ===== 自定义宠物（第三阶段：Petdex 格式导入，Rust pets 模块契约）=====

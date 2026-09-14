@@ -3,7 +3,9 @@
  * 百分比落盘（windowSize.ts），成功后广播 zbar-win-size-changed 供设置页刷新档位。
  *
  * 平台分流：
- * - 明确识别为 Windows / macOS 时走前端 JS 自实现 resize 会话。原因：
+ * - 明确识别为 Windows / macOS 时，纯尺寸方向使用前端 JS resize 会话，
+ *   需要同时改位置与尺寸的顶/左方向优先使用系统原子 resize，失败再回退
+ *   JS。原因：
  *   macOS 上 tao 0.35.3 的 drag_resize_window 返回 NotSupported，且
  *   tauri-runtime-wry 以 `let _ =` 吞错，startResizeDragging 静默无效，用户实际
  *   靠 AppKit 给 Borderless|Resizable 窗口的系统级边缘热区（约 3~5pt）拖动，
@@ -13,7 +15,8 @@
  *   不掉、IPC 延迟期间鼠标状态变化），偶发拖不动。JS 会话改为 pointerdown 采集
  *   几何快照（monitor / outerSize / outerPosition，物理 ÷ scaleFactor 换逻辑值）
  *   + pointermove 按 8 向增量 setSize / setPosition（Logical 单位），并用
- *   setPointerCapture 锁定事件流：无系统消息模拟、无跨进程竞态。
+ *   setPointerCapture 锁定事件流：无系统消息模拟、无跨进程竞态。JS 路径
+ *   只保留最新目标且串行提交 IPC，避免上一帧尚未完成时下一帧插队造成抖动。
  * - 其余平台（Linux、识别失败）保留原生 startResizeDragging（tao 有实现，且
  *   Wayland 下程序化 setPosition 受限），行为与旧版一致。
  *
@@ -68,6 +71,12 @@ const isMac =
  *  其余平台（Linux、识别失败）一律走原生 startResizeDragging，零回归 */
 const USE_JS_RESIZE = isWindows || isMac;
 
+/** 顶/左方向需要同时改变窗口位置与尺寸，优先交给系统一次性处理，避免
+ * setSize + setPosition 两个 IPC 在同一帧形成可见中间态。 */
+function isAnchoredDir(dir: TauriResizeDirection): boolean {
+  return dir.includes("North") || dir.includes("West");
+}
+
 /** Tauri ResizeDirection 联合（@tauri-apps/api 2.11.1 未导出该类型，本地等价声明） */
 type TauriResizeDirection =
   | "North"
@@ -108,24 +117,50 @@ function persistPct(pct: WinSizePct, monitor: Monitor): void {
 
 /** 原生 resize（Linux、识别失败平台及 JS 会话快照失败兜底）：交系统
  *  startResizeDragging；落盘绑定拖拽会话 promise settle */
+const finishNativeResize = async (): Promise<void> => {
+  // 拖拽会话终点：读最终窗口尺寸忠实落盘（覆盖防抖通道存的中间值）
+  try {
+    const [pct, monitor] = await Promise.all([
+      currentWinSizePct(),
+      currentMonitor(),
+    ]);
+    if (pct && monitor) persistPct(pct, monitor);
+  } catch {
+    /* 静默：落盘失败不影响本次拖拽结果 */
+  }
+};
+
 const startResize = (dir: TauriResizeDirection) => {
   getCurrentWindow()
     .startResizeDragging(dir)
-    .then(async () => {
-      // 拖拽会话终点：读最终窗口尺寸忠实落盘（覆盖防抖通道存的中间值）
-      try {
-        const [pct, monitor] = await Promise.all([
-          currentWinSizePct(),
-          currentMonitor(),
-        ]);
-        if (pct && monitor) persistPct(pct, monitor);
-      } catch {
-        /* 静默：落盘失败不影响本次拖拽结果 */
-      }
-    })
+    .then(finishNativeResize)
     .catch(() => {
       /* 原生 resize 调用失败（纯浏览器无 IPC 等）：静默 */
     });
+};
+
+/** 顶/左方向的系统 resize 优先路径；调用失败时回退到 JS 会话。 */
+const startNativeResizePreferred = (
+  dir: TauriResizeDirection,
+  e: ReactPointerEvent<HTMLDivElement>,
+) => {
+  const target = e.currentTarget;
+  getCurrentWindow()
+    .startResizeDragging(dir)
+    .then(finishNativeResize)
+    .catch(() => {
+      // currentTarget 在异步回调中会被 React 清空，必须使用 pointerdown 时
+      // 预取的元素；startJsResizeAt 内部会容忍捕获已错过的极窄时序。
+      startJsResizeAt(dir, e, target);
+    });
+};
+
+type ResizeGeometry = {
+  width: number;
+  height: number;
+  x: number;
+  y: number;
+  move: boolean;
 };
 
 /** JS resize 会话快照：pointerdown 一次性采集；全程以此为基准做「快照 + 最新
@@ -150,14 +185,19 @@ type JsResizeSession = {
   pendingY: number | null;
   /** 已排队未执行的 rAF id，null 表示当前无排队 */
   rafId: number | null;
+  /** 最新待提交的窗口几何；新指针到来时覆盖旧目标，不堆积 IPC */
+  desiredGeometry: ResizeGeometry | null;
+  /** 当前串行写入链；结束时等待它完成，保证最终尺寸再落盘 */
+  flushPromise: Promise<void> | null;
+  writing: boolean;
 };
 
 /** 当前 JS resize 会话（同一时刻至多一个），null 表示空闲 */
 let jsSession: JsResizeSession | null = null;
 
-/** 按方向增量计算并应用窗口几何（每动画帧至多一次，fire-and-forget 不阻塞输入） */
-function applyJsResizeGeometry(s: JsResizeSession): void {
-  if (s.pendingX === null || s.pendingY === null) return;
+/** 按方向增量计算窗口几何（始终从拖前快照计算，避免误差累积） */
+function calculateJsResizeGeometry(s: JsResizeSession): ResizeGeometry | null {
+  if (s.pendingX === null || s.pendingY === null) return null;
   const dx = s.pendingX - s.startX;
   const dy = s.pendingY - s.startY;
   const dir = s.dir;
@@ -190,27 +230,59 @@ function applyJsResizeGeometry(s: JsResizeSession): void {
     y = s.waY;
   }
 
-  // 先 setSize 后 setPosition：两调用均为按最终目标值的绝对赋值，顺序仅影响
-  // 单帧中间态，实测该顺序无可见闪跳；取整避免亚像素抖动；不 await，避免阻塞输入
-  const win = getCurrentWindow();
-  win.setSize(new LogicalSize(Math.round(w), Math.round(h))).catch(() => {
-    /* 纯浏览器（npm run dev）无 Tauri IPC：静默 */
-  });
-  if (dir.includes("North") || dir.includes("West")) {
-    win
-      .setPosition(new LogicalPosition(Math.round(x), Math.round(y)))
-      .catch(() => {
-        /* 纯浏览器（npm run dev）无 Tauri IPC：静默 */
-      });
+  return {
+    width: Math.round(w),
+    height: Math.round(h),
+    x: Math.round(x),
+    y: Math.round(y),
+    move: isAnchoredDir(dir),
+  };
+}
+
+/** 串行提交最新几何。窗口 API 前一笔完成前不发下一笔，且中途只保留
+ * 最新目标，避免 IPC 乱序把窗口短暂拉回旧尺寸造成抖动。 */
+async function flushJsResizeGeometry(s: JsResizeSession): Promise<void> {
+  let win: ReturnType<typeof getCurrentWindow>;
+  try {
+    win = getCurrentWindow();
+  } catch {
+    s.desiredGeometry = null;
+    return;
+  }
+  while (s.desiredGeometry !== null) {
+    const geometry = s.desiredGeometry;
+    s.desiredGeometry = null;
+    try {
+      await win.setSize(new LogicalSize(geometry.width, geometry.height));
+      // 有更新目标时跳过旧目标的位置写入，避免旧位置在最新几何前闪一下。
+      if (geometry.move && s.desiredGeometry === null) {
+        await win.setPosition(new LogicalPosition(geometry.x, geometry.y));
+      }
+    } catch {
+      /* 纯浏览器 / ACL 拒绝：丢弃本笔，保留循环中可能到来的最新目标 */
+    }
   }
 }
 
-/** JS resize 起点：pointerdown 同步锁定 pointer capture，再异步采集几何快照 */
-const startJsResize = (
+function enqueueJsResizeGeometry(s: JsResizeSession): void {
+  const geometry = calculateJsResizeGeometry(s);
+  if (!geometry) return;
+  s.desiredGeometry = geometry;
+  if (s.writing) return;
+  s.writing = true;
+  const flush = flushJsResizeGeometry(s).finally(() => {
+    s.writing = false;
+  });
+  s.flushPromise = flush;
+  void flush;
+}
+
+/** JS resize 起点实现：pointerdown 同步锁定 pointer capture，再异步采集几何快照 */
+const startJsResizeAt = (
   dir: TauriResizeDirection,
   e: ReactPointerEvent<HTMLDivElement>,
+  target: HTMLDivElement,
 ) => {
-  const target = e.currentTarget;
   const pointerId = e.pointerId;
   // 同步捕获：后续 move / up 拖出窗口边界仍派发到本热区元素
   target.setPointerCapture(pointerId);
@@ -237,6 +309,9 @@ const startJsResize = (
         pendingX: null,
         pendingY: null,
         rafId: null,
+        desiredGeometry: null,
+        flushPromise: null,
+        writing: false,
       };
     })
     .catch(() => {
@@ -253,6 +328,14 @@ const startJsResize = (
     });
 };
 
+/** JS resize 起点：同步取出当前热区元素，供异步快照链复用。 */
+const startJsResize = (
+  dir: TauriResizeDirection,
+  e: ReactPointerEvent<HTMLDivElement>,
+) => {
+  startJsResizeAt(dir, e, e.currentTarget);
+};
+
 /** JS resize 过程：只记最新坐标，rAF 节流到每动画帧至多应用一次几何 */
 const onJsResizeMove = (e: ReactPointerEvent<HTMLDivElement>) => {
   const s = jsSession;
@@ -263,7 +346,7 @@ const onJsResizeMove = (e: ReactPointerEvent<HTMLDivElement>) => {
   if (s.rafId === null) {
     s.rafId = window.requestAnimationFrame(() => {
       s.rafId = null;
-      applyJsResizeGeometry(s);
+      enqueueJsResizeGeometry(s);
     });
   }
 };
@@ -272,20 +355,27 @@ const onJsResizeMove = (e: ReactPointerEvent<HTMLDivElement>) => {
 const onJsResizeEnd = (e: ReactPointerEvent<HTMLDivElement>) => {
   const s = jsSession;
   if (!s || e.pointerId !== s.pointerId) return;
-  jsSession = null;
   if (s.rafId !== null) {
     window.cancelAnimationFrame(s.rafId);
     s.rafId = null;
   }
+  // pointerup 可能发生在下一帧前，直接把终点坐标作为最后目标提交。
+  if (e.type === "pointerup") {
+    s.pendingX = e.clientX;
+    s.pendingY = e.clientY;
+  }
+  enqueueJsResizeGeometry(s);
+  jsSession = null;
   // 落盘终值：读实际 outerSize（防 clamp 差异）→ pxToPct → clamp → 落盘 → 广播
   // （up 时浏览器自动释放 pointer capture，无需显式释放）
-  Promise.all([currentWinSizePct(), currentMonitor()])
+  const persist = () => Promise.all([currentWinSizePct(), currentMonitor()])
     .then(([pct, monitor]) => {
       if (pct && monitor) persistPct(pct, monitor);
     })
     .catch(() => {
       /* 静默：落盘失败不影响本次拖拽结果 */
     });
+  void (s.flushPromise ?? Promise.resolve()).then(persist);
 };
 
 /** 边缘拖拽热区组件：无可见 UI，仅提供 8 向隐形热区与尺寸落盘 */
@@ -353,8 +443,12 @@ export function ResizeHandles() {
           onPointerDown={(e) => {
             if (e.button !== 0) return;
             e.preventDefault();
-            // 平台分流：Win / macOS 走 JS 会话，其余走原生 startResizeDragging
-            if (USE_JS_RESIZE) startJsResize(h.dir, e);
+            // 平台分流：纯尺寸方向走串行 JS 会话；顶/左方向优先走系统
+            // 原子 resize，其余平台保留原生路径。
+            if (USE_JS_RESIZE) {
+              if (isAnchoredDir(h.dir)) startNativeResizePreferred(h.dir, e);
+              else startJsResize(h.dir, e);
+            }
             else startResize(h.dir);
           }}
           onPointerMove={onJsResizeMove}

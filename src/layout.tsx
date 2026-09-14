@@ -272,7 +272,7 @@ export function SortToggle<T extends string>({
   options: { key: T; label: string }[];
   value: T;
   onChange: (v: T) => void;
-  accent?: "sky" | "emerald" | "orange" | "violet" | "indigo";
+  accent?: "sky" | "emerald" | "orange" | "violet" | "indigo" | "teal";
 }) {
   const activeClass = {
     sky: "bg-sky-500/15 text-sky-700 font-medium",
@@ -280,6 +280,7 @@ export function SortToggle<T extends string>({
     orange: "bg-orange-500/15 text-orange-700 font-medium",
     violet: "bg-violet-500/15 text-violet-700 font-medium",
     indigo: "bg-indigo-500/15 text-indigo-700 font-medium",
+    teal: "bg-teal-500/15 text-teal-700 font-medium",
   };
   return (
     <div className="flex gap-0.5 p-0.5 rounded-lg bg-slate-900/4">

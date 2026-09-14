@@ -10,13 +10,28 @@
       - /src/session-hud-main.ts：宿主壳（监听 zbar://session-hud-usage
         数据快照与 zbar://session-hud-params 配置热推，invoke 读取初始
         配置；列表渲染在壳内完成，不引入 panel 的组件体系）。
-      - 样式内联：尺寸常量（头部 30px / 会话行 56px / 折叠行 20px /
-        底部留白 8px / 空态总高 64px）与 Rust 侧 session_hud.rs 的
-        hud_height 计算一一对应——窗口高度由 Rust 侧按会话条数自适应，
-        页面内容必须落在同样的尺寸栅格上，否则会出现裁切或空白。
+      - 样式内联：尺寸常量（头部 30px / 会话行 56px / 模型速度行 20px /
+        折叠行 20px / 今日行 20px / 底部留白 8px / 空态总高 64px）与
+        Rust 侧 session_hud.rs 的 hud_height 计算一一对应——窗口高度由
+        Rust 侧按会话条数自适应，页面内容必须落在同样的尺寸栅格上，
+        否则会出现裁切或空白。栅格与 Rust 公式的对齐要点（V3 修复）：
+        今日行/折叠行的 border 用 box-sizing: border-box 收进 20px 内，
+        列表区与模型速度区各自的 1px border-bottom 由 Rust 公式的
+        HUD_LIST_BORDER_H / HUD_MODELS_BORDER_H 计入。
         会话行三行制：项目行（状态点·项目名·短标识·模型）+ 核心指标行
        （Σ 累计 · × 请求 · 速度 t/s · TTFT）+ 分解行（↑ 输入 ↓ 输出
         ⟲ 缓存读），每行 nowrap + overflow hidden 防御极端长值。
+      - 字体缩放：--hud-scale（fontScale 配置，header 中部 Aa 滑块调节）
+        对全部字号/行高/行高栅格 calc 缩放，Rust 侧 hud_height 同乘
+        font_scale 保持自适应高度与内容一致；用户拖拽过窗口（固定高度）
+        时内容超出部分由 #hud-list 纵向滚动消化。
+      - 拖拽热区：#hud-resize-layer 为 src/hud-resize.ts 动态创建的 7 向
+        隐形热区层（上/左边 8px、下边 14px / 四角 14px，东缘热区已删除，
+        absolute inset 0
+        + z 最高，容器 pointer-events none、热区 auto）——undecorated
+        窗口的系统边缘热区在 Windows 上不生效，尺寸调整全靠该层（JS
+        resize 会话，见 hud-resize.ts 文件头）；顶部 8px 归热区优先，
+        header 其余区域仍是 data-tauri-drag-region 移动窗口。
     -->
     <style>
       html,
@@ -28,12 +43,16 @@
         background: transparent;
         overflow: hidden;
       }
-      /* 根节点即透明度作用层（设置卡透明度滑块 → CSS opacity） */
+      /* 根节点即透明度作用层（设置卡透明度滑块 → CSS opacity）；
+         --hud-scale 为字体缩放基准（默认 1，由 header 滑块 /
+         fontScale 配置经 JS 写入内联样式覆盖） */
       #hud-root {
+        --hud-scale: 1;
+        position: relative;
         box-sizing: border-box;
         width: 100%;
         height: 100%;
-        padding-bottom: 8px; /* HUD_BOTTOM_PAD */
+        padding-bottom: calc(8px * var(--hud-scale)); /* HUD_BOTTOM_PAD */
         display: flex;
         flex-direction: column;
         font-family:
@@ -43,10 +62,10 @@
         user-select: none;
         cursor: default;
       }
-      /* 头部拖动区：30px（HUD_HEADER_H），data-tauri-drag-region */
+      /* 头部拖动区：30px × --hud-scale（HUD_HEADER_H），data-tauri-drag-region */
       #hud-header {
-        height: 30px;
-        flex: 0 0 30px;
+        height: calc(30px * var(--hud-scale));
+        flex: 0 0 calc(30px * var(--hud-scale));
         display: flex;
         align-items: center;
         gap: 6px;
@@ -58,7 +77,7 @@
         border-bottom: none;
       }
       #hud-title {
-        font-size: 10px;
+        font-size: calc(10px * var(--hud-scale));
         font-weight: 600;
         letter-spacing: 0.02em;
         color: #94a3b8;
@@ -68,29 +87,191 @@
       }
       #hud-count {
         margin-left: auto;
-        font-size: 9px;
+        font-size: calc(9px * var(--hud-scale));
         color: #64748b;
         white-space: nowrap;
       }
-      /* 会话列表：每行 46px（HUD_ROW_H） */
+      /* 字体缩放组合（header 中部，0.8~1.4）：Aa 小灰字标识 + 细轨道小圆点
+         滑块同排，整体约 80px；两侧 margin auto 在标题与计数之间水平居中。
+         不带 data-tauri-drag-region，且 mousedown/pointerdown
+         stopPropagation 双保险（见 session-hud-main.ts），拖动滑块不触发
+         窗口移动 */
+      #hud-font-box {
+        flex: 0 0 auto;
+        width: 80px;
+        margin: 0 auto;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      /* Aa 标识：说明"这排是调字号的"，与标题同色系的次要灰 */
+      #hud-font-badge {
+        flex: none;
+        font-size: calc(10px * var(--hud-scale));
+        line-height: 1;
+        color: #94a3b8;
+        letter-spacing: 0.01em;
+      }
+      #hud-font-slider {
+        flex: 1 1 auto;
+        min-width: 0;
+        height: 12px;
+        margin: 0;
+        padding: 0;
+        background: transparent;
+        appearance: none;
+        -webkit-appearance: none;
+        cursor: pointer;
+      }
+      /* 细轨道（2px 半透明白）：深色壳上克制不抢视线 */
+      #hud-font-slider::-webkit-slider-runnable-track {
+        height: 2px;
+        border-radius: 1px;
+        background: rgba(255, 255, 255, 0.15);
+      }
+      /* 小圆点 thumb（8px）：垂直居中于 12px 输入框（(2−8)/2 = −3px） */
+      #hud-font-slider::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 8px;
+        height: 8px;
+        margin-top: -3px;
+        border: none;
+        border-radius: 50%;
+        background: #cbd5e1;
+      }
+      #hud-font-slider:hover::-webkit-slider-thumb {
+        background: #f1f5f9;
+      }
+      #hud-font-slider:active::-webkit-slider-thumb {
+        background: #f8fafc;
+      }
+      /* Firefox 等价轨道 / 圆点（仅浏览器预览用；Tauri 侧命中 WebKit 规则） */
+      #hud-font-slider::-moz-range-track {
+        height: 2px;
+        border-radius: 1px;
+        background: rgba(255, 255, 255, 0.15);
+      }
+      #hud-font-slider::-moz-range-thumb {
+        width: 8px;
+        height: 8px;
+        border: none;
+        border-radius: 50%;
+        background: #cbd5e1;
+      }
+      #hud-font-slider:hover::-moz-range-thumb {
+        background: #f1f5f9;
+      }
+      /* 拖拽热区层（src/hud-resize.ts 动态创建 7 个 .hud-rz-*）：absolute 铺满
+         窗口、z 最高；容器自身 pointer-events none（不挡内容滚动与 header
+         拖动），仅热区 auto 拦截。上/左边 8px、下边 14px、四角 14px（东缘热区已删除，见
+         hud-resize.ts 的 DIRECTIONS 注释）；角规则在边规则之后声明并后插入
+         DOM，天然盖在边交叠处优先命中 */
+      #hud-resize-layer {
+        position: absolute;
+        inset: 0;
+        z-index: 100;
+        pointer-events: none;
+      }
+      #hud-resize-layer .hud-rz {
+        position: absolute;
+        pointer-events: auto;
+        touch-action: none;
+        user-select: none;
+        z-index: 1;
+      }
+      .hud-rz-n {
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 8px;
+        cursor: ns-resize;
+      }
+      .hud-rz-s {
+        bottom: 0;
+        left: 0;
+        right: 0;
+        height: 14px;
+        cursor: ns-resize;
+      }
+      .hud-rz-w {
+        top: 0;
+        bottom: 0;
+        left: 0;
+        width: 8px;
+        cursor: ew-resize;
+      }
+      .hud-rz-nw {
+        top: 0;
+        left: 0;
+        width: 14px;
+        height: 14px;
+        cursor: nwse-resize;
+      }
+      .hud-rz-ne {
+        top: 0;
+        right: 0;
+        width: 14px;
+        height: 14px;
+        cursor: nesw-resize;
+      }
+      .hud-rz-sw {
+        bottom: 0;
+        left: 0;
+        width: 14px;
+        height: 14px;
+        cursor: nesw-resize;
+      }
+      .hud-rz-se {
+        bottom: 0;
+        right: 0;
+        width: 14px;
+        height: 14px;
+        cursor: nwse-resize;
+      }
+      /* 会话列表：每行 56px × --hud-scale（HUD_ROW_H）。flex 容器允许
+         收缩（flex-shrink 1 + min-height: 0）：自适应高度模式下窗口与
+         内容恰好等高不出现滚动；用户拖拽出更矮的窗口时本区收缩并纵向
+         滚动（细滚动条，与深色壳协调），头部/模型速度区/今日行/折叠行
+         固定不滚 */
       #hud-list {
-        flex: 0 1 auto;
+        /* 有会话时也要填满用户拖出的额外高度；否则列表按内容高度停止，
+           窗口下方透明，看起来像高度没有改变。min-height:0 允许拖矮时
+           列表收缩并滚动，空态仍由 #hud-empty 的 flex:1 填满。 */
+        flex: 1 1 auto;
+        min-height: 0;
         display: flex;
         flex-direction: column;
         background: rgba(10, 14, 24, 0.72);
         border-left: 1px solid rgba(148, 163, 184, 0.16);
         border-right: 1px solid rgba(148, 163, 184, 0.16);
-        overflow: hidden;
+        overflow-y: auto;
+        overflow-x: hidden;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
+      }
+      #hud-list::-webkit-scrollbar {
+        width: 4px;
+      }
+      #hud-list::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      #hud-list::-webkit-scrollbar-thumb {
+        background: rgba(148, 163, 184, 0.35);
+        border-radius: 2px;
+      }
+      #hud-list::-webkit-scrollbar-thumb:hover {
+        background: rgba(148, 163, 184, 0.55);
       }
       .hud-row {
-        height: 56px;
-        flex: 0 0 56px;
+        height: calc(56px * var(--hud-scale));
+        flex: 0 0 calc(56px * var(--hud-scale));
         box-sizing: border-box;
-        padding: 4px 10px 4px 8px;
+        padding: calc(4px * var(--hud-scale)) 10px calc(4px * var(--hud-scale)) 8px;
         display: flex;
         flex-direction: column;
         justify-content: center;
-        gap: 3px;
+        gap: calc(3px * var(--hud-scale));
         border-top: 1px solid rgba(148, 163, 184, 0.1);
         overflow: hidden;
       }
@@ -99,14 +280,14 @@
         align-items: center;
         gap: 5px;
         min-width: 0;
-        line-height: 14px;
+        line-height: calc(14px * var(--hud-scale));
       }
       /* 状态点：生成中（青绿呼吸脉冲，1.2s infinite，opacity + transform
          —— 不做位移/字号，不影响布局）/ 空闲（灰，静止） */
       .hud-dot {
         flex: 0 0 6px;
-        width: 6px;
-        height: 6px;
+        width: calc(6px * var(--hud-scale));
+        height: calc(6px * var(--hud-scale));
         border-radius: 50%;
         background: #64748b;
       }
@@ -126,7 +307,7 @@
         }
       }
       .hud-project {
-        font-size: 10px;
+        font-size: calc(10px * var(--hud-scale));
         font-weight: 600;
         color: #e2e8f0;
         white-space: nowrap;
@@ -136,7 +317,7 @@
       }
       .hud-short {
         flex: none;
-        font-size: 9px;
+        font-size: calc(9px * var(--hud-scale));
         color: #64748b;
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas,
           "Liberation Mono", monospace;
@@ -144,14 +325,14 @@
       /* 子代理徽标（⟡n）：窗口内有活动的子代理数 >0 才占位，克制小号 */
       .hud-sub {
         flex: none;
-        font-size: 9px;
+        font-size: calc(9px * var(--hud-scale));
         color: #a78bfa;
       }
       .hud-model {
         margin-left: auto;
         min-width: 0;
         max-width: 45%;
-        font-size: 9px;
+        font-size: calc(9px * var(--hud-scale));
         color: #7dd3fc;
         white-space: nowrap;
         overflow: hidden;
@@ -166,16 +347,23 @@
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas,
           "Liberation Mono", monospace;
         font-variant-numeric: tabular-nums;
-        font-size: 9px;
-        line-height: 14px;
+        font-size: calc(9px * var(--hud-scale));
+        line-height: calc(14px * var(--hud-scale));
         color: #94a3b8;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
       }
-      /* Σ 累计（核心指标行首字段）：10px 稍放大做视觉锚点 */
+      /* 字段 span 保留补位空格：容器的 nowrap 会像 normal 一样折叠空格
+         序列，padStart(3/4) 的空格补位因此无效；span 层 white-space: pre
+         让补位空格真实占宽（等宽字体下行宽稳定），容器 overflow hidden
+         仍防御极端长值 */
+      .hud-row-data span {
+        white-space: pre;
+      }
+      /* Σ 累计（核心指标行首字段）：稍放大做视觉锚点 */
       .hud-sigma {
-        font-size: 10px;
+        font-size: calc(10px * var(--hud-scale));
         font-weight: 600;
         color: #e2e8f0;
       }
@@ -217,13 +405,16 @@
         background: rgba(10, 14, 24, 0.72);
         border-left: 1px solid rgba(148, 163, 184, 0.16);
         border-right: 1px solid rgba(148, 163, 184, 0.16);
-        font-size: 10px;
+        font-size: calc(10px * var(--hud-scale));
         color: #64748b;
       }
-      /* 折叠提示行：20px（HUD_MORE_H） */
+      /* 折叠提示行：20px × --hud-scale（HUD_MORE_H）。border 收进高度
+         （box-sizing: border-box，V3 修复：content-box 下实际 21px，
+         Rust 公式按 20px 计导致窗口比内容矮、末行被裁） */
       #hud-more {
-        height: 20px;
-        flex: 0 0 20px;
+        height: calc(20px * var(--hud-scale));
+        flex: 0 0 calc(20px * var(--hud-scale));
+        box-sizing: border-box;
         display: none;
         align-items: center;
         justify-content: center;
@@ -231,11 +422,115 @@
         border: 1px solid rgba(148, 163, 184, 0.16);
         border-top: none;
         border-radius: 0 0 12px 12px;
-        font-size: 9px;
+        font-size: calc(9px * var(--hud-scale));
         color: #64748b;
       }
-      /* 圆角闭环：列表区（首行/末行）与头尾容器拼接。无折叠行时列表
-         承担底部圆角（rounded-bottom 由宿主壳按折叠行显隐切换） */
+      /* 今日合计行（HUD_TODAY_H，与折叠行同高同款）：列表下方、折叠行
+         之上的窗口级汇总（今日 Σ x · × n，自然日本地零点起全库合计，
+         随 showTokens 配置隐藏——关闭数据行时整行不显示；今日无请求
+         或空态不显示——Rust 侧窗口高度据此增减，页面内容须落在同一
+         尺寸栅格）。折叠行显示时由折叠行承担底部圆角，本行去圆角；
+         折叠行隐藏时本行承担。border 收进高度（box-sizing: border-box，
+         V3 修复同折叠行） */
+      #hud-today {
+        height: calc(20px * var(--hud-scale));
+        flex: 0 0 calc(20px * var(--hud-scale));
+        box-sizing: border-box;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        gap: 2px;
+        background: rgba(10, 14, 24, 0.72);
+        border: 1px solid rgba(148, 163, 184, 0.16);
+        border-top: none;
+        font-size: calc(9px * var(--hud-scale));
+        color: #94a3b8;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+        overflow: hidden;
+      }
+      #hud-today.rounded-bottom {
+        border-radius: 0 0 12px 12px;
+      }
+      /* 模型速度区（HUD_MODEL_ROW_H，与今日行同高）：列表与今日行之间
+         的按模型分组速度行，每活跃模型一行（左模型名 truncate、右速度
+         右对齐三档变色），随 showTokens 配置隐藏、空样本或空态不显示
+         ——Rust 侧窗口高度同条件增减（session_hud.rs
+         model_speed_visible）。顶部细分隔线由列表自身 border-bottom
+         提供（与今日行同款防双线处理），容器边框与今日行同款，克制
+         不另起标题行；容器 1px border-bottom 由 Rust 公式
+         HUD_MODELS_BORDER_H 计入 */
+      #hud-models {
+        display: none;
+        flex-direction: column;
+        background: rgba(10, 14, 24, 0.72);
+        border: 1px solid rgba(148, 163, 184, 0.16);
+        border-top: none;
+      }
+      #hud-models.rounded-bottom {
+        border-radius: 0 0 12px 12px;
+      }
+      .hud-msrow {
+        height: calc(20px * var(--hud-scale));
+        flex: 0 0 calc(20px * var(--hud-scale));
+        box-sizing: border-box;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0 10px;
+        font-size: calc(9px * var(--hud-scale));
+        color: #94a3b8;
+        white-space: nowrap;
+        overflow: hidden;
+      }
+      .hud-msrow + .hud-msrow {
+        border-top: 1px solid rgba(148, 163, 184, 0.08);
+      }
+      .hud-ms-name {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      /* 速度值：等宽字体 + tabular-nums 右对齐，三档变色（与主面板
+         速度卡同阈值：≥70 绿 / 40–70 黄 / <40 红） */
+      .hud-ms-val {
+        margin-left: auto;
+        flex: none;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas,
+          "Liberation Mono", monospace;
+        font-variant-numeric: tabular-nums;
+      }
+      /* 均 / 快 / 慢跟随小字（最近值之后）：更暗一档的灰、小一号，
+         窄窗口放不下时整体裁切（title 给全量口径说明） */
+      .hud-ms-extra {
+        flex: 0 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas,
+          "Liberation Mono", monospace;
+        font-variant-numeric: tabular-nums;
+        font-size: calc(8px * var(--hud-scale));
+        color: #64748b;
+      }
+      .hud-ms-fast {
+        color: #34d399;
+      }
+      .hud-ms-mid {
+        color: #fbbf24;
+      }
+      .hud-ms-slow {
+        color: #f87171;
+      }
+      /* 圆角闭环：列表区（首行/末行）与头尾容器拼接。无折叠行时最下方
+         可见行承担底部圆角（renderShell 按今日行 > 模型速度区 > 列表的
+         优先级切换 rounded-bottom 类）。注意：本注释此前缺失闭合符，
+         导致下面三条规则连同 .hidden（空态显隐）整段被浏览器当注释
+         吞掉——空态元素永远 display:flex 与列表同屏、会话行被挤压
+         裁切（V3 修复的高度/同屏 Bug 根因之一）。列表非空时的 1px
+         border-bottom 兼作与模型速度区/今日行的分隔线，高度由 Rust 公
+         式 HUD_LIST_BORDER_H 计入 */
       #hud-list.rounded-bottom {
         border-radius: 0 0 12px 12px;
       }
@@ -252,10 +547,27 @@
     <div id="hud-root">
       <div id="hud-header" data-tauri-drag-region="">
         <span id="hud-title" data-tauri-drag-region="">ZCode Sessions</span>
+        <!-- 字体缩放组合（0.8~1.4）：Aa 标识 + 细滑块，置于标题与计数之间
+             水平居中；不带 drag-region 属性且事件 stopPropagation（见
+             session-hud-main.ts），拖动滑块不移动窗口；title 文案由宿主壳
+             按语言偏好覆盖（此处为 zh 兜底文案） -->
+        <div id="hud-font-box" title="拖动调整文字大小">
+          <span id="hud-font-badge">Aa</span>
+          <input
+            id="hud-font-slider"
+            type="range"
+            min="0.8"
+            max="1.4"
+            step="0.05"
+            value="1"
+          />
+        </div>
         <span id="hud-count" data-tauri-drag-region=""></span>
       </div>
       <div id="hud-list"></div>
       <div id="hud-empty" class="hidden"></div>
+      <div id="hud-models"></div>
+      <div id="hud-today"></div>
       <div id="hud-more"></div>
     </div>
     <script type="module" src="/src/session-hud-main.ts"></script>

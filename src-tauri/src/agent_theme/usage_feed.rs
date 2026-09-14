@@ -54,6 +54,18 @@
 //!                         请求 model_usage 即落一行，2 秒轮询内可见）
 //!   req: 行数,            已完成的模型请求数
 //!   start: 首个请求开始毫秒
+//! }],
+//!   sess: [{              会话级统计（v2 格式不变的附加字段，旧渲染脚本
+//!                         忽略未知字段平滑兼容；空数组也输出）。
+//!   s: "sess_xxx",        会话 id（主会话行为"会话树"口径：自身 + 全部
+//!                         子代理归并；子代理会话若出现在 turns/runs 亦
+//!                         导出"自身树"行供其详情面板查询）
+//!   —— model_usage 全量合计（含失败/中断轮。与 turns 的 turn_usage
+//!      按轮聚合并存两套口径：turn_usage 覆盖不全（失败轮不落库），
+//!      会话累计优先消费本通道，渲染端无本字段时回退旧口径）：
+//!   tt: Σ = up+down+cr,   全量合计总量
+//!   up / down / cr:       ↑ 非缓存输入（逐笔 clamp）/ ↓ 输出 / ⟲ 缓存读
+//!   rq: 请求笔数          model_usage 行数（每行一笔请求）
 //! }] }
 //! ```
 //!
@@ -225,7 +237,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
@@ -263,6 +275,11 @@ pub(crate) const TOOL_WINDOW_MS: i64 = 10 * 60 * 1000;
 
 /// 导出周期（毫秒）：与注入端 usage.js 的数据重载周期一致
 const INTERVAL_MS: u64 = 2000;
+
+/// 导出连续失败的记日志间隔：连续失败达到该次数的整数倍时记一条 stderr
+/// 日志（150 × INTERVAL_MS ≈ 5 分钟一条——瞬态失败保持静默不刷屏，
+/// 持续死亡不再无声不可观测）；成功一轮即清零计数
+const FEED_FAIL_LOG_EVERY: u64 = 150;
 
 // ============================================================
 // 导出数据结构（JSON 键名即 usage-data.js 契约，勿改）
@@ -551,9 +568,15 @@ fn feed_loop() {
     }
 }
 
+/// 导出连续失败计数（export_once 专用）：成功清零、失败自增，达到
+/// FEED_FAIL_LOG_EVERY 整数倍时记一条日志。局部静态侵入最小，导出线程
+/// 是唯一调用方，无并发竞争
+static FEED_FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
+
 /// 单轮导出：读库 → 序列化 → flush_export 落盘（大文件按变化写、心跳
-/// 小文件按宠物开关维护）。任何失败静默跳过本轮（下个周期重试），
-/// 不 panic 不累积日志。
+/// 小文件按宠物开关维护）。任何失败静默跳过本轮（下个周期重试），不
+/// panic；连续失败达 FEED_FAIL_LOG_EVERY 整数倍时记一条日志（防再次
+/// 无声死亡——此前 NULL turn_id 脏行曾让导出静默停更且完全不可观测）。
 fn export_once(cache: &mut Option<String>) {
     let result = (|| -> Result<(), String> {
         let conn = crate::zcode_sessions::open_main_db_readonly_uri()?;
@@ -595,12 +618,17 @@ fn export_once(cache: &mut Option<String>) {
         // 相同（失败轮落库瞬间必在窗口内）
         let active_tool = collect_active_tool_ms(&conn, now_ms - TOOL_WINDOW_MS).unwrap_or(None);
         let failure_event = collect_failure_event_ms(&conn, now_ms - WINDOW_MS).unwrap_or(None);
+        // 会话级统计（sess：model_usage 全量合计）：附加通道，查询
+        // 失败降级为空数组（不阻塞 turns/runs 导出——渲染端对无 sess 数据
+        // 回退旧 sessionTotals 口径），瞬时闪空仅回退口径一轮
+        let sess = collect_session_stats(&conn, &turns, &runs).unwrap_or_default();
         flush_export(
             &dir,
             cache,
             pet_enabled,
             &turns,
             &runs,
+            &sess,
             pending_user,
             active_tool,
             failure_event,
@@ -608,16 +636,27 @@ fn export_once(cache: &mut Option<String>) {
         )?;
         Ok(())
     })();
-    if result.is_err() {
-        // 静默跳过本轮（库被锁超时、目录暂不可写等瞬态），下个周期重试；
-        // 刻意不记日志避免刷屏
+    match result {
+        Ok(()) => FEED_FAIL_COUNT.store(0, Ordering::Relaxed),
+        Err(e) => {
+            // 静默跳过本轮（库被锁超时、目录暂不可写等瞬态），下个周期
+            // 重试；仅连续失败达到 FEED_FAIL_LOG_EVERY 整数倍（约 5 分钟
+            // 一条）时记日志，瞬态失败不刷屏
+            let n = FEED_FAIL_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+            if n % FEED_FAIL_LOG_EVERY == 0 {
+                eprintln!(
+                    "[zbar-usage-feed] 导出已连续失败 {n} 轮（每 {INTERVAL_MS}ms 重试）: {e}"
+                );
+            }
+        }
     }
 }
 
 /// 导出结果落盘（不碰数据库，供单元测试复用）：
 /// - 大文件 usage-data.js 按变化写（内容不变跳写，ts 保持最后数据
 ///   变化语义；la/pu/ta/fe 随内容透出——pu/ta/fe 参与内容对比，用户
-///   发消息、工具开始/结束、失败轮落库本身就是数据变化）；
+///   发消息、工具开始/结束、失败轮落库本身就是数据变化；sess 为会话
+///   级统计附加数组，同样参与内容对比）；
 /// - 心跳小文件 usage-data-hb.js 仅注入版宠物开启时每周期无条件重写
 ///   （大文件跳写周期里心跳仍独立推进）；宠物关闭时停写并清理残留
 ///   （remove 不存在的文件是常态失败，忽略）。
@@ -627,6 +666,7 @@ pub(crate) fn flush_export(
     pet_enabled: bool,
     turns: &[UsageTurn],
     runs: &[UsageRun],
+    sess: &[UsageSessionStat],
     pending_user: Option<i64>,
     active_tool: Option<i64>,
     failure_event: Option<i64>,
@@ -637,8 +677,11 @@ pub(crate) fn flush_export(
         .map_err(|e| format!("序列化用量数据失败: {e}"))?;
     let runs_json =
         serde_json::to_string(runs).map_err(|e| format!("序列化进行中轮失败: {e}"))?;
+    let sess_json =
+        serde_json::to_string(sess).map_err(|e| format!("序列化会话统计失败: {e}"))?;
     write_if_changed(
-        dir, cache, la, pending_user, active_tool, failure_event, &turns_json, &runs_json, now_ms,
+        dir, cache, la, pending_user, active_tool, failure_event, &turns_json, &runs_json,
+        &sess_json, now_ms,
     )?;
     if pet_enabled {
         write_heartbeat_file(dir, now_ms)?;
@@ -881,7 +924,10 @@ pub(crate) fn collect_turns(
         turns.drain(..turns.len() - MAX_TURNS);
     }
 
-    // ---- 模型清单：该轮 model_usage 的去重 model_id（含并入子轮）----
+    // ---- 模型清单：该轮 model_usage 的去重 model_id（含并入子轮）。
+    //      CLI 后台请求（session_title/goal_summary_title 等）的行 turn_id
+    //      为 NULL，而 SELECT 首列按 String 强转不容忍 NULL，必须在 SQL
+    //      排除，否则一行脏数据即中断整轮导出（usage-data.js 停更）----
     if has_table(conn, "model_usage")
         && crate::db::has_column(conn, "model_usage", "turn_id")
         && crate::db::has_column(conn, "model_usage", "model_id")
@@ -890,7 +936,8 @@ pub(crate) fn collect_turns(
         let mut stmt = conn
             .prepare(
                 "SELECT turn_id, model_id FROM model_usage \
-                 WHERE started_at >= ?1 AND model_id IS NOT NULL AND model_id != ''",
+                 WHERE started_at >= ?1 AND turn_id IS NOT NULL \
+                 AND model_id IS NOT NULL AND model_id != ''",
             )
             .map_err(|e| format!("准备 model_usage 查询失败: {e}"))?;
         let rows = stmt
@@ -1130,13 +1177,17 @@ pub(crate) fn collect_runs(
     // 外层扫查限 7 天窗口（行数几万级可控），IN 子查询限定"近 10 分钟有
     // 请求"的轮——组内聚合含窗口外的早期请求（长轮完整合计）；保活
     // 分支按会话命中（turn_id 全局唯一，按 turn_id 分组后组行整体保留，
-    // 组内聚合同样完整含窗口外早期请求）
+    // 组内聚合同样完整含窗口外早期请求）。mu.turn_id IS NOT NULL 防御：
+    // CLI 后台请求（session_title/goal_summary_title 等）的行 turn_id 为
+    // NULL，IN 子查询的三值逻辑天然挡住它们，但 keepalive 分支只按会话
+    // 命中、不经过 turn_id——NULL 行一旦命中成组，SELECT 首列按 String
+    // 强转即失败并中断整轮导出，必须在 SQL 层排除
     let sql = format!(
         "SELECT mu.turn_id, {umid_expr}, mu.session_id, {psess_expr}, \
          SUM({inp}), SUM({out}), SUM({cr}), SUM({cw}), SUM({rt}), COUNT(*), \
          MIN(mu.started_at) \
          FROM model_usage mu {join} \
-         WHERE mu.started_at >= ?2 AND (mu.turn_id IN \
+         WHERE mu.started_at >= ?2 AND mu.turn_id IS NOT NULL AND (mu.turn_id IN \
            (SELECT turn_id FROM model_usage WHERE started_at >= ?1){keepalive}) \
          GROUP BY mu.turn_id, mu.session_id"
     );
@@ -1346,6 +1397,233 @@ fn attach_models(
 }
 
 // ============================================================
+// 会话级导出（sess 数组：model_usage 全量合计）
+// ============================================================
+
+/// 会话级统计行（sess 数组元素，v2 附加字段，旧渲染脚本忽略未知字段）。
+/// 键名即 usage.js 消费端契约，勿改。内容为会话树内 model_usage 逐笔
+/// 累加的**全量合计**（tt/up/down/cr/rq，含失败/中断轮——turn_usage 覆盖
+/// 不全，轮正常结束才落库，按轮聚合的旧口径会话累计系统性偏小，本通道
+/// 修正为请求级全量）；↑ 口径 = 逐笔 max(0, input − cache_read)（与
+/// 悬浮窗 Σ/注入版会话条一致）。
+/// 历史注记：V21 曾携带 CTX 上下文占用三字段（cp/cu/cw，树内最近一笔
+/// completed 请求的 input ÷ 窗口容量），V22 随展示下线一并删除（数据端
+/// 不再查询/序列化，context_window 模块随之移除）。
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct UsageSessionStat {
+    /// 会话 id（主会话行为"会话树"口径——含全部子代理归并；子代理会话
+    /// 若自身出现在 turns/runs 亦导出"自身树"行供其详情面板查询）
+    #[serde(rename = "s")]
+    session_id: String,
+    /// 全量合计 Σ = ↑+↓+⟲（model_usage 逐笔，含失败轮）
+    #[serde(rename = "tt")]
+    total: i64,
+    /// 全量合计 ↑ 非缓存输入（逐笔 clamp）
+    #[serde(rename = "up")]
+    plain_in: i64,
+    /// 全量合计 ↓ 输出
+    #[serde(rename = "down")]
+    out_tokens: i64,
+    /// 全量合计 ⟲ 缓存读
+    #[serde(rename = "cr")]
+    cache_read: i64,
+    /// 全量合计 × 请求笔数（model_usage 行数）
+    #[serde(rename = "rq")]
+    requests: i64,
+}
+
+/// 单成员会话的 model_usage 聚合中间值（全量合计用）
+#[derive(Default, Clone, Copy)]
+struct SessionUsageAgg {
+    plain_in: i64,
+    out_tokens: i64,
+    cache_read: i64,
+    requests: i64,
+}
+
+impl SessionUsageAgg {
+    fn total(&self) -> i64 {
+        self.plain_in + self.out_tokens + self.cache_read
+    }
+}
+
+/// 收集会话级统计（sess 数组数据源，model_usage 全量合计）：
+/// - 目标会话 = turns/runs 中出现过的全部会话 id ∪ 各自沿 parent_id 上溯
+///   到的根会话（子代理活动已归并的主会话即使自身未出现也导出，渲染端
+///   会话条按主会话 id 查询必命中）；每个目标导出"以它为根的会话树"
+///   （自身 + 全部后代子代理）合计——主会话行天然含子代理（V9 归并
+///   口径），子代理行 = 自身及更深层后代；
+/// - 全量合计走一次 `session_id IN (...)` 索引等值查（成员并集一次
+///   查询、内存按树归并），无全表扫；
+/// - session 表/parent_id 缺失（老版本库）降级为无归并：每个出现的会话
+///   id 仅聚合自身；
+/// - 查询失败返回 Err（调用方按附加通道降级为空 sess，不阻塞 turns/runs
+///   导出——渲染端对无 sess 数据回退旧口径）。
+pub(crate) fn collect_session_stats(
+    conn: &Connection,
+    turns: &[UsageTurn],
+    runs: &[UsageRun],
+) -> Result<Vec<UsageSessionStat>, String> {
+    // 1) 出现过的会话集合（runs 含子代理进行中行，turns 含自身视图行）
+    let mut appeared: BTreeSet<String> = BTreeSet::new();
+    for t in turns {
+        appeared.insert(t.session_id.clone());
+    }
+    for r in runs {
+        appeared.insert(r.session_id.clone());
+    }
+    if appeared.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // 2) 会话父子关系（内存建树）：session 表行数几千级，一次读出
+    let has_parent = has_table(conn, "session")
+        && crate::db::has_column(conn, "session", "id")
+        && crate::db::has_column(conn, "session", "parent_id");
+    let mut parent_of: BTreeMap<String, String> = BTreeMap::new();
+    let mut children: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    if has_parent {
+        let mut stmt = conn
+            .prepare("SELECT id, parent_id FROM session")
+            .map_err(|e| format!("准备会话关系查询失败: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            })
+            .map_err(|e| format!("读取会话关系失败: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("读取会话关系失败: {e}"))?;
+        for (id, parent) in rows {
+            match parent.filter(|p| !p.is_empty()) {
+                Some(p) => {
+                    parent_of.insert(id.clone(), p.clone());
+                    children.entry(p).or_default().push(id);
+                }
+                None => {
+                    parent_of.insert(id, String::new());
+                }
+            }
+        }
+    }
+
+    // 3) 目标会话 = 出现集合 ∪ 各自的根（沿 parent 链上溯，visited 防环）
+    let root_of = |id: &str, parent_of: &BTreeMap<String, String>| -> String {
+        let mut cur = id.to_string();
+        let mut guard = BTreeSet::new();
+        while let Some(p) = parent_of.get(&cur) {
+            if p.is_empty() || !guard.insert(cur.clone()) {
+                break;
+            }
+            cur = p.clone();
+        }
+        cur
+    };
+    let mut targets: BTreeSet<String> = appeared.clone();
+    if has_parent {
+        for id in &appeared {
+            targets.insert(root_of(id, &parent_of));
+        }
+    }
+
+    // 4) 各目标的树成员（BFS 收集全部后代；无 parent 列时成员即自身）
+    let mut members_by_target: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut all_members: BTreeSet<String> = BTreeSet::new();
+    for t in &targets {
+        let mut members = vec![t.clone()];
+        if has_parent {
+            let mut queue = std::collections::VecDeque::from(vec![t.clone()]);
+            let mut seen = BTreeSet::new();
+            seen.insert(t.clone());
+            while let Some(cur) = queue.pop_front() {
+                if let Some(kids) = children.get(&cur) {
+                    for k in kids {
+                        if seen.insert(k.clone()) {
+                            members.push(k.clone());
+                            queue.push_back(k.clone());
+                        }
+                    }
+                }
+            }
+        }
+        all_members.extend(members.iter().cloned());
+        members_by_target.insert(t.clone(), members);
+    }
+
+    // 5) 全量合计：成员并集一次 IN 等值查（走 session_turn 前缀索引），
+    //    逐笔 clamp 的 ↑ 在 SQL 内完成（SQLite 双参 MAX 为标量函数）
+    let member_list: Vec<String> = all_members.into_iter().collect();
+    let (inp, out, cr) = (
+        num_col(conn, "model_usage", "input_tokens"),
+        num_col(conn, "model_usage", "output_tokens"),
+        num_col(conn, "model_usage", "cache_read_input_tokens"),
+    );
+    let placeholders = vec!["?"; member_list.len()].join(", ");
+    let agg_sql = format!(
+        "SELECT session_id, \
+                SUM(MAX({inp} - {cr}, 0)), SUM({out}), SUM({cr}), COUNT(*) \
+         FROM model_usage WHERE session_id IN ({placeholders}) \
+         GROUP BY session_id"
+    );
+    let mut stmt = conn
+        .prepare(&agg_sql)
+        .map_err(|e| format!("准备会话合计查询失败: {e}"))?;
+    let agg_rows = stmt
+        .query_map(rusqlite::params_from_iter(member_list.iter()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })
+        .map_err(|e| format!("查询会话合计失败: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("读取会话合计失败: {e}"))?;
+    let agg_by_session: BTreeMap<String, SessionUsageAgg> = agg_rows
+        .into_iter()
+        .map(|(sid, up, out, cr, rq)| {
+            (
+                sid,
+                SessionUsageAgg {
+                    plain_in: up.max(0),
+                    out_tokens: out.max(0),
+                    cache_read: cr.max(0),
+                    requests: rq.max(0),
+                },
+            )
+        })
+        .collect();
+
+    // 6) 按目标组装（树内逐成员累加全量合计）。CTX 查询（每成员最近一笔
+    //    completed 请求 + 窗口容量解析）已随 V22 展示下线一并删除
+    let mut out = Vec::with_capacity(targets.len());
+    for (target, members) in &members_by_target {
+        let mut agg = SessionUsageAgg::default();
+        for m in members {
+            if let Some(a) = agg_by_session.get(m) {
+                agg.plain_in += a.plain_in;
+                agg.out_tokens += a.out_tokens;
+                agg.cache_read += a.cache_read;
+                agg.requests += a.requests;
+            }
+        }
+        out.push(UsageSessionStat {
+            session_id: target.clone(),
+            total: agg.total(),
+            plain_in: agg.plain_in,
+            out_tokens: agg.out_tokens,
+            cache_read: agg.cache_read,
+            requests: agg.requests,
+        });
+    }
+    Ok(out)
+}
+
+// ============================================================
 // 序列化与原子写出
 // ============================================================
 
@@ -1401,13 +1679,14 @@ fn render_usage_js(
     failure_event: Option<i64>,
     turns_json: &str,
     runs_json: &str,
+    sess_json: &str,
 ) -> String {
     let opt = |v: Option<i64>| match v {
         Some(t) => t.to_string(),
         None => "null".to_string(),
     };
     format!(
-        "window.__ZBAR_USAGE__ = {{\"v\":2,\"ts\":{ts_ms},\"la\":{la_ms},\"pu\":{},\"ta\":{},\"fe\":{},\"turns\":{turns_json},\"runs\":{runs_json}}};\n",
+        "window.__ZBAR_USAGE__ = {{\"v\":2,\"ts\":{ts_ms},\"la\":{la_ms},\"pu\":{},\"ta\":{},\"fe\":{},\"turns\":{turns_json},\"runs\":{runs_json},\"sess\":{sess_json}}};\n",
         opt(pending_user),
         opt(active_tool),
         opt(failure_event)
@@ -1447,13 +1726,16 @@ fn write_if_changed(
     failure_event: Option<i64>,
     turns_json: &str,
     runs_json: &str,
+    sess_json: &str,
     ts_ms: i64,
 ) -> Result<bool, String> {
     let mut payload =
-        String::with_capacity(turns_json.len() + runs_json.len() + 16);
+        String::with_capacity(turns_json.len() + runs_json.len() + sess_json.len() + 16);
     payload.push_str(turns_json);
     payload.push('\u{1}'); /* 不可见分隔符：防多段拼接的边界歧义 */
     payload.push_str(runs_json);
+    payload.push('\u{1}');
+    payload.push_str(sess_json);
     payload.push('\u{1}');
     /* 附加信号形态并入对比键：None（'-'）与任一时刻值互不相同 */
     for sig in [pending_user, active_tool, failure_event] {
@@ -1478,6 +1760,7 @@ fn write_if_changed(
             failure_event,
             turns_json,
             runs_json,
+            sess_json,
         ),
     )
     .map_err(|e| format!("写入 {} 失败: {e}", tmp.display()))?;
@@ -1604,11 +1887,12 @@ mod tests {
             !sv_json.contains("\"sub\":{"),
             "自身视图行不携带 sub 并入聚合：{sv_json}"
         );
-        // 完整文件形态：v/ts/la/pu/ta/fe/turns/runs 字段 + 分号结尾（v2
-        // 格式不变，runs 为 V6 起追加的进行中轮字段、la 为 V2 起追加的
+        // 完整文件形态：v/ts/la/pu/ta/fe/turns/runs/sess 字段 + 分号结尾
+        //（v2 格式不变，runs 为 V6 起追加的进行中轮字段、la 为 V2 起追加的
         // 最后活动时刻字段、pu 为 V5 起追加的待处理用户消息字段、ta/fe
-        // 为 V6 起追加的活跃工具/失败轮事件字段；旧消费端按未知字段忽略；
-        // runs 为空时也输出；心跳已拆独立小文件 usage-data-hb.js，
+        // 为 V6 起追加的活跃工具/失败轮事件字段、sess 为会话级统计附加
+        // 字段（model_usage 全量合计）；旧消费端按未知字段忽略；
+        // runs/sess 为空时也输出；心跳已拆独立小文件 usage-data-hb.js，
         // 大文件不再含 hb 字段）
         let file = render_usage_js(
             12345,
@@ -1618,6 +1902,7 @@ mod tests {
             None,
             &json,
             "[]",
+            "[]",
         );
         assert!(
             file.starts_with(
@@ -1626,12 +1911,14 @@ mod tests {
             "{file}"
         );
         // pu/ta/fe 缺失两态之一：None → null（旧消费端与宠物核心按缺失兼容）
-        let file_null = render_usage_js(12345, 12000, None, None, Some(9000), &json, "[]");
+        let file_null = render_usage_js(12345, 12000, None, None, Some(9000), &json, "[]", "[]");
         assert!(file_null.contains(",\"pu\":null,"), "{file_null}");
         assert!(file_null.contains(",\"ta\":null,"), "{file_null}");
         assert!(file_null.contains(",\"fe\":9000,"), "{file_null}");
         assert!(!file.contains("\"hb\":"), "心跳不应在大文件里：{file}");
-        assert!(file.contains(",\"runs\":[]};\n"), "{file}");
+        assert!(file.contains(",\"runs\":[]"), "{file}");
+        // sess 附加数组（V2 格式不变的追加字段，空数组也输出）
+        assert!(file.contains(",\"sess\":[]};\n"), "{file}");
         assert!(file.ends_with("};\n"));
     }
 
@@ -1753,7 +2040,7 @@ mod tests {
         let mut cache: Option<String> = None;
         // 首次：写盘（la 为最后活动时刻，随内容透出）
         assert!(
-            write_if_changed(&dir, &mut cache, 900, None, None, None, "[{\"turn\":\"a\"}]", "[]", 1000)
+            write_if_changed(&dir, &mut cache, 900, None, None, None, "[{\"turn\":\"a\"}]", "[]", "[]", 1000)
                 .unwrap()
         );
         let first = fs::read_to_string(&target).unwrap();
@@ -1763,10 +2050,11 @@ mod tests {
         assert!(first.contains("\"ta\":null"), "{first}");
         assert!(first.contains("\"fe\":null"), "{first}");
         assert!(first.contains("\"runs\":[]"), "{first}");
+        assert!(first.contains("\"sess\":[]"), "{first}");
         // 内容无变化（仅 ts/la 参数不同）→ 跳写，文件保持旧值（写放大
         // 修复：大文件恢复跳写策略，心跳由独立小文件承担）
         assert!(
-            !write_if_changed(&dir, &mut cache, 900, None, None, None, "[{\"turn\":\"a\"}]", "[]", 2000)
+            !write_if_changed(&dir, &mut cache, 900, None, None, None, "[{\"turn\":\"a\"}]", "[]", "[]", 2000)
                 .unwrap()
         );
         assert_eq!(
@@ -1776,7 +2064,7 @@ mod tests {
         );
         // turns 内容变化 → 重写为新 ts
         assert!(
-            write_if_changed(&dir, &mut cache, 900, None, None, None, "[{\"turn\":\"b\"}]", "[]", 3000)
+            write_if_changed(&dir, &mut cache, 900, None, None, None, "[{\"turn\":\"b\"}]", "[]", "[]", 3000)
                 .unwrap()
         );
         let third = fs::read_to_string(&target).unwrap();
@@ -1794,6 +2082,7 @@ mod tests {
                 None,
                 "[{\"turn\":\"b\"}]",
                 "[{\"sess\":\"s1\"}]",
+                "[]",
                 4000
             )
             .unwrap()
@@ -1801,7 +2090,30 @@ mod tests {
         let fourth = fs::read_to_string(&target).unwrap();
         assert!(fourth.contains("\"ts\":4000"), "{fourth}");
         assert!(fourth.contains("\"runs\":[{\"sess\":\"s1\"}]"), "{fourth}");
-        // pu 变化（turns/runs 均不变）同样触发重写——用户发消息本身就是
+        // sess 内容变化（turns/runs 均不变）同样触发重写——会话级统计
+        //（全量合计随请求落库推进）本身就是数据变化
+        assert!(
+            write_if_changed(
+                &dir,
+                &mut cache,
+                900,
+                None,
+                None,
+                None,
+                "[{\"turn\":\"b\"}]",
+                "[{\"sess\":\"s1\"}]",
+                "[{\"s\":\"s1\",\"tt\":123}]",
+                4500
+            )
+            .unwrap()
+        );
+        let fourth_half = fs::read_to_string(&target).unwrap();
+        assert!(fourth_half.contains("\"ts\":4500"), "{fourth_half}");
+        assert!(
+            fourth_half.contains("\"sess\":[{\"s\":\"s1\",\"tt\":123}]"),
+            "{fourth_half}"
+        );
+        // pu 变化（turns/runs/sess 均不变）同样触发重写——用户发消息本身就是
         // 数据变化（V5）：ts 刷新、pu 透出、la 取大（900 → 5000）
         assert!(
             write_if_changed(
@@ -1813,6 +2125,7 @@ mod tests {
                 None,
                 "[{\"turn\":\"b\"}]",
                 "[{\"sess\":\"s1\"}]",
+                "[{\"s\":\"s1\",\"tt\":123}]",
                 5000
             )
             .unwrap()
@@ -1833,6 +2146,7 @@ mod tests {
                 None,
                 "[{\"turn\":\"b\"}]",
                 "[{\"sess\":\"s1\"}]",
+                "[{\"s\":\"s1\",\"tt\":123}]",
                 6000
             )
             .unwrap()
@@ -1851,6 +2165,7 @@ mod tests {
                 Some(5500),
                 "[{\"turn\":\"b\"}]",
                 "[{\"sess\":\"s1\"}]",
+                "[{\"s\":\"s1\",\"tt\":123}]",
                 7000
             )
             .unwrap()
@@ -1908,20 +2223,28 @@ mod tests {
         // ---- 宠物关：大文件按变化写、心跳不写、残留被清理 ----
         // 预置心跳残留（模拟此前宠物开启过）
         fs::write(&hb, b"window.__ZBAR_USAGE_HB__ = 1;\n").unwrap();
-        flush_export(&dir, &mut cache, false, &turns, &[], None, None, None, 1000).unwrap();
+        let sess = vec![UsageSessionStat {
+            session_id: "sess_1".to_string(),
+            total: 1110,
+            plain_in: 100,
+            out_tokens: 200,
+            cache_read: 50,
+            requests: 2,
+        }];
+        flush_export(&dir, &mut cache, false, &turns, &[], &sess, None, None, None, 1000).unwrap();
         assert!(big.exists(), "首次导出应写大文件");
         let first = fs::read_to_string(&big).unwrap();
         assert!(first.contains("\"ts\":1000"), "{first}");
         assert!(first.contains("\"pu\":null"), "{first}");
         assert!(!hb.exists(), "宠物关闭应清理心跳残留");
         // 内容不变 → 大文件跳写（mtime 不变以内容一致性表达），心跳仍不写
-        flush_export(&dir, &mut cache, false, &turns, &[], None, None, None, 2000).unwrap();
+        flush_export(&dir, &mut cache, false, &turns, &[], &sess, None, None, None, 2000).unwrap();
         assert_eq!(fs::read_to_string(&big).unwrap(), first, "内容未变不应重写大文件");
         assert!(!hb.exists(), "宠物关闭周期不应写心跳文件");
 
         // ---- 宠物开：心跳每周期无条件刷新、大文件仍按变化写 ----
         let mut cache_on: Option<String> = None;
-        flush_export(&dir, &mut cache_on, true, &turns, &[], Some(4500), None, None, 3000).unwrap();
+        flush_export(&dir, &mut cache_on, true, &turns, &[], &sess, Some(4500), None, None, 3000).unwrap();
         let big_on = fs::read_to_string(&big).unwrap();
         assert!(big_on.contains("\"ts\":3000"), "首次写盘 ts 应为当前周期");
         assert!(big_on.contains("\"la\":5000"), "la 应随内容透出：{big_on}");
@@ -1934,7 +2257,7 @@ mod tests {
             "window.__ZBAR_USAGE_HB__ = 3000;\n"
         );
         // 下一周期内容不变：大文件跳写（保持旧 ts），心跳刷新为当前周期
-        flush_export(&dir, &mut cache_on, true, &turns, &[], Some(4500), None, None, 5000).unwrap();
+        flush_export(&dir, &mut cache_on, true, &turns, &[], &sess, Some(4500), None, None, 5000).unwrap();
         assert_eq!(
             fs::read_to_string(&big).unwrap(),
             big_on,
@@ -2227,6 +2550,184 @@ mod tests {
         assert_eq!(sv.models, "GLM-4.7", "自身视图行的模型清单为自己的");
         // 子轮已整轮并入 turns → 不应再分流到 runs 侧（防双计）
         assert!(orphans.is_empty(), "已并入 turns 的子轮不应进游离集合：{orphans:?}");
+        drop(conn);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn sess序列化_键名契约与全零形态() {
+        // 短键名一字不差（usage.js 按名消费）；V22 起 cp/cu/cw 已随 CTX
+        // 展示下线删除，不再出现在序列化输出
+        let row = UsageSessionStat {
+            session_id: "sess_1".to_string(),
+            total: 1110,
+            plain_in: 100,
+            out_tokens: 200,
+            cache_read: 50,
+            requests: 2,
+        };
+        let json = serde_json::to_string(&vec![row]).unwrap();
+        assert_eq!(
+            json,
+            "[{\"s\":\"sess_1\",\"tt\":1110,\"up\":100,\"down\":200,\"cr\":50,\"rq\":2}]",
+            "sess 行序列化形态不符：{json}"
+        );
+        // 全零行（无任何请求）：各合计为 0
+        let none_row = UsageSessionStat {
+            session_id: "sess_2".to_string(),
+            total: 0,
+            plain_in: 0,
+            out_tokens: 0,
+            cache_read: 0,
+            requests: 0,
+        };
+        let json = serde_json::to_string(&vec![none_row]).unwrap();
+        assert_eq!(
+            json,
+            "[{\"s\":\"sess_2\",\"tt\":0,\"up\":0,\"down\":0,\"cr\":0,\"rq\":0}]",
+            "{json}"
+        );
+        // CTX 短键零残留（V22 删除 cp/cu/cw）
+        assert!(!json.contains("\"cp\"") && !json.contains("\"cu\"") && !json.contains("\"cw\""));
+    }
+
+    #[test]
+    fn sess聚合_会话树全量合计() {
+        // 库形态：主会话 + 两个子代理（其一嵌套更深），含失败轮请求行
+        //（turn_usage 无行）与 turn_id NULL 的 CLI 后台请求行（不过滤，
+        // 计入全量合计）
+        let (conn, path) = temp_db("sess-agg");
+        conn.execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT);
+             CREATE TABLE turn_usage (
+                session_id TEXT, turn_id TEXT, status TEXT, started_at INTEGER);
+             CREATE TABLE model_usage (
+                session_id TEXT, turn_id TEXT, started_at INTEGER, model_id TEXT,
+                status TEXT, input_tokens INTEGER, output_tokens INTEGER,
+                cache_read_input_tokens INTEGER);",
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO session VALUES
+               ('sess_main', NULL), ('sess_sub1', 'sess_main'),
+               ('sess_sub2', 'sess_main'), ('sess_sub2_child', 'sess_sub2');
+             INSERT INTO model_usage VALUES
+               -- 主会话：完成请求 + 失败请求（无 turn_usage 行，旧口径漏计）
+               ('sess_main', 't1', 1000, 'GLM-4.6', 'completed', 100, 200, 40),
+               ('sess_main', 't2', 2000, 'GLM-4.6', 'error', 50, 0, 0),
+               -- turn_id NULL 的后台请求（session_title 等）：计入合计
+               ('sess_main', NULL, 1500, 'GLM-4.6', 'completed', 10, 5, 0),
+               -- 子代理 1：完成请求（started_at 最大）
+               ('sess_sub1', 't3', 5000, 'GLM-5.3', 'completed', 13107, 300, 100),
+               -- 子代理 2 及其嵌套子代理
+               ('sess_sub2', 't4', 3000, 'GLM-4.7', 'completed', 30, 40, 20),
+               ('sess_sub2_child', 't5', 3500, 'GLM-4.7', 'completed', 30, 10, 10);",
+        )
+        .unwrap();
+        // 出现过的会话：turns 携带 sess_main（模拟 turns/runs 的出现集合）
+        let turns = vec![turn("t1", "sess_main", 1000, Some(2000))];
+        let runs: Vec<UsageRun> = Vec::new();
+        let sess = collect_session_stats(&conn, &turns, &runs).unwrap();
+
+        // 目标 = 出现的 sess_main（根），子代理作为其后代并入；子代理
+        // 未出现在 turns/runs → 不单独导出行
+        assert_eq!(sess.len(), 1, "{sess:?}");
+        let main = &sess[0];
+        assert_eq!(main.session_id, "sess_main");
+        // 全量合计：↑ = 60 + 50 + 10 + 13007 + 10 + 20 = 13157
+        assert_eq!(main.plain_in, 60 + 50 + 10 + (13107 - 100) + 10 + 20);
+        // ↓ = 200 + 0 + 5 + 300 + 40 + 10
+        assert_eq!(main.out_tokens, 555);
+        // ⟲ = 40 + 100 + 20 + 10
+        assert_eq!(main.cache_read, 170);
+        assert_eq!(main.requests, 6, "失败轮与 NULL turn_id 行均计入");
+        assert_eq!(main.total, main.plain_in + main.out_tokens + main.cache_read);
+        drop(conn);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn sess聚合_子代理出现导出自身树与根会话行() {
+        // 子代理自身出现在 runs（主轮静默场景）：导出根会话行（树合计）
+        // + 子代理自身树行；两行各自查询互不重叠
+        let (conn, path) = temp_db("sess-self");
+        conn.execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT);
+             CREATE TABLE turn_usage (
+                session_id TEXT, turn_id TEXT, status TEXT, started_at INTEGER);
+             CREATE TABLE model_usage (
+                session_id TEXT, turn_id TEXT, started_at INTEGER, model_id TEXT,
+                status TEXT, input_tokens INTEGER, output_tokens INTEGER,
+                cache_read_input_tokens INTEGER);",
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO session VALUES
+               ('sess_main', NULL), ('sess_sub1', 'sess_main');
+             INSERT INTO model_usage VALUES
+               ('sess_main', 't1', 1000, 'GLM-4.6', 'completed', 100, 200, 40),
+               ('sess_sub1', 't3', 5000, 'GLM-5.3', 'completed', 30, 40, 20);",
+        )
+        .unwrap();
+        // 仅子代理出现（主轮未落库、turns 空）：目标 = sess_sub1 + 其根
+        // sess_main（上溯补入），主会话行也导出
+        let runs = vec![UsageRun {
+            user_message_id: Some("msg_c".to_string()),
+            session_id: "sess_sub1".to_string(),
+            parent_session_id: Some("sess_main".to_string()),
+            input_tokens: 30,
+            output_tokens: 40,
+            cache_read: 20,
+            cache_write: 0,
+            reasoning: 0,
+            requests: 1,
+            start: 5000,
+            merged: None,
+            sub: None,
+        }];
+        let sess = collect_session_stats(&conn, &[], &runs).unwrap();
+        assert_eq!(sess.len(), 2, "{sess:?}");
+        let main = sess.iter().find(|s| s.session_id == "sess_main").unwrap();
+        let sub = sess.iter().find(|s| s.session_id == "sess_sub1").unwrap();
+        // 主会话树行含子代理（↑ = 60 + 10）
+        assert_eq!(main.plain_in, 70);
+        assert_eq!(main.requests, 2);
+        // 子代理自身树行 = 仅自身（↑ = 10）
+        assert_eq!(sub.plain_in, 10);
+        assert_eq!(sub.requests, 1);
+        drop(conn);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn sess聚合_无session表降级为各会话自身合计() {
+        // 老版本库：无 session 表 → 无归并，出现的会话各自聚合自身；
+        // status 列同库缺失（本用例顺带覆盖，合计口径不区分状态）
+        let (conn, path) = temp_db("sess-nosession");
+        conn.execute_batch(
+            "CREATE TABLE turn_usage (
+                session_id TEXT, turn_id TEXT, status TEXT, started_at INTEGER);
+             CREATE TABLE model_usage (
+                session_id TEXT, turn_id TEXT, started_at INTEGER, model_id TEXT,
+                input_tokens INTEGER, output_tokens INTEGER,
+                cache_read_input_tokens INTEGER);",
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO model_usage VALUES
+               ('sess_a', 't1', 1000, 'GLM-4.6', 100, 200, 40),
+               ('sess_b', 't2', 2000, 'GLM-5.3', 50, 60, 10);",
+        )
+        .unwrap();
+        let turns = vec![
+            turn("t1", "sess_a", 1000, Some(2000)),
+            turn("t2", "sess_b", 2000, Some(3000)),
+        ];
+        let sess = collect_session_stats(&conn, &turns, &[]).unwrap();
+        assert_eq!(sess.len(), 2, "{sess:?}");
+        let a = sess.iter().find(|s| s.session_id == "sess_a").unwrap();
+        assert_eq!(a.plain_in, 60, "无 session 表不归并，仅自身");
+        assert_eq!(a.requests, 1);
         drop(conn);
         let _ = fs::remove_file(&path);
     }

@@ -493,6 +493,7 @@ export interface CursorSnapshot {
 export type StatsTab =
   | "summary"
   | "projects"
+  | "speed"
   | "zai"
   | "codex"
   | "claude"
@@ -512,6 +513,32 @@ export type StatsTab =
   | "alibabatoken"
   | "stepfun"
   | "doubao";
+
+// ===== 模型速度统计（model_speed.rs get_model_speed 契约）=====
+
+/** 单模型速度统计（近段窗口聚合；速度 = output ÷ 生成毫秒口径，
+ *  null = 对应统计无可信样本/老库降级） */
+export interface ModelSpeedStat {
+  modelId: string;
+  provider: string;
+  requests: number;
+  /** 成功率（completed 行占比，0–1；status 列缺失的老库为 null） */
+  successRate: number | null;
+  avgTps: number | null;
+  p10Tps: number | null;
+  p50Tps: number | null;
+  p90Tps: number | null;
+  ttftMinMs: number | null;
+  ttftAvgMs: number | null;
+  ttftP90Ms: number | null;
+  durAvgMs: number | null;
+  durP90Ms: number | null;
+  /** 输入 token 均值（input_tokens 原值，含缓存读） */
+  inAvg: number;
+  inMax: number;
+  outAvg: number;
+  outMax: number;
+}
 
 // ===== 通用凭证体系（与 Rust provider_credentials 模块结构一一对应）=====
 
@@ -944,8 +971,15 @@ export interface SessionHudConfig {
   /** 窗口左上角位置（逻辑坐标，拖动结束持久化，重启恢复）；
    *  null = 从未拖动过（默认主显示器右下角、宠物窗默认区域上方） */
   pos: [number, number] | null;
-  /** 窗口宽度基准（逻辑 px；高度随会话条数自适应） */
+  /** 窗口宽度（逻辑 px）。宽度滑块已移除：本字段转为用户拖拽尺寸
+   *  持久化用途（从未拖拽时为默认宽度） */
   width: number;
+  /** 窗口高度（逻辑 px）：有值 = 用户拖拽过（自由尺寸模式，内容超高
+   *  时会话列表纵向滚动）；null = 从未拖拽（高度按会话条数自适应）。
+   *  恢复自适应：配置文件把 height 手改为 null */
+  height: number | null;
+  /** 字体缩放（0.8~1.4，悬浮窗 header 滑块调节；脏值回退 1.0） */
+  fontScale: number;
   /** 窗口不透明度（0.25~1.0，悬浮窗内容层 CSS opacity） */
   opacity: number;
   /** 活跃窗口档位（分钟）：5/10/30，0 = 不限（Rust 侧仍有 24h 兜底） */

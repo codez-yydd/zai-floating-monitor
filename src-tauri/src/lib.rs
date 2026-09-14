@@ -18,6 +18,7 @@ mod kimi_oauth;
 mod longcat;
 mod minimax;
 mod mimo;
+mod model_speed;
 mod moonshot;
 mod opencodego;
 mod pet;
@@ -1982,6 +1983,14 @@ pub fn run() {
                         session_hud::handle_session_hud_window_moved(window, *pos);
                     }
                 }
+                WindowEvent::Resized(size) => {
+                    // 会话悬浮窗自由拖拽宽高：用户拖出的尺寸节流持久化
+                    //（与程序自适应 set_size 的回声在挂点内区分，不会
+                    // 误存）；宠物窗无此需求
+                    if window.label() == session_hud::SESSION_HUD_WINDOW_LABEL {
+                        session_hud::handle_session_hud_window_resized(window, *size);
+                    }
+                }
                 WindowEvent::Destroyed => {
                     if window.label() == pet::PET_WINDOW_LABEL {
                         pet::handle_pet_window_destroyed(window.app_handle());
@@ -2172,6 +2181,11 @@ pub fn run() {
             pet::set_pet_config,
             session_hud::get_session_hud_config,
             session_hud::set_session_hud_config,
+            session_hud::set_session_hud_font_scale,
+            // 悬浮窗热区拖拽尺寸会话："用户调整中"标志置位/清除 + 结束即时落盘核校
+            session_hud::session_hud_resize_begin,
+            session_hud::session_hud_resize_end,
+            model_speed::get_model_speed,
             pets::import_pet,
             pets::list_custom_pets,
             pets::delete_custom_pet,

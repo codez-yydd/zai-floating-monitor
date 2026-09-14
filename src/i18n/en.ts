@@ -5,7 +5,7 @@
  */
 import { common } from "./dicts/common";
 import { layout } from "./dicts/layout";
-import { stats } from "./dicts/stats";
+import { stats, speed } from "./dicts/stats";
 import { summary } from "./dicts/summary";
 import { pricing } from "./dicts/pricing";
 import { sync } from "./dicts/sync";
@@ -102,6 +102,7 @@ export const en: typeof zh = {
   ...({
     // 统计面板顶栏
     "stats.tab.summary": "Summary",
+    "stats.tab.speed": "Speed",
     "stats.reports": "Reports",
     "stats.syncOn": "Device sync",
     "stats.syncOff": "Set up device sync",
@@ -168,6 +169,51 @@ export const en: typeof zh = {
     "cursor.eventsFailed": "Failed to load token usage: {msg}",
     "cursor.noEvents": "No token usage in the selected range",
   } satisfies typeof stats),
+
+  ...({
+    // 模型速度统计面板
+    "speed.title": "Model Speed",
+    "speed.subtitle": "Compare typical streaming output speed across models",
+    "speed.rangeToday": "Today",
+    "speed.range7d": "7 days",
+    "speed.rangeLabel": "Speed range",
+    "speed.fastest": "Fastest typical speed",
+    "speed.fastestHint": "in selected range",
+    "speed.autoRefresh": "Auto-refreshes every 30s",
+    "speed.overviewModels": "Models",
+    "speed.overviewRequests": "Requests",
+    "speed.overviewMean": "Mean typical speed",
+    "speed.overviewSuccess": "Success",
+    "speed.ranking": "Model ranking",
+    "speed.modelCount": "{n} models",
+    "speed.samplesCount": "{n} requests",
+    "speed.providerUnknown": "Unknown source",
+    "speed.relativeSpeed": "{pct}% of fastest model",
+    "speed.relativeLabel": "Relative to fastest model",
+    "speed.averagePeak": "Average {avg} · peak {max}",
+    "speed.averageSlower": "Average {avg} · slower {slow}",
+    "speed.requestSummary": "{n} · {pct} success",
+    "speed.p10": "Slow",
+    "speed.p50": "Average",
+    "speed.p90": "Fast",
+    "speed.ttft": "TTFT",
+    "speed.latency": "Latency",
+    "speed.inputShort": "Input",
+    "speed.outputShort": "Output",
+    "speed.latencyShort": "Latency",
+    "speed.samplesShort": "Requests",
+    "speed.waitingData": "Waiting for local request data",
+    "speed.live": "Live",
+    "speed.loadFailed": "Could not load speed data",
+    "speed.retry": "Retry",
+    "speed.empty": "No model requests in the selected range",
+    "speed.emptyHint": "Stats appear automatically once you chat in ZCode",
+    "speed.fail": "Failed to load model speed stats: {msg}",
+    // 数据截至标识（每次查询成功后更新，Ns 随时间自走）
+    "speed.updatedAt": "As of {time} · {ago}s ago",
+    "speed.updatedHint": "Last successful query; auto-refreshes every 30s",
+    "speed.refresh": "Refresh now",
+  } satisfies typeof speed),
 
   ...({
     "summary.totalCost": "Total cost",
@@ -717,10 +763,11 @@ export const en: typeof zh = {
       "States: sleeping (ZCode idle for over 1 minute or ZBar not running) · idle (recent turn activity) · thinking (model planning, no output yet) · typing (output growing; speed tiers by token rate) · tool running (a tool is executing, e.g. command/build) · walking (heading to a new turn / waiting for the next) · celebrating (turn finished, about 3s) · failed (turn failed or cancelled, about 3s)",
 
     // Session HUD card (standalone always-on-top overlay showing active
-    // ZCode sessions; config in session-hud.json, no skin dependency)
+    // ZCode sessions; config in session-hud.json, no skin dependency;
+    // freely resizable by dragging, height auto-fits until resized)
     "theme.hudTitle": "Session HUD",
     "theme.hudHint":
-      "A standalone transparent always-on-top overlay showing active ZCode sessions with model, state (generating/idle) and token totals (Σ total · ↑ input · ↓ output · ⟲ cache read · × requests · speed t/s · TTFT, same convention as the in-chat session bar), one row per session sorted by recent activity; no skin required, draggable.",
+      "A standalone transparent always-on-top overlay showing active ZCode sessions with model, state (generating/idle) and token totals (Σ total · ↑ input · ↓ output · ⟲ cache read · × requests · speed t/s · TTFT, same convention as the in-chat session bar), one row per session sorted by recent activity; no skin required, drag to move, drag an edge to resize freely (slider on the overlay adjusts the font size).",
     "theme.hudEnabled": "Enable Session HUD",
     "theme.hudEnabledHint": "Master switch: off hides the overlay and stops polling",
     "theme.hudApplyFail": "Failed to apply Session HUD settings: {msg}",
@@ -734,11 +781,9 @@ export const en: typeof zh = {
       "Only sessions active (model requests or sent messages) within this window are shown; \"All\" falls back to the last 24 hours, up to 5 visible rows, extras folded",
     "theme.hudOpacity": "Opacity",
     "theme.hudOpacityHint": "Content opacity of the overlay, applied instantly",
-    "theme.hudWidth": "Width",
-    "theme.hudWidthHint": "Overlay width (240–480px), applied instantly; content adapts",
     "theme.hudShowTokens": "Data row",
     "theme.hudShowTokensHint":
-      "Per-session totals in the session-bar convention: Σ total · ↑ input · ↓ output · ⟲ cache read · × requests · speed t/s · TTFT",
+      "Per-session totals in the session-bar convention: Σ total · ↑ input · ↓ output · ⟲ cache read · × requests · speed t/s · TTFT, plus the per-model speed rows below the list; turning it off also hides the Today total row",
     "theme.hudShowModel": "Model name",
     "theme.hudShowModelHint": "Show the session's most recently used model",
     "theme.currentWallpaper": "Current wallpaper",

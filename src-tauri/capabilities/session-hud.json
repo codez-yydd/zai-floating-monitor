@@ -1,10 +1,16 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "session-hud",
-  "description": "Minimal capability for the session HUD window (event listen + window dragging only; custom commands like get_session_hud_config are not ACL-gated)",
+  "description": "Minimal capability for the session HUD window (event listen + window dragging + JS resize hot-zone session; custom commands like get_session_hud_config are not ACL-gated)",
   "windows": ["session-hud"],
   "permissions": [
     "core:event:default",
-    "core:window:allow-start-dragging"
+    "core:window:allow-start-dragging",
+    "core:window:allow-start-resize-dragging",
+    "core:window:allow-outer-size",
+    "core:window:allow-outer-position",
+    "core:window:allow-current-monitor",
+    "core:window:allow-set-size",
+    "core:window:allow-set-position"
   ]
 }

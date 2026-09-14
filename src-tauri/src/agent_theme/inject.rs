@@ -650,9 +650,30 @@ pub const EFFECTS_JS: &str = r#"// =============================================
 /// store::ensure_versioned_template）。风格与 effects.js 同款：自愈、
 /// 静默失败、空值防御；DOM 选择器集中在头部常量，便于实机比对调整。
 pub const USAGE_JS: &str = r#"// ============================================================
-// ZBAR-THEME-V20
+// ZBAR-THEME-V22
 // ZBar Agent 对话页用量统计条（由 ZBar 落盘并随版本升级覆盖）
 // ============================================================
+// V22 变更（删除会话条 CTX 上下文占用段。用户改主意：CTX 百分比展示
+//   下线（悬浮窗版已先行删除），注入版一并删除， sess 数组保留
+//   model_usage 全量合计口径不变）：
+//   a) 会话条删除 "CTX NN%" 段与三档变色 class（黄/红两条样式规则一并
+//      移除）；逐段 span 渲染结构保留（V21 引入，未来段级配色零成本
+//      复用，当前全部段无配色 class，行为与单串 textContent 等价）。
+//   b) 数据端 usage_feed 同步删除 sess 行的 cp/cu/cw 三字段与 CTX 查询
+//      （context_window 模块整体移除）；渲染端 cp 消费点删除，旧数据
+//      文件残留 cp 字段被忽略（未知字段零影响）。
+// V21 变更（数据端新增 sess 会话级统计数组，渲染端会话累计条优先消费
+//   新口径 + 追加 CTX 段。数据仍为 v2 附加字段，旧脚本忽略未知字段）：
+//   a) 会话累计口径修正：turn_usage 覆盖不全（失败/中断轮不落库），按
+//      轮聚合的旧会话累计系统性偏小。数据端新增 sess 数组（每会话一条
+//      model_usage 全量合计：tt 总量 / up 非缓存输入 / down 输出 / cr
+//      缓存读 / rq 请求数，会话树口径含子代理与失败轮）。渲染端
+//      sessionTotals 优先读 sess 行（sessIndex 命中且 tt != null）；
+//      数据里无该字段（旧数据文件/查询降级）回退旧 turns 遍历口径——
+//      两套口径并存，无缝降级。sess 命中时不再叠加 sessionRunTotals
+//      （runs 行即 model_usage 已落库行的聚合，全量合计已含，叠加即
+//      双计）；逐轮显示（renderOne 完成态）仍用 turn_usage 不变。
+//      （V21 b) 的 CTX 段已被 V22 删除，见上）
 // V20 变更（配合数据端 V20 双修复，渲染管线零改动即天然正确）：
 //   a) turns 新增子代理"自身视图行"（每条已完成子代理轮额外导出一条
 //      行：sess 为子代理会话 id、umid 为子轮自己的用户消息 id、数值与
@@ -1100,6 +1121,8 @@ pub const USAGE_JS: &str = r#"// ===============================================
        * （fixed 贴窗底，bottom 见 SESSION_BAR_BOTTOM_PX） */
       "[" + ATTR_SESSION_BAR + "][" + ATTR_SESSION_BAR_FIXED + "]{" +
       "position:fixed;top:auto;bottom:" + SESSION_BAR_BOTTOM_PX + "px;}";
+      /* V21 的 CTX 三档变色样式（黄/红两个 class 规则）已随 V22 CTX 段
+       * 删除（无渲染路径再产出这两个 class） */
     (document.head || document.documentElement).appendChild(st);
   }
 
@@ -1115,10 +1138,15 @@ pub const USAGE_JS: &str = r#"// ===============================================
    * 的子代理轮——经 psess 并入），故聚合时遍历原始数组而非索引 */
   var lastTurns = [];
   var lastRuns = [];
+  /* V21 会话级统计索引：会话 id → sess 行（数据端 model_usage 全量合计；
+   * V22 起 cp/cu/cw 已删，仅余合计字段）。旧数据文件无 sess 数组：索引
+   * 为空对象，会话累计回退旧口径 */
+  var sessIndex = {};
 
   function rebuildIndex(data) {
     index = {};
     runIndex = {};
+    sessIndex = {};
     lastTurns = (data && data.turns) || [];
     lastRuns = (data && data.runs) || [];
     if (data && data.turns && data.turns.length) {
@@ -1133,6 +1161,12 @@ pub const USAGE_JS: &str = r#"// ===============================================
         var r = data.runs[j];
         /* 旧导出文件无 runs 数组：lastRuns 兜底为空数组，零影响 */
         if (r && r.umid) runIndex[r.umid] = r;
+      }
+    }
+    if (data && data.sess && data.sess.length) {
+      for (var k = 0; k < data.sess.length; k++) {
+        var sv = data.sess[k];
+        if (sv && sv.s) sessIndex[sv.s] = sv;
       }
     }
   }
@@ -1491,15 +1525,30 @@ pub const USAGE_JS: &str = r#"// ===============================================
     }
   }
 
-  /* 会话累计（完成轮真实值）：按 sess 过滤 turns 原始数组聚合。该会话
-   * 无任何完成轮返回 null——V6 起不再据此直接放弃渲染（V5 根因 a)：
-   * 新会话首轮生成期间 totals 恒为 null，动态段从未启动），改由
-   * renderSessionBar 以 run 合计兜底。
+  /* 会话累计：V21 起双口径并存——
+   * ① 新口径（优先）：数据端 sess 数组的 model_usage 全量合计（含
+   *    失败/中断轮——turn_usage 覆盖不全，轮正常结束才落库，按轮聚合
+   *    的旧口径会话累计系统性偏小；sess 行为会话树口径，含子代理与
+   *    CLI 后台请求）。命中且 tt != null 即采用，调用方跳过 runs 叠加
+   *    （runs 行即 model_usage 已落库行的聚合，全量合计已含）；
+   * ② 旧口径（回退）：数据无 sess 字段（旧数据文件/查询降级）时按
+   *    sess 过滤 turns 原始数组聚合完成轮真实值 + 调用方叠加
+   *    sessionRunTotals 的进行中合计（V6/V9 既有行为）。
+   * 两套口径返回同构 {tin, tout, tcr, treq}（↑ 均为逐笔/逐轮 clamp 的
+   * 非缓存输入），渲染端无感切换。
    * V20：turns 含子代理自身视图行（sess 为子代理会话 id、带
    * subagent:1），按 sess 精确匹配天然隔离——主会话视图不命中子代理
    * 自身行（其数值经主轮行的并入值计入），子代理视图（面板锚点外通常
    * 不渲染会话条）只命中自身行，无任何双计路径 */
   function sessionTotals(sessId) {
+    /* ① 新口径：sess 全量合计行 */
+    var sv = sessIndex[sessId];
+    if (sv && sv.tt != null) {
+      return { tin: sv.up || 0, tout: sv.down || 0, tcr: sv.cr || 0, treq: sv.rq || 0 };
+    }
+    /* ② 旧口径回退：该会话无任何完成轮返回 null——V6 起不再据此直接
+     * 放弃渲染（V5 根因 a)：新会话首轮生成期间 totals 恒为 null，动态
+     * 段从未启动），改由 renderSessionBar 以 run 合计兜底 */
     var tin = 0,
       tout = 0,
       tcr = 0,
@@ -1801,46 +1850,70 @@ pub const USAGE_JS: &str = r#"// ===============================================
       removeBar();
       return;
     }
+    /* V21 双口径判定：sess 全量合计命中（新口径）时 runs 不再叠加
+     * （runs 行即 model_usage 已落库行的聚合，全量合计已含，叠加即
+     * 双计）；未命中（旧数据文件/查询降级）回退旧口径 totals +
+     * runTotals 叠加（V6/V9 既有行为）。估算段 ≈est 独立于两口径，
+     * 始终保留 */
+    var sv = sessIndex[sessId];
+    var useSess = !!(sv && sv.tt != null);
     var totals = sessionTotals(sessId);
-    var runTotals = sessionRunTotals(sessId);
+    var runTotals = useSess ? null : sessionRunTotals(sessId);
     /* V8：完成合计、run 合计均空且无活动轮（DOM 驱动判定）才放弃——
      * 启动窗口活动轮同样支撑会话条即时显示（新会话首轮发消息即出现，
      * 修复 V6/V7 首笔请求完成前会话条全空白的启动窗口）。draft 空会话
-     * 仍不渲染。V9：活动轮按本会话 id 从 activeMap 取 */
+     * 仍不渲染。V9：活动轮按本会话 id 从 activeMap 取。V21：sess 行
+     * 命中同样支撑（全量合计非空） */
     var active = activeMap.has(sessId);
-    if (!totals && !runTotals && !active) {
+    if (!useSess && !totals && !runTotals && !active) {
       removeBar();
       return;
     }
     var est = dyn.timer ? dynEstimate(sessId) : EST_ZERO;
-    /* Σ 真实部分 = 完成轮合计 + 进行中 run 合计。V8：流式估算输出不再
-     * 叠加进 ↓ 真实数字（避免估算污染累计），改入下方动态段 ≈est。
-     * 轮完成切换时刻：run 合计消失、完成合计接管——最后一笔进行中请求
-     * 完成后才计入 turn_usage，切换瞬间数字可能小幅修正，属预期误差 */
-    var tin = (totals ? totals.tin : 0) + (runTotals ? runTotals.tin : 0);
-    var tout =
-      (totals ? totals.tout : 0) + (runTotals ? runTotals.tout : 0);
-    var tcr = (totals ? totals.tcr : 0) + (runTotals ? runTotals.tcr : 0);
-    var treq = (totals ? totals.treq : 0) + (runTotals ? runTotals.treq : 0);
+    /* Σ 真实部分：新口径 = sess 全量合计（含失败轮，实时——每笔请求
+     * 完成 model_usage 即落行，2 秒轮询内跳动）；旧口径 = 完成轮合计 +
+     * 进行中 run 合计。V8：流式估算输出不叠加进 ↓ 真实数字（避免估算
+     * 污染累计），改入下方动态段 ≈est。轮完成切换时刻数字可能小幅修
+     * 正，属预期误差 */
+    var tin = useSess ? (sv.up || 0) : (totals ? totals.tin : 0) + (runTotals ? runTotals.tin : 0);
+    var tout = useSess
+      ? sv.down || 0
+      : (totals ? totals.tout : 0) + (runTotals ? runTotals.tout : 0);
+    var tcr = useSess
+      ? sv.cr || 0
+      : (totals ? totals.tcr : 0) + (runTotals ? runTotals.tcr : 0);
+    var treq = useSess
+      ? sv.rq || 0
+      : (totals ? totals.treq : 0) + (runTotals ? runTotals.treq : 0);
     /* V10：Σ 数字段等宽补位（token 经 fmtTokens 恒定 5 字符、req
      * padStart(3)），行宽不随数值位数跳动。V15：Σ 段为会话总 Token
      * （tsum = 输入+输出+缓存读之和，真实数据不含估算），明细段依次
-     * 为 ↑ 输入 / ↓ 输出 / ⟲ 缓存读 / × 请求数 */
+     * 为 ↑ 输入 / ↓ 输出 / ⟲ 缓存读 / × 请求数。
+     * V21：parts 改段对象 {t: 文本, c: 可选配色 class}——会话条由单
+     * textContent 改为逐段 span 渲染（当时为 CTX 段级变色引入）。V22
+     * 删除 CTX 段后已无带配色的段，结构保留（未来段级配色零成本复
+     * 用，全部段无 class 时行为与单串等价） */
     var tsum = tin + tout + tcr;
-    var parts = [
-      "Σ " + fmtTokens(tsum),
-      "↑ " + fmtTokens(tin),
-      "↓ " + fmtTokens(tout),
-      "⟲ " + fmtTokens(tcr),
-      "× " + String(treq).padStart(3, " ")
+    var segs = [
+      { t: "Σ " + fmtTokens(tsum) },
+      { t: "↑ " + fmtTokens(tin) },
+      { t: "↓ " + fmtTokens(tout) },
+      { t: "⟲ " + fmtTokens(tcr) },
+      { t: "× " + String(treq).padStart(3, " ") }
     ];
     /* V10 动态段固定：两段永远显示（idle 无活动轮时速度 0.0、估算 0），
      * 不再按有无值省略，Σ 行整体宽度恒定。启动窗口轮（runs 未达）与
      * runs 阶段统一走此段。V15：速度段去掉 ⋯ 前缀（与每轮条一致）；
      * 估算段改 ≈ 前缀（生成中未落库的输出估算，不计入累计） */
-    parts.push(padSpeed(est.speed || 0) + " t/s");
-    parts.push("≈" + fmtTokens(est.tok));
-    var text = parts.join(" · ");
+    segs.push({ t: padSpeed(est.speed || 0) + " t/s" });
+    segs.push({ t: "≈" + fmtTokens(est.tok) });
+    /* V21 曾在此追加 "CTX NN%" 上下文占用段（三档变色，消费 sess 行的
+     * cp 字段），V22 随展示下线删除（数据端 cp/cu/cw 字段一并移除，
+     * 旧数据文件残留值被忽略） */
+    var text = "";
+    for (var si = 0; si < segs.length; si++) {
+      text += (si ? " · " : "") + segs[si].t;
+    }
     var bar = ensureBar();
     /* V13：挂载进输入区容器（幂等迁移）——条 absolute 住进 CSS 注入的
      * 26px 顶部留白，零坐标测量、随文档流自适应。V17：挂载点经
@@ -1869,7 +1942,18 @@ pub const USAGE_JS: &str = r#"// ===============================================
         try { console.warn("[ZBar] usage session bar mount error:", e); } catch (e2) {}
       }
     }
-    if (bar.textContent !== text) bar.textContent = text;
+    /* V21：内容变化时逐段重建（textContent 读值含全部子节点文本，拼接
+     * 串比对与旧单串比对等价）；无变化零 DOM 操作 */
+    if (bar.textContent !== text) {
+      while (bar.firstChild) bar.removeChild(bar.firstChild);
+      for (var sj = 0; sj < segs.length; sj++) {
+        if (sj) bar.appendChild(document.createTextNode(" · "));
+        var sp = document.createElement("span");
+        if (segs[sj].c) sp.className = segs[sj].c;
+        sp.textContent = segs[sj].t;
+        bar.appendChild(sp);
+      }
+    }
   }
 
   function renderAll() {
@@ -3398,7 +3482,15 @@ mod tests {
         assert!(!THEME_CSS.contains("ZBAR-THEME-V9"), "版本头应已升到 V10");
         assert!(EFFECTS_JS.contains("ZBAR-THEME-V5"));
         assert!(!EFFECTS_JS.contains("ZBAR-THEME-V4"), "版本头应已升到 V5");
-        // usage.js V20（配合数据端 V20 双修复：turns 新增子代理自身视图
+        // usage.js V22（删除会话条 CTX 上下文占用段：用户改主意，CTX 百分
+        // 比展示下线——渲染端删除 "CTX NN%" 段与三档变色样式，数据端
+        // usage_feed 同步删除 sess 行 cp/cu/cw 字段与 CTX 查询，逐段
+        // span 渲染结构保留）；V21（数据端新增 sess 会话级统计数组：
+        // model_usage 全量合计修正会话累计口径（turn_usage 覆盖不全）；
+        // 渲染端 sessionTotals 优先读 sessIndex、命中时不叠加 runs 防双
+        // 计、数据缺失回退旧口径，会话条逐段 span 化（V21 的 CTX 段已
+        // 被 V22 删除）；
+        // V20（配合数据端 V20 双修复：turns 新增子代理自身视图
         // 行（subagent:1），子轮 umid 进入完成索引后已完成子代理轮不再
         // 被误判为活动轮、面板按 index 命中显示真实 token，会话累计按
         // sess 精确匹配无双计路径，渲染管线零改动；数据端父会话保活修
@@ -3423,10 +3515,41 @@ mod tests {
         // 占位枯萎清理；V9 子代理消耗实时化：document 级扫描 + 多容器
         // 活动轮 + 主轮 live 行 sub 合计 + 会话条 Σ 跳过 m 行；V8 启动
         // 窗口实时渲染；V7 请求图标 ⟳ → ×；V6 生成过程实时跳动）
-        assert!(USAGE_JS.contains("ZBAR-THEME-V20"));
-        assert!(!USAGE_JS.contains("ZBAR-THEME-V19"), "版本头应已升到 V20");
+        assert!(USAGE_JS.contains("ZBAR-THEME-V22"));
+        assert!(!USAGE_JS.contains("ZBAR-THEME-V21"), "版本头应已升到 V22");
+        assert!(!USAGE_JS.contains("ZBAR-THEME-V19"), "版本头不应回退");
         assert!(!USAGE_JS.contains("ZBAR-THEME-V18"), "版本头不应回退");
         assert!(!USAGE_JS.contains("ZBAR-THEME-V10"), "版本头不应回退");
+        // V22 CTX 删除特征：渲染段、变色样式、sv.cp 消费点全部零残留
+        //（注释中的历史记载不算特征）
+        assert!(
+            !USAGE_JS.contains("\"CTX \" + Math.round(cp)"),
+            "会话条不应再有 CTX 百分比段（V22 已删）"
+        );
+        assert!(
+            !USAGE_JS.contains(".zbar-ctx-warn") && !USAGE_JS.contains(".zbar-ctx-high{"),
+            "CTX 三档变色样式应已移除"
+        );
+        assert!(!USAGE_JS.contains("sv.cp"), "sv.cp 消费点应已删除");
+        // V21 会话累计双口径特征：sessIndex 索引 + sessionTotals 优先读
+        // sess 全量合计行（数据缺失回退旧 turns 遍历）+ 命中时跳过 runs
+        // 叠加（model_usage 全量已含 runs 行聚合，叠加即双计）
+        assert!(
+            USAGE_JS.contains("var sessIndex = {};"),
+            "V21 应新增 sess 会话级统计索引"
+        );
+        assert!(
+            USAGE_JS.contains("sv && sv.tt != null"),
+            "sessionTotals 应优先读 sess 行（tt != null 判定新口径）"
+        );
+        assert!(
+            USAGE_JS.contains("var useSess = !!(sv && sv.tt != null);"),
+            "renderSessionBar 应按 sess 命中切换口径"
+        );
+        assert!(
+            USAGE_JS.contains("runTotals = useSess ? null : sessionRunTotals(sessId);"),
+            "sess 命中时不得叠加 runs 合计（防双计）"
+        );
         // V19 每轮统计条开关特征：开关变量 + 镜像读取函数 + renderAll
         // 第二遍渲染循环的关闭分支（对全部轮节点 removeRow 并跳过
         // renderOne）
@@ -3749,11 +3872,12 @@ mod tests {
         );
         // V10 动态段固定：两段永远显示（idle 无活动轮时速度 0.0、估算 0），
         // 不再按有无值省略，Σ 行整体宽度恒定；Σ 数字段同步补位。V15：
-        // Σ 段为会话总 Token（tsum），速度段去 ⋯ 前缀、估算段 ≈ 前缀
+        // Σ 段为会话总 Token（tsum），速度段去 ⋯ 前缀、估算段 ≈ 前缀；
+        // V21 段对象形态（{t: 文本}，逐段 span 渲染），文字内容不变
         assert!(
             USAGE_JS.contains("var tsum = tin + tout + tcr;")
-                && USAGE_JS.contains("parts.push(padSpeed(est.speed || 0) + \" t/s\");")
-                && USAGE_JS.contains("parts.push(\"≈\" + fmtTokens(est.tok));"),
+                && USAGE_JS.contains("segs.push({ t: padSpeed(est.speed || 0) + \" t/s\" });")
+                && USAGE_JS.contains("segs.push({ t: \"≈\" + fmtTokens(est.tok) });"),
             "会话条动态段两段应固定显示（idle 时 0.0 / 0，不再按有无值省略）"
         );
         assert!(

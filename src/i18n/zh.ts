@@ -3,7 +3,7 @@
  */
 import { common } from "./dicts/common";
 import { layout } from "./dicts/layout";
-import { stats } from "./dicts/stats";
+import { stats, speed } from "./dicts/stats";
 import { summary } from "./dicts/summary";
 import { pricing } from "./dicts/pricing";
 import { sync } from "./dicts/sync";
@@ -19,6 +19,7 @@ export const zh = {
   ...common,
   ...layout,
   ...stats,
+  ...speed,
   ...summary,
   ...pricing,
   ...sync,

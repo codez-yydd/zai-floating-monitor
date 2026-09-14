@@ -1002,6 +1002,20 @@ pub const EFFECTS_JS_VERSION: u32 = 5;
 /// 第二遍渲染前统一读 --zbar-usage-turn-bar（变量缺失视为开启，兼容旧
 /// variables.css），关闭时对全部轮节点 removeRow 并跳过 renderOne，估
 /// 算管线 syncDyn 与会话条不受影响。
+/// V21：会话累计条消费数据端新增 sess 会话级统计数组——a) 会话累计
+/// 优先读 sess 行的 model_usage 全量合计（tt/up/down/cr/rq，含失败/
+/// 中断轮——turn_usage 覆盖不全，旧按轮聚合口径系统性偏小；sess 命中
+/// 时不再叠加 runs 合计防双计），数据缺失（旧数据文件/查询降级）回退
+/// 旧 sessionTotals+sessionRunTotals 口径；b) 会话条尾部新增 CTX 上下
+/// 文字占用段（"CTX NN%"，树内最近一笔 completed 请求 input ÷ 窗口容
+/// 量，三档变色 <60 正常/60–85 黄/>85 红，会话条逐段 span 化支持段级
+/// 配色）。数据仍为 v2 附加字段，旧脚本忽略未知字段。
+/// V22：删除会话条 CTX 上下文占用段——用户改主意，CTX 百分比展示下线
+/// （悬浮窗版已先行删除）：渲染端删除 "CTX NN%" 段与 sv.cp 消费点、
+/// .zbar-ctx-warn/.zbar-ctx-high 变色样式；数据端 usage_feed 同步删除
+/// sess 行的 cp/cu/cw 字段与 CTX 查询（context_window 模块整体移除）。
+/// 逐段 span 渲染结构保留（V21 引入，当前无配色段，行为与单串等价）；
+/// sess 的 model_usage 全量合计口径（tt/up/down/cr/rq）不变。
 /// V20：配合数据端双修复——a) turns 新增子代理自身视图行（sess 为子代
 /// 理会话 id、umid 为子轮自己的用户消息 id、数值与 dur/ttft 为子轮自身
 /// 口径，带 subagent:1 标记；主轮行仍照常含并入的 sub 数值，两行并存）：
@@ -1011,7 +1025,7 @@ pub const EFFECTS_JS_VERSION: u32 = 5;
 /// sessionTotals 按 t.sess 精确匹配无任何双计路径，渲染管线零改动；
 /// b) 数据端 usage_feed 父会话保活：主轮派发子代理后自身静默不再满 10
 /// 分钟被踢出 runs，主轮条、会话累计与子代理孤儿并入保持实时值。
-pub const USAGE_JS_VERSION: u32 = 20;
+pub const USAGE_JS_VERSION: u32 = 22;
 
 /// 桌面像素宠物脚本 pet.js 的版本化落盘标记。
 /// 版本头写在模板首行注释（ZBAR-THEME-V 标记，提取器与

@@ -6,6 +6,7 @@
 export const stats = {
   // ===== 统计面板顶栏 =====
   "stats.tab.summary": "汇总",
+  "stats.tab.speed": "速度",
   "stats.reports": "报表",
   "stats.syncOn": "设备同步",
   "stats.syncOff": "配置设备同步",
@@ -70,4 +71,54 @@ export const stats = {
   "cursor.byModel": "按模型",
   "cursor.eventsFailed": "Token 明细拉取失败：{msg}",
   "cursor.noEvents": "所选时间范围内暂无 Token 使用明细",
+};
+
+// ===== 模型速度统计面板（ModelSpeedPanel，"速度"tab）=====
+// V5 行块骨架 + 明细平铺：常态每行 = 模型名 + 速度值 + 相对速度条 + 3 行 ×
+// 2 列明细网格（速度/首字/耗时/输入/输出/请求，全部数值直接可见、无需悬停
+// 依赖）。明细格 = 11px 灰标签 + 12px 黑值，统计口径直接写进值串。速度分位
+// 在 UI 中使用“慢 / 平均 / 快”直白标签。键集与 en 保持
+// 一致（satisfies 约束）。
+export const speed = {
+  "speed.title": "模型速度",
+  "speed.subtitle": "按典型速度比较模型的流式输出表现",
+  "speed.rangeToday": "今日",
+  "speed.range7d": "7天",
+  "speed.rangeLabel": "速度统计范围",
+  "speed.fastest": "最快典型速度",
+  "speed.fastestHint": "当前范围内",
+  "speed.autoRefresh": "每 30 秒自动更新",
+  "speed.overviewModels": "模型",
+  "speed.overviewRequests": "请求",
+  "speed.overviewMean": "平均典型速度",
+  "speed.overviewSuccess": "成功率",
+  "speed.ranking": "模型排行",
+  "speed.modelCount": "{n} 个模型",
+  "speed.samplesCount": "{n} 次请求",
+  "speed.providerUnknown": "未标注来源",
+  "speed.relativeSpeed": "相对最快模型 {pct}%",
+  "speed.relativeLabel": "相对最快模型",
+  "speed.averagePeak": "平均 {avg} · 峰值 {max}",
+  "speed.averageSlower": "平均 {avg} · 较慢 {slow}",
+  "speed.requestSummary": "{n} 次 · 成功率 {pct}",
+  "speed.p10": "慢",
+  "speed.p50": "平均",
+  "speed.p90": "快",
+  "speed.ttft": "首字",
+  "speed.latency": "耗时",
+  "speed.inputShort": "输入",
+  "speed.outputShort": "输出",
+  "speed.latencyShort": "耗时",
+  "speed.samplesShort": "请求",
+  "speed.waitingData": "等待本地请求数据",
+  "speed.live": "实时",
+  "speed.loadFailed": "速度数据加载失败",
+  "speed.retry": "重试",
+  "speed.empty": "所选时间范围内暂无模型请求",
+  "speed.emptyHint": "在 ZCode 中发起对话后自动统计",
+  "speed.fail": "模型速度统计查询失败：{msg}",
+  // 数据截至标识（每次查询成功后更新，Ns 随时间自走）
+  "speed.updatedAt": "数据截至 {time} · {ago}s 前",
+  "speed.updatedHint": "最近一次查询成功时刻；每 30 秒自动刷新",
+  "speed.refresh": "立即刷新",
 };

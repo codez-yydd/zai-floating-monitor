@@ -122,3 +122,11 @@ export function formatMs(v: number): string {
   if (v < 60_000) return `${(v / 1000).toFixed(1)}s`;
   return `${(v / 60_000).toFixed(1)}min`;
 }
+
+/** 耗时统一秒单位格式化（速度面板指标格专用）：恒定秒量纲避免同一
+ *  格内 ms 与 s 混排（881ms → 0.9s）；<100s 一位小数、更大取整秒
+ *  防止数值过长挤爆窄格。与 formatMs（自适应量纲）并存，按场景选用 */
+export function formatSeconds(v: number): string {
+  if (v < 100_000) return `${(v / 1000).toFixed(1)}s`;
+  return `${Math.round(v / 1000)}s`;
+}

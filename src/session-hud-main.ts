@@ -5,14 +5,24 @@
  * 组件体系（widgets/layout 为 panel 专用），列表渲染在壳内直接完成。
  * 职责：
  * - 初始配置：invoke get_session_hud_config 读取（透明度 + 显示项 +
- *   活跃档位）；读取失败按 HTML/CSS 默认渲染（防御式，与 pet 同风格）；
+ *   活跃档位 + 字体缩放）；读取失败按 HTML/CSS 默认渲染（防御式，与
+ *   pet 同风格）；
  * - 数据流：监听 zbar://session-hud-usage（session_hud.rs 轮询器每
  *   2 秒/速度字段 1 秒节拍推送的会话快照，内容变化才推），重建列表 DOM；
- * - 参数流：监听 zbar://session-hud-params（设置卡变更热推），即时
- *   应用透明度与显示项，下一轮数据到达后列表按新显示项重建；
- * - 拖动：#hud-header 为 data-tauri-drag-region 拖动区（列表行不留
+ * - 参数流：监听 zbar://session-hud-params（设置卡变更 / 字体滑块落盘
+ *   回推），即时应用透明度、显示项与字体缩放，下一轮数据到达后列表按
+ *   新显示项重建；
+ * - 字体缩放：header 中部 Aa 小灰字标识 + 细轨道滑块组合（0.8~1.4）
+ *   写 CSS 变量 --hud-scale（页面全部字号/行高 calc 随动），防抖经专用
+ *   命令 set_session_hud_font_scale 落盘 session-hud.json 的 fontScale；
+ * - 拖动移动：#hud-header 为 data-tauri-drag-region 拖动区（列表行不留
  *   拖动属性，避免后续行内 hover 交互误拖），位置由 Rust 侧 Moved
  *   挂点节流持久化；
+ * - 拖动调整尺寸：8 向隐形热区层由 hud-resize.ts 安装（undecorated
+ *   窗口系统边缘热区在 Windows 上不生效，详见该模块文件头）；尺寸落盘
+ *   走 Rust 侧 Resized 挂点，拖拽期间经"用户调整中"标志暂停自适应
+ *   set_size（防高度被程序拉回，见 hud-resize.ts / session_hud.rs）；
+ *   内容超高时列表区纵向滚动；
  * - 文案：轻量双语词典（zh/en），语言偏好读主面板写入的 localStorage
  *   键（同源 WebView 共享；缺失/异常回退 zh），不引入 i18n 运行时。
  *
@@ -21,6 +31,7 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { installHudResizeHandles } from "./hud-resize";
 
 /** Rust 侧 HudSessionBrief（camelCase 契约，紧凑标量，无原始行数据）。
  *  行主体是"会话树"（主会话 + 全部子代理，注入版 V9 合计口径）：
@@ -52,27 +63,63 @@ interface HudSessionBrief {
   ttftMs: number | null;
 }
 
+/** Rust 侧 HudModelSpeed（模型速度区单行，按模型聚合的窗口速度摘要） */
+interface HudModelSpeed {
+  /** 模型 id（原值，行内 truncate + title 全名） */
+  model: string;
+  /** 最近一笔完成请求的输出速度 t/s */
+  tps: number;
+  /** 窗口内全部可信样本的总输出速度 t/s */
+  avgTps: number;
+  /** 窗口内可信样本的单笔最快速度 t/s（与 avgTps 同样本池） */
+  maxTps: number;
+  /** 窗口内可信样本的单笔最慢速度 t/s（与 avgTps 同样本池） */
+  minTps: number;
+  /** 可信速度样本数 */
+  samples: number;
+}
+
 /** Rust 侧 HudSnapshot */
 interface HudSnapshot {
   v: number;
   /** 窗口内活跃会话总数（含未展示的，折叠提示消费） */
   totalActive: number;
   sessions: HudSessionBrief[];
+  /** 今日合计（自然日本地零点起全库 model_usage；窗口级汇总，随
+   *  showTokens 配置隐藏——不想看数字的用户整行不显示；全 0 = 今日
+   *  无请求不显示该行） */
+  todayTotal: {
+    in: number;
+    out: number;
+    cacheRead: number;
+    total: number;
+    reqCount: number;
+  };
+  /** 模型速度区（活跃窗口内按模型分组的速度摘要，最近使用降序至多
+   *  3 个；空数组 = 不渲染该区，显隐与窗口高度判定同条件，见
+   *  session_hud.rs model_speed_visible） */
+  modelSpeeds: HudModelSpeed[];
 }
 
-/** Rust 侧热推参数（设置卡变更 → zbar://session-hud-params） */
+/** Rust 侧热推参数（设置卡变更 / header 字体滑块 → zbar://session-hud-params） */
 interface HudParams {
   opacity: number;
   windowMinutes: number;
   showTokens: boolean;
   showModel: boolean;
+  /** 字体缩放（0.8~1.4，header 滑块 ↔ fontScale 配置双向同步） */
+  fontScale: number;
 }
 
 /** 初始配置（get_session_hud_config 返回，含热推参数之外的字段） */
 interface HudConfigFull extends HudParams {
   enabled: boolean;
   pos: [number, number] | null;
+  /** 窗口宽度（逻辑 px；用户拖拽持久化或默认值） */
   width: number;
+  /** 窗口高度（逻辑 px）：null = 从未拖拽（自适应高度模式），
+   *  有值 = 用户拖拽过（自由尺寸模式，列表超高滚动） */
+  height: number | null;
 }
 
 /** 词典行结构（以 zh 为基准，en 必须同构） */
@@ -96,6 +143,25 @@ interface Msg {
   ) => string;
   /** 行3 分解行 */
   splitLine: (inT: string, out: string, cr: string) => string;
+  /** 字体缩放组合 tooltip（"拖动调整文字大小"） */
+  fontTip: string;
+  /** 模型速度区行内跟随小字（最近值之后的 均 / 快 / 慢） */
+  modelSpeedExtra: (avg: string, max: string, min: string) => string;
+  /** 模型速度区行 title 详情（模型全名 + 最近值/窗口均/最快/最慢/样本数 +
+   *  行内颜色分档口径说明） */
+  modelSpeedTitle: (
+    model: string,
+    recent: string,
+    avg: string,
+    max: string,
+    min: string,
+    n: number
+  ) => string;
+  /** 今日合计行（窗口级汇总：今日 Σ 总量 · × 请求数） */
+  todayLine: (total: string, req: string) => string;
+  /** 今日合计行 title 详情（in 为 input 原值含缓存读，中性符号避免与
+   *  行内 ↑ 非缓存输入的语义混淆） */
+  todayDetail: (inT: string, out: string, cr: string, req: string) => string;
 }
 
 /** 轻量双语词典（仅悬浮窗内文案；语言偏好与主面板同键共享） */
@@ -112,6 +178,13 @@ const MESSAGES: Record<"zh" | "en", Msg> = {
     metricsLine: (total, req, speed, ttft) =>
       `Σ ${total} · × ${req} · ${speed} t/s · TTFT ${ttft}`,
     splitLine: (inT, out, cr) => `↑ ${inT}  ↓ ${out}  ⟲ ${cr}`,
+    fontTip: "拖动调整文字大小",
+    modelSpeedExtra: (avg, max, min) => `· 均 ${avg} · 快 ${max} · 慢 ${min}`,
+    modelSpeedTitle: (model, recent, avg, max, min, n) =>
+      `${model} · 最近 ${recent} t/s · 均 ${avg} t/s · 快 ${max} t/s · 慢 ${min} t/s · ${n} 笔；颜色按最近值分档`,
+    todayLine: (total, req) => `今日 Σ ${total} · × ${req}`,
+    todayDetail: (inT, out, cr, req) =>
+      `输入(含⟲) ${inT} · 输出 ${out} · 缓存读 ${cr} · 请求 ${req}`,
   },
   en: {
     title: "ZCode Sessions",
@@ -125,6 +198,14 @@ const MESSAGES: Record<"zh" | "en", Msg> = {
     metricsLine: (total, req, speed, ttft) =>
       `Σ ${total} · × ${req} · ${speed} t/s · TTFT ${ttft}`,
     splitLine: (inT, out, cr) => `↑ ${inT}  ↓ ${out}  ⟲ ${cr}`,
+    fontTip: "Drag to adjust text size",
+    modelSpeedExtra: (avg, max, min) =>
+      `· avg ${avg} · best ${max} · worst ${min}`,
+    modelSpeedTitle: (model, recent, avg, max, min, n) =>
+      `${model} · recent ${recent} t/s · avg ${avg} t/s · best ${max} t/s · worst ${min} t/s · ${n} requests; color tiers by the latest value`,
+    todayLine: (total, req) => `Today Σ ${total} · × ${req}`,
+    todayDetail: (inT, out, cr, req) =>
+      `Input (incl. cache read) ${inT} · Output ${out} · Cache read ${cr} · Requests ${req}`,
   },
 };
 
@@ -168,6 +249,7 @@ let cfg: HudParams = {
   windowMinutes: 10,
   showTokens: true,
   showModel: true,
+  fontScale: 1.0,
 };
 let snapshot: HudSnapshot | null = null;
 
@@ -175,8 +257,51 @@ const rootEl = document.getElementById("hud-root");
 const listEl = document.getElementById("hud-list");
 const emptyEl = document.getElementById("hud-empty");
 const moreEl = document.getElementById("hud-more");
+const todayEl = document.getElementById("hud-today");
+const modelsEl = document.getElementById("hud-models");
 const countEl = document.getElementById("hud-count");
 const titleEl = document.getElementById("hud-title");
+const fontSliderEl = document.getElementById(
+  "hud-font-slider"
+) as HTMLInputElement | null;
+const fontBoxEl = document.getElementById("hud-font-box");
+
+/** 字体缩放落盘防抖 timer（滑块拖动连续触发，300ms 合并提交一次） */
+let fontSaveTimer: number | undefined = undefined;
+/** 热推回填滑块的防重入标志：用户拖动中收到回推（值相同）不重设，
+ *  避免打断拖动手感 */
+let fontSliderDirty = false;
+
+/** 应用字体缩放：写根节点 CSS 变量 --hud-scale，页面全部字号/行高/
+ *  行高栅格 calc 随动（Rust 侧自适应高度同乘 font_scale，见
+ *  session_hud.rs hud_height）。脏值按 1.0 处理（与 Rust clamp 对齐） */
+function applyFontScale(scale: number): void {
+  if (!rootEl) return;
+  const v =
+    Number.isFinite(scale) && scale >= 0.8 && scale <= 1.4 ? scale : 1.0;
+  rootEl.style.setProperty("--hud-scale", String(v));
+  if (fontSliderEl && document.activeElement !== fontSliderEl) {
+    fontSliderEl.value = String(v);
+  }
+}
+
+/** 滑块输入 → 即时缩放 + 300ms 防抖落盘（专用轻量命令
+ *  set_session_hud_font_scale：只改 fontScale 并热推，不走建/关窗流程） */
+function handleFontSliderInput(): void {
+  if (!fontSliderEl) return;
+  const v = parseFloat(fontSliderEl.value);
+  if (!Number.isFinite(v)) return;
+  fontSliderDirty = true;
+  applyFontScale(v);
+  if (fontSaveTimer !== undefined) window.clearTimeout(fontSaveTimer);
+  fontSaveTimer = window.setTimeout(() => {
+    fontSaveTimer = undefined;
+    fontSliderDirty = false;
+    invoke("set_session_hud_font_scale", { scale: v }).catch(() => {
+      /* 落盘失败静默：本次缩放已生效，下次拖动再试 */
+    });
+  }, 300);
+}
 
 function applyOpacity(): void {
   if (rootEl) {
@@ -184,18 +309,40 @@ function applyOpacity(): void {
   }
 }
 
-/** 空态/列表/折叠行三者的显隐与文案 */
+/** 空态/列表/模型速度区/今日行/折叠行五者的显隐与文案。今日合计行
+ *  为窗口级汇总（自然日本地零点起全库合计），模型速度区为按模型分组
+ *  的窗口速度摘要——两者都属数字信息，随 showTokens 配置隐藏（Rust 侧
+ *  窗口高度判定同条件，见 session_hud.rs today_visible /
+ *  model_speed_visible）；仅在开启数据行、有可见会话且各有数据时显示
+ *  （空态不显示，跟随列表存在）。圆角闭环：折叠行显示时折叠行承担
+ *  底部圆角；否则最下方可见行承担，优先级 今日行 > 模型速度区 > 列表 */
 function renderShell(): void {
-  if (!listEl || !emptyEl || !moreEl || !countEl) return;
+  if (!listEl || !emptyEl || !moreEl || !countEl || !todayEl || !modelsEl) return;
   const sessions = snapshot?.sessions ?? [];
   const totalActive = snapshot?.totalActive ?? 0;
-  countEl.textContent = totalActive > 0 ? msg.active(totalActive) : "";
+  const today = snapshot?.todayTotal;
+  const modelSpeeds = snapshot?.modelSpeeds ?? [];
+  const showToday =
+    cfg.showTokens &&
+    sessions.length > 0 &&
+    today != null &&
+    today.total > 0;
+  // 与 Rust 侧 model_speed_visible 逐字同条件
+  const showModels =
+    cfg.showTokens && modelSpeeds.length > 0 && sessions.length > 0;
+  // 头部计数与空态严格互斥：以可见列表为准（Rust 侧保证 total_active>0
+  // ⟹ sessions 非空，此处按列表存在性双重防御，计数绝不与"暂无活跃
+  // 会话"同屏）
+  countEl.textContent =
+    sessions.length > 0 && totalActive > 0 ? msg.active(totalActive) : "";
   if (sessions.length === 0) {
     listEl.replaceChildren();
     listEl.classList.remove("rounded-bottom");
     emptyEl.textContent = msg.empty;
     emptyEl.classList.remove("hidden");
     moreEl.style.display = "none";
+    todayEl.style.display = "none";
+    renderModels(false);
     return;
   }
   emptyEl.classList.add("hidden");
@@ -204,9 +351,30 @@ function renderShell(): void {
     moreEl.textContent = msg.more(overflow);
     moreEl.style.display = "flex";
     listEl.classList.remove("rounded-bottom");
+    todayEl.classList.remove("rounded-bottom");
+    modelsEl.classList.remove("rounded-bottom");
   } else {
     moreEl.style.display = "none";
-    listEl.classList.add("rounded-bottom");
+    // 底部圆角由最下方可见行承担：今日行 > 模型速度区 > 列表
+    todayEl.classList.toggle("rounded-bottom", showToday);
+    modelsEl.classList.toggle("rounded-bottom", !showToday && showModels);
+    listEl.classList.toggle("rounded-bottom", !showToday && !showModels);
+  }
+  renderModels(showModels);
+  if (showToday && today) {
+    todayEl.textContent = msg.todayLine(
+      fmtTokens(today.total),
+      String(today.reqCount)
+    );
+    todayEl.title = msg.todayDetail(
+      String(today.in),
+      String(today.out),
+      String(today.cacheRead),
+      String(today.reqCount)
+    );
+    todayEl.style.display = "flex";
+  } else {
+    todayEl.style.display = "none";
   }
 }
 
@@ -236,8 +404,66 @@ function fieldSpan(text: string, changed: boolean, cls?: string): HTMLSpanElemen
   return el;
 }
 
-/** 重建会话行（textContent 写入外部字符串，无 innerHTML 注入面） */
-function renderRows(): void {
+/** 模型速度三档变色（与主面板速度卡同阈值）：≥70 绿 / 40–70 黄 /
+ *  <40 红 */
+function modelSpeedClass(tps: number): string {
+  if (tps >= 70) return "hud-ms-fast";
+  if (tps >= 40) return "hud-ms-mid";
+  return "hud-ms-slow";
+}
+
+/** 重建模型速度区（列表下方、今日行之上，每活跃模型一行：左模型名
+ *  truncate、右速度值右对齐三档变色 + 小号灰单位后缀 + 更暗一档的
+ *  "· 均 x · 快 y · 慢 z" 跟随小字）。textContent 写入外部字符串，无
+ *  innerHTML 注入面；速度属数字信息，显隐随 showTokens（与 Rust 侧
+ *  model_speed_visible 同条件：开启数据行 + 有样本 + 有可见会话） */
+function renderModels(visible: boolean): void {
+  if (!modelsEl) return;
+  if (!visible) {
+    modelsEl.replaceChildren();
+    modelsEl.style.display = "none";
+    return;
+  }
+  const rows = (snapshot?.modelSpeeds ?? []).map((m) => {
+    const row = document.createElement("div");
+    row.className = "hud-msrow";
+    const recent = m.tps.toFixed(1);
+    const avg = m.avgTps.toFixed(1);
+    const max = m.maxTps.toFixed(1);
+    const min = m.minTps.toFixed(1);
+    // 行 title 同时兜底模型全名（名字截断时）与速度口径
+    row.title = msg.modelSpeedTitle(m.model, recent, avg, max, min, m.samples);
+    const name = document.createElement("span");
+    name.className = "hud-ms-name";
+    name.textContent = m.model;
+    const val = document.createElement("span");
+    val.className = `hud-ms-val ${modelSpeedClass(m.tps)}`;
+    val.textContent = recent;
+    // 单位后缀：独立静态节点，只继承行灰、小一号，不参与三档变色
+    //（同会话行"数值 + t/s"格式；flex 行内用 span 承载以便单独设字号；
+    // 字号随 --hud-scale 缩放与行内其余文字保持比例）
+    const unit = document.createElement("span");
+    unit.textContent = " t/s";
+    unit.style.fontSize = "calc(8px * var(--hud-scale))";
+    unit.style.whiteSpace = "pre";
+    // 均 / 快 / 慢跟随小字（与最近值同样本池）：取整求紧凑（行内示例
+    // "均 65 · 快 120 · 慢 40"），一位小数全量口径在行 title 里；窄窗口
+    // 放不下时由 CSS 裁切兜底
+    const extra = document.createElement("span");
+    extra.className = "hud-ms-extra";
+    extra.textContent = msg.modelSpeedExtra(
+      m.avgTps.toFixed(0),
+      m.maxTps.toFixed(0),
+      m.minTps.toFixed(0)
+    );
+    row.append(name, val, unit, extra);
+    return row;
+  });
+  modelsEl.replaceChildren(...rows);
+  modelsEl.style.display = rows.length > 0 ? "flex" : "none";
+}
+
+/** 重建会话行（textContent 写入外部字符串，无 innerHTML 注入面） */function renderRows(): void {
   if (!listEl) return;
   const sessions = snapshot?.sessions ?? [];
   const rows = sessions.map((s) => {
@@ -366,11 +592,30 @@ function render(): void {
 }
 
 const main = async () => {
-  if (!rootEl || !listEl || !emptyEl || !moreEl) return;
+  if (!rootEl || !listEl || !emptyEl || !moreEl || !todayEl || !modelsEl) return;
   if (titleEl) titleEl.textContent = msg.title;
+  if (fontBoxEl) fontBoxEl.title = msg.fontTip; // 字体组合 tooltip 随语言
+  fontSliderEl?.setAttribute("aria-label", msg.fontTip); // 无可见标签，补无障碍名
   emptyEl.textContent = msg.empty; // 数据到达前的首帧空态
 
-  // 初始配置（失败按默认渲染，防御式与 pet-main.ts 同风格）
+  // 拖拽热区层（8 向隐形热区）：undecorated 窗口的系统边缘热区在 Windows
+  // 上不生效，尺寸调整全靠自绘热区（见 hud-resize.ts）。纯 DOM 安装，
+  // 无窗口 API 调用，失败不影响其余功能
+  installHudResizeHandles();
+
+  // 字体缩放滑块：mousedown/pointerdown 阻断冒泡，防止拖动滑块触发
+  // 窗口拖动（data-tauri-drag-region 依赖 mousedown；滑块元素本身不带
+  // 该属性已是一层防护，此处双保险防宿主实现差异）；input 即时缩放 +
+  // 防抖落盘（见 handleFontSliderInput）
+  if (fontSliderEl) {
+    const stop = (e: Event) => e.stopPropagation();
+    fontSliderEl.addEventListener("mousedown", stop);
+    fontSliderEl.addEventListener("pointerdown", stop);
+    fontSliderEl.addEventListener("input", handleFontSliderInput);
+  }
+
+  // 初始配置（失败按默认渲染，防御式与 pet-main.ts 同风格）：fontScale
+  // 写入 CSS 变量并回填滑块刻度
   try {
     const full = await invoke<HudConfigFull>("get_session_hud_config");
     cfg = {
@@ -378,10 +623,12 @@ const main = async () => {
       windowMinutes: full.windowMinutes,
       showTokens: full.showTokens,
       showModel: full.showModel,
+      fontScale: full.fontScale,
     };
   } catch {
     /* 静默：保持默认参数 */
   }
+  applyFontScale(cfg.fontScale);
   render();
 
   // 数据流：轮询器推送的会话快照（内容变化才推，事件停流保持最后内容）
@@ -394,10 +641,15 @@ const main = async () => {
     /* 监听失败保持空态（与 pet 同款降级） */
   }
 
-  // 参数流：设置卡变更热推（透明度/显示项即时生效）
+  // 参数流：设置卡变更 / 字体滑块落盘回推（透明度/显示项/字体缩放即时
+  // 生效）。fontScale 同步滑块刻度——用户在面板侧改配置（现无入口）或
+  // 多窗口场景回推时保持一致；拖动中（dirty）不覆盖避免打断手感
   try {
     await listen<HudParams>("zbar://session-hud-params", (e) => {
       cfg = { ...cfg, ...e.payload };
+      if (!fontSliderDirty || document.activeElement !== fontSliderEl) {
+        applyFontScale(cfg.fontScale);
+      }
       render();
     });
   } catch {

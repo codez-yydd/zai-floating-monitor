@@ -7,6 +7,7 @@ import { useDataCache } from "./DataCache";
 import { QuotaPanel } from "./QuotaPanel";
 import { RangePicker } from "./RangePicker";
 import { ZaiStatsContent } from "./ZaiStatsContent";
+import { ModelSpeedPanel } from "./ModelSpeedPanel";
 import { CodexPanel } from "./CodexPanel";
 import { ClaudePanel } from "./ClaudePanel";
 import { CursorPanel } from "./CursorPanel";
@@ -88,6 +89,8 @@ function loadStatsTab(agentVisibility: AgentVisibility): StatsTab {
     const saved = localStorage.getItem("zbar-tab");
     if (saved === "summary") return saved;
     if (saved === "projects") return saved;
+    // 模型速度面板：本地 tab（无 Agent 偏好控制），直接恢复
+    if (saved === "speed") return saved;
     // Agent tab：任一 AgentId 均合法（含新 provider），按展示偏好恢复或回汇总
     if (saved && saved in agentVisibility) {
       return agentVisibility[saved as keyof AgentVisibility]
@@ -273,6 +276,7 @@ export function StatsPanel({
     if (
       tab !== "summary" &&
       tab !== "projects" &&
+      tab !== "speed" &&
       !agentVisibility[tab] &&
       // 凭证驱动的新 provider：有凭证时即使偏好未开也保留（「有凭证自动显示」）；
       // kimi 属首批 5 个（纯偏好控制，见 PURE_PREFERENCE_AGENTS），不参与该保留
@@ -286,13 +290,15 @@ export function StatsPanel({
     }
   }, [agentVisibility, credentialPresence, tab, addProvider]);
 
-  // 模式 C：「汇总」/「项目」标签走词典（其余是品牌名），语言切换时随 t 重建
+  // 模式 C：「汇总」/「项目」标签走词典（其余是品牌名），语言切换时随 t 重建；
+  // 「速度」同为词典标签（模型速度统计面板，本地库数据与 Agent 无关）
   const statTabs = useMemo<
     ReadonlyArray<{ id: StatsTab; label: string; brand?: BrandIconName }>
   >(
     () => [
       { id: "summary", label: t("stats.tab.summary") },
       { id: "projects", label: t("projects.tab") },
+      { id: "speed", label: t("stats.tab.speed") },
       ...AGENT_VISIBILITY_OPTIONS.map((agent) => ({
         id: agent.id,
         label: agent.label,
@@ -303,7 +309,7 @@ export function StatsPanel({
   );
 
   const visibleTabs = statTabs.filter((item) =>
-    item.id === "summary" || item.id === "projects"
+    item.id === "summary" || item.id === "projects" || item.id === "speed"
       ? true
       : // 凭证驱动的新 provider：「已启用或有凭证」才显示 tab（默认隐藏，
         // 添加凭证 / 手动开启后出现）；kimi 属首批 5 个，tab 仍纯偏好控制
@@ -368,6 +374,11 @@ export function StatsPanel({
       /* 忽略：QuotaExceededError、隐私模式等 */
     }
   }, [tab]);
+
+  // 速度面板重查令牌：全局 ↻ 刷新时递增，驱动 ModelSpeedPanel 重新查询。
+  // 速度面板是本地库即席查询，不在 DataCache 缓存体系内，cache.refresh()
+  // 触及不到，需独立令牌联动（面板 useEffect 消费该 prop）
+  const [speedRefresh, setSpeedRefresh] = useState(0);
 
   return (
     // relative：承载「＋添加服务」的添加凭证全卡弹层（CredentialFormDialog
@@ -449,7 +460,10 @@ export function StatsPanel({
               </button>
             )}
             <button
-              onClick={refresh}
+              onClick={() => {
+                refresh();
+                setSpeedRefresh((v) => v + 1);
+              }}
               disabled={refreshing}
               className={`toolbar-btn ${refreshing ? "opacity-40" : ""}`}
               title={t("common.refresh")}
@@ -458,16 +472,22 @@ export function StatsPanel({
             </button>
           </div>
         </div>
-        <RangePicker
-          preset={preset}
-          custom={custom}
-          onChange={(p, c) => {
-            setPreset(p);
-            setCustom(c);
-          }}
-        />
+        {/* 速度 tab 自管时间范围（面板标题栏「今日 / 7天」小切换），全局
+            RangePicker 对它无输入（面板不消费 preset/custom，点了没反应）；
+            设备筛选同理（面板查询不走 DataCache 的设备过滤）。两者在 speed
+            tab 激活时一并隐藏；此时 tab 栏回到 mt-2 顶距，布局不塌陷 */}
+        {tab !== "speed" && (
+          <RangePicker
+            preset={preset}
+            custom={custom}
+            onChange={(p, c) => {
+              setPreset(p);
+              setCustom(c);
+            }}
+          />
+        )}
         {/* 设备筛选单独占一行，标签保持完整名称；未来新增 Agent 时横向滚动。 */}
-        {syncEnabled && (
+        {tab !== "speed" && syncEnabled && (
           <div className="mt-2 flex items-center">
             <select
               value={deviceFilter}
@@ -497,7 +517,7 @@ export function StatsPanel({
         {/* tab 栏：横向滚动区 + 右侧固定「＋添加服务」入口。渐隐遮罩只盖
             滚动区；「＋」在遮罩之外始终可见——新 provider 的 tab 默认隐藏，
             这是新用户添加第一个凭证服务的唯一常驻入口 */}
-        <div className={`${syncEnabled ? "mt-1.5" : "mt-2"} flex items-stretch gap-1 min-w-0`}>
+        <div className={`${tab !== "speed" && syncEnabled ? "mt-1.5" : "mt-2"} flex items-stretch gap-1 min-w-0`}>
           <div
             ref={tabScrollRef}
             className={`min-w-0 overflow-x-auto ${
@@ -516,6 +536,7 @@ export function StatsPanel({
                 zai: "bg-sky-500/12 text-sky-700 shadow-sm",
                 summary: "bg-sky-500/15 text-sky-700 shadow-sm",
                 projects: "bg-amber-500/12 text-amber-700 shadow-sm",
+                speed: "bg-teal-500/12 text-teal-700 shadow-sm",
                 // 凭证驱动的新 provider：激活色贴近各自品牌色
                 gemini: "bg-blue-500/12 text-blue-700 shadow-sm",
                 grok: "bg-sky-500/12 text-sky-700 shadow-sm",
@@ -674,6 +695,10 @@ export function StatsPanel({
           currency={currency}
           fxRate={fxRate}
         />
+      ) : tab === "speed" ? (
+        // 模型速度统计：本地库即席查询（与 Agent 面板的 DataProvider 流
+        // 独立），自取数据自管时间范围；refreshToken 驱动全局 ↻ 联动重查
+        <ModelSpeedPanel refreshToken={speedRefresh} />
       ) : (
         <SummaryTab
           stats={stats}

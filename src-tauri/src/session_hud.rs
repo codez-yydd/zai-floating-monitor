@@ -73,10 +73,20 @@ pub const SESSION_HUD_USAGE_EVENT: &str = "zbar://session-hud-usage";
 /// 配置热推事件（悬浮窗 listen，payload = HudParams，设置变更时推送）
 pub const SESSION_HUD_PARAMS_EVENT: &str = "zbar://session-hud-params";
 
-/// 悬浮窗默认宽度（逻辑 px，基准尺寸；高度随会话条数自适应）
+/// 悬浮窗默认宽度（逻辑 px，基准尺寸；用户从未拖拽窗口大小时使用，
+/// 高度随会话条数自适应。用户拖拽后宽度/高度成对持久化，见
+/// SessionHudConfig.height）
 pub const HUD_DEFAULT_WIDTH: f64 = 300.0;
-/// 宽度合法域（设置持久化前夹取，防脏值）
-const HUD_WIDTH_RANGE: (f64, f64) = (240.0, 480.0);
+/// 自由拖拽宽高的最小值（逻辑 px，与建窗 min_inner_size 一致；小于该
+/// 尺寸的 Resized 事件（最小化/系统抖动）不落盘）
+pub const HUD_MIN_WIDTH: f64 = 260.0;
+pub const HUD_MIN_HEIGHT: f64 = 160.0;
+/// 拖拽尺寸上限（逻辑 px，防脏值/极端最大化落盘；正常屏幕远小于此）
+const HUD_MAX_WIDTH: f64 = 4096.0;
+const HUD_MAX_HEIGHT: f64 = 4096.0;
+/// 字体缩放合法域与默认值（header 滑块 0.8~1.4 步进 0.05；脏值回退默认）
+pub const HUD_FONT_SCALE_RANGE: (f64, f64) = (0.8, 1.4);
+pub const HUD_FONT_SCALE_DEFAULT: f64 = 1.0;
 /// 透明度默认值与合法域（前端经 CSS opacity 应用，见 HudParams）
 const HUD_OPACITY_DEFAULT: f64 = 0.92;
 const HUD_OPACITY_RANGE: (f64, f64) = (0.25, 1.0);
@@ -98,6 +108,11 @@ const ACTIVITY_SCAN_LIMIT: i64 = 24;
 /// 查询成本有硬上限；超出极重负载漏掉的老会话属可接受窄边缘（最新
 /// 会话——排序前几名——必然在内层结果中）
 const MODEL_USAGE_SCAN_ROWS: i64 = 2000;
+/// 模型速度区扫查的行数上限（活跃窗口内最近 N 笔请求，started_at 降序
+/// LIMIT）：窗口（尤其"不限"档的 24h）内行数可能很大，以最近 N 笔为界
+/// 保证查询成本有硬上限；极重负载下更早的完成请求不参与速度聚合属可
+/// 接受窄边缘（展示只取每模型最近值 + 窗口均值，最近样本必然在内）
+const MODEL_SPEED_SCAN_ROWS: i64 = 2000;
 /// message 尾部扫查行数：与 usage_feed::collect_pending_user_ms 同款
 /// 口径（最近消息必在 rowid 尾部，扫查成本与表大小无关，绝不全表扫）
 const MESSAGE_TAIL_ROWS: i64 = 400;
@@ -122,13 +137,33 @@ const SAMPLE_RETENTION_MS: i64 = 60_000;
 ///（极快请求/时钟抖动）时避免速率爆炸
 const SAMPLE_MIN_SPAN_MS: i64 = 1_000;
 
-/// 窗口布局常量（逻辑 px）：与 session-hud.html / session-hud-main.ts
-/// 的 CSS 尺寸一一对应（头部拖动区 / 会话行 / 折叠提示行 / 底部留白），
-/// Rust 侧据此按会话条数计算窗口高度。行高 56 = 三行制内容（项目行
-/// 14 + 核心指标行 14 + 分解行 14 + 行距 3×2）+ 上下内边距 4×2
+/// 窗口布局常量（逻辑 px，font_scale = 1 基准）：与 session-hud.html /
+/// session-hud-main.ts 的 CSS 尺寸一一对应（头部拖动区 / 会话行 / 模型
+/// 速度行 / 折叠提示行 / 底部留白），Rust 侧据此按会话条数计算窗口高
+/// 度。行高 56 = 三行制内容（项目行 14 + 核心指标行 14 + 分解行 14 +
+/// 行距 3×2）+ 上下内边距 4×2。CSS 侧字号/行高/这些行高全部随
+/// --hud-scale（fontScale）calc 缩放，本公式在出口整体乘 font_scale
+/// 保持与内容栅格一致。
 const HUD_HEADER_H: f64 = 30.0;
 const HUD_ROW_H: f64 = 56.0;
 const HUD_MORE_H: f64 = 20.0;
+/// 今日合计行高（逻辑 px，与折叠行同高）：列表下方、折叠行之上的独立
+/// 汇总行（"今日 Σ x · × n"，窗口级汇总随 show_tokens 配置隐藏；关闭
+/// 数据行显示、今日无请求或会话列表为空时不显示）
+const HUD_TODAY_H: f64 = 20.0;
+/// 模型速度区单行高（逻辑 px，与今日行同高）：列表与今日行之间的按模型
+/// 分组速度行（每活跃模型一行，左模型名右速度），随 show_tokens 配置
+/// 隐藏、空样本或空态不显示
+const HUD_MODEL_ROW_H: f64 = 20.0;
+/// 模型速度区最多行数（窗口内最近活跃的前 3 个模型，超出不展示）
+const HUD_MAX_MODEL_ROWS: usize = 3;
+/// 列表区容器 border-bottom（逻辑 px）：#hud-list:not(:empty) 有一条
+/// 1px 下边框（兼作与模型速度区/今日行的分隔线），随可见行一起出现，
+/// 高度公式必须计入（否则窗口比内容矮 1px，末行被裁）
+const HUD_LIST_BORDER_H: f64 = 1.0;
+/// 模型速度区容器 border-bottom（逻辑 px）：#hud-models 的 1px 下边框
+///（与今日行的分隔线或自身底部收边），区可见时计入
+const HUD_MODELS_BORDER_H: f64 = 1.0;
 const HUD_BOTTOM_PAD: f64 = 8.0;
 /// 空列表时的最小高度（仅头部 + "暂无活跃会话"提示态，不为 0 高）
 const HUD_EMPTY_HEIGHT: f64 = 64.0;
@@ -147,10 +182,11 @@ const HUD_DEFAULT_BOTTOM_EXTRA: f64 = 140.0;
 // 配置持久化（~/.zbar/session-hud.json，与项目其它配置同目录）
 // ============================================================
 
-/// 会话悬浮窗配置（皮肤页"会话悬浮窗"卡读写）。serde camelCase 与
-/// 前端契约字段一一对应；`#[serde(default)]` 旧版文件缺字段按默认补齐，
-/// 未知名（如改版前残留的 showContextBar）serde 默认忽略，旧配置文件
-/// 解析不受影响，下次保存自然收敛到新字段集。
+/// 会话悬浮窗配置（皮肤页"会话悬浮窗"卡读写 + 窗口自由拖拽尺寸/字体
+/// 缩放持久化）。serde camelCase 与前端契约字段一一对应；
+/// `#[serde(default)]` 旧版文件缺字段按默认补齐，未知名（如改版前残留
+/// 的 showContextBar）serde 默认忽略，旧配置文件解析不受影响，下次保存
+/// 自然收敛到新字段集。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SessionHudConfig {
@@ -159,8 +195,20 @@ pub struct SessionHudConfig {
     /// 窗口左上角位置（逻辑坐标 x/y，拖动结束落盘，重启恢复）；
     /// None = 从未拖动过，创建时默认主显示器右下角（宠物窗上方）
     pub pos: Option<(f64, f64)>,
-    /// 窗口宽度基准（逻辑 px；高度随会话条数自适应，不持久化）
+    /// 窗口宽度（逻辑 px）。语义（V3 起）：宽度滑块已移除，本字段转为
+    /// "用户拖拽尺寸持久化"用途——从未拖拽时为默认宽度；拖拽后与 height
+    /// 成对落盘，重启按持久化尺寸恢复
     pub width: f64,
+    /// 窗口高度（逻辑 px）：Some = 用户拖拽过窗口（自由尺寸模式，内容
+    /// 超出高度时会话列表区纵向滚动，模型速度区/今日行固定不滚）；
+    /// None = 从未拖拽（自适应模式，高度按 hud_height 公式随会话条数
+    /// 自适应）。恢复自适应方式：配置文件把 height 手改为 null（无 UI
+    /// 入口，属进阶操作）
+    pub height: Option<f64>,
+    /// 字体缩放系数（0.8~1.4，悬浮窗 header 滑块调节）：页面经 CSS 变量
+    /// --hud-scale 对全部字号/行高/行高栅格 calc 缩放，自适应高度按
+    /// hud_height × font_scale 同步缩放保持内容不被裁；脏值回退 1.0
+    pub font_scale: f64,
     /// 窗口不透明度（0.25~1.0，前端经 CSS opacity 应用到悬浮窗根节点）
     pub opacity: f64,
     /// 活跃窗口档位（分钟）：5/10/30，0 = 不限（仍有 24h 兜底）
@@ -178,6 +226,8 @@ impl Default for SessionHudConfig {
             enabled: false,
             pos: None,
             width: HUD_DEFAULT_WIDTH,
+            height: None,
+            font_scale: HUD_FONT_SCALE_DEFAULT,
             opacity: HUD_OPACITY_DEFAULT,
             window_minutes: HUD_WINDOW_MINUTES_DEFAULT,
             show_tokens: true,
@@ -188,13 +238,22 @@ impl Default for SessionHudConfig {
 
 impl SessionHudConfig {
     /// 把越界参数收敛到合法范围（保存前的防御，脏数据不落盘）：宽度/
-    /// 透明度夹回合法域，档位归一到四个合法值（其余脏值一律回默认
-    /// 10 分钟）
+    /// 高度夹回拖拽合法域、透明度夹回合法域、档位归一到四个合法值
+    ///（其余脏值一律回默认 10 分钟）、字体缩放脏值回退 1.0
     pub fn clamped(mut self) -> Self {
         if !self.width.is_finite() {
             self.width = HUD_DEFAULT_WIDTH;
         }
-        self.width = self.width.clamp(HUD_WIDTH_RANGE.0, HUD_WIDTH_RANGE.1);
+        self.width = self.width.clamp(HUD_MIN_WIDTH, HUD_MAX_WIDTH);
+        self.height = match self.height {
+            Some(h) if h.is_finite() => Some(h.clamp(HUD_MIN_HEIGHT, HUD_MAX_HEIGHT)),
+            _ => None,
+        };
+        if !self.font_scale.is_finite()
+            || !(HUD_FONT_SCALE_RANGE.0..=HUD_FONT_SCALE_RANGE.1).contains(&self.font_scale)
+        {
+            self.font_scale = HUD_FONT_SCALE_DEFAULT;
+        }
         if !self.opacity.is_finite() {
             self.opacity = HUD_OPACITY_DEFAULT;
         }
@@ -242,6 +301,156 @@ pub fn save_session_hud_config(config: &SessionHudConfig) -> Result<(), String> 
 #[tauri::command]
 pub fn get_session_hud_config() -> Result<SessionHudConfig, String> {
     Ok(load_session_hud_config().clamped())
+}
+
+/// 更新字体缩放（悬浮窗 header 滑块专用轻量命令）：只改 fontScale 一
+/// 个字段并落盘 + 热推参数，不走 set_session_hud_config 的建/关窗流程
+///（滑块在悬浮窗内，用户拖动的瞬间窗口一定存在，无需窗口操作；也避免
+/// 整份配置回传竞态——面板侧可能正持有旧快照）。返回 clamp 后的完整
+/// 配置供调用方回读校准。窗口不存在时仅落盘（下次开窗生效）。
+#[tauri::command]
+pub fn set_session_hud_font_scale(scale: f64, app: AppHandle) -> Result<SessionHudConfig, String> {
+    let mut cfg = load_session_hud_config().clamped();
+    cfg.font_scale = scale;
+    let cfg = cfg.clamped();
+    save_session_hud_config(&cfg)?;
+    push_session_hud_params(&app, &cfg);
+    Ok(cfg)
+}
+
+/// 用户拖拽热区调整尺寸：会话开始（悬浮窗热区 pointerdown 调用）。置位
+/// "用户调整中"原子标志（poll_db 在其期间暂停程序侧 set_size，见
+/// HUD_USER_RESIZING 的防打架说明），并读取当前窗口实际尺寸存为拖前快照
+///（HUD_RESIZE_SNAPSHOT）：用户纯拖宽度（West 向）时 Resized 事件的高度
+/// 仍是拖前自适应值，persist_hud_size 据快照识别"高度轴没动"从而不把
+/// 自适应高度固化成用户固定高度（方向感知，见 merge_persist_axes）。快照
+/// 读取失败（窗口不存在 / 主线程异常）保持 None = 放弃方向感知，persist
+/// 退化为现状两轴都写。async 命令 + run_on_main_thread 读取（同步命令占
+/// 主线程，直接调窗口 API 会自等待死锁，见 set_session_hud_config 的同款
+/// 死锁防护说明）。
+#[tauri::command]
+pub async fn session_hud_resize_begin(app: AppHandle) {
+    set_user_resizing(true);
+    // 先清旧快照再读取：上次会话的残留快照会污染本次高度轴判定
+    clear_resize_snapshot();
+    // 先置标志后读快照：读取期间 poll_db 的 set_size 已被标志拦截（含已
+    // 投递闭包的 should_apply_size_now 双检），读到的是干净的拖前值。注：
+    // 快照读取是异步的，用户飞快拖拽时可能晚于首个 Resized 落盘——该窗口
+    // 内 persist 退化为现状行为，属可接受窄边缘（见 HUD_RESIZE_SNAPSHOT）
+    let snapshot = read_window_logical_size(&app).ok().flatten();
+    if let Some(s) = snapshot {
+        store_resize_snapshot(s);
+    }
+}
+
+/// 用户拖拽热区调整尺寸：会话结束（pointerup / pointercancel 调用）。
+/// **先完成终值读取与落盘，最后才清标志**——顺序是关键（Bug 修复）：若先
+/// 清标志再落盘，清标志后、cfg.height 落盘前（本函数的窗口读取最长
+/// HUD_WINDOW_OP_TIMEOUT）的竞态窗口内，poll_db 的下一 DB 拍（1-2 秒一拍，
+/// 命中概率高）会读到旧配置（height 仍是 None / 旧值）→ 算自适应高度 →
+/// should_sync_size（标志已 false）放行 → set_size 把窗口打回自适应值
+///（松手后高度弹回 / 闪跳），本函数的落盘随后才写用户值，下一拍又
+/// set_size 回来。先落盘后清标志则整个读取 + 落盘期间 poll_db 都被标志
+/// 拦住；清标志时 cfg.height 已是用户值，后续 poll_db 的同值 set_size
+/// 冗余无害。终值读取优先窗口实际尺寸（顺带覆盖 clamp / 取整差异：主线程
+/// 窗口读取排在拖拽期间排队的 Resized 事件之后，不会读到滞后值），读不到
+/// 时退回 Resized 挂点的内存槽；尺寸未变（点住热区没拖动）或低于最小尺寸
+/// 不落盘（见纯函数 should_persist_resize_result）。落盘经
+/// persist_hud_size 带拖前快照做高度轴条件写（纯拖宽不固化自适应高度）。
+/// 落盘后还无条件用实际尺寸再 set_size 一次（WebView bounds 自愈，见
+/// resize_end_persist）。收尾段递增尺寸纪元（HUD_SIZE_EPOCH）：feed 线程
+/// 局部 last_size 记忆与窗口实际脱钩时，下一拍强制重同步一次。
+/// async 命令 + run_on_main_thread + channel + 超时等待：同步命令占主线程，
+/// 在其中调窗口 API 会自等待死锁（同 set_session_hud_config 的死锁防护
+/// 说明）。
+#[tauri::command]
+pub async fn session_hud_resize_end(app: AppHandle) -> Result<(), String> {
+    // 主体（读终值 → 判定 → 落盘 + WebView 自愈 set_size）在标志置位下
+    // 执行；此处不提前清标志
+    let outcome = resize_end_persist(&app);
+    // 收尾统一清理（成败路径都到达，persist 失败也不能让标志永久留在
+    // true——自适应高度会被永久禁用，见 HUD_USER_RESIZING）：先递增尺寸
+    // 纪元（feed 线程下一拍作废局部 last_size 记忆、强制重同步一次
+    // set_size，见 HUD_SIZE_EPOCH 的脱钩场景），再清标志，最后清拖前快照
+    //（上方 persist 依赖快照做高度轴判定，必须在 persist 之后清）
+    bump_size_epoch();
+    set_user_resizing(false);
+    clear_resize_snapshot();
+    outcome
+}
+
+/// resize_end 的主体（读终值 → 判定 → 落盘 → WebView 自愈 set_size）：
+/// 同步函数，由 async 命令包装后在非主线程上下文调用——内部 recv_timeout
+/// 阻塞等待主线程，主线程同步命令中调用会自等待死锁。
+fn resize_end_persist(app: &AppHandle) -> Result<(), String> {
+    let actual = read_window_logical_size(app)?;
+    let Some(size) = actual.or_else(|| hud_size_slot().lock().ok().and_then(|g| *g)) else {
+        return Ok(());
+    };
+    if should_persist_resize_result(size, cached_size()) {
+        // 立即落盘终值 + 记为程序侧目标（同尺寸回声不再重复落盘）。刻意不推进
+        // HUD_SIZE_SAVED_AT 节流时钟：若本次读数恰好落后于仍在排队的最后一个
+        // Resized 事件（事件队列先行、消息队列后行的窄竞态），该事件仍能立刻
+        // 落盘真正的终值，不被节流吞掉；同尺寸回声由 LAST_SIZE 拦截，不会重复
+        // 写盘
+        persist_hud_size(size);
+    }
+    // WebView bounds 自愈（根治"HWND 600 / 视口 258"脱钩，成倍的 set_size
+    // 才触发 WebView 重排、单靠 HWND 变化不够）：无条件用读到的实际尺寸再
+    // set_size 一次——即使上方拒绝落盘（点住热区未拖动）也执行。同值
+    // set_size 幂等无害，但会显式触发一次 WM_SIZE → wry 重设 WebView
+    // bounds，把可能停在旧尺寸的 WebView 视口拉回与 HWND 一致。只用
+    // actual（窗口真实读数）而非槽值兜底；actual 读取失败（None，事件
+    // 循环异常）时跳过。仍在标志置位下执行，期间 poll_db 无干扰。
+    if let Some(actual_size) = actual {
+        force_webview_bounds_resync(app, actual_size);
+    }
+    Ok(())
+}
+
+/// 强制一次程序侧 set_size（WebView bounds 自愈专用，见 resize_end_persist）：
+/// 经主线程事件循环执行并同步等待完成（run_on_main_thread + channel +
+/// 超时兜底，与 read_window_logical_size 同款死锁防护口径——只能从非
+/// 主线程上下文调用）。窗口不存在 / 投递失败静默跳过（自愈失败还有
+/// HUD_SIZE_EPOCH 驱动的下一拍强制重同步兜底）。
+fn force_webview_bounds_resync(app: &AppHandle, size: (f64, f64)) {
+    let (tx, rx) = mpsc::channel::<()>();
+    let app_main = app.clone();
+    let posted = app.run_on_main_thread(move || {
+        if let Some(win) = app_main.get_webview_window(SESSION_HUD_WINDOW_LABEL) {
+            let _ = win.set_size(LogicalSize::new(size.0, size.1));
+        }
+        let _ = tx.send(());
+    });
+    if posted.is_ok() {
+        // 超时仅事件循环异常时兜底：等待完成保证自愈 set_size 落在 resize_end
+        // 清标志之前执行（期间 poll_db 无干扰）
+        let _ = rx.recv_timeout(HUD_WINDOW_OP_TIMEOUT);
+    }
+}
+
+/// 经主线程读取悬浮窗当前实际逻辑尺寸（宽, 高）：物理 outer_size ÷
+/// scale_factor 换算逻辑值。窗口不存在 / scale 异常 / 超时（事件循环异常
+/// 退出）返回 None，投递失败返回 Err。拖前快照（session_hud_resize_begin）
+/// 与终值核校（resize_end_persist）共用同一读取口径。同步阻塞等待
+///（HUD_WINDOW_OP_TIMEOUT 兜底），只能从非主线程上下文调用（async 命令
+/// 体），主线程同步命令中调用会自等待死锁。
+fn read_window_logical_size(app: &AppHandle) -> Result<Option<(f64, f64)>, String> {
+    let (tx, rx) = mpsc::channel::<Option<(f64, f64)>>();
+    let app_main = app.clone();
+    app.run_on_main_thread(move || {
+        let size = app_main
+            .get_webview_window(SESSION_HUD_WINDOW_LABEL)
+            .and_then(|win| {
+                let scale = win.scale_factor().ok().filter(|s| *s > 0.0)?;
+                let size = win.outer_size().ok()?;
+                Some((size.width as f64 / scale, size.height as f64 / scale))
+            });
+        let _ = tx.send(size);
+    })
+    .map_err(|e| format!("投递会话悬浮窗尺寸读取失败: {e}"))?;
+    // 超时（事件循环异常退出）：None，调用方自行退回内存槽等兜底
+    Ok(rx.recv_timeout(HUD_WINDOW_OP_TIMEOUT).ok().flatten())
 }
 
 /// 保存并应用会话悬浮窗配置（改完即生效，无保存按钮）：
@@ -320,8 +529,10 @@ pub fn start_if_enabled(app: &AppHandle) {
 // 悬浮窗
 // ============================================================
 
-/// 最近一次窗口逻辑尺寸缓存（宽, 高）：设置卡重复应用（已存在分支）
-/// 与窗口重建时按最后已知尺寸同步，避免热切换把活跃列表折叠回空态。
+/// 程序侧最近一次设置的目标窗口逻辑尺寸（宽, 高）：轮询线程自适应
+/// set_size / 建窗后记录，供窗口重建恢复与 Resized 挂点区分"程序自身
+/// 的尺寸调整回声"（与目标一致 → 忽略不落盘）与"用户拖拽"（不一致 →
+/// 持久化 width/height），避免自适应高度被误存成用户固定尺寸。
 static LAST_SIZE: OnceLock<Mutex<Option<(f64, f64)>>> = OnceLock::new();
 
 fn last_size_slot() -> &'static Mutex<Option<(f64, f64)>> {
@@ -336,6 +547,194 @@ fn remember_size(size: (f64, f64)) {
 
 fn cached_size() -> Option<(f64, f64)> {
     last_size_slot().lock().ok().and_then(|g| *g)
+}
+
+/// "用户正在拖拽热区调整尺寸"原子标志：悬浮窗自绘热区（前端 hud-resize.ts）
+/// 的会话开始 / 结束经 session_hud_resize_begin / session_hud_resize_end 置
+/// 位与清除。置位期间 poll_db 跳过程序侧 set_size——自适应高度模式每拍按
+/// hud_height 公式 set_size，用户拖拽高度期间（pointerdown → up，秒级）会
+/// 把高度拉回自适应值（闪跳 / 拖不动）。窗口销毁与重建路径兜底清除，防窗口
+/// 重建后标志残留导致自适应高度永久失效。
+static HUD_USER_RESIZING: AtomicBool = AtomicBool::new(false);
+
+fn user_resizing() -> bool {
+    HUD_USER_RESIZING.load(Ordering::Relaxed)
+}
+
+fn set_user_resizing(active: bool) {
+    HUD_USER_RESIZING.store(active, Ordering::Relaxed);
+}
+
+/// 用户 Resized 活动宽限期（毫秒）：2.5 秒。构成 = 1 秒节流落盘间隔
+///（HUD_SIZE_SAVE_THROTTLE_MS，拖拽中 persist 至少隔 1 秒才写盘）+
+/// 松手后仍可能在事件队列里排队的最后一个 Resized 事件 + 原生
+/// startResizeDragging 的 promise 在 Windows 上提前 settle 后用户仍在
+/// 拖的整段（拖拽期间每帧 Resized 都会刷新锚点，宽限期从最后一帧起算，
+/// 任意长的持续拖拽全程都被覆盖）。期间 poll_db 持续让路（见
+/// user_size_active），既不与用户拖拽打架，也保证节流 persist 能把
+/// 拖拽中的终值写盘。
+const HUD_USER_RESIZE_GRACE_MS: u64 = 2_500;
+
+/// 最后一次"用户 Resized 事件"到达时刻（毫秒，0 = 从未）：挂点
+/// handle_session_hud_window_resized 对每个经 record_user_size 判定为
+/// 用户尺寸的事件刷新（含拖拽进行中的每帧）。宽限期的锚点（见
+/// HUD_USER_RESIZE_GRACE_MS）。
+static HUD_LAST_USER_RESIZE_AT: AtomicU64 = AtomicU64::new(0);
+
+fn mark_user_resized(now: u64) {
+    HUD_LAST_USER_RESIZE_AT.store(now, Ordering::Relaxed);
+}
+
+fn last_user_resized_at() -> u64 {
+    HUD_LAST_USER_RESIZE_AT.load(Ordering::Relaxed)
+}
+
+/// "用户尺寸活动期"判定（纯函数供单元测试）：HUD_USER_RESIZING 标志置位，
+/// 或距最后用户 Resized 事件（HUD_LAST_USER_RESIZE_AT）不足宽限期。
+/// poll_db 的 should_sync_size 与闭包双检 should_apply_size_now 都以本
+/// 判定替代裸标志——根治"原生 promise 提前 settle → end 提前清标志 →
+/// 用户继续拖期间 poll_db 抢先 set_size 打架 / 终值无人落盘"的竞态。
+fn user_size_active(resizing: bool, last_resized_at: u64, now: u64) -> bool {
+    resizing || now.saturating_sub(last_resized_at) < HUD_USER_RESIZE_GRACE_MS
+}
+
+/// 宽限期内出现过用户尺寸活动且尚未核校：Resized 挂点对每个经
+/// record_user_size 判定为用户尺寸的事件置位（与 mark_user_resized 同处），
+/// poll_db 在用户尺寸活动期结束后的下一拍消费（见 grace_check_due）——
+/// 程序恢复尺寸干涉前的最后一次终值落盘机会，根治"原生 promise 提前
+/// settle / 节流错过 / end 未再触发"一切终值丢失形态（松手后高度被旧
+/// 配置拉回的根因兜底）。
+static HUD_GRACE_PENDING: AtomicBool = AtomicBool::new(false);
+
+fn grace_pending() -> bool {
+    HUD_GRACE_PENDING.load(Ordering::Relaxed)
+}
+
+fn mark_grace_pending() {
+    HUD_GRACE_PENDING.store(true, Ordering::Relaxed);
+}
+
+fn clear_grace_pending() {
+    HUD_GRACE_PENDING.store(false, Ordering::Relaxed);
+}
+
+/// 宽限期到期核校触发判定（纯函数供单元测试）：用户尺寸活动期已结束
+/// （!user_active——标志清除且距最后用户 Resized ≥ 宽限期）且宽限期内
+/// 出现过用户尺寸活动且尚未核校（pending）→ 触发一次到期核校。核校本
+/// 体（主线程读窗口实际尺寸 → 判定 → persist_hud_size 兜底落盘 → 清
+/// pending → 重读配置覆盖局部 cfg）在 poll_db 内联执行，依赖 AppHandle
+/// 与主线程事件循环不可单元测试，触发时序拆由本函数承担。
+fn grace_check_due(user_active: bool, pending: bool) -> bool {
+    !user_active && pending
+}
+
+/// 拖前尺寸快照（宽, 高，逻辑值）：session_hud_resize_begin 置位标志时
+/// 读取当前窗口实际尺寸存入，session_hud_resize_end / 窗口销毁 / 建窗
+/// 路径清除。用途（高度轴方向感知）：用户纯拖宽度（West 向，高度不动）
+/// 时 Resized 事件的高度 = 拖前自适应值，persist_hud_size 若无条件写
+/// cfg.height 会把自适应高度固化成用户固定高度（会话再多高度也不涨，
+/// 用户感知"高度有 bug"的一种形态）；落盘时对照快照——高度与快照一致
+///（容差内，用户没动高度轴）则 cfg.height 保持原样（None 仍自适应 /
+/// Some 仍原用户值），见 merge_persist_axes。begin 的快照读取是异步的，
+/// 用户飞快拖拽时可能晚于首个 Resized 落盘——该窗口内 persist 退化为
+/// 现状行为（把当时高度写死），属可接受窄边缘。
+static HUD_RESIZE_SNAPSHOT: OnceLock<Mutex<Option<(f64, f64)>>> = OnceLock::new();
+
+fn resize_snapshot_slot() -> &'static Mutex<Option<(f64, f64)>> {
+    HUD_RESIZE_SNAPSHOT.get_or_init(|| Mutex::new(None))
+}
+
+/// 读拖前快照；None = 会话外 / begin 读取失败（放弃方向感知）
+fn resize_snapshot() -> Option<(f64, f64)> {
+    resize_snapshot_slot().lock().ok().and_then(|g| *g)
+}
+
+fn store_resize_snapshot(size: (f64, f64)) {
+    if let Ok(mut guard) = resize_snapshot_slot().lock() {
+        *guard = Some(size);
+    }
+}
+
+fn clear_resize_snapshot() {
+    if let Ok(mut guard) = resize_snapshot_slot().lock() {
+        *guard = None;
+    }
+}
+
+/// 尺寸差容差（逻辑 px）：系统窗口读数与程序侧目标值之间存在取整 / 缩放
+/// 换算残差（逻辑值 → 物理像素四舍五入 → 再除以 scale_factor；系统缩放
+/// 非 100% 时回除未必复原），容差内一律视为"与程序侧目标一致的尺寸"。
+/// 两处判定共用：热区会话终值是否落盘（点住热区未拖动）、Resized 挂点
+/// 区分自身 set_size 回声（见 size_matches_target）
+const HUD_SIZE_EPSILON: f64 = 1.0;
+
+/// 程序侧尺寸同步判定（纯函数供单元测试）：与上次目标尺寸不同才需要
+/// set_size；用户尺寸活动期（user_resizing 入参为"标志置位 或 宽限期内"
+/// 的合成判定，见 user_size_active）一律跳过
+fn should_sync_size(
+    user_resizing: bool,
+    last: Option<(f64, f64)>,
+    size: (f64, f64),
+) -> bool {
+    if user_resizing {
+        return false;
+    }
+    last.map(|s| s != size).unwrap_or(true)
+}
+
+/// poll_db 投递闭包内的双检判定（纯函数供单元测试）：闭包从投递到在
+/// 主线程实际执行存在时间窗，期间用户可能按下热区（session_hud_resize_
+/// begin 的标志置位晚于上方 should_sync_size 检查到达）。执行时复查一次
+/// 用户活动判定（user_resizing 入参为 user_size_active 的合成结果，闭包
+/// 执行时重新取时刻），活动期则放弃本次 set_size——消除"排队期间用户
+/// 开始拖拽 / 宽限期内用户仍在拖"的竞态窗口（set_size 仍会把高度拉回
+/// 自适应公式值，表现为拖拽起始阶段高度回弹 / 首拍抖动）。闭包里拿不到
+/// last_size 快照语义，只做活动判定复查，尺寸比对仍由调用侧的
+/// should_sync_size 承担
+fn should_apply_size_now(user_resizing: bool) -> bool {
+    !user_resizing
+}
+
+/// 尺寸是否与程序侧目标一致（容差内，纯函数供单元测试复用）：Resized
+/// 挂点判"自身 set_size 回声"与热区终值落盘判定共用同一口径。逻辑值到
+/// 物理像素的取整 + 除以 scale_factor 会让回声与目标差出亚像素残差
+///（系统缩放 125% / 150% 时 1.25L / 1.5L 取整后回除不复原原值），精确
+/// 相等判定会漏判 → 回声被当成用户尺寸落盘 → 自适应高度模式静默冻结
+fn size_matches_target(size: (f64, f64), target: Option<(f64, f64)>) -> bool {
+    target.is_some_and(|(w, h)| {
+        (w - size.0).abs() <= HUD_SIZE_EPSILON && (h - size.1).abs() <= HUD_SIZE_EPSILON
+    })
+}
+
+/// 热区会话终值是否落盘（纯函数供单元测试）：低于最小尺寸（最小化 /
+/// 系统抖动）不落；与程序侧目标尺寸一致（点住热区未拖动）不落——否则
+/// 一次点击就把自适应高度模式误冻结成用户固定尺寸
+fn should_persist_resize_result(size: (f64, f64), last_target: Option<(f64, f64)>) -> bool {
+    if size.0 < HUD_MIN_WIDTH || size.1 < HUD_MIN_HEIGHT {
+        return false;
+    }
+    !size_matches_target(size, last_target)
+}
+
+/// 拖拽尺寸落盘的轴向合并（纯函数供单元测试）：宽度轴无条件写（宽度本就
+/// 是纯用户语义，无自适应）；高度轴对照拖前快照（HUD_RESIZE_SNAPSHOT）
+/// 条件写——仅当高度相对拖前快照变化超过容差（用户确实动了高度轴）才写
+/// 死用户值，否则保持 cfg.height 原样（None 仍自适应 / Some 仍原用户值，
+/// 纯拖宽度不固化自适应高度）。快照缺失（begin 读取失败 / 快照晚于首个
+/// Resized 的窄竞态）时退化为现状行为（两轴都写）。返回 (width, height)
+/// 的落盘目标值。
+fn merge_persist_axes(
+    cfg_height: Option<f64>,
+    size: (f64, f64),
+    snapshot: Option<(f64, f64)>,
+) -> (f64, Option<f64>) {
+    let height = match snapshot {
+        // 高度未动（容差内，含取整 / 缩放换算残差）：不覆写 cfg.height
+        Some(snap) if (size.1 - snap.1).abs() <= HUD_SIZE_EPSILON => cfg_height,
+        // 高度动了 / 快照缺失：写死用户值（现状行为）
+        _ => Some(size.1),
+    };
+    (size.0, height)
 }
 
 /// 窗口代数计数器：窗口销毁/重建路径递增。feed 线程的变化检测 cache
@@ -353,18 +752,102 @@ fn window_epoch() -> u64 {
     WINDOW_EPOCH.load(Ordering::Relaxed)
 }
 
+/// 尺寸同步纪元计数器：session_hud_resize_end 收尾段与建窗路径
+/// （ensure_session_hud_window）递增。动机：poll_db 的尺寸同步基准是
+/// feed 线程**局部的 last_size（记忆值）而非窗口实际值**——用户拖到
+/// 600 而 last_size 仍是 (w,258) 时，下一拍 should_sync_size 比较
+/// "记忆 == 目标"直接跳过，HWND 实际尺寸与程序认知脱钩（窗口停在
+/// 600 空壳、WebView 视口不跟随、空态触发一次 set_size 才瞬间缩回的
+/// 根源）。纪元变化令 feed 线程把局部 last_size 置 None，下一拍
+/// should_sync_size 必然放行一次 set_size：cfg.height 已落盘时目标 =
+/// 用户值（HWND 与配置强制一致），未落盘时目标 = 自适应值（HWND 回
+/// 内容高度）——两种都消除脱钩态。
+static HUD_SIZE_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+fn bump_size_epoch() {
+    HUD_SIZE_EPOCH.fetch_add(1, Ordering::Relaxed);
+}
+
+fn size_epoch() -> u64 {
+    HUD_SIZE_EPOCH.load(Ordering::Relaxed)
+}
+
 /// 窗口高度（逻辑 px，纯函数供单元测试复用）：头部 + 会话行 × 条数
-/// + 折叠提示行 + 底部留白；空列表回空态最小高（显示"暂无活跃会话"，
-/// 不为 0 高）。折叠提示行只在列表确实达到上限条数时出现（调用方传
-/// total_active > MAX 的判定结果，此处再钳制一次互为双保险）。与
-/// session-hud.html 的 CSS 尺寸常量一一对应。
-fn hud_height(visible_rows: usize, folded: bool) -> f64 {
-    if visible_rows == 0 {
-        return HUD_EMPTY_HEIGHT;
-    }
-    let rows = visible_rows.min(MAX_VISIBLE_SESSIONS) as f64;
-    let more = folded && visible_rows >= MAX_VISIBLE_SESSIONS;
-    HUD_HEADER_H + rows * HUD_ROW_H + if more { HUD_MORE_H } else { 0.0 } + HUD_BOTTOM_PAD
+/// + 列表区边框 + 模型速度区行数与边框 + 今日合计行 + 折叠提示行 + 底
+/// 部留白，出口整体乘 font_scale（页面全部字号/行高/行高栅格随
+/// --hud-scale calc 缩放，公式同步缩放保持内容恰好铺满、不被裁）；脏
+/// font_scale 按默认 1.0 处理。空列表回空态最小高（显示"暂无活跃会话"，
+/// 不为 0 高；空态不显示模型速度区与今日行——两者都跟随列表存在）。
+/// 折叠提示行只在列表确实达到上限条数时出现、今日合计行仅在 today 为
+/// 真（开启数据行显示、今日有请求且有可见会话，见 today_visible）、模
+/// 型速度区仅在 model_rows > 0（调用方传 model_speed_visible 判定后的
+/// 行数，开启数据行 + 有样本 + 有可见会话）时计入。列表区与模型速度区
+/// 各有 1px 容器 border-bottom（分隔线/收边，CSS 无 box-sizing 包含，
+/// 见 HUD_LIST_BORDER_H / HUD_MODELS_BORDER_H 注释——V3 修复窗口比内
+/// 容矮 1~3px 导致会话行被裁的高度 Bug）。与 session-hud.html 的 CSS
+/// 尺寸常量一一对应。
+fn hud_height(visible_rows: usize, folded: bool, today: bool, model_rows: usize, font_scale: f64) -> f64 {
+    let scale = if font_scale.is_finite()
+        && (HUD_FONT_SCALE_RANGE.0..=HUD_FONT_SCALE_RANGE.1).contains(&font_scale)
+    {
+        font_scale
+    } else {
+        HUD_FONT_SCALE_DEFAULT
+    };
+    let base = if visible_rows == 0 {
+        HUD_EMPTY_HEIGHT
+    } else {
+        let rows = visible_rows.min(MAX_VISIBLE_SESSIONS) as f64;
+        let more = folded && visible_rows >= MAX_VISIBLE_SESSIONS;
+        HUD_HEADER_H
+            + rows * HUD_ROW_H
+            + HUD_LIST_BORDER_H
+            + if more { HUD_MORE_H } else { 0.0 }
+            + if today { HUD_TODAY_H } else { 0.0 }
+            + if model_rows > 0 {
+                model_rows.min(HUD_MAX_MODEL_ROWS) as f64 * HUD_MODEL_ROW_H + HUD_MODELS_BORDER_H
+            } else {
+                0.0
+            }
+            + HUD_BOTTOM_PAD
+    };
+    base * scale
+}
+
+/// 程序侧目标窗口尺寸（逻辑 px，纯函数供单元测试复用）：建窗 / 每拍
+/// set_size 的入参与 LAST_SIZE、HUD_SIZE 回声比对的统一基准，按窗口侧
+/// 实际生效口径收口两件事——取整 + 夹到合法域：
+/// - 取整：LogicalSize 的逻辑值到物理像素按 scale_factor 乘后四舍五入，
+///   font_scale（0.8~1.4 步进 0.05）让 hud_height 出现 .25 / .75 等小数
+///   （如 95 × 1.05 = 99.75），回声取整后与小数目标精确相等判定不成立
+///   → 非默认字号下自适应高度被 Resized 挂点误判成用户尺寸落盘，静默变
+///   固定尺寸；
+/// - 最小高：建窗 min_inner_size（HUD_MIN_HEIGHT = 160）会钳住低于它的
+///   set_size（空态 64、单行 95 都在其下），不夹取则程序侧目标永远对不
+///   上回声（同上误判）。
+fn hud_target_size(width: f64, height: f64) -> (f64, f64) {
+    (
+        width.round().clamp(HUD_MIN_WIDTH, HUD_MAX_WIDTH),
+        height.round().clamp(HUD_MIN_HEIGHT, HUD_MAX_HEIGHT),
+    )
+}
+
+/// 今日合计行显隐判定（纯函数供单元测试复用，轮询线程与前端
+/// session-hud-main.ts renderShell 的 showToday 判定同条件）：开启
+/// 数据行显示（show_tokens）+ 今日有请求 + 有可见会话行（空态不
+/// 显示——今日行跟随列表存在）。show_tokens 的语义是"不想看数字"，
+/// 今日行整行数字同理一并隐藏，窗口高度随之增减。
+fn today_visible(show_tokens: bool, today_total: i64, visible_sessions: usize) -> bool {
+    show_tokens && today_total > 0 && visible_sessions > 0
+}
+
+/// 模型速度区显隐判定（纯函数供单元测试复用，轮询线程与前端
+/// renderShell 的 showModels 判定逐字同条件）：开启数据行显示
+///（show_tokens）+ 窗口内有可信速度样本（model_speeds 非空）+ 有可见
+/// 会话行（空态不显示——模型速度区与今日行一样跟随列表存在）。
+/// 速度属数字信息，随 show_tokens 一并隐藏，窗口高度随之增减。
+fn model_speed_visible(show_tokens: bool, model_count: usize, visible_sessions: usize) -> bool {
+    show_tokens && model_count > 0 && visible_sessions > 0
 }
 
 /// 主显示器右下角默认位置（逻辑坐标）：右下留边距（Windows 含任务栏
@@ -383,34 +866,34 @@ fn default_bottom_right(mon: Option<&tauri::Monitor>, width: f64, height: f64) -
     )
 }
 
-/// 确保 "session-hud" 悬浮窗存在并应用配置：已存在时仅同步尺寸与热推
-/// 参数（防重复创建同名窗口）；不存在时创建（透明、无边框、置顶、
-/// 不抢焦点、skipTaskbar、shadow 关闭，位置取持久化坐标或默认主显示
-/// 器右下角）。必须在主线程的事件循环上下文调用（WebviewWindowBuilder
-/// 的要求）：合法调用点是 setup 阶段（start_if_enabled）与
-/// run_on_main_thread 投递的闭包（set_session_hud_config）。不能在同步
-/// 命令主体里直接调——同步命令占用主线程，建窗等不到事件循环处理
-/// 消息，自等待死锁（见 pet.rs 同名注释的事故记载）。
+/// 确保 "session-hud" 悬浮窗存在并应用配置：已存在时仅热推参数（防重
+/// 复创建同名窗口；窗口尺寸由用户拖拽 Resized 挂点与轮询线程自适应
+/// 维护，此处不再 set_size——设置卡的宽度滑块已移除，配置宽度只随拖拽
+/// 变化，重复同步反而可能与拖拽竞态）；不存在时创建（透明、无边框、
+/// 置顶、不抢焦点、skipTaskbar、shadow 关闭、**可拖拽调整大小**，位置
+/// 取持久化坐标或默认主显示器右下角）。必须在主线程的事件循环上下文
+/// 调用（WebviewWindowBuilder 的要求）：合法调用点是 setup 阶段
+///（start_if_enabled）与 run_on_main_thread 投递的闭包
+///（set_session_hud_config）。不能在同步命令主体里直接调——同步命令
+/// 占用主线程，建窗等不到事件循环处理消息，自等待死锁（见 pet.rs 同名
+/// 注释的事故记载）。
 fn ensure_session_hud_window(app: &AppHandle, cfg: &SessionHudConfig) -> Result<(), String> {
-    if let Some(win) = app.get_webview_window(SESSION_HUD_WINDOW_LABEL) {
-        // 已存在：按最后已知尺寸同步宽度（高度由轮询线程按会话条数
-        // 自适应，这里不重算防折叠活跃列表），再热推参数
-        let (w, h) = cached_size().unwrap_or((cfg.width, hud_height(0, false)));
-        if (w - cfg.width).abs() > f64::EPSILON {
-            let _ = win.set_size(LogicalSize::new(cfg.width, h));
-            remember_size((cfg.width, h));
-        }
+    if app.get_webview_window(SESSION_HUD_WINDOW_LABEL).is_some() {
+        // 已存在：仅热推参数（尺寸维护见函数 doc）
         push_session_hud_params(app, cfg);
         return Ok(());
     }
 
-    // 建窗初始尺寸：宽度恒取配置值（LAST_SIZE 缓存可能残留旧宽，不覆
-    // 盖本次配置）；高度沿用最后已知高度（关后再开恢复原列表高度），
+    // 建窗初始尺寸：用户拖拽过（height 已持久化）→ 按用户尺寸恢复；
+    // 自适应模式 → 高度沿用最后已知高度（关后再开恢复原列表高度），
     // 无记录时空态最小高（首帧即"暂无活跃会话"，2 秒内数据到达后由
-    // 轮询线程自适应）
-    let (w, h) = (
+    // 轮询线程自适应）。经 hud_target_size 取整 + 夹取：建窗尺寸即
+    // LAST_SIZE 基准，回声比对不受小数与 min_inner_size 钳制影响
+    let (w, h) = hud_target_size(
         cfg.width,
-        cached_size().map(|(_, h)| h).unwrap_or(hud_height(0, false)),
+        cfg.height
+            .or_else(|| cached_size().map(|(_, h)| h))
+            .unwrap_or_else(|| hud_height(0, false, false, 0, cfg.font_scale)),
     );
     let mut builder = WebviewWindowBuilder::new(
         app,
@@ -424,11 +907,16 @@ fn ensure_session_hud_window(app: &AppHandle, cfg: &SessionHudConfig) -> Result<
     .always_on_top(true)
     .skip_taskbar(true)
     .shadow(false)
-    .resizable(false)
+    // 可自由拖拽调整大小（V3 起）：用户拖出尺寸经 Resized 挂点节流
+    // 持久化到 session-hud.json 的 width/height，内容超高时会话列表
+    // 纵向滚动（见 session-hud.html #hud-list）
+    .resizable(true)
     // Windows 钳宽修复（照搬 pet.rs）：tao 给所有窗口无条件带
     // WS_CAPTION，DefWindowProc 的 WM_GETMINMAXINFO 默认最小跟踪宽度
-    // 会把小窗口出生即钳宽，min_inner_size(1,1) 在子类化后覆盖该值
-    .min_inner_size(1.0, 1.0)
+    // 会把小窗口出生即钳宽，min_inner_size 在子类化后覆盖该值；同时
+    // 承担自由拖拽的最小尺寸约束（260×160，与 HUD_MIN_WIDTH/
+    // HUD_MIN_HEIGHT、Resized 落盘下限一致）
+    .min_inner_size(HUD_MIN_WIDTH, HUD_MIN_HEIGHT)
     // 不抢焦点（照搬 pet.rs）：focusable(false) 映射 WS_EX_NOACTIVATE
     // 从根上不激活，focused(false) 双保险；HUD 无键盘交互，拖动不需要
     // 激活，且绝不能从正在输入的会话里抢走焦点
@@ -467,6 +955,17 @@ fn ensure_session_hud_window(app: &AppHandle, cfg: &SessionHudConfig) -> Result<
     // 新窗口诞生即递增代数：feed 线程（含被复用的旧线程）下一拍清空
     // 变化检测缓存，向新页面强制重发一帧快照（首帧数据保障）
     bump_window_epoch();
+    // 同步递增尺寸纪元：feed 线程（含被复用的旧线程 / 重启后的新线程）的
+    // 局部 last_size 是旧窗口的记忆，与建窗尺寸恰好相等时会让
+    // should_sync_size 误判"已同步"跳过 set_size；作废记忆保证首拍必与
+    // 配置强制对齐一次（见 HUD_SIZE_EPOCH）
+    bump_size_epoch();
+    // 清"用户调整中"标志与拖前快照兜底：拖拽会话中窗口被销毁 / 重建时
+    // 前端来不及调 session_hud_resize_end，标志残留会让自适应高度永久失效
+    //（见 HUD_USER_RESIZING）；旧会话快照残留会污染新窗口首次拖拽的高度
+    // 轴判定（新窗口尺寸与旧快照无关联）
+    set_user_resizing(false);
+    clear_resize_snapshot();
 
     // 首帧参数：页面加载后也会主动 get_session_hud_config，这里推送
     // 保证先到（双通道幂等）
@@ -474,9 +973,10 @@ fn ensure_session_hud_window(app: &AppHandle, cfg: &SessionHudConfig) -> Result<
     Ok(())
 }
 
-/// 向悬浮窗推送当前显示参数（透明度 + 显示项 + 活跃档位）。透明度由
-/// 页面经 CSS opacity 应用（窗口级 set_opacity 平台差异大，CSS 路径
-/// 跨平台一致且作用于内容层）。
+/// 向悬浮窗推送当前显示参数（透明度 + 显示项 + 活跃档位 + 字体缩放）。
+/// 透明度由页面经 CSS opacity 应用（窗口级 set_opacity 平台差异大，CSS
+/// 路径跨平台一致且作用于内容层）；字体缩放经 CSS 变量 --hud-scale 应
+/// 用并同步 header 滑块刻度。
 fn push_session_hud_params(app: &AppHandle, cfg: &SessionHudConfig) {
     #[derive(Clone, Serialize)]
     #[serde(rename_all = "camelCase")]
@@ -485,6 +985,7 @@ fn push_session_hud_params(app: &AppHandle, cfg: &SessionHudConfig) {
         window_minutes: u32,
         show_tokens: bool,
         show_model: bool,
+        font_scale: f64,
     }
     let _ = app.emit_to(
         SESSION_HUD_WINDOW_LABEL,
@@ -494,6 +995,7 @@ fn push_session_hud_params(app: &AppHandle, cfg: &SessionHudConfig) {
             window_minutes: cfg.window_minutes,
             show_tokens: cfg.show_tokens,
             show_model: cfg.show_model,
+            font_scale: cfg.font_scale,
         },
     );
 }
@@ -538,8 +1040,8 @@ pub fn handle_session_hud_window_moved(win: &tauri::Window, pos: tauri::Physical
     persist_hud_pos(logical);
 }
 
-/// 悬浮窗 Destroyed 事件挂点：冲刷最终位置（无节流）+ 停轮询 + 开关
-/// 复位（窗口没了 = 功能关闭，防面板显示与实况脱节；用户 alt+F4 等
+/// 悬浮窗 Destroyed 事件挂点：冲刷最终位置与尺寸（无节流）+ 停轮询 +
+/// 开关复位（窗口没了 = 功能关闭，防面板显示与实况脱节；用户 alt+F4 等
 /// 旁路关闭后开关能如实回读为关）。
 pub fn handle_session_hud_window_destroyed(_app: &AppHandle) {
     stop_feed();
@@ -547,14 +1049,26 @@ pub fn handle_session_hud_window_destroyed(_app: &AppHandle) {
     // 内未及感知 stop），代数变化令其清空变化检测缓存重发一帧，新页面
     // 不停留在假空态（见 WINDOW_EPOCH 注释）
     bump_window_epoch();
+    // 清"用户调整中"标志兜底：拖拽会话中窗口被销毁（前端不再有机会调
+    // session_hud_resize_end），标志残留会让下次建窗后的自适应高度失效
+    set_user_resizing(false);
+    let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    // 冲刷最终位置（无节流）
     let pos = hud_pos_slot().lock().ok().and_then(|guard| *guard);
     if let Some(p) = pos {
-        HUD_POS_SAVED_AT.store(
-            chrono::Utc::now().timestamp_millis().max(0) as u64,
-            Ordering::Relaxed,
-        );
+        HUD_POS_SAVED_AT.store(now, Ordering::Relaxed);
         persist_hud_pos(p);
     }
+    // 冲刷最终尺寸（用户拖拽的自由宽高，无节流；高度轴对照拖前快照条件
+    // 写——拖拽中销毁时槽里是拖后值、快照是拖前值，方向判定仍成立）
+    let size = hud_size_slot().lock().ok().and_then(|guard| *guard);
+    if let Some(sz) = size {
+        HUD_SIZE_SAVED_AT.store(now, Ordering::Relaxed);
+        persist_hud_size(sz);
+    }
+    // 拖前快照随窗口销毁清理：须在上方冲刷落盘之后（persist 依赖它做
+    // 高度轴判定），残留快照会污染下次建窗后首次拖拽的判定
+    clear_resize_snapshot();
     // 开关复位：仅开启态（旁路关闭如实反映）；set_session_hud_config
     // 的正常关闭流程已先落盘新开关，此处读到的已关不动（幂等）
     let mut cfg = load_session_hud_config();
@@ -573,6 +1087,107 @@ fn persist_hud_pos(pos: (f64, f64)) {
     }
     cfg.pos = Some(pos);
     let _ = save_session_hud_config(&cfg);
+}
+
+// ============================================================
+// 窗口尺寸持久化（Resized 事件节流落盘，自由拖拽宽高，V3 起）
+// ============================================================
+
+/// 最近一次收到的窗口逻辑尺寸（逻辑坐标）：Resized 事件高频触发（拖拽
+/// 边缘时连续），先写内存，按节流间隔落盘
+static HUD_SIZE: OnceLock<Mutex<Option<(f64, f64)>>> = OnceLock::new();
+/// 上次尺寸落盘时刻（毫秒），0 = 从未落盘
+static HUD_SIZE_SAVED_AT: AtomicU64 = AtomicU64::new(0);
+/// 尺寸落盘节流间隔（毫秒）：拖拽结束后最迟 1 秒内持久化（与 Moved
+/// 同口径）
+const HUD_SIZE_SAVE_THROTTLE_MS: u64 = 1000;
+
+fn hud_size_slot() -> &'static Mutex<Option<(f64, f64)>> {
+    HUD_SIZE.get_or_init(|| Mutex::new(None))
+}
+
+/// 把 Resized 事件尺寸记入内存槽（判定 + 写槽集中处，纯判定复用
+/// should_persist_resize_result，供单元测试直接驱动）：槽只承载"用户产生
+/// 的尺寸"——低于最小尺寸（最小化 / 系统抖动）与程序侧 set_size 回声
+///（与目标尺寸容差内一致，见 size_matches_target）都不进槽，也不覆盖槽里
+/// 已有的用户尺寸。返回是否视为用户尺寸（调用方据此决定是否节流落盘）。
+///
+/// 回声过滤是关窗冲刷安全的前提：Destroyed 挂点
+///（handle_session_hud_window_destroyed）无节流冲刷落盘时直接读槽，回声
+/// 一旦进槽，关窗（关开关 / 关窗口）就会把程序侧尺寸当成"用户拖拽出的
+/// 尺寸"写进 session-hud.json 的 width/height，自适应高度模式被永久冻结；
+/// 过滤后冲刷落盘的不是用户尺寸就是槽为空不写。
+fn record_user_size(size: (f64, f64), target: Option<(f64, f64)>) -> bool {
+    if !should_persist_resize_result(size, target) {
+        return false;
+    }
+    if let Ok(mut guard) = hud_size_slot().lock() {
+        *guard = Some(size);
+    }
+    true
+}
+
+/// 悬浮窗 Resized 事件挂点（lib.rs 的 on_window_event 转发）：把用户
+/// 自由拖拽出的窗口尺寸（物理坐标转逻辑）节流持久化到 session-hud.json
+/// 的 width/height。三类事件必须忽略：
+/// 1. 与程序侧目标尺寸（LAST_SIZE）一致的回声——轮询线程自适应高度 /
+///    建窗 set_size 自身触发（含取整 / 缩放换算的亚像素残差，见
+///    size_matches_target），绝不能存成用户尺寸（否则自适应模式被
+///    一次数据变化永久打断）；
+/// 2. 低于最小尺寸（Windows 最小化等系统抖动）——不可用尺寸不落盘；
+/// 3. 与上次已落盘值相同（重复事件）。
+/// 前两类同时由 record_user_size 拦在内存槽之外（写内存都不写，防止
+/// Destroyed 前的冲刷把非用户尺寸带走）。落盘后同步 LAST_SIZE（该尺寸
+/// 即新的"程序侧目标"），后续同尺寸回声不再重复落盘。
+pub fn handle_session_hud_window_resized(win: &tauri::Window, size: tauri::PhysicalSize<u32>) {
+    let scale = win.scale_factor().unwrap_or(1.0);
+    if scale <= 0.0 {
+        return;
+    }
+    let logical = (size.width as f64 / scale, size.height as f64 / scale);
+    // 只有用户动手产生的尺寸才进槽并进入落盘流程（最小尺寸下限与回声
+    // 过滤见 record_user_size）
+    if !record_user_size(logical, cached_size()) {
+        return;
+    }
+    // 节流落盘：拖拽期间每秒最多一次写盘
+    let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    // 刷新"最后用户 Resized 时刻"（含拖拽进行中的每帧）：宽限期锚点，
+    // 见 HUD_USER_RESIZE_GRACE_MS / user_size_active——原生 promise 提前
+    // settle 后用户继续拖的整段，靠每帧刷新的锚点让 poll_db 持续让路
+    mark_user_resized(now);
+    // 置位"宽限期待核校"：本帧已判定为用户尺寸（record_user_size 通过），
+    // 宽限期一过 poll_db 需要一次到期核校兜底落盘终值（见 HUD_GRACE_
+    // PENDING / grace_check_due——节流 persist 与 resize_end 都可能错过
+    // 用户拖的最后一段终值，此处保证宽限期内只要有过用户尺寸活动就必有
+    // 一次核校；置位幂等，拖拽每帧重复置无害）
+    mark_grace_pending();
+    let last = HUD_SIZE_SAVED_AT.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < HUD_SIZE_SAVE_THROTTLE_MS {
+        return;
+    }
+    HUD_SIZE_SAVED_AT.store(now, Ordering::Relaxed);
+    persist_hud_size(logical);
+}
+
+/// 把用户拖拽尺寸合并进 session-hud.json（保留其它字段）。宽度轴无条件
+/// 写；高度轴经 merge_persist_axes 对照拖前快照条件写——纯拖宽度（高度
+/// 与拖前一致）不把当时的自适应高度固化成用户固定高度（见该函数 doc）。
+/// 与已持久化值相同（宽度与高度都一致）则只更新内存目标不写盘。落盘失败
+/// 静默（下次 Resized 再试）；成功后把当前实际尺寸记为程序侧目标
+///（LAST_SIZE），避免同尺寸回声反复落盘。
+fn persist_hud_size(size: (f64, f64)) {
+    let mut cfg = load_session_hud_config();
+    let (width, height) = merge_persist_axes(cfg.height, size, resize_snapshot());
+    if cfg.width == width && cfg.height == height {
+        remember_size(size);
+        return;
+    }
+    cfg.width = width;
+    cfg.height = height;
+    if save_session_hud_config(&cfg).is_ok() {
+        remember_size(size);
+    }
 }
 
 // ============================================================
@@ -620,6 +1235,10 @@ fn feed_loop(app: AppHandle) {
     // 计数）后清空变化检测缓存，强制向新页面重发一帧快照（见
     // WINDOW_EPOCH 注释的假空态场景）
     let mut epoch = window_epoch();
+    // 尺寸同步纪元基线：resize_end 收尾 / 建窗路径递增后，局部 last_size
+    // 记忆与窗口实际可能脱钩（见 HUD_SIZE_EPOCH），作废记忆保证下一拍
+    // poll_db 必然重同步一次 set_size
+    let mut size_epoch_base = size_epoch();
     // rollout 旁路速度监控器与最后快照（速度拍在其上原地更新 speed）
     let mut monitor = RolloutMonitor::default();
     let mut last_snapshot: Option<HudSnapshot> = None;
@@ -634,6 +1253,14 @@ fn feed_loop(app: AppHandle) {
         if now_epoch != epoch {
             epoch = now_epoch;
             cache = None; // 新窗口尚未收到任何数据，下一拍必重发
+        }
+        let now_size_epoch = size_epoch();
+        if now_size_epoch != size_epoch_base {
+            size_epoch_base = now_size_epoch;
+            // 记忆与窗口实际脱钩（拖拽终值 / 新建窗尺寸），置 None 令下一拍
+            // should_sync_size 必然放行一次 set_size（强制 HWND/WebView 与
+            // 配置对齐，见 HUD_SIZE_EPOCH）
+            last_size = None;
         }
         // 1 秒一拍交替：DB 轮询拍隔拍一次（等效原 2 秒周期，查询内容
         // 不变），rollout 速度拍每拍执行（仅文件 stat + 增量读 + 内存
@@ -681,7 +1308,7 @@ fn poll_db(
     last_fallback: &mut BTreeMap<String, Option<f64>>,
 ) {
     let result = (|| -> Result<(), String> {
-        let cfg = load_session_hud_config().clamped();
+        let mut cfg = load_session_hud_config().clamped();
         let conn = crate::zcode_sessions::open_main_db_readonly_uri()?;
         let now_ms = chrono::Utc::now().timestamp_millis();
         let (mut snapshot, trees) =
@@ -717,10 +1344,13 @@ fn poll_db(
         }
         *last_snapshot = Some(snapshot);
 
-        // 高度自适应：会话条数（含折叠态）变化 → 窗口高度随之调整。
-        // 必须在主线程操作窗口（轮询线程非主线程，直接调窗口 API 会
-        // panic）；投递失败静默（下轮条数变化时再试）。宽度同步配置
-        // 值（设置卡改宽度即热生效）。
+        // 高度自适应（仅"从未拖拽"模式）：会话条数（含折叠态）变化 →
+        // 窗口高度随之调整（乘 font_scale 与页面缩放栅格一致）。用户
+        // 拖拽过（height 已持久化）→ 窗口尺寸归用户，此处只读不动；
+        // 内容超高时会话列表区纵向滚动（页面 CSS flex 布局自动处理，
+        // 模型速度区/今日行/头部固定不滚）。必须在主线程操作窗口（轮
+        // 询线程非主线程，直接调窗口 API 会 panic）；投递失败静默（下
+        // 轮条数变化时再试）。
         let visible = last_snapshot
             .as_ref()
             .map(|s| s.sessions.len())
@@ -730,19 +1360,101 @@ fn poll_db(
             .as_ref()
             .map(|s| s.total_active)
             .unwrap_or(0);
-        let size = (
-            cfg.width,
-            hud_height(visible, total_active > MAX_VISIBLE_SESSIONS),
+        // 今日合计行显隐：开启数据行显示（show_tokens）+ 今日有请求 +
+        // 有可见会话行（空态不显示，今日行跟随列表存在；判定与前端
+        // renderShell 的 showToday 一致，见 today_visible）
+        let today = last_snapshot.as_ref().is_some_and(|s| {
+            today_visible(cfg.show_tokens, s.today_total.total, s.sessions.len())
+        });
+        // 模型速度区行数：显隐判定与前端 renderShell 的 showModels 逐字
+        // 同条件（见 model_speed_visible），不显示按 0 行计（窗口高度不
+        // 含该区）
+        let model_rows = last_snapshot
+            .as_ref()
+            .map(|s| {
+                if model_speed_visible(cfg.show_tokens, s.model_speeds.len(), s.sessions.len()) {
+                    s.model_speeds.len()
+                } else {
+                    0
+                }
+            })
+            .unwrap_or(0);
+        // 用户尺寸活动期（标志置位 或 距最后用户 Resized < 宽限期，见
+        // user_size_active）时跳过：自适应高度模式的每拍 set_size 会把用户
+        // 拖出的高度拉回公式值（闪跳 / 拖不动）。宽限期兜住原生
+        // startResizeDragging 的 promise 提前 settle 竞态——end 被提前触发
+        // 清了标志，但用户仍在拖（每帧 Resized 刷新锚点），期间 poll_db
+        // 必须持续让路，节流 persist 才能把拖拽中的终值写盘（否则终值
+        // 永远丢失）。拖拽结束由 session_hud_resize_end 清标志并即时落盘
+        // 核校
+        let user_active = user_size_active(
+            user_resizing(),
+            last_user_resized_at(),
+            now_ms.max(0) as u64,
         );
-        if last_size.map(|s| s != size).unwrap_or(true) {
+        // 宽限期到期核校（终值兜底落盘，触发判定见 grace_check_due /
+        // HUD_GRACE_PENDING）：宽限期内出现过用户尺寸活动且活动期已结束
+        // → 恢复程序侧尺寸干涉（下方 set_size）之前先核校一次终值。兜底
+        // 动机：N 向 startResizeDragging 的 promise 在 Windows 上可能提前
+        // settle → resize_end 提前执行（提前 persist 当时高度、bump 纪元、
+        // 清标志/快照）→ 用户继续拖的最后一段（距上次节流 persist < 1 秒、
+        // 松手后没有第二次 end）终值无人落盘 → 宽限期一过，下方按旧
+        // cfg.height 算出的 set_size 会把窗口高度拉回（有数据时松手弹回
+        // 的根因）。核校动作：经主线程读窗口实际尺寸（与
+        // resize_end_persist 同一读取口径），确为用户拖出的值（不低于
+        // 最小尺寸且与程序侧目标 LAST_SIZE 差超容差，即非程序回声）才
+        // persist_hud_size 落盘终值；无论是否落盘，核校完成即消费
+        // pending。落盘改了配置，本拍后续的尺寸计算必须用新值——重读
+        // 配置覆盖局部 cfg（此后目标 == 实际，下方 set_size 即便放行也是
+        // 同值幂等，窗口保持用户高度；"核校后重读 cfg"依赖主线程窗口
+        // 读取，不可单元测试，由 grace_check_due 锁定时序）。读失败
+        // （事件循环异常超时）同样清 pending 后走本拍正常逻辑（下次
+        // Resized 会重新置位，重试机会天然存在）。与 resize_end 的正常
+        // 核校路径幂等共存：persist 同值时相同值比较直接跳过写盘
+        if grace_check_due(user_active, grace_pending()) {
+            let actual = read_window_logical_size(app).ok().flatten();
+            if let Some(size) = actual
+                .filter(|&s| should_persist_resize_result(s, cached_size()))
+            {
+                persist_hud_size(size);
+            }
+            clear_grace_pending();
+            cfg = load_session_hud_config().clamped();
+        }
+        let height = cfg.height.unwrap_or_else(|| {
+            hud_height(
+                visible,
+                total_active > MAX_VISIBLE_SESSIONS,
+                today,
+                model_rows,
+                cfg.font_scale,
+            )
+        });
+        // 目标尺寸经 hud_target_size 取整 + 夹取后再 set_size：LogicalSize
+        // 小数（font_scale 让公式出 .25 / .75）与 min_inner_size 钳制都会
+        // 让回声与目标不再精确相等，被 Resized 挂点误判成"用户尺寸"落盘 →
+        // 自适应高度模式静默变固定尺寸
+        let size = hud_target_size(cfg.width, height);
+        if should_sync_size(user_active, *last_size, size) {
             *last_size = Some(size);
             remember_size(size);
             // 两个句柄：一个供方法调用（借用于调用期间），一个供闭包捕获
             let app_task = app.clone();
             let app_call = app.clone();
             let _ = app_call.run_on_main_thread(move || {
-                if let Some(win) = app_task.get_webview_window(SESSION_HUD_WINDOW_LABEL) {
-                    let _ = win.set_size(LogicalSize::new(size.0, size.1));
+                // 双检用户活动判定（V2 竞态消除，判定见 should_apply_
+                // size_now）：闭包从投递到主线程实际执行存在时间窗，期间
+                // 用户按下热区 / 仍处宽限期的话此处以执行时刻重新合成判定，
+                // 活动期则放弃本次 set_size（防排队闭包把拖拽起始阶段的
+                // 高度拉回公式值 / promise 提前 settle 后与继续拖的用户打架）
+                if should_apply_size_now(user_size_active(
+                    user_resizing(),
+                    last_user_resized_at(),
+                    chrono::Utc::now().timestamp_millis().max(0) as u64,
+                )) {
+                    if let Some(win) = app_task.get_webview_window(SESSION_HUD_WINDOW_LABEL) {
+                        let _ = win.set_size(LogicalSize::new(size.0, size.1));
+                    }
                 }
             });
         }
@@ -836,6 +1548,48 @@ pub(crate) struct HudSessionBrief {
     pub ttft_ms: Option<i64>,
 }
 
+/// 今日（自然日本地零点起）全库 model_usage 合计（窗口级汇总行）。
+/// total 与主面板 today 口径一致：Σcomputed_total_tokens（列缺失时
+/// 等价退化为 input+output——实测 computed = input+output）。全 0 =
+/// 今日无请求（前端不显示今日行）。
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HudTodayTotal {
+    /// Σ input_tokens（原值，含缓存读）
+    #[serde(rename = "in")]
+    pub in_tokens: i64,
+    /// Σ output_tokens
+    #[serde(rename = "out")]
+    pub out_tokens: i64,
+    /// Σ cache_read_input_tokens
+    pub cache_read: i64,
+    /// Σ computed_total_tokens（缺列时 input+output）
+    pub total: i64,
+    /// 请求笔数（model_usage 行数）
+    pub req_count: i64,
+}
+
+/// 模型速度区单行（列表下方、今日行之上的按模型分组速度摘要）。
+/// camelCase 与前端契约一致；口径见 collect_model_speeds。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HudModelSpeed {
+    /// 模型 id（原值展示；前端 truncate + title 全名）
+    pub model: String,
+    /// 最近一笔完成请求的输出速度 t/s（output ÷ 生成毫秒 × 1000，
+    /// 实时感优先）
+    pub tps: f64,
+    /// 窗口内全部可信样本的总 output ÷ 总生成耗时（t/s，窗口均值）
+    pub avg_tps: f64,
+    /// 窗口内可信样本的单笔最快速度 t/s（与 avg_tps 同样本池）
+    pub max_tps: f64,
+    /// 窗口内可信样本的单笔最慢速度 t/s（与 avg_tps 同样本池）
+    pub min_tps: f64,
+    /// 可信速度样本数（completed 且 first/completed 时刻齐全时序正常
+    /// 且 output > 0 的行数）
+    pub samples: i64,
+}
+
 /// 推给悬浮窗的会话快照（事件 payload）
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -846,6 +1600,14 @@ pub(crate) struct HudSnapshot {
     pub total_active: usize,
     /// 会话列表（按最近活动倒序，至多 MAX_VISIBLE_SESSIONS 条）
     pub sessions: Vec<HudSessionBrief>,
+    /// 今日合计（自然日本地零点起全库 model_usage；窗口级汇总行，
+    /// 随 show_tokens 配置隐藏——前端与窗口高度判定同条件，见
+    /// today_visible；全 0 = 今日无请求，前端不显示该行）
+    pub today_total: HudTodayTotal,
+    /// 模型速度区（活跃窗口内按模型分组的速度摘要，按最近使用降序至多
+    /// HUD_MAX_MODEL_ROWS 个；查询失败/老库缺列降级为空数组 → 前端不
+    /// 渲染该区，窗口高度判定同条件见 model_speed_visible）
+    pub model_speeds: Vec<HudModelSpeed>,
 }
 
 /// 查询库并构造会话快照：活跃判定（时间窗内 model_usage ∪ message）
@@ -867,6 +1629,8 @@ pub(crate) fn collect_session_snapshot(
                 v: 1,
                 total_active: 0,
                 sessions: Vec::new(),
+                today_total: HudTodayTotal::default(),
+                model_speeds: Vec::new(),
             },
             Vec::new(),
         ));
@@ -1084,9 +1848,210 @@ pub(crate) fn collect_session_snapshot(
             v: 1,
             total_active,
             sessions,
+            today_total: collect_today_total(conn, today_start_ms(now_ms))?,
+            model_speeds: collect_model_speeds(conn, window_start),
         },
         trees,
     ))
+}
+
+/// 本地时区自然日零点（毫秒，纯函数供测试）：与主面板 today /
+/// lib.rs today_tray_title 的零点口径一致（不能用 UTC——东八区午前 UTC
+/// 零点会把昨天 8 小时计入"今日"）。零点解析异常（DST 切换窄边缘）回
+/// 退 now − 24h。
+fn today_start_ms(now_ms: i64) -> i64 {
+    let Some(dt) = chrono::DateTime::from_timestamp_millis(now_ms) else {
+        return now_ms - 86_400_000;
+    };
+    let local = dt.with_timezone(&chrono::Local);
+    local
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .and_then(|midnight| midnight.and_local_timezone(chrono::Local).single())
+        .map(|d| d.timestamp_millis())
+        .unwrap_or(now_ms - 86_400_000)
+}
+
+/// 今日合计（自然日本地零点起全库 model_usage）：与主面板 today /
+/// 菜单栏 today_tray_title 同口径（全库不分会话树，input 用原值）。
+/// total = Σcomputed_total_tokens（实测 computed = input+output；列
+/// 缺失的老库等价退化为 input+output）。注意数据源不同：本函数直读
+/// 主库 model_usage 实时值，today_tray_title 走派生库（30 秒节流导
+/// 入），公式与本地零点口径一致但数值允许最长约 30 秒的瞬时差异。
+/// 调用方已守卫核心列存在。
+fn collect_today_total(conn: &Connection, today_start: i64) -> Result<HudTodayTotal, String> {
+    let has = |col: &str| crate::db::has_column(conn, "model_usage", col);
+    let num = |ok: bool, col: &str| {
+        if ok {
+            format!("COALESCE(SUM({col}), 0)")
+        } else {
+            "0".to_string()
+        }
+    };
+    // total：优先 computed_total_tokens（与主面板 total_tokens 完全一致），
+    // 缺列时由 input+output 等价合成（分项仍需逐列读取）
+    let total_expr = if has("computed_total_tokens") {
+        "COALESCE(SUM(computed_total_tokens), 0)".to_string()
+    } else {
+        format!(
+            "{} + {}",
+            num(has("input_tokens"), "input_tokens"),
+            num(has("output_tokens"), "output_tokens")
+        )
+    };
+    let sql = format!(
+        "SELECT {}, {}, {}, {}, COUNT(*) \
+         FROM model_usage WHERE started_at >= ?1",
+        num(has("input_tokens"), "input_tokens"),
+        num(has("output_tokens"), "output_tokens"),
+        num(has("cache_read_input_tokens"), "cache_read_input_tokens"),
+        total_expr,
+    );
+    conn.query_row(&sql, [today_start], |row| {
+        Ok(HudTodayTotal {
+            in_tokens: row.get::<_, i64>(0)?.max(0),
+            out_tokens: row.get::<_, i64>(1)?.max(0),
+            cache_read: row.get::<_, i64>(2)?.max(0),
+            total: row.get::<_, i64>(3)?.max(0),
+            req_count: row.get::<_, i64>(4)?.max(0),
+        })
+    })
+    .map_err(|e| format!("读取今日合计失败: {e}"))
+}
+
+/// 模型速度区数据源（活跃窗口内按 model_id 分组的速度摘要）：窗口内
+/// status='completed' 且 first_token_at/completed_at 齐全时序正常的
+/// model_usage 行（turn_id NULL 的后台请求行不过滤——速度语义与轮次
+/// 无关），每模型：
+/// - tps = 最近一笔可信样本的 output ÷ (completed_at − first_token_at)
+///   × 1000（最近一笔优先，实时感）；
+/// - avg_tps = 窗口内全部可信样本的总 output ÷ 总生成耗时（窗口均值）；
+/// - max_tps / min_tps = 同一可信样本池内的单笔最快 / 最慢速度（单笔样本
+///   时三者同值）；
+/// - samples = 可信样本数。
+/// output ≤ 0 与除零（completed ≤ first、时刻 NULL/非正）的行跳过不
+/// 计样本；status 列缺失的老库按全完成降级（与 collect_session_brief
+/// 的完成判定同口径）。按最近使用时间降序，至多 HUD_MAX_MODEL_ROWS 个
+/// 模型。任何查询失败/表或列缺失返回空数组（不阻塞快照——速度区是
+/// 锦上添花信息，失败静默降级，下个轮询周期自然重试）。扫查行数以
+/// MODEL_SPEED_SCAN_ROWS 为硬上限（started_at 降序 LIMIT，走
+/// model_usage_started_model_idx 前缀索引，绝不全表扫）。
+fn collect_model_speeds(conn: &Connection, window_start: i64) -> Vec<HudModelSpeed> {
+    let has = |col: &str| crate::db::has_column(conn, "model_usage", col);
+    if !has_table(conn, "model_usage") || !has("model_id") || !has("started_at") {
+        return Vec::new();
+    }
+    let has_status = has("status");
+    let status_expr = if has_status { "status" } else { "NULL" };
+    let sql = format!(
+        "SELECT COALESCE(model_id, ''), {status_expr}, started_at, {}, {}, {} \
+         FROM model_usage \
+         WHERE started_at >= ?1 AND model_id IS NOT NULL AND model_id != '' \
+         ORDER BY started_at DESC LIMIT ?2",
+        opt_expr(has("first_token_at"), "first_token_at"),
+        opt_expr(has("completed_at"), "completed_at"),
+        num_expr(has("output_tokens"), "output_tokens"),
+    );
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return Vec::new();
+    };
+    let rows = stmt.query_map(
+        rusqlite::params![window_start, MODEL_SPEED_SCAN_ROWS],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        },
+    );
+    let Ok(rows) = rows else {
+        return Vec::new();
+    };
+
+    // 单趟聚合：行按 started_at 降序，每模型首条可信样本即"最近一笔"。
+    // 输出排序键 last_at 随聚合暂存，出口重排。
+    struct ModelSpeedAgg {
+        last_at: i64,
+        last_tps: f64,
+        /// 样本池内单笔最快 / 最慢速度（首笔样本在 or_insert 初始化）
+        max_tps: f64,
+        min_tps: f64,
+        sum_out: i64,
+        sum_ms: i64,
+        samples: i64,
+    }
+    let mut aggs: BTreeMap<String, ModelSpeedAgg> = BTreeMap::new();
+    for row in rows.flatten() {
+        let (model, status, started_at, first, completed, output) = row;
+        if model.is_empty() || started_at <= 0 {
+            continue;
+        }
+        // 完成判定：status 列缺失按全完成降级；列存在时行值为 NULL/
+        // error/cancelled 均不计（与 collect_session_brief 同口径）
+        if has_status && status.as_deref() != Some("completed") {
+            continue;
+        }
+        // 可信样本：两时刻齐全、时序正常（completed > first > 0）且
+        // output > 0（0 速度无意义），否则跳过不产生样本
+        let (Some(first), Some(completed)) = (first, completed) else {
+            continue;
+        };
+        if first <= 0 || completed <= first || output <= 0 {
+            continue;
+        }
+        let gen_ms = completed - first;
+        let tps = output as f64 * 1000.0 / gen_ms as f64;
+        let entry = aggs.entry(model).or_insert(ModelSpeedAgg {
+            last_at: started_at,
+            last_tps: tps,
+            max_tps: tps,
+            min_tps: tps,
+            sum_out: 0,
+            sum_ms: 0,
+            samples: 0,
+        });
+        // DESC 序首见即最近一笔；同刻多行取先到者（防御乱序 only >）
+        if started_at > entry.last_at {
+            entry.last_at = started_at;
+            entry.last_tps = tps;
+        }
+        // 单笔最快 / 最慢（首笔已在 or_insert 初始化，逐笔比较即可）
+        if tps > entry.max_tps {
+            entry.max_tps = tps;
+        }
+        if tps < entry.min_tps {
+            entry.min_tps = tps;
+        }
+        entry.sum_out += output;
+        entry.sum_ms += gen_ms;
+        entry.samples += 1;
+    }
+
+    let mut out: Vec<(i64, HudModelSpeed)> = aggs
+        .into_iter()
+        .filter(|(_, a)| a.sum_ms > 0)
+        .map(|(model, a)| {
+            (
+                a.last_at,
+                HudModelSpeed {
+                    model,
+                    tps: a.last_tps,
+                    avg_tps: a.sum_out as f64 * 1000.0 / a.sum_ms as f64,
+                    max_tps: a.max_tps,
+                    min_tps: a.min_tps,
+                    samples: a.samples,
+                },
+            )
+        })
+        .collect();
+    // 按最近使用时间降序（同刻按模型名稳定排序），至多前 3 个模型
+    out.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.model.cmp(&b.1.model)));
+    out.truncate(HUD_MAX_MODEL_ROWS);
+    out.into_iter().map(|(_, s)| s).collect()
 }
 
 /// 活跃时刻合并（同一会话两信号取更晚者）
@@ -1245,7 +2210,7 @@ fn collect_session_brief(
 
         if is_completed && started_at >= agg.latest_completed_at {
             agg.latest_completed_at = started_at;
-            agg.latest_completed = Some((output, dur, ttft));
+            agg.latest_completed = Some(LatestCompleted { output, dur, ttft });
         }
     }
 
@@ -1286,7 +2251,11 @@ fn collect_session_brief(
     // DB 口径速度（rollout 缺失/未观测时的 fallback）："最近生成速率"
     // 语义，生成中与空闲同值不归 0（空闲保持显示该值，是否在生成由
     // 状态点表达）。TTFT 恒为最近一笔完成请求的值（静态参考）。
-    let (lc_out, lc_dur, lc_ttft) = agg.latest_completed.unwrap_or((0, None, None));
+    let lc = agg.latest_completed.as_ref();
+    let (lc_out, lc_dur, lc_ttft) = match lc {
+        Some(c) => (c.output, c.dur, c.ttft),
+        None => (0, None, None),
+    };
     let speed = turn_speed(lc_out, lc_dur, lc_ttft);
 
     // 模型集合序列化：按最近使用降序（当前模型排首）逗号拼接，注入版
@@ -1336,8 +2305,16 @@ struct SessionAgg {
     tails: BTreeMap<String, MemberTail>,
     /// 最近一笔完成请求的 started_at（比较键，初值 MIN 保证首行入选）
     latest_completed_at: i64,
-    /// 最近一笔完成请求的 (output, duration_ms, time_to_first_token_ms)
-    latest_completed: Option<(i64, Option<i64>, Option<i64>)>,
+    /// 最近一笔完成请求（速度/TTFT 共用数据源）
+    latest_completed: Option<LatestCompleted>,
+}
+
+/// 树内最近一笔 completed 请求摘要（速度 fallback / TTFT 共用数据源，
+/// 只保留这两个消费方需要的最小字段）
+struct LatestCompleted {
+    output: i64,
+    dur: Option<i64>,
+    ttft: Option<i64>,
 }
 
 /// 树内单个成员的最新一笔 model_usage 摘要（生成中判定输入）
@@ -1791,6 +2768,8 @@ mod tests {
         let default = SessionHudConfig::default();
         assert!(!default.enabled);
         assert_eq!(default.width, HUD_DEFAULT_WIDTH);
+        assert_eq!(default.height, None, "从未拖拽 = 自适应高度模式");
+        assert_eq!(default.font_scale, HUD_FONT_SCALE_DEFAULT);
         assert_eq!(default.window_minutes, HUD_WINDOW_MINUTES_DEFAULT);
         assert_eq!(default.pos, None);
         assert!(default.show_tokens && default.show_model);
@@ -1804,6 +2783,8 @@ mod tests {
             "\"enabled\"",
             "\"pos\"",
             "\"width\"",
+            "\"height\"",
+            "\"fontScale\"",
             "\"opacity\"",
             "\"windowMinutes\"",
             "\"showTokens\"",
@@ -1812,7 +2793,8 @@ mod tests {
             assert!(text.contains(key), "session-hud.json 缺少字段 {key}：{text}");
         }
         // 旧版配置文件兼容：改版前残留的 showContextBar 字段被 serde
-        // 默认忽略，解析不失败（下次保存自然收敛到新字段集）
+        // 默认忽略、缺 height/fontScale 按默认补齐（自适应高度 + 不缩放），
+        // 解析不失败（下次保存自然收敛到新字段集）
         fs::write(
             &path,
             r#"{"enabled":true,"showContextBar":false,"windowMinutes":30}"#,
@@ -1822,21 +2804,25 @@ mod tests {
         assert!(legacy.enabled);
         assert_eq!(legacy.window_minutes, 30);
         assert_eq!(legacy.show_tokens, true, "缺字段按默认补齐");
+        assert_eq!(legacy.height, None, "旧配置无用户尺寸 → 自适应模式");
+        assert_eq!(legacy.font_scale, HUD_FONT_SCALE_DEFAULT);
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn 配置_clamp收敛() {
-        // 宽度/透明度越界夹回合法域；档位归一到四个合法值
+        // 宽度/高度/透明度越界夹回合法域；档位归一到四个合法值
         let c = SessionHudConfig {
             width: 100.0,
+            height: Some(50.0),
             opacity: 5.0,
             window_minutes: 7,
             ..SessionHudConfig::default()
         }
         .clamped();
-        assert_eq!(c.width, HUD_WIDTH_RANGE.0);
+        assert_eq!(c.width, HUD_MIN_WIDTH);
+        assert_eq!(c.height, Some(HUD_MIN_HEIGHT));
         assert_eq!(c.opacity, HUD_OPACITY_RANGE.1);
         assert_eq!(c.window_minutes, HUD_WINDOW_MINUTES_DEFAULT);
         // 合法档位原样保留（含"不限"= 0）
@@ -1848,9 +2834,31 @@ mod tests {
                 m
             );
         }
-        // NaN 防御回默认宽度
-        let c = SessionHudConfig { width: f64::NAN, ..SessionHudConfig::default() }.clamped();
+        // NaN 防御回默认宽度；height NaN/负值回 None（自适应模式）
+        let c = SessionHudConfig {
+            width: f64::NAN,
+            height: Some(f64::NAN),
+            ..SessionHudConfig::default()
+        }
+        .clamped();
         assert_eq!(c.width, HUD_DEFAULT_WIDTH);
+        assert_eq!(c.height, None);
+        // 字体缩放：合法域内保留，越界/脏值回退 1.0
+        assert_eq!(
+            SessionHudConfig { font_scale: 1.25, ..SessionHudConfig::default() }
+                .clamped()
+                .font_scale,
+            1.25
+        );
+        for dirty in [0.5, 2.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                SessionHudConfig { font_scale: dirty, ..SessionHudConfig::default() }
+                    .clamped()
+                    .font_scale,
+                HUD_FONT_SCALE_DEFAULT,
+                "字体缩放脏值 {dirty} 应回退默认"
+            );
+        }
         // 开关不被 clamp 改动
         let c = SessionHudConfig { enabled: true, ..SessionHudConfig::default() }.clamped();
         assert!(c.enabled);
@@ -1859,18 +2867,465 @@ mod tests {
     #[test]
     fn 窗口高度_会话条数自适应与空态下限() {
         // 栅格锁定：与 session-hud.html 的 CSS 常量一一对应
-        //（头部 30 / 行 56 / 折叠行 20 / 底部留白 8 / 空态 64）
+        //（头部 30 / 行 56 / 列表区边框 1 / 折叠行 20 / 今日行 20 /
+        // 模型速度行 20 + 区边框 1 / 底部留白 8 / 空态 64）
         assert_eq!(HUD_ROW_H, 56.0);
-        // 空列表：空态最小高（显示"暂无活跃会话"，不为 0 高）
-        assert_eq!(hud_height(0, false), HUD_EMPTY_HEIGHT);
-        assert_eq!(hud_height(0, true), HUD_EMPTY_HEIGHT);
-        // 头部 + 行 × 条数 + 底部留白
-        assert_eq!(hud_height(1, false), 30.0 + 56.0 + 8.0);
-        assert_eq!(hud_height(3, false), 30.0 + 3.0 * 56.0 + 8.0);
-        // 超出上限折叠：5 行 + 折叠提示行
-        assert_eq!(hud_height(9, true), 30.0 + 5.0 * 56.0 + 20.0 + 8.0);
+        assert_eq!(HUD_TODAY_H, 20.0);
+        assert_eq!(HUD_MODEL_ROW_H, 20.0);
+        assert_eq!(HUD_LIST_BORDER_H, 1.0);
+        assert_eq!(HUD_MODELS_BORDER_H, 1.0);
+        // 空列表：空态最小高（显示"暂无活跃会话"，不为 0 高；空态不
+        // 显示今日行与模型速度区——两者都跟随列表存在）
+        assert_eq!(hud_height(0, false, false, 0, 1.0), HUD_EMPTY_HEIGHT);
+        assert_eq!(hud_height(0, true, false, 0, 1.0), HUD_EMPTY_HEIGHT);
+        assert_eq!(
+            hud_height(0, false, true, 0, 1.0),
+            HUD_EMPTY_HEIGHT,
+            "空态不显示今日行"
+        );
+        assert_eq!(
+            hud_height(0, false, false, 3, 1.0),
+            HUD_EMPTY_HEIGHT,
+            "空态不显示模型速度区"
+        );
+        // 头部 + 行 × 条数 + 列表区边框 + 底部留白
+        assert_eq!(
+            hud_height(1, false, false, 0, 1.0),
+            30.0 + 56.0 + 1.0 + 8.0
+        );
+        assert_eq!(
+            hud_height(3, false, false, 0, 1.0),
+            30.0 + 3.0 * 56.0 + 1.0 + 8.0
+        );
+        // 超出上限折叠：5 行 + 折叠提示行 + 今日行
+        assert_eq!(
+            hud_height(9, true, true, 0, 1.0),
+            30.0 + 5.0 * 56.0 + 1.0 + 20.0 + 20.0 + 8.0
+        );
         // 折叠标志在可见行数内不生效
-        assert_eq!(hud_height(2, true), hud_height(2, false) + 0.0);
+        assert_eq!(
+            hud_height(2, true, false, 0, 1.0),
+            hud_height(2, false, false, 0, 1.0) + 0.0
+        );
+        // 今日行独立叠加
+        assert_eq!(
+            hud_height(2, false, true, 0, 1.0),
+            hud_height(2, false, false, 0, 1.0) + HUD_TODAY_H
+        );
+        // 模型速度区：每行 20px + 区边框 1px，超过 3 行按上限 3 行计
+        assert_eq!(
+            hud_height(2, false, false, 2, 1.0),
+            hud_height(2, false, false, 0, 1.0) + 2.0 * HUD_MODEL_ROW_H + HUD_MODELS_BORDER_H
+        );
+        assert_eq!(
+            hud_height(2, false, false, 5, 1.0),
+            hud_height(2, false, false, 0, 1.0) + 3.0 * HUD_MODEL_ROW_H + HUD_MODELS_BORDER_H,
+            "模型速度行数超过上限按 3 行计"
+        );
+        // 字体缩放：整体等比缩放（与页面 --hud-scale 栅格一致）
+        assert_eq!(
+            hud_height(2, false, false, 0, 1.4),
+            hud_height(2, false, false, 0, 1.0) * 1.4
+        );
+        assert_eq!(
+            hud_height(2, false, false, 0, 0.8),
+            hud_height(2, false, false, 0, 1.0) * 0.8
+        );
+        // 脏 font_scale 回退 1.0
+        assert_eq!(
+            hud_height(2, false, false, 0, 3.0),
+            hud_height(2, false, false, 0, 1.0)
+        );
+        assert_eq!(
+            hud_height(2, false, false, 0, f64::NAN),
+            hud_height(2, false, false, 0, 1.0)
+        );
+    }
+
+    #[test]
+    fn 程序侧目标尺寸_取整与最小高夹取() {
+        // 取整：font_scale（0.8~1.4 步进 0.05）让 hud_height 出 .25 / .75
+        // 等小数（95 × 1.05 = 99.75）——LogicalSize 小数到物理像素四舍五入
+        // 后回声与目标精确相等判定不成立，会被 Resized 挂点当成用户尺寸
+        // 落盘（自适应高度静默变固定尺寸），故目标先取整
+        assert_eq!(hud_target_size(300.0, 217.35), (300.0, 217.0));
+        assert_eq!(hud_target_size(300.0, 227.7), (300.0, 228.0));
+        assert_eq!(hud_target_size(300.0, 258.75), (300.0, 259.0));
+        // 与公式出口直连：3 行 × font_scale 1.05 = 217.35 → 217
+        assert_eq!(
+            hud_target_size(300.0, hud_height(3, false, false, 0, 1.05)),
+            (300.0, 217.0)
+        );
+        assert_eq!(
+            hud_target_size(300.0, hud_height(3, false, false, 0, 1.1)),
+            (300.0, 228.0)
+        );
+        assert_eq!(
+            hud_target_size(300.0, hud_height(5, false, false, 0, 1.05)),
+            (300.0, 335.0)
+        );
+        // 最小高夹取：建窗 min_inner_size（HUD_MIN_HEIGHT = 160）会钳住更矮
+        // 的 set_size（空态 64 / 单行 95 / 两行 151 全在其下，窗口实际就是
+        // 160 高），目标不夹取则永远对不上回声（同上误判）
+        assert_eq!(hud_target_size(300.0, 64.0), (300.0, 160.0));
+        assert_eq!(
+            hud_target_size(300.0, hud_height(0, false, false, 0, 1.0)),
+            (300.0, 160.0),
+            "空态 64 被 min_inner_size 钳到 160"
+        );
+        assert_eq!(
+            hud_target_size(300.0, hud_height(1, false, false, 0, 1.0)),
+            (300.0, 160.0),
+            "单行 95 被 min_inner_size 钳到 160"
+        );
+        assert_eq!(
+            hud_target_size(300.0, hud_height(2, false, false, 0, 1.0)),
+            (300.0, 160.0),
+            "两行 151 被 min_inner_size 钳到 160"
+        );
+        // 不低于最小高：自适应值本身即生效尺寸，原样保留
+        assert_eq!(hud_target_size(300.0, 207.0), (300.0, 207.0));
+        // 宽度同口径：取整（配置手改小数不产生残差）+ 夹回拖拽合法域
+        assert_eq!(hud_target_size(283.3333333333333, 207.0), (283.0, 207.0));
+        assert_eq!(hud_target_size(1120.5, 207.0), (1121.0, 207.0));
+        assert_eq!(hud_target_size(120.0, 207.0), (HUD_MIN_WIDTH, 207.0));
+    }
+
+    #[test]
+    fn 回声与目标一致_容差覆盖缩放取整残差() {
+        // 精确相等（程序侧目标就是回声自身）：一致
+        assert!(size_matches_target((300.0, 207.0), Some((300.0, 207.0))));
+        // 系统缩放 125% / 150%：逻辑目标转物理像素取整后回除不复原原值
+        //（1.25 × 98 = 122.5 → 123 → 98.4；1.5 × 99 = 148.5 → 149 →
+        // 99.33），残差落在容差内——不认这类回声就会把程序自身的 set_size
+        // 当成用户尺寸落盘（自适应高度静默冻结）
+        assert!(size_matches_target((300.0, 98.4), Some((300.0, 98.0))));
+        assert!(size_matches_target((300.0, 99.33333333333333), Some((300.0, 99.0))));
+        assert!(size_matches_target((283.4, 207.2), Some((283.0, 207.0))));
+        // 容差外：真·用户拖拽，需落盘
+        assert!(!size_matches_target((300.0, 240.0), Some((300.0, 200.0))));
+        assert!(!size_matches_target((420.0, 207.0), Some((300.0, 207.0))));
+        // 任一轴超出容差即不一致（宽度拖出 30px 必须落盘）
+        assert!(!size_matches_target((330.0, 207.2), Some((300.0, 207.0))));
+        // 无目标记录（刚建窗 / 首拍）不算回声
+        assert!(!size_matches_target((300.0, 207.0), None));
+    }
+
+    #[test]
+    fn 今日行显隐_跟随数据行开关() {
+        // 与前端 renderShell 的 showToday 同条件：show_tokens 关闭即整行
+        // 隐藏（不想看数字的用户今日合计也不显示，窗口高度随之收缩）
+        assert!(today_visible(true, 100, 2));
+        assert!(!today_visible(false, 100, 2), "关闭数据行时今日行一并隐藏");
+        assert!(!today_visible(true, 0, 2), "今日无请求不显示");
+        assert!(!today_visible(true, 100, 0), "空态不显示今日行");
+    }
+
+    #[test]
+    fn 模型速度区显隐_跟随数据行开关() {
+        // 与前端 renderShell 的 showModels 逐字同条件：show_tokens 关闭、
+        // 窗口内无可信样本或空态均不显示（速度属数字信息，与今日行同
+        // 规则随数据行开关隐藏，窗口高度随之增减）
+        assert!(model_speed_visible(true, 2, 3));
+        assert!(
+            !model_speed_visible(false, 2, 3),
+            "关闭数据行时模型速度区一并隐藏"
+        );
+        assert!(!model_speed_visible(true, 0, 3), "无可信样本不显示");
+        assert!(!model_speed_visible(true, 2, 0), "空态不显示模型速度区");
+    }
+
+    #[test]
+    fn 尺寸同步_用户调整中跳过且同尺寸不重复设置() {
+        // 尺寸变化 → 需同步；同尺寸 → 跳过（防无谓 set_size 回声）
+        assert!(should_sync_size(false, Some((300.0, 200.0)), (305.0, 220.0)));
+        assert!(!should_sync_size(false, Some((300.0, 200.0)), (300.0, 200.0)));
+        // 无上次目标（首拍）→ 需同步
+        assert!(should_sync_size(false, None, (300.0, 200.0)));
+        // 用户正在拖拽热区（HUD_USER_RESIZING 置位）→ 一律跳过：否则自适应
+        // 高度模式每拍把高度拉回公式值，用户拖不动 / 闪跳
+        assert!(!should_sync_size(true, Some((300.0, 200.0)), (305.0, 400.0)));
+        assert!(!should_sync_size(true, None, (305.0, 400.0)));
+        // 标志置位 / 清除（前端 begin/end 命令 + 窗口销毁重建兜底共用）
+        set_user_resizing(true);
+        assert!(user_resizing());
+        set_user_resizing(false);
+        assert!(!user_resizing());
+        // ---- Bug 1 顺序契约锁定：end 先落盘后清标志 ----
+        // session_hud_resize_end 必须先完成终值落盘再清标志。下面用真实
+        // 全局状态复现 end 的关键序列（置位 → 落盘判定 → 清理），锁定
+        // "落盘完成前 poll_db 的 set_size 判定必须被标志拦住"：若 end 先
+        // 清标志（旧 Bug），清标志后、cfg.height 落盘前的竞态窗口内
+        // poll_db 读旧配置（height=None）算自适应高度并 set_size，把窗口
+        // 打回自适应值（松手后高度弹回 / 闪跳）
+        set_user_resizing(true);
+        store_resize_snapshot((300.0, 207.0));
+        // 落盘尚未完成（persist 之前）：poll_db 判定必须跳过（标志置位）
+        assert!(
+            !should_sync_size(user_resizing(), Some((300.0, 207.0)), (300.0, 400.0)),
+            "落盘完成前 poll_db 不得放行 set_size（防打回自适应值）"
+        );
+        assert!(!should_apply_size_now(user_resizing()));
+        // 收尾（persist 已完成，cfg.height 已是用户值）：清标志 + 清快照
+        clear_resize_snapshot();
+        set_user_resizing(false);
+        // 清标志后放行：此时 cfg.height 已落盘为用户值，poll_db 的 set_size
+        // 与用户值同值，冗余无害
+        assert!(should_sync_size(user_resizing(), Some((300.0, 207.0)), (300.0, 400.0)));
+    }
+
+    #[test]
+    fn 用户活动宽限期_纯函数时序判定() {
+        // 从未有用户 Resized（锚点 0）：不拦截（与空闲态一致，宽限期不是
+        // 常驻抑制）
+        assert!(!user_size_active(false, 0, 1_000_000));
+        // 标志置位恒为活动期（正常路径：begin 置位 → end 清除）
+        assert!(user_size_active(true, 0, 1_000_000));
+        // 最后用户 Resized 后不足宽限期：拦截（promise 提前 settle 后用户
+        // 仍在拖的整段由每帧刷新的锚点持续覆盖；松手后仍在事件队列里的
+        // 最后一个 Resized 事件同理）
+        assert!(user_size_active(false, 10_000, 12_499));
+        // 恰好到期（2.5 秒边界）：解除拦截
+        assert!(!user_size_active(false, 10_000, 12_500));
+        assert!(!user_size_active(false, 10_000, 60_000));
+        // 锚点晚于当前时刻（时钟回拨 / 残值）：saturating_sub 归 0 判活动，
+        // 不产生 underflow panic
+        assert!(user_size_active(false, 20_000, 10_000));
+    }
+
+    #[test]
+    fn 用户活动宽限期_锚点刷新驱动poll持续让路() {
+        // 复现根因 A 时序并锁定拦截链路：N 向原生 startResizeDragging 的
+        // promise 提前 settle（Windows 竞态）→ end 提前清标志 → 用户继续
+        // 拖。期间每帧 Resized 经挂点刷新锚点（此处直接驱动
+        // mark_user_resized 模拟挂点侧写），poll_db 的两处拦截判定都必须
+        // 持续让路——否则 set_size 与拖拽打架（限高观感）+ 终值无人落盘
+        mark_user_resized(0); // 复位（静态量全局共享，避免影响其它用例）
+        // promise 提前 settle 后、下一帧 Resized 到达前：标志已清且锚点
+        // 陈旧，不拦截（宽限期尚未被新帧锚定——挂点先于本判定刷新则自然
+        // 进入拦截，见下）
+        assert!(!user_size_active(false, last_user_resized_at(), 10_000));
+        // 用户继续拖：每帧 Resized 刷新锚点（挂点侧写）
+        mark_user_resized(10_500);
+        assert_eq!(last_user_resized_at(), 10_500);
+        // 宽限期内：should_sync_size（poll_db 主判定）与 should_apply_size_
+        // now（闭包双检）都必须拦截
+        assert!(
+            !should_sync_size(
+                user_size_active(false, last_user_resized_at(), 12_999),
+                Some((300.0, 258.0)),
+                (300.0, 400.0)
+            ),
+            "宽限期内 poll_db 不得放行 set_size（防打架 + 终值落盘）"
+        );
+        assert!(
+            !should_apply_size_now(user_size_active(
+                false,
+                last_user_resized_at(),
+                12_999
+            )),
+            "闭包双检同样让路（执行时刻重新合成判定）"
+        );
+        // 持续拖拽任意久都覆盖：每帧刷新锚点，宽限期从最后一帧起算
+        mark_user_resized(600_000);
+        assert!(user_size_active(false, last_user_resized_at(), 602_499));
+        // 真实松手（最后一帧后 2.5s）：拦截解除，poll_db 恢复正常同步
+        assert!(!user_size_active(false, last_user_resized_at(), 602_500));
+        mark_user_resized(0); // 复位
+    }
+
+    #[test]
+    fn 宽限期到期核校_纯函数触发判定() {
+        // 宽限期内（用户仍可能在拖 / 终值尚未定格）：不核校——此时任何
+        // 程序侧动作（含读尺寸落盘）都可能与拖拽打架或读到中间值
+        assert!(!grace_check_due(true, true));
+        assert!(!grace_check_due(true, false));
+        // 宽限期刚过且有 pending（宽限期内出现过用户尺寸活动且尚未核校）：
+        // 核校——终值兜底落盘的唯一触发形态
+        assert!(grace_check_due(false, true));
+        // 无 pending（从未有用户尺寸活动 / 上一轮已核校消费）：不核校，
+        // 空闲态零额外开销（每拍只多一次原子读）
+        assert!(!grace_check_due(false, false));
+    }
+
+    #[test]
+    fn 宽限期待核校标志_置位与消费生命周期() {
+        // 挂点置位（record_user_size 判定为用户尺寸时与 mark_user_resized
+        // 同处）→ poll_db 到期核校消费（无论是否落盘、无论读取成败都必须
+        // 消费——否则空闲期每拍重复核校）；置位可重复（拖拽每帧都置，幂等）
+        clear_grace_pending();
+        assert!(!grace_pending(), "初始/复位态无待核校");
+        mark_grace_pending();
+        assert!(grace_pending(), "用户尺寸事件置位待核校");
+        mark_grace_pending();
+        assert!(grace_pending(), "重复置位幂等（拖拽每帧）");
+        clear_grace_pending();
+        assert!(!grace_pending(), "核校完成必须消费 pending");
+        clear_grace_pending(); // 复位收尾（静态量全局共享，避免影响其它用例）
+    }
+
+    #[test]
+    fn 宽限期到期核校_终值丢失形态的触发时序() {
+        // 复现修复目标的完整时序（根因兜底链路）：promise 提前 settle →
+        // resize_end 提前执行（清标志/快照 + persist 当时值）→ 用户继续拖
+        // 的最后一段距上次节流 persist < 1 秒、松手后没有第二次 end → 终值
+        // 无人落盘 → 宽限期一过 poll_db 将按旧 cfg.height set_size 拉回。
+        // 修复链路：拖拽期间每帧 Resized 都置 pending（挂点侧写：与
+        // mark_user_resized 同处置位）→ 宽限期一过触发一次核校 → 消费后
+        // 不再重复核校。核校本体的"读实际尺寸 + 兜底落盘 + 重读 cfg 覆盖
+        // 局部变量"在 poll_db 内联执行（依赖 AppHandle 与主线程事件循环，
+        // 不可单元测试），本用例锁定其触发时序契约
+        mark_user_resized(0);
+        clear_grace_pending();
+        // 最后一帧用户 Resized（挂点侧写）
+        mark_user_resized(10_000);
+        mark_grace_pending();
+        let active_at = |now: u64| user_size_active(false, last_user_resized_at(), now);
+        // 宽限期内：不核校（等终值定格 / 不与拖拽打架）
+        assert!(!grace_check_due(active_at(12_499), grace_pending()));
+        // 宽限期刚过（12_500 边界）：核校触发——终值落盘的最后机会
+        assert!(grace_check_due(active_at(12_500), grace_pending()));
+        // 核校完成消费 pending：同拍后续 / 之后每拍都不再核校（与
+        // resize_end 的正常核校路径幂等共存，persist 同值直接跳过写盘）
+        clear_grace_pending();
+        assert!(!grace_check_due(active_at(12_600), grace_pending()));
+        mark_user_resized(0); // 复位
+    }
+
+    #[test]
+    fn 尺寸纪元_递增作废feed局部记忆强制重同步() {
+        // 复现根因 B 并锁定自愈链路：用户拖到 600，feed 线程局部 last_size
+        // 仍停在记忆值 (300,258)——目标与记忆相等时 should_sync_size 跳过，
+        // HWND 与程序认知脱钩（600 空壳 / WebView 视口停在 258）。resize_end
+        // 收尾递增尺寸纪元（真实调用点在 session_hud_resize_end）→ feed
+        // 线程作废局部记忆 → 下一拍必然放行一次 set_size（强制 HWND/WebView
+        // 与配置一致）
+        let mut last_size = Some((300.0, 258.0)); // feed 线程局部记忆（脱钩值）
+        let mut base = size_epoch();
+        let target = (300.0, 258.0); // cfg.height 未落盘时下一拍的自适应目标
+        // 纪元未变：记忆 == 目标 → 跳过（脱钩态即 Bug 现状）
+        assert!(!should_sync_size(false, last_size, target));
+        // resize_end 收尾 / 建窗路径递增纪元
+        bump_size_epoch();
+        let now_epoch = size_epoch();
+        assert_ne!(now_epoch, base, "递增必须可被 feed 线程观测");
+        if now_epoch != base {
+            base = now_epoch;
+            last_size = None; // feed_loop 的纪元比对逻辑（见 HUD_SIZE_EPOCH）
+        }
+        assert_eq!(last_size, None, "纪元变化后局部记忆必须作废");
+        // 下一拍：无记忆 → 必然放行一次 set_size（强制同步，消除脱钩态）
+        assert!(should_sync_size(false, last_size, target));
+        // 同步成功后记忆恢复，同目标不再重复 set_size（既有语义不变）
+        last_size = Some(target);
+        assert!(!should_sync_size(false, last_size, target));
+    }
+
+    #[test]
+    fn 拖拽落盘轴向合并_纯拖宽不固化自适应高度() {
+        // Bug 2 锁定：用户纯拖宽度（高度与拖前快照一致，容差内）时
+        // cfg.height 不被当时的自适应高度覆写
+        // 快照存在 + 高度未动（自适应模式）→ height 保持 None（自适应
+        // 不被悄悄冻结，会话增多时高度继续自适应）
+        assert_eq!(
+            merge_persist_axes(None, (380.0, 207.0), Some((300.0, 207.0))),
+            (380.0, None)
+        );
+        // 快照存在 + 高度未动（容差覆盖取整 / 缩放残差，原用户固定高度）
+        // → height 保持原用户值
+        assert_eq!(
+            merge_persist_axes(Some(400.0), (380.0, 400.4), Some((300.0, 400.0))),
+            (380.0, Some(400.0))
+        );
+        // 快照存在 + 高度变了（超出容差）→ 写死用户值
+        assert_eq!(
+            merge_persist_axes(None, (300.0, 400.0), Some((300.0, 207.0))),
+            (300.0, Some(400.0))
+        );
+        // 快照缺失（begin 读取失败 / 飞快拖拽的窄竞态）→ 现状行为：两轴都写
+        assert_eq!(
+            merge_persist_axes(None, (380.0, 207.0), None),
+            (380.0, Some(207.0))
+        );
+        assert_eq!(
+            merge_persist_axes(Some(400.0), (380.0, 260.0), None),
+            (380.0, Some(260.0))
+        );
+        // 宽度轴恒为拖后值（宽度是纯用户语义，无自适应，不受快照影响）
+        assert_eq!(
+            merge_persist_axes(None, (260.0, 207.0), Some((4096.0, 207.0))),
+            (260.0, None)
+        );
+    }
+
+    #[test]
+    fn 拖前快照_存取与清理生命周期() {
+        // begin 存入 / end 与兜底路径（建窗 / 销毁）清理：残留旧快照会
+        // 污染下一次拖拽的高度轴判定（merge_persist_axes 拿旧值当拖前
+        // 基准），生命周期必须闭环
+        clear_resize_snapshot();
+        assert_eq!(resize_snapshot(), None, "会话外无快照");
+        store_resize_snapshot((300.0, 207.0));
+        assert_eq!(resize_snapshot(), Some((300.0, 207.0)));
+        clear_resize_snapshot();
+        assert_eq!(resize_snapshot(), None, "end 收尾后快照必须清空");
+    }
+
+    #[test]
+    fn 尺寸双检_投递闭包执行时复查标志() {
+        // V2 竞态消除：poll_db 的 set_size 闭包从投递到主线程实际执行存在
+        // 时间窗，期间用户可能按下热区——闭包内复查 user_resizing，置位则
+        // 放弃本次 set_size（防排队闭包把拖拽起始阶段的高度拉回公式值）
+        assert!(should_apply_size_now(false), "空闲时投递闭包正常 set_size");
+        assert!(
+            !should_apply_size_now(true),
+            "闭包执行时用户已开始拖拽 → 跳过 set_size"
+        );
+    }
+
+    #[test]
+    fn 热区终值落盘判定_未拖动与脏尺寸不落盘() {
+        // 前端拖出的尺寸与程序侧目标不同 → 落盘
+        assert!(should_persist_resize_result((305.0, 240.0), Some((300.0, 200.0))));
+        // 无目标记录（首拍 / 刚建窗）→ 落盘
+        assert!(should_persist_resize_result((305.0, 240.0), None));
+        // 点住热区未拖动（≈ 程序侧目标）：不落盘——自适应高度模式不被一次
+        // 点击误冻结成用户固定尺寸；容差内（取整 / 缩放换算残差）同样不落
+        assert!(!should_persist_resize_result((300.0, 200.0), Some((300.0, 200.0))));
+        assert!(!should_persist_resize_result((300.4, 199.6), Some((300.0, 200.0))));
+        // 低于最小尺寸（最小化 / 系统抖动）→ 不落盘（与 Resized 挂点同口径）
+        assert!(!should_persist_resize_result((120.0, 100.0), Some((300.0, 200.0))));
+        assert!(!should_persist_resize_result((300.0, 100.0), Some((300.0, 200.0))));
+    }
+
+    #[test]
+    fn 尺寸槽_回声不进槽用户尺寸进槽() {
+        // 槽（HUD_SIZE）只承载"用户产生的尺寸"：Destroyed 挂点的关窗冲刷
+        // 无节流直接读槽落盘，程序侧 set_size 回声一旦进槽，关窗时就会被
+        // 当成用户尺寸写进 cfg.height，自适应高度模式被永久冻结
+        let read_slot = || *hud_size_slot().lock().unwrap();
+        *hud_size_slot().lock().unwrap() = None;
+        // 程序侧自适应 set_size 的回声（与 LAST_SIZE 一致）：不进槽
+        assert!(!record_user_size((300.0, 207.0), Some((300.0, 207.0))));
+        assert_eq!(read_slot(), None, "回声不写内存槽（关窗冲刷不落盘）");
+        // 缩放取整残差回声（125% 下 1.25 × 98 = 122.5 → 123 → 98.4）同理
+        assert!(!record_user_size((300.0, 98.4), Some((300.0, 98.0))));
+        assert_eq!(read_slot(), None);
+        // 低于最小尺寸（最小化 / 系统抖动）：不进槽
+        assert!(!record_user_size((120.0, 100.0), Some((300.0, 207.0))));
+        assert_eq!(read_slot(), None);
+        // 用户拖拽出的尺寸（与程序侧目标不同）：进槽 → 关窗冲刷落盘的就是它
+        assert!(record_user_size((380.0, 260.0), Some((300.0, 207.0))));
+        assert_eq!(read_slot(), Some((380.0, 260.0)));
+        // 用户尺寸之后再收到程序回声：不覆盖槽里已有的用户尺寸（关窗仍落
+        // 用户值，不会被随后一拍自适应 set_size 冲掉）
+        assert!(!record_user_size((300.0, 207.0), Some((300.0, 207.0))));
+        assert_eq!(read_slot(), Some((380.0, 260.0)));
+        // 无目标记录（刚建窗 / 首拍）按用户尺寸处理
+        assert!(record_user_size((380.0, 260.0), None));
+        assert_eq!(read_slot(), Some((380.0, 260.0)));
+        // 复位（静态槽全局共享，避免影响其它用例）
+        *hud_size_slot().lock().unwrap() = None;
     }
 
     #[test]
@@ -1975,6 +3430,21 @@ mod tests {
         assert_eq!(snap.sessions[2].ttft_ms, None);
         assert_eq!(snap.sessions[2].total, 0);
         assert_eq!(snap.sessions[2].req_count, 0);
+        // 今日合计（全库不分会话树；测试库全部行都在"今日"本地零点后）：
+        // in = 100+5+999+10、out = 200+6+999+20、⟲ = 50+0+0+5、
+        // total = Σcomputed_total_tokens = 300+11+1998+30、× = 4 行
+        let today = &snap.today_total;
+        assert_eq!(today.in_tokens, 1114);
+        assert_eq!(today.out_tokens, 1225);
+        assert_eq!(today.cache_read, 55);
+        assert_eq!(today.total, 2339, "total 应为 Σcomputed_total_tokens（主面板口径）");
+        assert_eq!(today.req_count, 4);
+        // 模型速度区：本测试库无 first_token_at/completed_at 列（老版本
+        // 库形态），应降级为空数组而不是报错
+        assert!(
+            snap.model_speeds.is_empty(),
+            "缺 first/completed 列的老库模型速度应降级为空"
+        );
 
         // 折叠：7 个活跃会话只展示 5 条，total_active = 7
         let (conn, path) = hud_db("fold");
@@ -2118,6 +3588,67 @@ mod tests {
     }
 
     #[test]
+    fn 今日合计_本地零点口径与全库聚合降级() {
+        use chrono::Timelike as _;
+        let (conn, path) = hud_db("today");
+        let now = 15_000_000_000_i64;
+        let start = today_start_ms(now);
+        // 零点落在 [now−24h, now] 内且为本地零点整点
+        assert!(start <= now && start > now - 86_400_000, "{start}");
+        let dt = chrono::DateTime::from_timestamp_millis(start).unwrap();
+        let local = dt.with_timezone(&chrono::Local);
+        assert_eq!((local.time().hour(), local.time().minute(), local.time().second()), (0, 0, 0));
+        // 全库聚合（不分会话树）：零点后两行计入、零点前行剔除
+        conn.execute_batch(&format!(
+            "INSERT INTO session VALUES ('s1', NULL, '/a'), ('s2', NULL, '/b');
+             INSERT INTO model_usage VALUES
+               ('s1', 't1', {t1}, 'M', 'completed', 100, 200, 0, 0, 40, 300),
+               ('s2', 't2', {t2}, 'M', 'error', 10, 20, 0, 0, 5, 30),
+               ('s1', 't0', {t0}, 'M', 'completed', 999, 999, 0, 0, 999, 1998);",
+            t1 = now - 1_000,
+            t2 = now - 2_000,
+            t0 = start - 1, /* 零点前一行（昨日）不计入 */
+        ))
+        .unwrap();
+        let today = collect_today_total(&conn, start).unwrap();
+        assert_eq!(today.in_tokens, 110, "失败轮（error）同样计入今日合计");
+        assert_eq!(today.out_tokens, 220);
+        assert_eq!(today.cache_read, 45, "⟲ = 40 + 5（两行 cache_read 合计）");
+        assert_eq!(today.total, 330, "total = Σcomputed_total_tokens");
+        assert_eq!(today.req_count, 2);
+        // 无今日行 → 全 0（前端不显示今日行）
+        assert_eq!(
+            collect_today_total(&conn, now - 500).unwrap(),
+            HudTodayTotal::default()
+        );
+        drop(conn);
+        let _ = fs::remove_file(&path);
+
+        // computed_total_tokens 列缺失的老库：total 等价退化为 in+out
+        let path2 = std::env::temp_dir().join(format!(
+            "zbar-session-hud-db-{}-nocomputed.sqlite",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path2);
+        let conn = Connection::open(&path2).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE model_usage (
+                session_id TEXT, turn_id TEXT, started_at INTEGER, model_id TEXT,
+                status TEXT, input_tokens INTEGER, output_tokens INTEGER,
+                cache_read_input_tokens INTEGER);",
+        )
+        .unwrap();
+        conn.execute_batch("INSERT INTO model_usage VALUES
+            ('s1', 't1', 1000, 'M', 'completed', 300, 50, 100);")
+            .unwrap();
+        let today = collect_today_total(&conn, 0).unwrap();
+        assert_eq!(today.in_tokens, 300);
+        assert_eq!(today.total, 350, "缺 computed 列时 total = in + out");
+        drop(conn);
+        let _ = fs::remove_file(&path2);
+    }
+
+    #[test]
     fn 口径_非缓存输入clamp与Σ合成() {
         // 个别行 cache_read 大于 input（异常/口径交叉）：↑ 按行 clamp 0，
         // 注入版"保守取小值"同款；Σ = ↑ + ↓ + ⟲
@@ -2142,6 +3673,151 @@ mod tests {
         assert_eq!(s.total, 60 + 10 + 90, "Σ 应为 ↑+↓+⟲（注入版 V15 口径）");
         assert_eq!(s.req_count, 2, "× = model_usage 行数");
 
+        drop(conn);
+        let _ = fs::remove_file(&path);
+    }
+
+    /// 模型速度区测试库（model_usage 带完整时刻列的最小 schema）
+    fn speed_zone_db(name: &str) -> (Connection, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "zbar-session-hud-mszone-{}-{name}.sqlite",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE model_usage (
+                session_id TEXT, turn_id TEXT, started_at INTEGER,
+                model_id TEXT, status TEXT,
+                first_token_at INTEGER, completed_at INTEGER,
+                input_tokens INTEGER, output_tokens INTEGER);",
+        )
+        .unwrap();
+        (conn, path)
+    }
+
+    #[test]
+    fn 模型速度区_最近值窗口均值排序与上限降级() {
+        let (conn, path) = speed_zone_db("zone");
+        let now = 20_000_000_000_i64;
+        let win_start = now - 10 * 60_000;
+        // M-main：5 笔可信样本（100/100/100 常规 + 200 快样本 + 50 慢样本）
+        //   → tps=100（最近一笔）、avg=700tok÷6.5s、max=200、min=50、samples=5
+        // M-fast：1 笔可信样本（60 t/s），比 M-main 新（单样本时 max=min=tps）
+        // M-dirty：error 行 / output=0 行 / 时序倒置行 → 无可信样本，不入列
+        // M-old：窗口外 → 不参与
+        conn.execute_batch(&format!(
+            "INSERT INTO model_usage VALUES
+               -- M-main 最早样本：1000ms 生成 100tok
+               ('s1', 't1', {a1}, 'M-main', 'completed', {a1} + 500, {a1} + 1500, 10, 100),
+               -- M-main 中间样本：500ms 生成 50tok
+               ('s1', 't2', {a2}, 'M-main', 'completed', {a2} + 200, {a2} + 700, 10, 50),
+               -- M-main 最新样本：3000ms 生成 300tok
+               ('s1', 't3', {a3}, 'M-main', 'completed', {a3} + 1000, {a3} + 4000, 10, 300),
+               -- M-main 更早的快样本：1000ms 生成 200tok → 200 t/s（最快）
+               ('s1', 't10', {a4}, 'M-main', 'completed', {a4} + 100, {a4} + 1100, 10, 200),
+               -- M-main 更早的慢样本：1000ms 生成 50tok → 50 t/s（最慢）
+               ('s1', 't11', {a5}, 'M-main', 'completed', {a5} + 100, {a5} + 1100, 10, 50),
+               -- M-fast：500ms 生成 30tok → 60 t/s
+               ('s1', 't4', {b1}, 'M-fast', 'completed', {b1} + 100, {b1} + 600, 10, 30),
+               -- M-dirty：error 状态（不计）
+               ('s1', 't5', {c1}, 'M-dirty', 'error', {c1} + 100, {c1} + 600, 10, 100),
+               -- M-dirty：output=0（无速度意义）
+               ('s1', 't6', {c2}, 'M-dirty', 'completed', {c2} + 100, {c2} + 600, 10, 0),
+               -- M-dirty：时序倒置 completed < first（除零防御跳过）
+               ('s1', 't7', {c3}, 'M-dirty', 'completed', {c3} + 500, {c3} + 300, 10, 100),
+               -- M-dirty：时刻 NULL（跳过）
+               ('s1', 't8', {c4}, 'M-dirty', 'completed', NULL, NULL, 10, 100),
+               -- M-old：窗口外（不参与）
+               ('s1', 't9', {old}, 'M-old', 'completed', {old} + 100, {old} + 600, 10, 100);",
+            a1 = now - 30_000,
+            a2 = now - 20_000,
+            a3 = now - 10_000,
+            a4 = now - 40_000,
+            a5 = now - 50_000,
+            b1 = now - 5_000,
+            c1 = now - 8_000,
+            c2 = now - 7_000,
+            c3 = now - 6_000,
+            c4 = now - 6_500,
+            old = now - 20 * 60_000,
+        ))
+        .unwrap();
+        let speeds = collect_model_speeds(&conn, win_start);
+        assert_eq!(speeds.len(), 2, "{speeds:?}");
+        // 排序按最近使用降序：M-fast(−5s) > M-main(−10s)
+        assert_eq!(speeds[0].model, "M-fast");
+        assert!((speeds[0].tps - 60.0).abs() < 1e-9);
+        assert!((speeds[0].avg_tps - 60.0).abs() < 1e-9);
+        assert!(
+            (speeds[0].max_tps - 60.0).abs() < 1e-9 && (speeds[0].min_tps - 60.0).abs() < 1e-9,
+            "单样本时最快/最慢与最近值同值：{speeds:?}"
+        );
+        assert_eq!(speeds[0].samples, 1);
+        assert_eq!(speeds[1].model, "M-main");
+        // tps = 最近一笔（300tok ÷ 3000ms = 100 t/s）；avg = 700tok ÷ 6.5s；
+        // 最快 = 200 t/s 快样本、最慢 = 50 t/s 慢样本（极端值不影响最近值）
+        assert!((speeds[1].tps - 100.0).abs() < 1e-9);
+        assert!((speeds[1].avg_tps - 700.0 * 1000.0 / 6_500.0).abs() < 1e-9);
+        assert!(
+            (speeds[1].max_tps - 200.0).abs() < 1e-9,
+            "最快应为样本池内单笔最快（含非最近样本）：{speeds:?}"
+        );
+        assert!(
+            (speeds[1].min_tps - 50.0).abs() < 1e-9,
+            "最慢应为样本池内单笔最慢（含非最近样本）：{speeds:?}"
+        );
+        assert_eq!(speeds[1].samples, 5);
+        // turn_id NULL 的后台请求行不过滤（速度语义与轮次无关）：
+        conn.execute_batch(&format!(
+            "INSERT INTO model_usage VALUES
+               ('s1', NULL, {n1}, 'M-null-turn', 'completed', {n1} + 100, {n1} + 1100, 10, 200);",
+            n1 = now - 4_000,
+        ))
+        .unwrap();
+        let speeds = collect_model_speeds(&conn, win_start);
+        assert_eq!(speeds.len(), 3);
+        assert_eq!(speeds[0].model, "M-null-turn", "NULL turn_id 后台请求计入");
+        assert!((speeds[0].tps - 200.0).abs() < 1e-9);
+        assert!(
+            (speeds[0].max_tps - 200.0).abs() < 1e-9
+                && (speeds[0].min_tps - 200.0).abs() < 1e-9,
+            "单样本的最快/最慢与最近值同值：{speeds:?}"
+        );
+
+        // 上限截断：再补 2 个比 M-main 更新的模型 → 5 个可信模型只留
+        // 最近 3 个（M-null-turn −4s、M-cap2 −2s、M-cap1 −1s）
+        conn.execute_batch(&format!(
+            "INSERT INTO model_usage VALUES
+               ('s1', 'ta', {d1}, 'M-cap1', 'completed', {d1} + 100, {d1} + 600, 10, 50),
+               ('s1', 'tb', {d2}, 'M-cap2', 'completed', {d2} + 100, {d2} + 600, 10, 50);",
+            d1 = now - 1_000,
+            d2 = now - 2_000,
+        ))
+        .unwrap();
+        let speeds = collect_model_speeds(&conn, win_start);
+        assert_eq!(speeds.len(), 3, "超过 3 个模型只留最近 3 个：{speeds:?}");
+        assert_eq!(
+            speeds
+                .iter()
+                .map(|s| s.model.as_str())
+                .collect::<Vec<_>>(),
+            vec!["M-cap1", "M-cap2", "M-null-turn"]
+        );
+
+        drop(conn);
+        let _ = fs::remove_file(&path);
+
+        // 老版本库缺 first/completed 列：降级为空数组不报错
+        let (conn, path) = speed_zone_db("legacy");
+        conn.execute_batch(&format!(
+            "INSERT INTO model_usage (session_id, turn_id, started_at, model_id, status,
+                input_tokens, output_tokens) VALUES
+               ('s1', 't1', {t}, 'M', 'completed', 10, 100);",
+            t = now - 1_000,
+        ))
+        .unwrap();
+        assert!(collect_model_speeds(&conn, win_start).is_empty());
         drop(conn);
         let _ = fs::remove_file(&path);
     }
