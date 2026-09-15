@@ -9,7 +9,9 @@
       面板（index.html）/宠物窗（pet.html）互不影响。页面为极简薄壳——
       - /src/session-hud-main.ts：宿主壳（监听 zbar://session-hud-usage
         数据快照与 zbar://session-hud-params 配置热推，invoke 读取初始
-        配置；列表渲染在壳内完成，不引入 panel 的组件体系）。
+        配置；列表渲染在壳内完成，不引入 panel 的组件体系；另监听
+        zbar://appearance-changed 同步主面板的语言与亮暗主题——语言变化
+        重读词典全量重渲染，主题变化给 <html> 切 .dark 类，纯 CSS 生效）。
       - 样式内联：尺寸常量（头部 30px / 会话行 56px / 模型速度行 20px /
         折叠行 20px / 今日行 20px / 底部留白 8px / 空态总高 64px）与
         Rust 侧 session_hud.rs 的 hud_height 计算一一对应——窗口高度由
@@ -45,9 +47,36 @@
       }
       /* 根节点即透明度作用层（设置卡透明度滑块 → CSS opacity）；
          --hud-scale 为字体缩放基准（默认 1，由 header 滑块 /
-         fontScale 配置经 JS 写入内联样式覆盖） */
+         fontScale 配置经 JS 写入内联样式覆盖）。
+         主题 token：颜色全部收敛为 --hud-* 变量，默认值为亮色主题
+         （半透明白底 + 深色字，配主面板亮色玻璃质感）；主面板切到暗色
+         时由 session-hud-main.ts 给本窗口 <html> 加 .dark 类，下方
+         html.dark 块整体覆盖为原有深色壳配色（半透明深底 + 浅色字，
+         原样式原样迁入，暗色观感与历史版本一致），切换即时生效 */
       #hud-root {
         --hud-scale: 1;
+        /* 亮色主题 token（默认值） */
+        --hud-bg: rgba(255, 255, 255, 0.78);
+        --hud-border: rgba(15, 23, 42, 0.14);
+        --hud-divider: rgba(15, 23, 42, 0.1);
+        --hud-divider-soft: rgba(15, 23, 42, 0.08);
+        --hud-text: #1e293b;
+        --hud-text-2: #64748b;
+        --hud-text-3: #94a3b8;
+        --hud-idle: #94a3b8;
+        --hud-ok: #059669;
+        --hud-warn: #d97706;
+        --hud-err: #dc2626;
+        --hud-accent-sub: #7c3aed;
+        --hud-accent-model: #0284c7;
+        --hud-track: rgba(15, 23, 42, 0.15);
+        --hud-thumb: #64748b;
+        --hud-thumb-hover: #334155;
+        --hud-thumb-active: #1e293b;
+        --hud-scrollbar: rgba(15, 23, 42, 0.25);
+        --hud-scrollbar-hover: rgba(15, 23, 42, 0.4);
+        --hud-flash-text: #0f172a;
+        --hud-flash-glow: rgba(2, 132, 199, 0.45);
         position: relative;
         box-sizing: border-box;
         width: 100%;
@@ -58,9 +87,34 @@
         font-family:
           -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
           "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-        color: #e2e8f0;
+        color: var(--hud-text);
         user-select: none;
         cursor: default;
+      }
+      /* 暗色主题 token：原有深色壳配色原样迁入（历史版本观感零变化）。
+         选择器带 .dark 提高特异性，覆盖上方同名默认值 */
+      html.dark #hud-root {
+        --hud-bg: rgba(10, 14, 24, 0.72);
+        --hud-border: rgba(148, 163, 184, 0.16);
+        --hud-divider: rgba(148, 163, 184, 0.1);
+        --hud-divider-soft: rgba(148, 163, 184, 0.08);
+        --hud-text: #e2e8f0;
+        --hud-text-2: #94a3b8;
+        --hud-text-3: #64748b;
+        --hud-idle: #64748b;
+        --hud-ok: #34d399;
+        --hud-warn: #fbbf24;
+        --hud-err: #f87171;
+        --hud-accent-sub: #a78bfa;
+        --hud-accent-model: #7dd3fc;
+        --hud-track: rgba(255, 255, 255, 0.15);
+        --hud-thumb: #cbd5e1;
+        --hud-thumb-hover: #f1f5f9;
+        --hud-thumb-active: #f8fafc;
+        --hud-scrollbar: rgba(148, 163, 184, 0.35);
+        --hud-scrollbar-hover: rgba(148, 163, 184, 0.55);
+        --hud-flash-text: #e2e8f0;
+        --hud-flash-glow: rgba(125, 211, 252, 0.55);
       }
       /* 头部拖动区：30px × --hud-scale（HUD_HEADER_H），data-tauri-drag-region */
       #hud-header {
@@ -71,16 +125,16 @@
         gap: 6px;
         padding: 0 10px;
         box-sizing: border-box;
-        background: rgba(10, 14, 24, 0.72);
+        background: var(--hud-bg);
         border-radius: 12px 12px 0 0;
-        border: 1px solid rgba(148, 163, 184, 0.16);
+        border: 1px solid var(--hud-border);
         border-bottom: none;
       }
       #hud-title {
         font-size: calc(10px * var(--hud-scale));
         font-weight: 600;
         letter-spacing: 0.02em;
-        color: #94a3b8;
+        color: var(--hud-text-2);
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -88,7 +142,7 @@
       #hud-count {
         margin-left: auto;
         font-size: calc(9px * var(--hud-scale));
-        color: #64748b;
+        color: var(--hud-text-3);
         white-space: nowrap;
       }
       /* 字体缩放组合（header 中部，0.8~1.4）：Aa 小灰字标识 + 细轨道小圆点
@@ -109,7 +163,7 @@
         flex: none;
         font-size: calc(10px * var(--hud-scale));
         line-height: 1;
-        color: #94a3b8;
+        color: var(--hud-text-2);
         letter-spacing: 0.01em;
       }
       #hud-font-slider {
@@ -123,11 +177,11 @@
         -webkit-appearance: none;
         cursor: pointer;
       }
-      /* 细轨道（2px 半透明白）：深色壳上克制不抢视线 */
+      /* 细轨道（2px 半透明）：随主题取深/浅半透明色，克制不抢视线 */
       #hud-font-slider::-webkit-slider-runnable-track {
         height: 2px;
         border-radius: 1px;
-        background: rgba(255, 255, 255, 0.15);
+        background: var(--hud-track);
       }
       /* 小圆点 thumb（8px）：垂直居中于 12px 输入框（(2−8)/2 = −3px） */
       #hud-font-slider::-webkit-slider-thumb {
@@ -138,29 +192,29 @@
         margin-top: -3px;
         border: none;
         border-radius: 50%;
-        background: #cbd5e1;
+        background: var(--hud-thumb);
       }
       #hud-font-slider:hover::-webkit-slider-thumb {
-        background: #f1f5f9;
+        background: var(--hud-thumb-hover);
       }
       #hud-font-slider:active::-webkit-slider-thumb {
-        background: #f8fafc;
+        background: var(--hud-thumb-active);
       }
       /* Firefox 等价轨道 / 圆点（仅浏览器预览用；Tauri 侧命中 WebKit 规则） */
       #hud-font-slider::-moz-range-track {
         height: 2px;
         border-radius: 1px;
-        background: rgba(255, 255, 255, 0.15);
+        background: var(--hud-track);
       }
       #hud-font-slider::-moz-range-thumb {
         width: 8px;
         height: 8px;
         border: none;
         border-radius: 50%;
-        background: #cbd5e1;
+        background: var(--hud-thumb);
       }
       #hud-font-slider:hover::-moz-range-thumb {
-        background: #f1f5f9;
+        background: var(--hud-thumb-hover);
       }
       /* 拖拽热区层（src/hud-resize.ts 动态创建 7 个 .hud-rz-*）：absolute 铺满
          窗口、z 最高；容器自身 pointer-events none（不挡内容滚动与 header
@@ -242,13 +296,13 @@
         min-height: 0;
         display: flex;
         flex-direction: column;
-        background: rgba(10, 14, 24, 0.72);
-        border-left: 1px solid rgba(148, 163, 184, 0.16);
-        border-right: 1px solid rgba(148, 163, 184, 0.16);
+        background: var(--hud-bg);
+        border-left: 1px solid var(--hud-border);
+        border-right: 1px solid var(--hud-border);
         overflow-y: auto;
         overflow-x: hidden;
         scrollbar-width: thin;
-        scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
+        scrollbar-color: var(--hud-scrollbar) transparent;
       }
       #hud-list::-webkit-scrollbar {
         width: 4px;
@@ -257,11 +311,11 @@
         background: transparent;
       }
       #hud-list::-webkit-scrollbar-thumb {
-        background: rgba(148, 163, 184, 0.35);
+        background: var(--hud-scrollbar);
         border-radius: 2px;
       }
       #hud-list::-webkit-scrollbar-thumb:hover {
-        background: rgba(148, 163, 184, 0.55);
+        background: var(--hud-scrollbar-hover);
       }
       .hud-row {
         height: calc(56px * var(--hud-scale));
@@ -272,7 +326,7 @@
         flex-direction: column;
         justify-content: center;
         gap: calc(3px * var(--hud-scale));
-        border-top: 1px solid rgba(148, 163, 184, 0.1);
+        border-top: 1px solid var(--hud-divider);
         overflow: hidden;
       }
       .hud-row-top {
@@ -289,10 +343,10 @@
         width: calc(6px * var(--hud-scale));
         height: calc(6px * var(--hud-scale));
         border-radius: 50%;
-        background: #64748b;
+        background: var(--hud-idle);
       }
       .hud-dot.gen {
-        background: #34d399;
+        background: var(--hud-ok);
         animation: hud-pulse 1.2s ease-in-out infinite;
       }
       @keyframes hud-pulse {
@@ -309,7 +363,7 @@
       .hud-project {
         font-size: calc(10px * var(--hud-scale));
         font-weight: 600;
-        color: #e2e8f0;
+        color: var(--hud-text);
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -318,7 +372,7 @@
       .hud-short {
         flex: none;
         font-size: calc(9px * var(--hud-scale));
-        color: #64748b;
+        color: var(--hud-text-3);
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas,
           "Liberation Mono", monospace;
       }
@@ -326,14 +380,14 @@
       .hud-sub {
         flex: none;
         font-size: calc(9px * var(--hud-scale));
-        color: #a78bfa;
+        color: var(--hud-accent-sub);
       }
       .hud-model {
         margin-left: auto;
         min-width: 0;
         max-width: 45%;
         font-size: calc(9px * var(--hud-scale));
-        color: #7dd3fc;
+        color: var(--hud-accent-model);
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -349,7 +403,7 @@
         font-variant-numeric: tabular-nums;
         font-size: calc(9px * var(--hud-scale));
         line-height: calc(14px * var(--hud-scale));
-        color: #94a3b8;
+        color: var(--hud-text-2);
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -365,20 +419,21 @@
       .hud-sigma {
         font-size: calc(10px * var(--hud-scale));
         font-weight: 600;
-        color: #e2e8f0;
+        color: var(--hud-text);
       }
       /* 字段级变化高亮：数值更新瞬间提亮 + 柔和光晕，0.55s ease-out
          渐隐回正常色。只用颜色/阴影动画（等宽 + tabular-nums 下不引起
-         行宽抖动），配色取 HUD 现有亮色（#e2e8f0 文字亮色 / #7dd3fc
-         模型强调色的光晕）。字段 span 为每帧新建节点，插入即播一次，
+         行宽抖动），亮色取深色闪 + 模型强调色光晕、暗色取浅色闪 + 天蓝
+         光晕（颜色变量随 .dark 切换，keyframes 内 var() 在动画元素上
+         按当前主题解析）。字段 span 为每帧新建节点，插入即播一次，
          1 秒节拍下同字段连续变化可重复触发 */
       .hud-flash {
         animation: hud-field-flash 0.55s ease-out;
       }
       @keyframes hud-field-flash {
         from {
-          color: #e2e8f0;
-          text-shadow: 0 0 6px rgba(125, 211, 252, 0.55);
+          color: var(--hud-flash-text);
+          text-shadow: 0 0 6px var(--hud-flash-glow);
         }
       }
       /* 速度位"测算中"占位：生成中但尚无可测数据（单笔请求生成中的
@@ -402,11 +457,11 @@
         align-items: center;
         justify-content: center;
         gap: 6px;
-        background: rgba(10, 14, 24, 0.72);
-        border-left: 1px solid rgba(148, 163, 184, 0.16);
-        border-right: 1px solid rgba(148, 163, 184, 0.16);
+        background: var(--hud-bg);
+        border-left: 1px solid var(--hud-border);
+        border-right: 1px solid var(--hud-border);
         font-size: calc(10px * var(--hud-scale));
-        color: #64748b;
+        color: var(--hud-text-3);
       }
       /* 折叠提示行：20px × --hud-scale（HUD_MORE_H）。border 收进高度
          （box-sizing: border-box，V3 修复：content-box 下实际 21px，
@@ -418,12 +473,12 @@
         display: none;
         align-items: center;
         justify-content: center;
-        background: rgba(10, 14, 24, 0.72);
-        border: 1px solid rgba(148, 163, 184, 0.16);
+        background: var(--hud-bg);
+        border: 1px solid var(--hud-border);
         border-top: none;
         border-radius: 0 0 12px 12px;
         font-size: calc(9px * var(--hud-scale));
-        color: #64748b;
+        color: var(--hud-text-3);
       }
       /* 今日合计行（HUD_TODAY_H，与折叠行同高同款）：列表下方、折叠行
          之上的窗口级汇总（今日 Σ x · × n，自然日本地零点起全库合计，
@@ -440,11 +495,11 @@
         align-items: center;
         justify-content: center;
         gap: 2px;
-        background: rgba(10, 14, 24, 0.72);
-        border: 1px solid rgba(148, 163, 184, 0.16);
+        background: var(--hud-bg);
+        border: 1px solid var(--hud-border);
         border-top: none;
         font-size: calc(9px * var(--hud-scale));
-        color: #94a3b8;
+        color: var(--hud-text-2);
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
         overflow: hidden;
@@ -463,8 +518,8 @@
       #hud-models {
         display: none;
         flex-direction: column;
-        background: rgba(10, 14, 24, 0.72);
-        border: 1px solid rgba(148, 163, 184, 0.16);
+        background: var(--hud-bg);
+        border: 1px solid var(--hud-border);
         border-top: none;
       }
       #hud-models.rounded-bottom {
@@ -479,12 +534,12 @@
         gap: 8px;
         padding: 0 10px;
         font-size: calc(9px * var(--hud-scale));
-        color: #94a3b8;
+        color: var(--hud-text-2);
         white-space: nowrap;
         overflow: hidden;
       }
       .hud-msrow + .hud-msrow {
-        border-top: 1px solid rgba(148, 163, 184, 0.08);
+        border-top: 1px solid var(--hud-divider-soft);
       }
       .hud-ms-name {
         min-width: 0;
@@ -512,16 +567,16 @@
           "Liberation Mono", monospace;
         font-variant-numeric: tabular-nums;
         font-size: calc(8px * var(--hud-scale));
-        color: #64748b;
+        color: var(--hud-text-3);
       }
       .hud-ms-fast {
-        color: #34d399;
+        color: var(--hud-ok);
       }
       .hud-ms-mid {
-        color: #fbbf24;
+        color: var(--hud-warn);
       }
       .hud-ms-slow {
-        color: #f87171;
+        color: var(--hud-err);
       }
       /* 圆角闭环：列表区（首行/末行）与头尾容器拼接。无折叠行时最下方
          可见行承担底部圆角（renderShell 按今日行 > 模型速度区 > 列表的
@@ -535,7 +590,7 @@
         border-radius: 0 0 12px 12px;
       }
       #hud-list:not(:empty) {
-        border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+        border-bottom: 1px solid var(--hud-border);
       }
       .hidden {
         display: none !important;

@@ -23,14 +23,21 @@
  *   走 Rust 侧 Resized 挂点，拖拽期间经"用户调整中"标志暂停自适应
  *   set_size（防高度被程序拉回，见 hud-resize.ts / session_hud.rs）；
  *   内容超高时列表区纵向滚动；
- * - 文案：轻量双语词典（zh/en），语言偏好读主面板写入的 localStorage
- *   键（同源 WebView 共享；缺失/异常回退 zh），不引入 i18n 运行时。
+ * - 语言/主题同步：文案为轻量双语词典（zh/en），语言偏好读主面板写入
+ *   的 localStorage 键（同源 WebView 共享；缺失/异常回退 zh），不引入
+ *   i18n 运行时；主题经本窗口 <html> 的 .dark 类切换 session-hud.html
+ *   的 --hud-* 颜色变量 token（仅 "dark" 视为暗色，对齐 appearance.ts
+ *   loadTheme 语义）。两者启动各读一次，随后监听主面板广播的
+ *   zbar://appearance-changed（setLocale/applyTheme 发出，无 payload）
+ *   即时跟随：语言变化全量重渲染，主题变化纯 CSS 生效无需重渲染。
  *
  * 尺寸栅格：Rust 侧按会话条数自适应窗口高度（hud_height），页面 CSS
  * 的头部/行/折叠行/留白尺寸必须与之一一对应（见 session-hud.html 注释）。
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { APPEARANCE_CHANGED_EVENT, THEME_KEY } from "./appearance";
+import { LOCALE_KEY } from "./i18n/locale";
 import { installHudResizeHandles } from "./hud-resize";
 
 /** Rust 侧 HudSessionBrief（camelCase 契约，紧凑标量，无原始行数据）。
@@ -214,14 +221,29 @@ const MESSAGES: Record<"zh" | "en", Msg> = {
   },
 };
 
-/** 读语言偏好（主面板 locale.ts 同键；异常/非法值回退 zh） */
+/** 读语言偏好（主面板 locale.ts 同键同回退：异常/非法值一律 zh）。
+ *  返回词典对象引用（全局仅两份），调用方以引用对比判断语言是否变化 */
 function detectMsg(): Msg {
   try {
-    const v = localStorage.getItem("zbar-locale");
+    const v = localStorage.getItem(LOCALE_KEY);
     return v === "en" ? MESSAGES.en : MESSAGES.zh;
   } catch {
     return MESSAGES.zh;
   }
+}
+
+/** 应用主题（主面板 appearance.ts loadTheme 同语义）：仅 "dark" 视为
+ *  暗色，其余（含无值/损坏值/读取异常）一律亮色。给本窗口 <html> 切
+ *  .dark 类，session-hud.html 的 --hud-* 变量在两套 token 间整体切换，
+ *  纯 CSS 生效，无需重渲染 */
+function applyHudTheme(): void {
+  let dark = false;
+  try {
+    dark = localStorage.getItem(THEME_KEY) === "dark";
+  } catch {
+    dark = false; /* localStorage 异常一律亮色（对齐 loadTheme） */
+  }
+  document.documentElement.classList.toggle("dark", dark);
 }
 
 /** token 数缩写（注入版 fmtTokens 同语义）：恒定宽度紧凑格式，
@@ -252,7 +274,9 @@ function fmtTtft(ttftMs: number | null): string {
 
 // ===== 运行时状态 =====
 
-const msg: Msg = detectMsg();
+/** 当前词典（模块级可变状态）：启动读一次，此后随 zbar://appearance-changed
+ *  重读 localStorage 更新（渲染取词统一走本变量） */
+let msg: Msg = detectMsg();
 let cfg: HudParams = {
   opacity: 0.92,
   windowMinutes: 10,
@@ -316,6 +340,16 @@ function applyOpacity(): void {
   if (rootEl) {
     rootEl.style.opacity = String(cfg.opacity);
   }
+}
+
+/** 静态文案（header 标题 / 字体组合 tooltip / 无障碍名 / 首帧空态）按
+ *  当前语言应用：启动与语言切换共用。动态区（计数/列表/今日行/模型
+ *  速度区/折叠行）的文案在 renderShell/renderRows 内每次取词，不经此 */
+function applyStaticText(): void {
+  if (titleEl) titleEl.textContent = msg.title;
+  if (fontBoxEl) fontBoxEl.title = msg.fontTip; // 字体组合 tooltip 随语言
+  fontSliderEl?.setAttribute("aria-label", msg.fontTip); // 无可见标签，补无障碍名
+  if (emptyEl) emptyEl.textContent = msg.empty; // 数据到达前的首帧空态
 }
 
 /** 空态/列表/模型速度区/今日行/折叠行五者的显隐与文案。今日合计行
@@ -603,10 +637,10 @@ function render(): void {
 
 const main = async () => {
   if (!rootEl || !listEl || !emptyEl || !moreEl || !todayEl || !modelsEl) return;
-  if (titleEl) titleEl.textContent = msg.title;
-  if (fontBoxEl) fontBoxEl.title = msg.fontTip; // 字体组合 tooltip 随语言
-  fontSliderEl?.setAttribute("aria-label", msg.fontTip); // 无可见标签，补无障碍名
-  emptyEl.textContent = msg.empty; // 数据到达前的首帧空态
+  // 冷启动同步主题（语言已在模块顶层 detectMsg 读取）：读主面板写入的
+  // zbar-theme 切 .dark，主面板主题切换时经下方 appearance-changed 重读
+  applyHudTheme();
+  applyStaticText();
 
   // 拖拽热区层（8 向隐形热区）：undecorated 窗口的系统边缘热区在 Windows
   // 上不生效，尺寸调整全靠自绘热区（见 hud-resize.ts）。纯 DOM 安装，
@@ -664,6 +698,29 @@ const main = async () => {
     });
   } catch {
     /* 静默：参数保持初始值 */
+  }
+
+  // 外观同步流：主面板语言（setLocale）/主题（applyTheme）切换后广播
+  // zbar://appearance-changed（无 payload，接收方重读 localStorage 自行
+  // 对比；常量与主面板共用 appearance.ts 单一来源）。语言变化：更新模块
+  // 级词典引用 + 静态文案 + 全量重渲染；主题变化：纯 CSS 变量切换，
+  // applyHudTheme 切 .dark 即生效，无需重渲染。主面板启动首帧的
+  // applyTheme 也会广播一次（HUD 未创建则事件无人接收），重读对比后
+  // 幂等无副作用。与既有 listen 同款 try-catch 降级：监听失败保持启动
+  // 时读取的偏好（HUD 为长生命周期窗口，随窗口销毁自动清理，无需手动
+  // unlisten）
+  try {
+    await listen(APPEARANCE_CHANGED_EVENT, () => {
+      applyHudTheme();
+      const next = detectMsg();
+      if (next !== msg) {
+        msg = next;
+        applyStaticText();
+        render();
+      }
+    });
+  } catch {
+    /* 静默：保持启动时读取的语言与主题 */
   }
 };
 

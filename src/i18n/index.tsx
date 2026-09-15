@@ -2,7 +2,8 @@
  * i18n 运行时：Provider + useI18n。
  *  - 扁平点路径词典（zh 为基准类型，en 必须键集一致）
  *  - t(key, vars) 支持 {name} 插值
- *  - setLocale 同步 setState + <html lang> + localStorage 持久化
+ *  - setLocale 同步 setState + <html lang> + localStorage 持久化，
+ *    并广播 zbar://appearance-changed（Session HUD 等独立窗口同步）
  */
 import {
   createContext,
@@ -12,6 +13,8 @@ import {
   useState,
 } from "react";
 import type { ReactNode } from "react";
+import { emit } from "@tauri-apps/api/event";
+import { APPEARANCE_CHANGED_EVENT } from "../appearance";
 import {
   applyLocale,
   detectLocale,
@@ -53,10 +56,18 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     () => loadLocale() ?? detectLocale()
   );
 
+  // 语言切换：同步 React 状态 + <html lang> + localStorage，并广播外观
+  // 变更事件通知 Session HUD 等独立窗口同步。调用链仅顶栏/设置页的用户
+  // 切换（初始化走 applyLocale，不经此处），无启动噪音；重复值也会广播
+  // （幂等：HUD 侧重读 localStorage 对比后不重渲染）。emit 失败静默，
+  // 不影响主面板本窗已生效的语言
   const setLocale = useCallback((l: Locale) => {
     setLocaleState(l);
     applyLocale(l);
     persistLocale(l);
+    emit(APPEARANCE_CHANGED_EVENT).catch(() => {
+      /* 广播失败静默：语言在主面板本窗已生效 */
+    });
   }, []);
 
   const t = useCallback(

@@ -2,9 +2,15 @@
  * 外观偏好（主题 / 面板透明度 / 整体缩放）：
  * localStorage 持久化，通过 CSS 变量（.dark 类、--panel-alpha、--ui-scale）即时生效。
  */
+import { emit } from "@tauri-apps/api/event";
 
 /** 主题类型 */
 export type Theme = "light" | "dark";
+
+/** 外观变更广播事件（无 payload，接收方自行重读 localStorage 幂等对比）：
+ *  主题（applyTheme）与语言（i18n setLocale）切换后通知 Session HUD 等
+ *  同源独立窗口同步，命名对齐既有 zbar://agent-theme-progress */
+export const APPEARANCE_CHANGED_EVENT = "zbar://appearance-changed";
 
 /** 主题持久化键 */
 export const THEME_KEY = "zbar-theme";
@@ -40,9 +46,17 @@ export function loadTheme(): Theme {
   }
 }
 
-/** 应用主题：切换 <html> 的 .dark 类（纯 DOM，不写盘） */
+/**
+ * 应用主题：切换 <html> 的 .dark 类，并广播外观变更事件通知 Session HUD
+ * 等同源独立窗口同步。启动首帧（main.tsx 仅暗色时）也会调用，此时 HUD
+ * 窗口尚未创建、事件无人接收，多广播一次无害（HUD 侧重读 localStorage
+ * 对比后幂等）；emit 失败静默，不影响本窗已生效的主题
+ */
 export function applyTheme(t: Theme): void {
   document.documentElement.classList.toggle("dark", t === "dark");
+  emit(APPEARANCE_CHANGED_EVENT).catch(() => {
+    /* 广播失败静默：主题在主面板本窗已生效 */
+  });
 }
 
 /** 持久化主题偏好 */
