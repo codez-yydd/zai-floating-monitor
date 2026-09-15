@@ -2,7 +2,8 @@
 //! `turn_usage` 表（官方每轮聚合表，轮次完成时才落库），把最近 7 天内
 //! （至多 3000 轮，超出保留最新）的轮次用量序列化为 `usage-data.js`
 //! 写出到主题目录，供注入的 usage.js 周期加载并在对话区每轮下方渲染
-//! 统计条。
+//! 统计条。请求级速度另写入同目录的 `usage-speed.js` 小文件，速度更新
+//! 不会牵连历史用量大文件。
 //!
 //! 数据契约（usage-data.js 内容，键名与 inject::USAGE_JS 消费端一字不差）：
 //! ```js
@@ -66,8 +67,29 @@
 //!   tt: Σ = up+down+cr,   全量合计总量
 //!   up / down / cr:       ↑ 非缓存输入（逐笔 clamp）/ ↓ 输出 / ⟲ 缓存读
 //!   rq: 请求笔数          model_usage 行数（每行一笔请求）
+//!   speed / speedState: V24.1 起大文件承载**稳定**速度——turns 行携带该
+//!          完成轮最新请求的速度快照（轮完成后不再变化），sess 行携带
+//!          空闲会话的速度/状态；runs 行不携带速度（秒级跳动值由
+//!          usage-speed.js 旁路 1 秒覆盖）。旧文件（无这些键）由注入版按
+//!          缺省 "–" 处理，首个导出周期（≤2 秒）自然补齐。
 //! }] }
 //! ```
+//!
+//! `usage-speed.js` 的内容是只含定位键、速度快照和状态的窄数据：
+//! `window.__ZBAR_USAGE_SPEED__ = {v: 1, ts, turns, runs, sess}`。它不包含
+//! 任何 token 合计，因此请求完成后只改写这个小文件；`quality` 为
+//! `generation` 或 `request_average`，后者只表示包含请求等待时间的完成后
+//! 平均值，界面带 `≈`，不宣称逐 Token 实时测速。
+//! V24.1 起旁路进一步收窄（文件仍为 v1 形态，旧注入脚本可继续消费）：
+//! - 历史轮（turns）的**稳定**速度快照随 2 秒大文件发布（完成轮的最新
+//!   请求速度不再变化，天然稳定，不放大写盘频率）；
+//! - 会话行的稳定速度/状态同样随大文件发布（空闲会话打开旧会话时仍能
+//!   显示其最近一次确认速度）；`runs` 行的速度仍只经旁路 1 秒更新；
+//! - 旁路只携带**活跃会话**（有进行中轮或刚发出待处理用户消息的会话）
+//!   的 sess 条目与全部 runs 条目，`turns` 恒为空数组——大文件与旁路的
+//!   优先级：旁路条目覆盖大文件（applySpeedData 仅按出现的键合并），旁
+//!   路未覆盖的会话沿用大文件数值；新一轮开始时旁路 sess 条目携带显式
+//!   null + measuring 清掉旧值，新轮没有已确认速度时不回填上一轮。
 //!
 //! ## la（最后活动时刻）字段（V2 附加字段，向后兼容）
 //!
@@ -240,7 +262,12 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use crate::token_speed::{
+    is_completed_status, request_speed_at, PENDING_FRESH_MS, RequestTiming, SpeedSnapshot,
+    SpeedState,
+};
 
 /// 当前唯一支持的目标应用（与 mod.rs 注册表一致；feed 挂载点均由
 /// agent_theme 的安装/卸载流程驱动，实际 app_id 恒为 zcode）
@@ -273,8 +300,12 @@ const PENDING_SCAN_ROWS: i64 = 64;
 /// 独立定义防语义耦合）。消费端另有 TOOL_ACTIVE_MS（30s）二层兜底
 pub(crate) const TOOL_WINDOW_MS: i64 = 10 * 60 * 1000;
 
-/// 导出周期（毫秒）：与注入端 usage.js 的数据重载周期一致
+/// 历史用量大文件刷新周期（毫秒）。速度小文件有独立更短节拍。
 const INTERVAL_MS: u64 = 2000;
+
+/// 速度小文件刷新周期（毫秒）：只读取活动会话的请求级时间字段，绝不
+/// 重写 usage-data.js。可见页面的速度轮询也按此数量级运行。
+const SPEED_INTERVAL_MS: u64 = 1000;
 
 /// 导出连续失败的记日志间隔：连续失败达到该次数的整数倍时记一条 stderr
 /// 日志（150 × INTERVAL_MS ≈ 5 分钟一条——瞬态失败保持静默不刷屏，
@@ -347,6 +378,9 @@ pub(crate) struct UsageTurn {
     pub(crate) subagent: Option<u8>,
     /// 该轮用到的模型（去重逗号拼接，含并入子代理的模型）
     models: String,
+    /// 该轮最新模型请求的速度；没有有效请求级时间数据时省略。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) speed: Option<SpeedSnapshot>,
 }
 
 /// 子代理并入聚合明细（usage.js hover 展示用）
@@ -447,6 +481,10 @@ pub(crate) struct SubTurnRow {
 /// 一致，仅主会话行携带）。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct UsageRun {
+    /// Internal key used to look up the latest model request speed. It is not
+    /// part of the usage-data.js contract.
+    #[serde(skip)]
+    pub(crate) turn_id: String,
     /// 用户消息 id（model_usage.parent_user_message_id，实测与 DOM
     /// data-turn-id 同值，渲染端匹配键；子代理轮指向子代理会话自己的
     /// 消息，主会话 DOM 匹配不到；列缺失或值为 null 时导出 null——
@@ -455,7 +493,7 @@ pub(crate) struct UsageRun {
     pub(crate) user_message_id: Option<String>,
     /// 会话 id（子代理进行中轮为 sess_subagent_* 形态）
     #[serde(rename = "sess")]
-    session_id: String,
+    pub(crate) session_id: String,
     /// 父会话 id（仅子代理会话查 session.parent_id 得出，主会话为 null；
     /// 渲染端按 sess 或 psess 命中当前会话并入累计）
     #[serde(rename = "psess")]
@@ -490,6 +528,9 @@ pub(crate) struct UsageRun {
     /// 按 psess 归并 + 游离子代理完成轮；None 不序列化）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) sub: Option<SubAgg>,
+    /// 该进行中轮最新模型请求的速度；没有有效请求级时间数据时省略。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) speed: Option<SpeedSnapshot>,
 }
 
 // ============================================================
@@ -545,6 +586,12 @@ fn feed_loop() {
     // 变化检测缓存：线程生命周期内持有上轮 turns+runs 序列化字节（线程
     // 重启丢失缓存只多写一次盘，无正确性影响）
     let mut cache: Option<String> = None;
+    // 速度小文件单独维护：每秒只查活动会话的请求级字段，
+    // usage-data.js 仍按 2 秒历史导出节拍运行。
+    let mut speed_view = SpeedView::default();
+    let mut speed_cache: Option<String> = None;
+    let mut last_full = Instant::now() - Duration::from_millis(INTERVAL_MS);
+    let mut last_speed = Instant::now() - Duration::from_millis(SPEED_INTERVAL_MS);
     loop {
         if FEED_STOP.load(Ordering::Relaxed) {
             return;
@@ -554,12 +601,19 @@ fn feed_loop() {
         if !store::load_state(TARGET_APP_ID).is_installed() {
             return;
         }
-        export_once(&mut cache);
-        // 分段睡眠：sleep 期间可及时感知 stop（export_once 期间不响应）。
-        // stop 仅置位 flag、不 join 不等待：线程在完成当前导出周期（含可能
-        // 的 DB busy 等待，最长约 3 秒余）后于下一个检查点退出（应用退出时
-        // 进程随之结束，与项目其它后台线程同款不显式 join）
-        for _ in 0..(INTERVAL_MS / 100) {
+        let now = Instant::now();
+        if now.duration_since(last_full).as_millis() >= INTERVAL_MS as u128 {
+            export_once(&mut cache, &mut speed_view, &mut speed_cache);
+            last_full = now;
+            last_speed = now;
+        } else if now.duration_since(last_speed).as_millis() >= SPEED_INTERVAL_MS as u128 {
+            export_speed_once(&mut speed_view, &mut speed_cache);
+            last_speed = now;
+        }
+        // 分段睡眠：sleep 期间可及时感知 stop（导出期间不响应）。
+        // stop 仅置位 flag、不 join 不等待：线程在完成当前导出周期后于下个
+        // 检查点退出（应用退出时进程随之结束，与项目其它后台线程同款）。
+        for _ in 0..10 {
             if FEED_STOP.load(Ordering::Relaxed) {
                 return;
             }
@@ -573,25 +627,163 @@ fn feed_loop() {
 /// 是唯一调用方，无并发竞争
 static FEED_FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Debug, Clone, Serialize)]
+struct SpeedRunEntry {
+    #[serde(skip)]
+    turn_id: String,
+    #[serde(rename = "umid")]
+    user_message_id: Option<String>,
+    #[serde(rename = "sess")]
+    session_id: String,
+    start: i64,
+    speed: Option<SpeedSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SpeedSessionEntry {
+    #[serde(rename = "s")]
+    session_id: String,
+    speed: Option<SpeedSnapshot>,
+    #[serde(rename = "speedState")]
+    speed_state: SpeedState,
+    /// Internal only: a root session's speed includes every descendant.
+    #[serde(skip)]
+    member_session_ids: Vec<String>,
+    /// Internal only: while a pending user message is the current round,
+    /// older requests are not eligible for this session speed.
+    #[serde(skip)]
+    round_started_at: Option<i64>,
+    /// Internal only: independent "a round is actually running" flag. It is
+    /// never derived from `speed_state`（A2）：一轮正在生成且已有一次完成
+    /// 请求时状态是 Recent，此时若最新有效速度暂时为空，状态必须回落到
+    /// Measuring 而不是 Unavailable。
+    #[serde(skip)]
+    generating: bool,
+}
+
+/// The last full export's small speed shape. It is also the target set for
+/// one-second speed refreshes, so a request that finishes between two full
+/// history exports can update visible speed without rebuilding `turns/runs`.
+/// V24.1 起只承载活跃通道（A3）：`turns` 不再进入旁路（历史轮的稳定速度
+/// 随 2 秒大文件发布），`sessions` 只保留活跃会话（有进行中轮成员或刚发
+/// 出待处理用户消息的会话）。
+#[derive(Debug, Clone, Default)]
+struct SpeedView {
+    runs: Vec<SpeedRunEntry>,
+    sessions: Vec<SpeedSessionEntry>,
+}
+
+impl SpeedView {
+    /// 构建旁路视图。`pending_session` 是刚发出待处理用户消息的会话
+    /// （首请求等待期需要在 1 秒拍上看到状态与首个速度）。
+    fn from_rows(
+        runs: &[UsageRun],
+        sessions: &[UsageSessionStat],
+        pending_session: Option<&str>,
+    ) -> Self {
+        let active_members: BTreeSet<&str> =
+            runs.iter().map(|run| run.session_id.as_str()).collect();
+        Self {
+            runs: runs
+                .iter()
+                .map(|run| SpeedRunEntry {
+                    turn_id: run.turn_id.clone(),
+                    user_message_id: run.user_message_id.clone(),
+                    session_id: run.session_id.clone(),
+                    start: run.start,
+                    speed: run.speed.clone(),
+                })
+                .collect(),
+            sessions: sessions
+                .iter()
+                .filter(|session| {
+                    pending_session == Some(session.session_id.as_str())
+                        || session
+                            .member_session_ids
+                            .iter()
+                            .any(|member| active_members.contains(&member.as_str()))
+                })
+                .map(|session| SpeedSessionEntry {
+                    session_id: session.session_id.clone(),
+                    speed: session.speed.clone(),
+                    speed_state: session.speed_state,
+                    member_session_ids: session.member_session_ids.clone(),
+                    round_started_at: session.round_started_at,
+                    generating: session.generating,
+                })
+                .collect(),
+        }
+    }
+
+    /// 旁路 1 秒拍需要读取请求级字段的会话集合：活跃会话条目自身及其全部
+    /// 树成员（会话级速度沿树取最新），外加进行中轮所在会话。绝不包含
+    /// 历史轮的会话（大文件已覆盖）。
+    fn session_ids(&self) -> BTreeSet<String> {
+        let mut ids = BTreeSet::new();
+        for session in &self.sessions {
+            ids.insert(session.session_id.clone());
+            ids.extend(session.member_session_ids.iter().cloned());
+        }
+        for run in &self.runs {
+            ids.insert(run.session_id.clone());
+        }
+        ids.retain(|id| !id.is_empty());
+        ids
+    }
+
+    fn refresh(&mut self, catalog: &SpeedCatalog, observed_at_ms: i64) {
+        for run in &mut self.runs {
+            run.speed = speed_for_latest(
+                catalog.for_turn(&run.session_id, &run.turn_id),
+                observed_at_ms,
+            );
+        }
+        for session in &mut self.sessions {
+            session.speed = speed_for_latest(
+                if session.member_session_ids.is_empty() {
+                    catalog.for_session(&session.session_id)
+                } else {
+                    catalog.latest_for_members(
+                        &session.member_session_ids,
+                        session.round_started_at,
+                    )
+                },
+                observed_at_ms,
+            );
+            session.speed_state = if session.speed.is_some() {
+                SpeedState::Recent
+            } else if session.generating {
+                SpeedState::Measuring
+            } else {
+                SpeedState::Unavailable
+            };
+        }
+    }
+}
+
 /// 单轮导出：读库 → 序列化 → flush_export 落盘（大文件按变化写、心跳
 /// 小文件按宠物开关维护）。任何失败静默跳过本轮（下个周期重试），不
 /// panic；连续失败达 FEED_FAIL_LOG_EVERY 整数倍时记一条日志（防再次
 /// 无声死亡——此前 NULL turn_id 脏行曾让导出静默停更且完全不可观测）。
-fn export_once(cache: &mut Option<String>) {
+fn export_once(
+    cache: &mut Option<String>,
+    speed_view: &mut SpeedView,
+    speed_cache: &mut Option<String>,
+) {
     let result = (|| -> Result<(), String> {
         let conn = crate::zcode_sessions::open_main_db_readonly_uri()?;
         let now_ms = chrono::Utc::now().timestamp_millis();
         // turns + 游离子代理完成轮（turns/merge 阶段分流输出，见
         // merge_subagent_turns）；None = turn_usage 表/核心列缺失（老版本
         // ZCode），功能静默关闭
-        let Some((turns, sub_orphans)) = collect_turns(&conn, now_ms - WINDOW_MS)? else {
+        let Some((mut turns, sub_orphans)) = collect_turns_raw(&conn, now_ms - WINDOW_MS)? else {
             return Ok(());
         };
         // 进行中轮 runs：与 turns 同连接同轮询周期读出。刻意不做"失败降级
         // 空数组"——runs 与 turns 任一查询失败都整体跳过本轮（下周期重试），
         // 避免 runs 闪空导致渲染端实时段闪烁断档
         let done = collect_done_turn_ids(&conn, now_ms - WINDOW_MS)?;
-        let runs = collect_runs(
+        let mut runs = collect_runs_raw(
             &conn,
             now_ms - RUN_WINDOW_MS,
             now_ms - WINDOW_MS,
@@ -607,12 +799,25 @@ fn export_once(cache: &mut Option<String>) {
         // pu（待处理用户消息）：与 turns 同轮询周期读出；完成轮匹配复用
         // 已聚合的 turns umid 集合（内存比对，不回查库）。查询失败按无
         // 信号降级（unwrap_or(None)）——pu 是附加信号，失败不阻塞
-        // turns/runs 导出，宠物端按 pu 缺失退化为既有行为
+        // turns/runs 导出，宠物端按 pu 缺失退化为既有行为。
+        // A1 新鲜期：待处理消息只在 PENDING_FRESH_MS 内独立成立；超期后
+        // 除非其会话树内仍有进行中轮（runs，经会话树根归并的"可复核活跃
+        // 证据"），否则不再冒充活跃轮——pu 透出 null、轮状态回落空闲，
+        // 会话全生命周期累计不受影响（sess 聚合独立于 pu 存在）
         let done_umids: BTreeSet<String> = turns
             .iter()
             .filter_map(|t| t.user_message_id.clone())
             .collect();
-        let pending_user = collect_pending_user_ms(&conn, &done_umids).unwrap_or(None);
+        let tree_index = crate::token_speed::load_session_tree_index(&conn)?;
+        let mut corroborating_sessions: BTreeSet<String> = BTreeSet::new();
+        for run in &runs {
+            corroborating_sessions.insert(run.session_id.clone());
+            if tree_index.has_parent() {
+                corroborating_sessions.insert(tree_index.root_for(&run.session_id));
+            }
+        }
+        let pending_user = collect_pending_user(&conn, &done_umids, now_ms, &corroborating_sessions)
+            .unwrap_or(None);
         // ta/fe（V6 附加信号）：与 pu 同款降级（查询失败按无信号，不阻塞
         // turns/runs 导出）；ta 窗口为 10 分钟残留兜底、fe 窗口与 turns
         // 相同（失败轮落库瞬间必在窗口内）
@@ -621,7 +826,23 @@ fn export_once(cache: &mut Option<String>) {
         // 会话级统计（sess：model_usage 全量合计）：附加通道，查询
         // 失败降级为空数组（不阻塞 turns/runs 导出——渲染端对无 sess 数据
         // 回退旧 sessionTotals 口径），瞬时闪空仅回退口径一轮
-        let sess = collect_session_stats(&conn, &turns, &runs).unwrap_or_default();
+        let pending_session = pending_user.as_ref().map(|pending| pending.session_id.as_str());
+        // One session-qualified SpeedCatalog supplies turns, runs and sess in
+        // this export. In particular, no bare `turn_id IN (...)` query is
+        // issued against the `(session_id, turn_id)` index.
+        let speed_sessions = session_ids_for_stats(&conn, &turns, &runs, pending_session)?;
+        let speed_catalog = SpeedCatalog::load(&conn, &speed_sessions).unwrap_or_default();
+        attach_turn_speeds(&speed_catalog, &mut turns, now_ms);
+        attach_run_speeds(&speed_catalog, &mut runs, now_ms);
+        let sess = collect_session_stats_with_catalog(
+            &conn,
+            &turns,
+            &runs,
+            &speed_catalog,
+            pending_user.as_ref(),
+        )
+        .unwrap_or_default();
+        let next_speed_view = SpeedView::from_rows(&runs, &sess, pending_session);
         flush_export(
             &dir,
             cache,
@@ -629,11 +850,13 @@ fn export_once(cache: &mut Option<String>) {
             &turns,
             &runs,
             &sess,
-            pending_user,
+            pending_user.as_ref().map(|pending| pending.time_created),
             active_tool,
             failure_event,
             now_ms,
         )?;
+        *speed_view = next_speed_view;
+        let _ = write_speed_view(speed_cache, &dir, speed_view, now_ms);
         Ok(())
     })();
     match result {
@@ -650,6 +873,26 @@ fn export_once(cache: &mut Option<String>) {
             }
         }
     }
+}
+
+/// One-second side channel. It only reads request timing/output columns for
+/// the last full export's active session set and writes `usage-speed.js`; the
+/// large seven-day history file is not touched.
+fn export_speed_once(speed_view: &mut SpeedView, speed_cache: &mut Option<String>) {
+    if speed_view.session_ids().is_empty() {
+        return;
+    }
+    let result = (|| -> Result<(), String> {
+        let conn = crate::zcode_sessions::open_main_db_readonly_uri()?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let sessions = speed_view.session_ids();
+        let catalog = SpeedCatalog::load(&conn, &sessions)?;
+        speed_view.refresh(&catalog, now_ms);
+        let dir = store::app_dir(TARGET_APP_ID)?;
+        fs::create_dir_all(&dir).map_err(|e| format!("创建主题目录失败: {e}"))?;
+        write_speed_view(speed_cache, &dir, speed_view, now_ms).map(|_| ())
+    })();
+    let _ = result;
 }
 
 /// 导出结果落盘（不碰数据库，供单元测试复用）：
@@ -673,10 +916,19 @@ pub(crate) fn flush_export(
     now_ms: i64,
 ) -> Result<(), String> {
     let la = last_activity_ms(turns, runs, pending_user, active_tool);
-    let turns_json = serde_json::to_string(turns)
-        .map_err(|e| format!("序列化用量数据失败: {e}"))?;
-    let runs_json =
-        serde_json::to_string(runs).map_err(|e| format!("序列化进行中轮失败: {e}"))?;
+    // A3 大小文件分工：完成轮（turns）的最新请求速度与空闲会话（sess）的
+    // 速度/状态都是稳定值——它们随 2 秒大文件发布且只在真实数据变化（请
+    // 求落库/轮结束/会话合计推进）时才参与写盘对比，不放大写盘频率；
+    // 进行中轮（runs）的速度是秒级跳动值，仍只经 usage-speed.js 旁路发
+    // 布，大文件中的 runs 行不携带速度（旁路按 umid 覆盖）。
+    let mut large_runs = runs.to_vec();
+    for run in &mut large_runs {
+        run.speed = None;
+    }
+    let turns_json =
+        serde_json::to_string(turns).map_err(|e| format!("序列化用量数据失败: {e}"))?;
+    let runs_json = serde_json::to_string(&large_runs)
+        .map_err(|e| format!("序列化进行中轮失败: {e}"))?;
     let sess_json =
         serde_json::to_string(sess).map_err(|e| format!("序列化会话统计失败: {e}"))?;
     write_if_changed(
@@ -725,13 +977,269 @@ fn opt_col(conn: &Connection, table: &str, col: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone)]
+struct LatestUsageRequest {
+    order: i64,
+    timing: RequestTiming,
+}
+
+/// All request-speed lookups needed by one usage export. The old implementation
+/// ran one `turn_id IN (...)` query for completed turns, another for runs, and a
+/// third `session_id IN (...)` query for session rows. `turn_id` is not the
+/// leading column of ZCode's `(session_id, turn_id)` index, so the first two
+/// queries could scan the whole table. This catalog performs one session-
+/// qualified read per export and indexes the result by both keys in memory.
+/// The query therefore uses the leading session column of the real index and
+/// never treats a bare turn id as globally indexed.
+#[derive(Debug, Clone, Default)]
+struct SpeedCatalog {
+    by_turn: BTreeMap<(String, String), LatestUsageRequest>,
+    by_session: BTreeMap<String, LatestUsageRequest>,
+}
+
+impl SpeedCatalog {
+    fn load(conn: &Connection, session_ids: &BTreeSet<String>) -> Result<Self, String> {
+        if session_ids.is_empty()
+            || !has_table(conn, "model_usage")
+            || !crate::db::has_column(conn, "model_usage", "session_id")
+            || !crate::db::has_column(conn, "model_usage", "started_at")
+        {
+            return Ok(Self::default());
+        }
+        let (out, first, completed, duration, status) = (
+            num_col(conn, "model_usage", "output_tokens"),
+            opt_col(conn, "model_usage", "first_token_at"),
+            opt_col(conn, "model_usage", "completed_at"),
+            opt_col(conn, "model_usage", "duration_ms"),
+            opt_col(conn, "model_usage", "status"),
+        );
+        let turn = opt_col(conn, "model_usage", "turn_id");
+        let placeholders = vec!["?"; session_ids.len()].join(", ");
+        // Do not add ORDER BY: the composite session/turn index can deliver
+        // the session-qualified rows directly; latest selection is stable in
+        // Rust and does not need a temporary sort.
+        let sql = format!(
+            "SELECT session_id, {turn}, {out}, started_at, {first}, {completed}, {duration}, {status} \
+             FROM model_usage WHERE session_id IN ({placeholders})"
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|error| format!("准备请求速度查询失败: {error}"))?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(session_ids.iter()), |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                ))
+            })
+            .map_err(|error| format!("读取请求速度失败: {error}"))?;
+
+        let mut catalog = Self::default();
+        for row in rows {
+            let (
+                Some(session_id),
+                turn_id,
+                output_tokens,
+                started_at,
+                first_token_at,
+                completed_at,
+                duration_ms,
+                status,
+            ) = row.map_err(|error| format!("读取请求速度失败: {error}"))?
+            else {
+                continue;
+            };
+            if session_id.is_empty() {
+                continue;
+            }
+            let completed_status = is_completed_status(status.as_deref());
+            let timing = RequestTiming {
+                // Keep the newest non-terminal row as an invalid candidate.
+                // Otherwise an older completed request would remain visible
+                // while a newer request in the same turn is still running.
+                output_tokens: completed_status.then_some(output_tokens.max(0)).unwrap_or(0),
+                started_at,
+                first_token_at,
+                completed_at,
+                duration_ms,
+                request_id: None,
+            };
+            let candidate = LatestUsageRequest {
+                order: request_order(&timing),
+                timing,
+            };
+            update_latest(&mut catalog.by_session, session_id.clone(), candidate.clone());
+            if let Some(turn_id) = turn_id.filter(|value| !value.is_empty()) {
+                update_latest(
+                    &mut catalog.by_turn,
+                    (session_id, turn_id),
+                    candidate,
+                );
+            }
+        }
+        Ok(catalog)
+    }
+
+    fn for_turn(&self, session_id: &str, turn_id: &str) -> Option<&LatestUsageRequest> {
+        self.by_turn
+            .get(&(session_id.to_string(), turn_id.to_string()))
+    }
+
+    fn for_session(&self, session_id: &str) -> Option<&LatestUsageRequest> {
+        self.by_session.get(session_id)
+    }
+
+    fn latest_for_members(
+        &self,
+        members: &[String],
+        round_started_at: Option<i64>,
+    ) -> Option<&LatestUsageRequest> {
+        members
+            .iter()
+            .filter_map(|member| self.for_session(member))
+            .filter(|request| {
+                round_started_at.is_none_or(|started| {
+                    request
+                        .timing
+                        .started_at
+                        .is_some_and(|request_started| request_started >= started)
+                })
+            })
+            .max_by_key(|request| request.order)
+    }
+}
+
+fn request_order(timing: &RequestTiming) -> i64 {
+    timing
+        .completed_at
+        .filter(|value| *value > 0)
+        .or_else(|| {
+            timing.started_at.and_then(|start| {
+                timing
+                    .duration_ms
+                    .filter(|value| *value > 0)
+                    .and_then(|duration| start.checked_add(duration))
+            })
+        })
+        .or(timing.started_at.filter(|value| *value > 0))
+        .unwrap_or(0)
+}
+
+fn update_latest<K: Ord>(
+    map: &mut BTreeMap<K, LatestUsageRequest>,
+    key: K,
+    candidate: LatestUsageRequest,
+) {
+    if map
+        .get(&key)
+        .is_none_or(|previous| candidate.order >= previous.order)
+    {
+        map.insert(key, candidate);
+    }
+}
+
+fn speed_for_latest(
+    request: Option<&LatestUsageRequest>,
+    observed_at_ms: i64,
+) -> Option<SpeedSnapshot> {
+    request.and_then(|latest| request_speed_at(&latest.timing, observed_at_ms))
+}
+
+fn session_ids_for_rows(
+    turns: &[UsageTurn],
+    runs: &[UsageRun],
+    extra: Option<&str>,
+) -> BTreeSet<String> {
+    let mut ids = BTreeSet::new();
+    ids.extend(turns.iter().map(|turn| turn.session_id.clone()));
+    ids.extend(runs.iter().map(|run| run.session_id.clone()));
+    if let Some(id) = extra.filter(|id| !id.is_empty()) {
+        ids.insert(id.to_string());
+    }
+    ids
+}
+
+fn session_ids_for_stats(
+    conn: &Connection,
+    turns: &[UsageTurn],
+    runs: &[UsageRun],
+    pending_session: Option<&str>,
+) -> Result<BTreeSet<String>, String> {
+    let appeared = session_ids_for_rows(turns, runs, pending_session);
+    if appeared.is_empty() {
+        return Ok(appeared);
+    }
+    let tree_index = crate::token_speed::load_session_tree_index(conn)?;
+    let mut targets = appeared.clone();
+    if tree_index.has_parent() {
+        for id in &appeared {
+            targets.insert(tree_index.root_for(id));
+        }
+    }
+    let mut members = BTreeSet::new();
+    for target in targets {
+        members.extend(tree_index.members(&target));
+    }
+    Ok(members)
+}
+
+fn attach_turn_speeds(catalog: &SpeedCatalog, turns: &mut [UsageTurn], observed_at_ms: i64) {
+    for turn in turns {
+        turn.speed = speed_for_latest(
+            catalog.for_turn(&turn.session_id, &turn.turn_id),
+            observed_at_ms,
+        );
+    }
+}
+
+fn attach_run_speeds(catalog: &SpeedCatalog, runs: &mut [UsageRun], observed_at_ms: i64) {
+    for run in runs {
+        run.speed = speed_for_latest(
+            catalog.for_turn(&run.session_id, &run.turn_id),
+            observed_at_ms,
+        );
+    }
+}
+
 /// 读出最近窗口内的主会话轮 + 并入子代理轮 + 模型清单，返回
 /// (导出序列, 游离子代理完成轮)。游离子代理完成轮 = 子代理 turn_usage
 /// 行已落库、但所属主轮尚未落库未被并入 turns 的部分（merge 阶段分流，
 /// 见 merge_subagent_turns），交由 runs 侧聚合进主轮行 sub。
 /// Ok(None) = 功能关闭（turn_usage 表或核心列缺失）；
 /// Err = 瞬态查询失败（调用方静默跳过本轮）。
+/// Public compatibility wrapper used by the pet worker and older call sites.
+/// The pet contract does not contain speed fields, so this path deliberately
+/// returns the count-only rows. The main usage export calls `collect_turns_raw`
+/// and shares one SpeedCatalog with runs and session statistics instead of
+/// repeating the speed query.
 pub(crate) fn collect_turns(
+    conn: &Connection,
+    window_start_ms: i64,
+) -> Result<Option<(Vec<UsageTurn>, Vec<SubTurnRow>)>, String> {
+    collect_turns_raw(conn, window_start_ms)
+}
+
+#[cfg(test)]
+fn collect_turns_with_speed(
+    conn: &Connection,
+    window_start_ms: i64,
+) -> Result<Option<(Vec<UsageTurn>, Vec<SubTurnRow>)>, String> {
+    let Some((mut turns, sub_orphans)) = collect_turns_raw(conn, window_start_ms)? else {
+        return Ok(None);
+    };
+    let session_ids = session_ids_for_rows(&turns, &[], None);
+    let catalog = SpeedCatalog::load(conn, &session_ids)?;
+    attach_turn_speeds(&catalog, &mut turns, chrono::Utc::now().timestamp_millis());
+    Ok(Some((turns, sub_orphans)))
+}
+
+fn collect_turns_raw(
     conn: &Connection,
     window_start_ms: i64,
 ) -> Result<Option<(Vec<UsageTurn>, Vec<SubTurnRow>)>, String> {
@@ -798,6 +1306,7 @@ pub(crate) fn collect_turns(
                 sub: None,
                 subagent: None,
                 models: String::new(),
+                speed: None,
             })
         })
         .map_err(|e| format!("读取 turn_usage 失败: {e}"))?
@@ -912,6 +1421,7 @@ pub(crate) fn collect_turns(
             sub: None,
             subagent: Some(1),
             models: String::new(),
+            speed: None,
         })
         .collect();
     let (merged_pairs, sub_orphans) = merge_subagent_turns(&mut turns, subs);
@@ -978,16 +1488,35 @@ pub(crate) fn collect_done_turn_ids(
 /// 0.023ms@10258 行主库，成本与表大小无关，绝不全表扫）；完成轮匹配与
 /// 调用方已聚合的 turns umid 集合（turn_usage.user_message_id，含子代理
 /// 自身视图行）内存比对，不回查库（该列无索引，回查即 turn_usage 全表
-/// 扫）。返回按 time_created 降序的第一条未匹配 user 消息（即最近的待
-/// 处理消息；更早的未匹配消息不透出——陈旧异常消息由消费端 90 秒窗口
-/// 兜底，不放大信号）。
+/// 扫）。返回按 time_created 降序的第一条未匹配且满足新鲜期/活跃佐证的
+/// user 消息（即最近的待处理消息；更早的未匹配消息不透出——陈旧异常消
+/// 息由消费端 90 秒窗口兜底，不放大信号）。
+/// A1 新鲜期与活跃佐证：`now_ms − time_created ≤ PENDING_FRESH_MS` 内的
+/// 消息可独立启动"等待首请求"；超期消息只有其会话（或会话树根）出现在
+/// `corroborating_sessions`（调用方传入的进行中轮所在会话及其树根集合）
+/// 时才继续保留——真实耗时很长的首请求一旦落库首行请求即转入 runs 通
+/// 道，佐证随之成立；无任何活跃证据的超期孤儿消息按无待处理处理，不再
+/// 永久冒充活跃轮。取消/失败轮落 turn_usage 行（umid 进完成集合）与新
+/// 一轮 user 消息（更新者胜出）都会立即清掉旧等待。
 /// - Ok(None) = 无待处理消息，或 message 表/核心列缺失（老版本库，
 ///   pu 信号整体缺失，宠物端退化为既有行为）；
 /// - Err = 瞬态查询失败（调用方静默降级为无信号，不阻塞导出）。
-pub(crate) fn collect_pending_user_ms(
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingUser {
+    pub(crate) id: String,
+    pub(crate) session_id: String,
+    pub(crate) time_created: i64,
+}
+
+/// Full pending-user signal. The session id is retained because the first
+/// model request may not have produced a turn/run yet; session statistics still
+/// need this id to load the existing model_usage lifetime total.
+pub(crate) fn collect_pending_user(
     conn: &Connection,
     done_user_msg_ids: &BTreeSet<String>,
-) -> Result<Option<i64>, String> {
+    now_ms: i64,
+    corroborating_sessions: &BTreeSet<String>,
+) -> Result<Option<PendingUser>, String> {
     // 核心列探测降级与 collect_turns 同款：表/核心列缺失 → 无 pu 信号
     if !has_table(conn, "message")
         || !crate::db::has_column(conn, "message", "id")
@@ -998,31 +1527,58 @@ pub(crate) fn collect_pending_user_ms(
     }
     let mut stmt = conn
         .prepare(
-            "SELECT id, time_created FROM \
-             (SELECT id, time_created, json_extract(data, '$.role') AS role \
+            "SELECT id, session_id, time_created FROM \
+             (SELECT id, session_id, time_created, json_extract(data, '$.role') AS role \
               FROM message ORDER BY rowid DESC LIMIT ?1) \
              WHERE role = 'user' ORDER BY time_created DESC",
         )
         .map_err(|e| format!("准备待处理用户消息查询失败: {e}"))?;
     let rows = stmt
         .query_map([PENDING_SCAN_ROWS], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
-        })
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            })
         .map_err(|e| format!("读取待处理用户消息失败: {e}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("读取待处理用户消息失败: {e}"))?;
-    for (id, tc) in rows {
+    for (id, session_id, tc) in rows {
         if done_user_msg_ids.contains(&id) {
             continue;
         }
         // 脏行防御：无效时刻不透出（与 turns 的 start > 0 口径一致）
-        if let Some(t) = tc {
-            if t > 0 {
-                return Ok(Some(t));
+        if let Some(t) = tc.filter(|value| *value > 0) {
+            if session_id.is_empty() {
+                continue;
+            }
+            // A1：新鲜期内独立成立；超期必须有会话树内的活跃佐证
+            let fresh = now_ms.saturating_sub(t) <= PENDING_FRESH_MS;
+            let corroborated = corroborating_sessions.contains(&session_id);
+            if fresh || corroborated {
+                return Ok(Some(PendingUser {
+                    id,
+                    session_id,
+                    time_created: t,
+                }));
             }
         }
     }
     Ok(None)
+}
+
+/// Compatibility projection used by the pet state machine, which only needs
+/// the timestamp. Callers that build session statistics should use
+/// `collect_pending_user` so the session id is not lost.
+pub(crate) fn collect_pending_user_ms(
+    conn: &Connection,
+    done_user_msg_ids: &BTreeSet<String>,
+    now_ms: i64,
+    corroborating_sessions: &BTreeSet<String>,
+) -> Result<Option<i64>, String> {
+    Ok(collect_pending_user(conn, done_user_msg_ids, now_ms, corroborating_sessions)?
+        .map(|pending| pending.time_created))
 }
 
 /// 读出 ta（活跃工具）时刻：最新一条 running 状态工具行的 started_at
@@ -1109,7 +1665,27 @@ pub(crate) fn collect_failure_event_ms(
 /// - model_usage 表/核心列缺失（老版本库）→ Ok(空)，不影响 turns 导出；
 /// - 行数量级：窗口内行数 = 10 分钟内完成的模型请求数（重度使用数百行），
 ///   分组后 runs 行数 = 活跃轮数（通常个位数），每 2 秒一次开销可忽略。
+/// Public compatibility wrapper used by the pet worker. The pet contract does
+/// not contain speed fields, so this path deliberately returns count-only rows.
+/// The main usage export calls `collect_runs_raw` and attaches speeds from its
+/// shared catalog once.
 pub(crate) fn collect_runs(
+    conn: &Connection,
+    recent_start_ms: i64,
+    sweep_start_ms: i64,
+    done_turn_ids: &BTreeSet<String>,
+    sub_orphans: &[SubTurnRow],
+) -> Result<Vec<UsageRun>, String> {
+    collect_runs_raw(
+        conn,
+        recent_start_ms,
+        sweep_start_ms,
+        done_turn_ids,
+        sub_orphans,
+    )
+}
+
+fn collect_runs_raw(
     conn: &Connection,
     recent_start_ms: i64,
     sweep_start_ms: i64,
@@ -1196,9 +1772,11 @@ pub(crate) fn collect_runs(
         .map_err(|e| format!("准备进行中轮查询失败: {e}"))?;
     let rows = stmt
         .query_map(rusqlite::params![recent_start_ms, sweep_start_ms], |row| {
+            let turn_id: String = row.get(0)?;
             Ok((
-                row.get::<_, String>(0)?,
+                turn_id.clone(),
                 UsageRun {
+                    turn_id,
                     user_message_id: row.get(1)?,
                     session_id: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
                     parent_session_id: row.get(3)?,
@@ -1211,6 +1789,7 @@ pub(crate) fn collect_runs(
                     start: row.get::<_, Option<i64>>(10)?.unwrap_or(0),
                     merged: None,
                     sub: None,
+                    speed: None,
                 },
             ))
         })
@@ -1430,6 +2009,27 @@ pub(crate) struct UsageSessionStat {
     /// 全量合计 × 请求笔数（model_usage 行数）
     #[serde(rename = "rq")]
     requests: i64,
+    /// 会话树内最新模型请求的速度。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    speed: Option<SpeedSnapshot>,
+    /// 当前会话树的速度状态；进行中且没有本轮确认请求时为 measuring。
+    #[serde(rename = "speedState")]
+    speed_state: SpeedState,
+    /// Internal only: members used to calculate the root session's lifetime
+    /// total and latest speed. The small speed side channel needs this after
+    /// the full history export, but it is not part of either JS contract.
+    #[serde(skip)]
+    member_session_ids: Vec<String>,
+    /// Internal only: current pending user-message boundary for this tree.
+    /// It prevents a one-second refresh from restoring the previous round's
+    /// session speed before the new request has produced a completed row.
+    #[serde(skip)]
+    round_started_at: Option<i64>,
+    /// Internal only: 独立的"该会话树当前确有轮在运行"布尔量（A2）——由
+    /// 进行中轮或新鲜待处理用户消息推导，绝不从 speed_state 反推。旁路
+    /// 的 1 秒刷新据此在"速度暂时为空"时回落 Measuring 而不是 Unavailable。
+    #[serde(skip)]
+    generating: bool,
 }
 
 /// 单成员会话的 model_usage 聚合中间值（全量合计用）
@@ -1464,6 +2064,22 @@ pub(crate) fn collect_session_stats(
     turns: &[UsageTurn],
     runs: &[UsageRun],
 ) -> Result<Vec<UsageSessionStat>, String> {
+    let session_ids = session_ids_for_stats(conn, turns, runs, None)?;
+    let catalog = SpeedCatalog::load(conn, &session_ids)?;
+    collect_session_stats_with_catalog(conn, turns, runs, &catalog, None)
+}
+
+/// Session-statistics implementation used by the full export. `pending_user`
+/// keeps the currently active session visible before its first model_usage row
+/// has produced a run/turn and supplies the current-round lower bound, while
+/// the catalog is shared with turns and runs.
+fn collect_session_stats_with_catalog(
+    conn: &Connection,
+    turns: &[UsageTurn],
+    runs: &[UsageRun],
+    catalog: &SpeedCatalog,
+    pending_user: Option<&PendingUser>,
+) -> Result<Vec<UsageSessionStat>, String> {
     // 1) 出现过的会话集合（runs 含子代理进行中行，turns 含自身视图行）
     let mut appeared: BTreeSet<String> = BTreeSet::new();
     for t in turns {
@@ -1472,59 +2088,22 @@ pub(crate) fn collect_session_stats(
     for r in runs {
         appeared.insert(r.session_id.clone());
     }
+    if let Some(pending) = pending_user.filter(|pending| !pending.session_id.is_empty()) {
+        appeared.insert(pending.session_id.clone());
+    }
     if appeared.is_empty() {
         return Ok(Vec::new());
     }
 
-    // 2) 会话父子关系（内存建树）：session 表行数几千级，一次读出
-    let has_parent = has_table(conn, "session")
-        && crate::db::has_column(conn, "session", "id")
-        && crate::db::has_column(conn, "session", "parent_id");
-    let mut parent_of: BTreeMap<String, String> = BTreeMap::new();
-    let mut children: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    if has_parent {
-        let mut stmt = conn
-            .prepare("SELECT id, parent_id FROM session")
-            .map_err(|e| format!("准备会话关系查询失败: {e}"))?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                ))
-            })
-            .map_err(|e| format!("读取会话关系失败: {e}"))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("读取会话关系失败: {e}"))?;
-        for (id, parent) in rows {
-            match parent.filter(|p| !p.is_empty()) {
-                Some(p) => {
-                    parent_of.insert(id.clone(), p.clone());
-                    children.entry(p).or_default().push(id);
-                }
-                None => {
-                    parent_of.insert(id, String::new());
-                }
-            }
-        }
-    }
+    // 2) 会话父子关系由共享索引一次加载：所有出口使用同一棵任意深度
+    //    会话树，并由索引内部负责缺列降级与环路保护。
+    let tree_index = crate::token_speed::load_session_tree_index(conn)?;
 
-    // 3) 目标会话 = 出现集合 ∪ 各自的根（沿 parent 链上溯，visited 防环）
-    let root_of = |id: &str, parent_of: &BTreeMap<String, String>| -> String {
-        let mut cur = id.to_string();
-        let mut guard = BTreeSet::new();
-        while let Some(p) = parent_of.get(&cur) {
-            if p.is_empty() || !guard.insert(cur.clone()) {
-                break;
-            }
-            cur = p.clone();
-        }
-        cur
-    };
+    // 3) 目标会话 = 出现集合 ∪ 各自的根。
     let mut targets: BTreeSet<String> = appeared.clone();
-    if has_parent {
+    if tree_index.has_parent() {
         for id in &appeared {
-            targets.insert(root_of(id, &parent_of));
+            targets.insert(tree_index.root_for(id));
         }
     }
 
@@ -1532,22 +2111,7 @@ pub(crate) fn collect_session_stats(
     let mut members_by_target: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut all_members: BTreeSet<String> = BTreeSet::new();
     for t in &targets {
-        let mut members = vec![t.clone()];
-        if has_parent {
-            let mut queue = std::collections::VecDeque::from(vec![t.clone()]);
-            let mut seen = BTreeSet::new();
-            seen.insert(t.clone());
-            while let Some(cur) = queue.pop_front() {
-                if let Some(kids) = children.get(&cur) {
-                    for k in kids {
-                        if seen.insert(k.clone()) {
-                            members.push(k.clone());
-                            queue.push_back(k.clone());
-                        }
-                    }
-                }
-            }
-        }
+        let members = tree_index.members(t);
         all_members.extend(members.iter().cloned());
         members_by_target.insert(t.clone(), members);
     }
@@ -1597,6 +2161,7 @@ pub(crate) fn collect_session_stats(
             )
         })
         .collect();
+    let now_ms = chrono::Utc::now().timestamp_millis();
 
     // 6) 按目标组装（树内逐成员累加全量合计）。CTX 查询（每成员最近一笔
     //    completed 请求 + 窗口容量解析）已随 V22 展示下线一并删除
@@ -1611,6 +2176,29 @@ pub(crate) fn collect_session_stats(
                 agg.requests += a.requests;
             }
         }
+        let round_started_at = pending_user
+            .filter(|pending| members.iter().any(|member| member == &pending.session_id))
+            .map(|pending| pending.time_created);
+        let latest = catalog.latest_for_members(members, round_started_at);
+        let speed = speed_for_latest(latest, now_ms);
+        let current_runs: Vec<&UsageRun> = runs
+            .iter()
+            .filter(|run| {
+                members.contains(&run.session_id)
+                    && round_started_at.is_none_or(|started| run.start >= started)
+            })
+            .collect();
+        // A2：生成态是独立布尔量（本轮有进行中请求，或刚发出待处理用户
+        // 消息），不从"有没有速度"反推；状态机允许"正在生成 + 本轮已完
+        // 成请求有最近速度"（generating=true 且 Recent 同时成立）
+        let generating = !current_runs.is_empty() || round_started_at.is_some();
+        let speed_state = if speed.is_some() {
+            SpeedState::Recent
+        } else if generating {
+            SpeedState::Measuring
+        } else {
+            SpeedState::Unavailable
+        };
         out.push(UsageSessionStat {
             session_id: target.clone(),
             total: agg.total(),
@@ -1618,6 +2206,11 @@ pub(crate) fn collect_session_stats(
             out_tokens: agg.out_tokens,
             cache_read: agg.cache_read,
             requests: agg.requests,
+            speed,
+            speed_state,
+            member_session_ids: members.clone(),
+            round_started_at,
+            generating,
         });
     }
     Ok(out)
@@ -1691,6 +2284,55 @@ fn render_usage_js(
         opt(active_tool),
         opt(failure_event)
     )
+}
+
+/// Render the volatile speed side channel. It contains only stable identity
+/// keys plus a snapshot/null, never token counters or historical turn fields.
+/// A3：历史轮不进旁路（`turns` 恒为空数组，保留键以维持 v1 文件形态，
+/// 旧注入脚本按空数组合并无副作用）；稳定的历史轮速度随 2 秒大文件
+/// 发布。
+fn render_speed_js(
+    ts_ms: i64,
+    runs: &[SpeedRunEntry],
+    sessions: &[SpeedSessionEntry],
+) -> Result<String, String> {
+    let runs_json = serde_json::to_string(runs)
+        .map_err(|e| format!("序列化速度进行中快照失败: {e}"))?;
+    let sessions_json = serde_json::to_string(sessions)
+        .map_err(|e| format!("序列化速度会话快照失败: {e}"))?;
+    Ok(format!(
+        "window.__ZBAR_USAGE_SPEED__ = {{\"v\":1,\"ts\":{ts_ms},\"turns\":[],\"runs\":{runs_json},\"sess\":{sessions_json}}};\n"
+    ))
+}
+
+/// Atomic write for the small speed file. The cache compares only its payload
+/// arrays, so a one-second tick with no new/changed request does not write at
+/// all; timestamp changes alone never cause disk churn.
+fn write_speed_view(
+    cache: &mut Option<String>,
+    dir: &Path,
+    view: &SpeedView,
+    ts_ms: i64,
+) -> Result<bool, String> {
+    let runs_json = serde_json::to_string(&view.runs)
+        .map_err(|e| format!("序列化速度进行中快照失败: {e}"))?;
+    let sess_json = serde_json::to_string(&view.sessions)
+        .map_err(|e| format!("序列化速度会话快照失败: {e}"))?;
+    let mut payload = String::with_capacity(runs_json.len() + sess_json.len() + 2);
+    payload.push_str(&runs_json);
+    payload.push('\u{1}');
+    payload.push_str(&sess_json);
+    if cache.as_deref() == Some(payload.as_str()) {
+        return Ok(false);
+    }
+    let target = dir.join(store::USAGE_SPEED_FILE);
+    let tmp = dir.join(format!("{}.tmp", store::USAGE_SPEED_FILE));
+    fs::write(&tmp, render_speed_js(ts_ms, &view.runs, &view.sessions)?)
+        .map_err(|e| format!("写入 {} 失败: {e}", tmp.display()))?;
+    fs::rename(&tmp, &target)
+        .map_err(|e| format!("替换 {} 失败: {e}", target.display()))?;
+    *cache = Some(payload);
+    Ok(true)
 }
 
 /// 渲染心跳小文件内容（几十字节）：注入版宠物壳每 2 秒经 script 时间戳
@@ -1776,6 +2418,7 @@ fn write_if_changed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::token_speed::SpeedQuality;
 
     /// 构造一轮主会话轮（其余字段取典型值，测试按需覆写）
     fn turn(id: &str, sess: &str, start: i64, end: Option<i64>) -> UsageTurn {
@@ -1799,6 +2442,7 @@ mod tests {
             sub: None,
             subagent: None,
             models: String::new(),
+            speed: None,
         }
     }
 
@@ -1923,8 +2567,402 @@ mod tests {
     }
 
     #[test]
+    fn 速度小文件_只含窄快照且与大历史文件独立() {
+        let dir = std::env::temp_dir().join(format!(
+            "zbar-usage-speed-write-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let snapshot = SpeedSnapshot {
+            value: 125.0,
+            quality: crate::token_speed::SpeedQuality::Generation,
+            completed_at: 9_000,
+            request_id: None,
+        };
+        let mut current_turn = turn("turn_speed", "sess_speed", 1_000, Some(9_000));
+        current_turn.speed = Some(snapshot.clone());
+        let turns = vec![current_turn];
+        let sessions = vec![UsageSessionStat {
+            session_id: "sess_speed".to_string(),
+            total: 1_200,
+            plain_in: 100,
+            out_tokens: 1_000,
+            cache_read: 100,
+            requests: 1,
+            speed: Some(snapshot),
+            speed_state: SpeedState::Recent,
+            member_session_ids: vec!["sess_speed".to_string()],
+            round_started_at: None,
+            generating: false,
+        }];
+        let view = SpeedView::from_rows(&[], &sessions, Some("sess_speed"));
+        let mut speed_cache = None;
+        assert!(write_speed_view(&mut speed_cache, &dir, &view, 10_000).unwrap());
+        let speed_path = dir.join(store::USAGE_SPEED_FILE);
+        let first = fs::read_to_string(&speed_path).unwrap();
+        assert!(first.starts_with("window.__ZBAR_USAGE_SPEED__ = "), "{first}");
+        assert!(first.contains("\"v\":1"), "{first}");
+        assert!(first.contains("\"quality\":\"generation\""), "{first}");
+        assert!(first.contains("\"speedState\":\"recent\""), "{first}");
+        assert!(first.contains("\"turns\":[]"), "A3 旁路不应携带历史轮: {first}");
+        for token_key in ["\"in\":", "\"out\":", "\"cr\":", "\"tt\":", "\"down\":"] {
+            assert!(
+                !first.contains(token_key),
+                "速度小文件不应携带历史累计字段 {token_key}: {first}"
+            );
+        }
+
+        // 只有 ts 变化时不重写；payload 未变，文件字节也保持不变。
+        assert!(!write_speed_view(&mut speed_cache, &dir, &view, 11_000).unwrap());
+        assert_eq!(fs::read_to_string(&speed_path).unwrap(), first);
+
+        // 速度发生变化才重写；临时文件不会残留。
+        let mut changed = view.clone();
+        changed.sessions[0].speed.as_mut().unwrap().value = 130.0;
+        assert!(write_speed_view(&mut speed_cache, &dir, &changed, 12_000).unwrap());
+        let changed_text = fs::read_to_string(&speed_path).unwrap();
+        assert!(changed_text.contains("130.0"), "{changed_text}");
+        assert!(!dir.join(format!("{}.tmp", store::USAGE_SPEED_FILE)).exists());
+
+        // A3 分工：完成轮的稳定速度与空闲会话的速度/状态随大文件发布；
+        // 进行中轮（runs）的速度不在大文件（旁路 1 秒覆盖）。
+        let mut history_cache = None;
+        let mut run_row = UsageRun {
+            turn_id: "turn_running".to_string(),
+            user_message_id: Some("msg_running".to_string()),
+            session_id: "sess_speed".to_string(),
+            parent_session_id: None,
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+            requests: 1,
+            start: 9_500,
+            merged: None,
+            sub: None,
+            speed: Some(SpeedSnapshot {
+                value: 99.0,
+                quality: crate::token_speed::SpeedQuality::Generation,
+                completed_at: 9_800,
+                request_id: None,
+            }),
+        };
+        flush_export(
+            &dir,
+            &mut history_cache,
+            false,
+            &turns,
+            &[run_row.clone()],
+            &sessions,
+            None,
+            None,
+            None,
+            12_000,
+        )
+        .unwrap();
+        let history = fs::read_to_string(dir.join(store::USAGE_DATA_FILE)).unwrap();
+        assert!(
+            history.contains("\"speed\":{\"value\":125.0"),
+            "完成轮的稳定速度应随大文件发布: {history}"
+        );
+        assert!(
+            history.contains("\"speedState\":\"recent\""),
+            "空闲会话的速度状态应随大文件发布: {history}"
+        );
+        let runs_start = history.find("\"runs\":").unwrap();
+        let runs_end = history[runs_start..].find(",\"sess\":").unwrap() + runs_start;
+        assert!(
+            !history[runs_start..runs_end].contains("\"speed\""),
+            "进行中轮的速度不应进入大文件: {}",
+            &history[runs_start..runs_end]
+        );
+        run_row.speed = None;
+        let _ = run_row;
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 速度会话刷新_沿树取最新且待处理轮不恢复旧值() {
+        let mut catalog = SpeedCatalog::default();
+        let root_request = LatestUsageRequest {
+            order: 1_200,
+            timing: RequestTiming {
+                output_tokens: 100,
+                started_at: Some(1_000),
+                first_token_at: Some(1_100),
+                completed_at: Some(1_200),
+                ..RequestTiming::default()
+            },
+        };
+        let child_request = LatestUsageRequest {
+            order: 2_300,
+            timing: RequestTiming {
+                output_tokens: 300,
+                started_at: Some(2_000),
+                first_token_at: Some(2_100),
+                completed_at: Some(2_300),
+                ..RequestTiming::default()
+            },
+        };
+        catalog
+            .by_session
+            .insert("sess_root".to_string(), root_request);
+        catalog
+            .by_session
+            .insert("sess_child".to_string(), child_request);
+
+        let mut view = SpeedView {
+            sessions: vec![SpeedSessionEntry {
+                session_id: "sess_root".to_string(),
+                speed: None,
+                speed_state: SpeedState::Unavailable,
+                member_session_ids: vec!["sess_root".to_string(), "sess_child".to_string()],
+                round_started_at: None,
+                generating: false,
+            }],
+            ..SpeedView::default()
+        };
+        view.refresh(&catalog, 3_000);
+        assert_eq!(view.sessions[0].speed.as_ref().unwrap().value, 1_500.0);
+
+        // A new user message starts a round before its first request exists.
+        // The same catalog must not restore either historical member speed.
+        view.sessions[0].speed = Some(SpeedSnapshot {
+            value: 1_500.0,
+            quality: SpeedQuality::Generation,
+            completed_at: 2_300,
+            request_id: None,
+        });
+        view.sessions[0].speed_state = SpeedState::Measuring;
+        view.sessions[0].generating = true;
+        view.sessions[0].round_started_at = Some(2_500);
+        view.refresh(&catalog, 3_000);
+        assert_eq!(view.sessions[0].speed, None);
+        assert_eq!(view.sessions[0].speed_state, SpeedState::Measuring);
+    }
+
+    #[test]
+    fn 速度会话刷新_生成中速度暂时为空时回落measuring而不是unavailable() {
+        // A2 场景一：同轮第一请求完成（Recent）→ 第二请求进行中（最新行
+        // 无效，速度清空）→ 状态必须是 Measuring（仍在生成），绝不能因
+        // "没有速度"反推成 Unavailable；第二请求完成后恢复 Recent；轮结
+        // 束（generating=false）且无有效速度时才是 Unavailable。
+        let mut catalog = SpeedCatalog::default();
+        let first_request = LatestUsageRequest {
+            order: 1_200,
+            timing: RequestTiming {
+                output_tokens: 100,
+                started_at: Some(1_000),
+                first_token_at: Some(1_100),
+                completed_at: Some(1_200),
+                ..RequestTiming::default()
+            },
+        };
+        catalog
+            .by_session
+            .insert("sess_a2".to_string(), first_request);
+        let mut view = SpeedView {
+            sessions: vec![SpeedSessionEntry {
+                session_id: "sess_a2".to_string(),
+                speed: None,
+                speed_state: SpeedState::Unavailable,
+                member_session_ids: vec!["sess_a2".to_string()],
+                round_started_at: None,
+                generating: true,
+            }],
+            ..SpeedView::default()
+        };
+        view.refresh(&catalog, 2_000);
+        // 正在生成 + 本轮已完成请求有最近速度：generating=true 且 Recent
+        assert_eq!(view.sessions[0].speed_state, SpeedState::Recent);
+        assert!(view.sessions[0].generating);
+
+        // 第二请求进行中：目录被最新的进行中行覆盖（无效候选），速度清空
+        let mut catalog_second = SpeedCatalog::default();
+        catalog_second.by_session.insert(
+            "sess_a2".to_string(),
+            LatestUsageRequest {
+                order: 3_000,
+                timing: RequestTiming {
+                    // 非完成状态的最新行：output 置 0，速度无效
+                    output_tokens: 0,
+                    started_at: Some(2_500),
+                    first_token_at: None,
+                    completed_at: None,
+                    ..RequestTiming::default()
+                },
+            },
+        );
+        view.refresh(&catalog_second, 3_000);
+        assert_eq!(view.sessions[0].speed, None, "进行中请求不得沿用旧速度");
+        assert_eq!(
+            view.sessions[0].speed_state,
+            SpeedState::Measuring,
+            "生成中且速度暂时为空应回落 measuring，不得变成 unavailable"
+        );
+
+        // 第二请求完成：恢复 Recent
+        let mut catalog_done = SpeedCatalog::default();
+        catalog_done.by_session.insert(
+            "sess_a2".to_string(),
+            LatestUsageRequest {
+                order: 5_000,
+                timing: RequestTiming {
+                    output_tokens: 200,
+                    started_at: Some(2_500),
+                    first_token_at: Some(2_600),
+                    completed_at: Some(5_000),
+                    ..RequestTiming::default()
+                },
+            },
+        );
+        view.refresh(&catalog_done, 5_500);
+        assert_eq!(view.sessions[0].speed_state, SpeedState::Recent);
+
+        // 轮结束：无新一轮待处理消息 → generating=false；目录中最新行又
+        // 变为无效（例如失败行）时状态为 Unavailable（不是 Measuring）
+        view.sessions[0].generating = false;
+        view.refresh(&catalog_second, 6_000);
+        assert_eq!(view.sessions[0].speed, None);
+        assert_eq!(view.sessions[0].speed_state, SpeedState::Unavailable);
+
+        // 场景二：新轮没有已确认速度（round_started_at 屏蔽上一轮请求）
+        view.sessions[0].generating = true;
+        view.sessions[0].round_started_at = Some(6_500);
+        view.refresh(&catalog_done, 7_000);
+        assert_eq!(view.sessions[0].speed, None, "新轮不得回填上一轮速度");
+        assert_eq!(view.sessions[0].speed_state, SpeedState::Measuring);
+    }
+
+    #[test]
+    fn 速度旁路视图_只保留活跃会话与进行中轮() {
+        // A3：3000 历史轮 + 若干空闲会话 + 1 个活跃会话（含进行中轮）。
+        // 旁路只携带活跃会话条目与 runs；turns 恒为空。
+        let mut sessions = Vec::new();
+        for i in 0..40 {
+            sessions.push(UsageSessionStat {
+                session_id: format!("sess_idle_{i}"),
+                total: 1_000,
+                plain_in: 100,
+                out_tokens: 800,
+                cache_read: 100,
+                requests: 9,
+                speed: Some(SpeedSnapshot {
+                    value: 120.0,
+                    quality: SpeedQuality::Generation,
+                    completed_at: 1_000,
+                    request_id: None,
+                }),
+                speed_state: SpeedState::Recent,
+                member_session_ids: vec![format!("sess_idle_{i}")],
+                round_started_at: None,
+                generating: false,
+            });
+        }
+        sessions.push(UsageSessionStat {
+            session_id: "sess_active".to_string(),
+            total: 2_000,
+            plain_in: 200,
+            out_tokens: 1_600,
+            cache_read: 200,
+            requests: 4,
+            speed: None,
+            speed_state: SpeedState::Measuring,
+            member_session_ids: vec![
+                "sess_active".to_string(),
+                "sess_subagent_agent_1".to_string(),
+            ],
+            round_started_at: Some(5_000),
+            generating: true,
+        });
+        let runs = vec![UsageRun {
+            turn_id: "turn_live".to_string(),
+            user_message_id: Some("msg_live".to_string()),
+            session_id: "sess_subagent_agent_1".to_string(),
+            parent_session_id: Some("sess_active".to_string()),
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+            requests: 1,
+            start: 5_100,
+            merged: None,
+            sub: None,
+            speed: None,
+        }];
+        let view = SpeedView::from_rows(&runs, &sessions, Some("sess_active"));
+
+        let dir = std::env::temp_dir().join(format!(
+            "zbar-usage-speed-slim-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut speed_cache = None;
+        assert!(write_speed_view(&mut speed_cache, &dir, &view, 7_000).unwrap());
+        let speed_path = dir.join(store::USAGE_SPEED_FILE);
+        let text = fs::read_to_string(&speed_path).unwrap();
+        let bytes_idle = fs::metadata(&speed_path).unwrap().len();
+        eprintln!(
+            "[speed-bypass-bytes] 单活跃会话+1进行中轮: {bytes_idle} B（3000 历史轮/40 空闲会话不进旁路）"
+        );
+        assert!(text.contains("\"s\":\"sess_active\""), "{text}");
+        assert!(
+            !text.contains("sess_idle_"),
+            "旁路不应携带空闲会话: {text}"
+        );
+        assert!(
+            !text.contains("sess_idle_39") && text.matches("\"s\":").count() == 1,
+            "旁路应只有活跃会话条目: {text}"
+        );
+        assert!(text.contains("\"turns\":[]"), "{text}");
+        // 空闲 + 单活跃会话 + 3000 历史轮场景下的旁路字节数（远小于大文件）
+        assert!(
+            bytes_idle < 1_024,
+            "空闲+单活跃会话的旁路应远小于 1KiB: {bytes_idle}"
+        );
+
+        // 3000 历史轮场景：大文件 turns 行数不影响旁路字节数（旁路不含
+        // turns）；一笔速度变化的写入量 = 整个旁路文件的字节数（原子替换）
+        // —— 空闲场景（无活跃会话/轮）旁路为空集，不写盘（session_ids 为空
+        // 时 export_speed_once 直接返回）。
+        let mut changed = view.clone();
+        changed.sessions[0].speed = Some(SpeedSnapshot {
+            value: 88.8,
+            quality: SpeedQuality::Generation,
+            completed_at: 6_800,
+            request_id: None,
+        });
+        changed.runs[0].speed = Some(SpeedSnapshot {
+            value: 77.7,
+            quality: SpeedQuality::Generation,
+            completed_at: 6_900,
+            request_id: None,
+        });
+        assert!(write_speed_view(&mut speed_cache, &dir, &changed, 7_100).unwrap());
+        let changed_bytes = fs::metadata(&speed_path).unwrap().len();
+        eprintln!("[speed-bypass-bytes] 一笔速度变化的写入量: {changed_bytes} B");
+        assert!(
+            changed_bytes < 1_024,
+            "一笔速度变化的旁路写入量应远小于 1KiB: {changed_bytes}"
+        );
+        assert!(changed_bytes > bytes_idle, "速度变化应真实写盘");
+        let changed_text = fs::read_to_string(&speed_path).unwrap();
+        assert!(changed_text.contains("88.8"), "{changed_text}");
+        assert!(changed_text.contains("77.7"), "{changed_text}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn runs序列化_键名契约与短键形态() {
         let r = UsageRun {
+            turn_id: "turn_r".to_string(),
             user_message_id: Some("msg_u1".to_string()),
             session_id: "sess_1".to_string(),
             parent_session_id: None,
@@ -1937,6 +2975,7 @@ mod tests {
             start: 42,
             merged: None,
             sub: None,
+            speed: None,
         };
         let json = serde_json::to_string(&vec![r]).unwrap();
         // 短键名契约一字不差（usage.js 按名消费）；无 turn/status 等整轮字段；
@@ -1951,6 +2990,7 @@ mod tests {
         );
         // umid null + 子代理 psess 形态
         let sub_run = UsageRun {
+            turn_id: "turn_sub".to_string(),
             user_message_id: None,
             session_id: "sess_subagent_agent_1".to_string(),
             parent_session_id: Some("sess_main".to_string()),
@@ -1963,6 +3003,7 @@ mod tests {
             start: 1,
             merged: None,
             sub: None,
+            speed: None,
         };
         let json = serde_json::to_string(&vec![sub_run]).unwrap();
         assert!(json.contains("\"umid\":null"), "{json}");
@@ -1970,6 +3011,7 @@ mod tests {
         assert!(!json.contains("\"m\":"), "未并入的子代理行不打 m 标记：{json}");
         // V9：m:1 标记 + sub 聚合的短键形态（结构与 turns 行 sub 一致）
         let merged_run = UsageRun {
+            turn_id: "turn_merged".to_string(),
             user_message_id: Some("msg_main".to_string()),
             session_id: "sess_main".to_string(),
             parent_session_id: None,
@@ -1990,6 +3032,7 @@ mod tests {
                 cache_write: 0,
                 reasoning: 1,
             }),
+            speed: None,
         };
         let json = serde_json::to_string(&vec![merged_run]).unwrap();
         assert!(
@@ -2012,6 +3055,7 @@ mod tests {
     /// 序列化测试用子代理行模板（测试按需覆写）
     fn sub_run_template() -> UsageRun {
         UsageRun {
+            turn_id: "turn_template".to_string(),
             user_message_id: None,
             session_id: "sess_subagent_agent_1".to_string(),
             parent_session_id: Some("sess_main".to_string()),
@@ -2024,6 +3068,7 @@ mod tests {
             start: 1,
             merged: None,
             sub: None,
+            speed: None,
         }
     }
 
@@ -2230,6 +3275,11 @@ mod tests {
             out_tokens: 200,
             cache_read: 50,
             requests: 2,
+            speed: None,
+            speed_state: SpeedState::Unavailable,
+            member_session_ids: vec!["sess_1".to_string()],
+            round_started_at: None,
+            generating: false,
         }];
         flush_export(&dir, &mut cache, false, &turns, &[], &sess, None, None, None, 1000).unwrap();
         assert!(big.exists(), "首次导出应写大文件");
@@ -2280,6 +3330,7 @@ mod tests {
         let t2 = turn("turn_2", "sess_1", 2000, Some(9000));
         let t_noend = turn("turn_3", "sess_1", 3000, None);
         let run = UsageRun {
+            turn_id: "turn_activity".to_string(),
             user_message_id: None,
             session_id: "sess_1".to_string(),
             parent_session_id: None,
@@ -2292,6 +3343,7 @@ mod tests {
             start: 12000,
             merged: None,
             sub: None,
+            speed: None,
         };
         assert_eq!(last_activity_ms(&[], &[], None, None), 0, "无活动应为 0");
         assert_eq!(
@@ -2555,6 +3607,180 @@ mod tests {
     }
 
     #[test]
+    fn 速度_每轮与会话级使用同一请求快照且最新无效会清空() {
+        let (conn, path) = temp_db("speed-contract");
+        conn.execute_batch(
+            "CREATE TABLE turn_usage (
+                session_id TEXT, turn_id TEXT, status TEXT, started_at INTEGER,
+                completed_at INTEGER, duration_ms INTEGER,
+                time_to_first_token_ms INTEGER);
+             CREATE TABLE model_usage (
+                session_id TEXT, turn_id TEXT, started_at INTEGER, status TEXT,
+                input_tokens INTEGER, output_tokens INTEGER,
+                cache_read_input_tokens INTEGER, first_token_at INTEGER,
+                completed_at INTEGER, duration_ms INTEGER, model_id TEXT);",
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO turn_usage VALUES
+                ('sess_speed', 'turn_speed', 'completed', 1000, 3000, 500, 200);
+             INSERT INTO model_usage VALUES
+                ('sess_speed', 'turn_speed', 1000, 'completed', 10, 100, 4,
+                 2000, 3000, 2000, 'M');",
+        )
+        .unwrap();
+
+        let (mut turns, _) = collect_turns_with_speed(&conn, 0)
+            .unwrap()
+            .expect("turn export");
+        let turn_speed = turns[0].speed.clone().expect("turn speed");
+        assert_eq!(turn_speed.quality, crate::token_speed::SpeedQuality::Generation);
+        assert!((turn_speed.value - 100.0).abs() < f64::EPSILON);
+        let session_speed = collect_session_stats(&conn, &turns, &[])
+            .unwrap()
+            .remove(0)
+            .speed
+            .expect("session speed");
+        assert_eq!(session_speed, turn_speed, "两出口应复用同一请求级快照");
+
+        // The newer row is invalid. It must win selection and clear the speed
+        // rather than allowing the older valid request to remain visible.
+        conn.execute(
+            "INSERT INTO model_usage VALUES
+                ('sess_speed', 'turn_speed', 2000, 'completed', 10, 50, 0,
+                 4000, 3500, 1500, 'M')",
+            [],
+        )
+        .unwrap();
+        turns = collect_turns_with_speed(&conn, 0)
+            .unwrap()
+            .expect("turn export")
+            .0;
+        assert!(turns[0].speed.is_none(), "最新无效请求不得沿用旧速度");
+        let session = collect_session_stats(&conn, &turns, &[]).unwrap();
+        assert!(session[0].speed.is_none(), "会话级也应清空旧速度");
+
+        // A newer in-flight request must suppress the previous completed
+        // request as well; skipping non-terminal rows would leak the old
+        // speed through the one-second side refresh.
+        conn.execute(
+            "INSERT INTO model_usage VALUES
+                ('sess_speed', 'turn_speed', 3000, 'running', 10, 500, 0,
+                 NULL, NULL, NULL, 'M')",
+            [],
+        )
+        .unwrap();
+        turns = collect_turns_with_speed(&conn, 0)
+            .unwrap()
+            .expect("turn export")
+            .0;
+        assert!(turns[0].speed.is_none(), "进行中最新请求不得沿用旧速度");
+
+        drop(conn);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn 速度查询_联合索引计划与单次目录读取() {
+        use std::time::Instant;
+
+        let (conn, path) = temp_db("speed-query-plan");
+        conn.execute_batch(
+            "CREATE TABLE model_usage (
+                session_id TEXT, turn_id TEXT, started_at INTEGER, status TEXT,
+                output_tokens INTEGER, first_token_at INTEGER, completed_at INTEGER,
+                duration_ms INTEGER);
+             CREATE INDEX model_usage_session_turn_idx
+                ON model_usage(session_id, turn_id);",
+        )
+        .unwrap();
+        conn.execute_batch("BEGIN").unwrap();
+        for session in 0..240 {
+            for turn in 0..240 {
+                conn.execute(
+                    "INSERT INTO model_usage VALUES (?1, ?2, ?3, 'completed', 100, ?4, ?5, 1000)",
+                    rusqlite::params![
+                        format!("sess_{session}"),
+                        format!("turn_{turn}"),
+                        1_000 + session * 100 + turn,
+                        1_500 + session * 100 + turn,
+                        2_000 + session * 100 + turn,
+                    ],
+                )
+                .unwrap();
+            }
+        }
+        conn.execute_batch("COMMIT").unwrap();
+
+        let explain = |sql: &str| -> Vec<String> {
+            conn.prepare(sql)
+                .unwrap()
+                .query_map(rusqlite::params!["turn_1", "turn_2"], |row| {
+                    row.get::<_, String>(3)
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        let old_plan = explain(
+            "EXPLAIN QUERY PLAN SELECT session_id, turn_id FROM model_usage \
+             WHERE turn_id IN (?1, ?2)",
+        );
+        let new_plan = explain(
+            "EXPLAIN QUERY PLAN SELECT session_id, turn_id FROM model_usage \
+             WHERE session_id IN (?1, ?2)",
+        );
+        eprintln!("[speed-query-plan] old={old_plan:?} new={new_plan:?}");
+        assert!(
+            old_plan.iter().any(|detail| detail.contains("SCAN model_usage")),
+            "未带 session 前缀的旧查询不应伪装成索引点查: {old_plan:?}"
+        );
+        assert!(
+            new_plan.iter().any(|detail| {
+                detail.contains("INDEX model_usage_session_turn_idx")
+                    && detail.contains("session_id=?")
+            }),
+            "新查询应使用(session_id, turn_id)索引前缀: {new_plan:?}"
+        );
+
+        let sessions = ["sess_1".to_string(), "sess_2".to_string()]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let old_started = Instant::now();
+        for _ in 0..20 {
+            // 旧导出周期会为 turns、runs、sess 分别读取同一张表；这里
+            // 以 3 次原 bare turn_id 查询模拟其重复成本，并读同一批
+            // 请求级字段，避免只比较一条极简 SELECT 的偏差。
+            for _ in 0..3 {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT session_id, turn_id, output_tokens, started_at, \
+                         first_token_at, completed_at, duration_ms, status \
+                         FROM model_usage WHERE turn_id IN (?1, ?2)",
+                    )
+                    .unwrap();
+                let mut rows = stmt
+                    .query(rusqlite::params!["turn_1", "turn_2"])
+                    .unwrap();
+                while rows.next().unwrap().is_some() {}
+            }
+        }
+        let old_elapsed = old_started.elapsed();
+        let new_started = Instant::now();
+        for _ in 0..20 {
+            let _ = SpeedCatalog::load(&conn, &sessions).unwrap();
+        }
+        let new_elapsed = new_started.elapsed();
+        eprintln!(
+            "[speed-query-plan] 20x elapsed old={old_elapsed:?} new={new_elapsed:?}"
+        );
+        assert!(new_elapsed < old_elapsed, "联合索引查询应明显少于全表扫");
+
+        drop(conn);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
     fn sess序列化_键名契约与全零形态() {
         // 短键名一字不差（usage.js 按名消费）；V22 起 cp/cu/cw 已随 CTX
         // 展示下线删除，不再出现在序列化输出
@@ -2565,11 +3791,16 @@ mod tests {
             out_tokens: 200,
             cache_read: 50,
             requests: 2,
+            speed: None,
+            speed_state: SpeedState::Unavailable,
+            member_session_ids: vec!["sess_1".to_string()],
+            round_started_at: None,
+            generating: false,
         };
         let json = serde_json::to_string(&vec![row]).unwrap();
         assert_eq!(
             json,
-            "[{\"s\":\"sess_1\",\"tt\":1110,\"up\":100,\"down\":200,\"cr\":50,\"rq\":2}]",
+            "[{\"s\":\"sess_1\",\"tt\":1110,\"up\":100,\"down\":200,\"cr\":50,\"rq\":2,\"speedState\":\"unavailable\"}]",
             "sess 行序列化形态不符：{json}"
         );
         // 全零行（无任何请求）：各合计为 0
@@ -2580,11 +3811,16 @@ mod tests {
             out_tokens: 0,
             cache_read: 0,
             requests: 0,
+            speed: None,
+            speed_state: SpeedState::Unavailable,
+            member_session_ids: vec!["sess_2".to_string()],
+            round_started_at: None,
+            generating: false,
         };
         let json = serde_json::to_string(&vec![none_row]).unwrap();
         assert_eq!(
             json,
-            "[{\"s\":\"sess_2\",\"tt\":0,\"up\":0,\"down\":0,\"cr\":0,\"rq\":0}]",
+            "[{\"s\":\"sess_2\",\"tt\":0,\"up\":0,\"down\":0,\"cr\":0,\"rq\":0,\"speedState\":\"unavailable\"}]",
             "{json}"
         );
         // CTX 短键零残留（V22 删除 cp/cu/cw）
@@ -2672,6 +3908,7 @@ mod tests {
         // 仅子代理出现（主轮未落库、turns 空）：目标 = sess_sub1 + 其根
         // sess_main（上溯补入），主会话行也导出
         let runs = vec![UsageRun {
+            turn_id: "turn_sub_run".to_string(),
             user_message_id: Some("msg_c".to_string()),
             session_id: "sess_sub1".to_string(),
             parent_session_id: Some("sess_main".to_string()),
@@ -2684,6 +3921,7 @@ mod tests {
             start: 5000,
             merged: None,
             sub: None,
+            speed: None,
         }];
         let sess = collect_session_stats(&conn, &[], &runs).unwrap();
         assert_eq!(sess.len(), 2, "{sess:?}");
@@ -2695,6 +3933,182 @@ mod tests {
         // 子代理自身树行 = 仅自身（↑ = 10）
         assert_eq!(sub.plain_in, 10);
         assert_eq!(sub.requests, 1);
+        drop(conn);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn sess聚合_首请求未完成时由待处理用户消息带出历史全生命周期累计() {
+        let (conn, path) = temp_db("sess-pending-lifetime");
+        conn.execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT);
+             CREATE TABLE message (
+                id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+             CREATE TABLE model_usage (
+                session_id TEXT, turn_id TEXT, started_at INTEGER, status TEXT,
+                input_tokens INTEGER, output_tokens INTEGER,
+                cache_read_input_tokens INTEGER, first_token_at INTEGER,
+                completed_at INTEGER);
+             INSERT INTO session VALUES ('sess_old_active', NULL);
+             INSERT INTO model_usage VALUES
+                ('sess_old_active', 'old_turn', 1000, 'completed', 1000, 2000, 300, 1100, 1200);
+             INSERT INTO message VALUES
+                ('msg_new_active', 'sess_old_active', 9999999900, '{\"role\":\"user\"}');",
+        )
+        .unwrap();
+        let now = 9_999_999_900 + 1_000;
+
+        // 没有 turns/runs：首笔请求尚未完成，只有发送即落库的 user message。
+        let pending = collect_pending_user(&conn, &BTreeSet::new(), now, &BTreeSet::new())
+            .unwrap()
+            .expect("应识别待处理用户消息");
+        assert_eq!(pending.session_id, "sess_old_active");
+        let ids = session_ids_for_stats(&conn, &[], &[], Some(&pending.session_id)).unwrap();
+        let catalog = SpeedCatalog::load(&conn, &ids).unwrap();
+        let stats = collect_session_stats_with_catalog(
+            &conn,
+            &[],
+            &[],
+            &catalog,
+            Some(&pending),
+        )
+        .unwrap();
+        assert_eq!(stats.len(), 1);
+        let active = &stats[0];
+        assert_eq!(active.session_id, "sess_old_active");
+        assert_eq!(active.plain_in, 700, "历史累计不应在首请求阶段归零");
+        assert_eq!(active.out_tokens, 2000);
+        assert_eq!(active.cache_read, 300);
+        assert_eq!(active.requests, 1);
+        assert_eq!(active.total, 3000);
+        // A1/A2：首请求等待期为 measuring 且 generating 独立成立；本轮
+        // 边界排除旧请求速度
+        assert!(active.generating, "新鲜待处理消息应视为生成中");
+        assert_eq!(active.speed_state, SpeedState::Measuring);
+        assert_eq!(active.speed, None, "新轮不得回填旧轮速度");
+
+        // A1 孤儿超时：同一消息超过新鲜期且无活跃佐证 → 不再冒充待处理，
+        // 会话回到空闲。纯 pending 通道的会话随之退出 sess 导出（渲染端回
+        // 退 turns 口径）；这里补一条完成轮让会话仍出现在 turns，验证空闲
+        // 状态与累计不清零
+        let stale_now = 9_999_999_900 + PENDING_FRESH_MS + 1;
+        let dropped = collect_pending_user(
+            &conn,
+            &BTreeSet::new(),
+            stale_now,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        assert_eq!(dropped, None, "超期孤儿消息应被清掉");
+        let turns = vec![turn("old_turn", "sess_old_active", 1000, Some(1200))];
+        let stats = collect_session_stats_with_catalog(&conn, &turns, &[], &catalog, dropped.as_ref())
+            .unwrap();
+        assert_eq!(stats.len(), 1);
+        let idle = &stats[0];
+        assert!(!idle.generating);
+        assert_eq!(idle.speed_state, SpeedState::Recent, "空闲会话显示最近确认速度");
+        // 历史累计不被陈旧状态清理清零（model_usage 全量口径，非 turns 合计）
+        assert_eq!(idle.plain_in, 700);
+        assert_eq!(idle.total, 3000);
+
+        drop(conn);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn sess聚合_多层子代理佐证与同轮多请求状态() {
+        // A1 多层子代理：主会话待处理消息超期，但树内子代理（含二层）仍
+        // 有进行中轮（runs 佐证）→ 会话保持生成中，累计含全层子代理。
+        // A2：同轮第一请求完成（有速度）后第二请求进行中（runs 仍在）→
+        // generating=true 且 Recent；速度暂时无效时回落 Measuring。
+        let (conn, path) = temp_db("sess-tree-corroborate");
+        conn.execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT);
+             CREATE TABLE message (
+                id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+             CREATE TABLE model_usage (
+                session_id TEXT, turn_id TEXT, started_at INTEGER, status TEXT,
+                input_tokens INTEGER, output_tokens INTEGER,
+                cache_read_input_tokens INTEGER, first_token_at INTEGER,
+                completed_at INTEGER, duration_ms INTEGER);
+             INSERT INTO session VALUES
+               ('sess_main', NULL),
+               ('sess_sub1', 'sess_main'),
+               ('sess_sub2_child', 'sess_sub1');
+             INSERT INTO model_usage VALUES
+               ('sess_main', 't_old', 1000, 'completed', 100, 200, 30, 1100, 1200, 1200),
+               ('sess_sub2_child', 't_live', 9900000, 'completed', 40, 80, 0, 9900100, 9900200, 200);
+             INSERT INTO message VALUES
+               ('msg_stale_main', 'sess_main', 9_000, '{\"role\":\"user\"}');",
+        )
+        .unwrap();
+        let now = 9_999_999;
+        // 超期主会话消息 + 二层子代理进行中轮（runs 形态）→ 佐证成立
+        let corroborate: BTreeSet<String> = ["sess_main".to_string()].into_iter().collect();
+        let pending = collect_pending_user(&conn, &BTreeSet::new(), now, &corroborate)
+            .unwrap()
+            .expect("树内活跃佐证应保留超期待处理消息");
+        assert_eq!(pending.session_id, "sess_main");
+
+        // 模拟 runs：二层子代理的进行中轮（turn_usage 无行）
+        let runs = vec![UsageRun {
+            turn_id: "t_live".to_string(),
+            user_message_id: None,
+            session_id: "sess_sub2_child".to_string(),
+            parent_session_id: Some("sess_sub1".to_string()),
+            input_tokens: 40,
+            output_tokens: 80,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+            requests: 1,
+            start: 9_900_000,
+            merged: None,
+            sub: None,
+            speed: Some(SpeedSnapshot {
+                value: 800.0,
+                quality: SpeedQuality::Generation,
+                completed_at: 9_900_200,
+                request_id: None,
+            }),
+        }];
+        let ids = session_ids_for_stats(&conn, &[], &runs, None).unwrap();
+        let catalog = SpeedCatalog::load(&conn, &ids).unwrap();
+        let stats =
+            collect_session_stats_with_catalog(&conn, &[], &runs, &catalog, Some(&pending))
+                .unwrap();
+        let main = stats
+            .iter()
+            .find(|s| s.session_id == "sess_main")
+            .expect("根会话行");
+        // 全层子代理累计：↑ = (100-30) + (40-0) = 110，↓ = 280
+        assert_eq!(main.plain_in, 110);
+        assert_eq!(main.out_tokens, 280);
+        // 同轮有已完成请求（runs 带速度）→ generating + Recent
+        assert!(main.generating);
+        assert_eq!(main.speed_state, SpeedState::Recent);
+
+        // A2 回落：同轮第二请求进行中（目录最新行无效）→ 速度清空且状态
+        // 回落 Measuring，绝不因"没有速度"转成 Unavailable
+        conn.execute(
+            "INSERT INTO model_usage VALUES
+               ('sess_sub2_child', 't_live', 9950000, 'running', 10, 500, 0, NULL, NULL, NULL)",
+            [],
+        )
+        .unwrap();
+        let ids = session_ids_for_stats(&conn, &[], &runs, None).unwrap();
+        let catalog = SpeedCatalog::load(&conn, &ids).unwrap();
+        let stats =
+            collect_session_stats_with_catalog(&conn, &[], &runs, &catalog, Some(&pending))
+                .unwrap();
+        let main = stats.iter().find(|s| s.session_id == "sess_main").unwrap();
+        assert!(main.generating, "第二请求进行中仍视为生成中");
+        assert_eq!(main.speed, None, "最新请求无效时不得沿用旧速度");
+        assert_eq!(
+            main.speed_state,
+            SpeedState::Measuring,
+            "生成中速度暂时无效应回落 measuring"
+        );
         drop(conn);
         let _ = fs::remove_file(&path);
     }
@@ -2756,9 +4170,11 @@ mod tests {
     #[test]
     fn pu查询_user消息识别与完成轮匹配() {
         let (conn, path) = pu_db("pu-basic");
+        // 固定观测时刻：全部样本都在新鲜期内（A1 之前的行为不受影响）
+        let now = 5_000i64;
         // 空表 → 无待处理消息
         assert_eq!(
-            collect_pending_user_ms(&conn, &BTreeSet::new()).unwrap(),
+            collect_pending_user_ms(&conn, &BTreeSet::new(), now, &BTreeSet::new()).unwrap(),
             None,
             "空 message 表应返回 None"
         );
@@ -2775,14 +4191,14 @@ mod tests {
         .unwrap();
         // 全空匹配集：最近 user（msg_sub 3500，跳过 assistant）待处理 → 3500
         assert_eq!(
-            collect_pending_user_ms(&conn, &BTreeSet::new()).unwrap(),
+            collect_pending_user_ms(&conn, &BTreeSet::new(), now, &BTreeSet::new()).unwrap(),
             Some(3500),
             "最近的未匹配 user 消息应透出（子代理会话同样参与）"
         );
         // msg_sub 已完成（umid 集合含它）→ 次新未匹配 msg_new → 3000
         let done: BTreeSet<String> = ["msg_sub".to_string()].into_iter().collect();
         assert_eq!(
-            collect_pending_user_ms(&conn, &done).unwrap(),
+            collect_pending_user_ms(&conn, &done, now, &BTreeSet::new()).unwrap(),
             Some(3000),
             "已完成的 user 消息应被跳过，取次新的待处理消息"
         );
@@ -2792,7 +4208,7 @@ mod tests {
                 .into_iter()
                 .collect();
         assert_eq!(
-            collect_pending_user_ms(&conn, &done_all).unwrap(),
+            collect_pending_user_ms(&conn, &done_all, now, &BTreeSet::new()).unwrap(),
             None,
             "全部 user 消息均有完成轮时应返回 None"
         );
@@ -2801,9 +4217,74 @@ mod tests {
             .into_iter()
             .collect();
         assert_eq!(
-            collect_pending_user_ms(&conn, &done_new_only).unwrap(),
+            collect_pending_user_ms(&conn, &done_new_only, now, &BTreeSet::new()).unwrap(),
             Some(1000),
             "应返回 time 降序第一条未匹配的 user 消息"
+        );
+        drop(conn);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pu查询_a1新鲜期与活跃佐证() {
+        let (conn, path) = pu_db("pu-fresh");
+        // 孤儿消息：12 小时前未匹配、无任何活跃证据 → 不再冒充待处理
+        let stale = 5_000_000_000_i64 - 12 * 3600 * 1000;
+        conn.execute_batch(&format!(
+            "INSERT INTO message VALUES
+               ('msg_stale', 'sess_orphan', {stale}, {stale}, '{{\"role\":\"user\"}}', 1);",
+        ))
+        .unwrap();
+        assert_eq!(
+            collect_pending_user_ms(
+                &conn,
+                &BTreeSet::new(),
+                5_000_000_000,
+                &BTreeSet::new()
+            )
+            .unwrap(),
+            None,
+            "超出新鲜期且无活跃佐证的孤儿消息不透出"
+        );
+        // 同一条消息，会话树内有进行中轮（佐证集合含其会话）→ 保留等待
+        let corroborate: BTreeSet<String> =
+            ["sess_orphan".to_string()].into_iter().collect();
+        assert_eq!(
+            collect_pending_user_ms(&conn, &BTreeSet::new(), 5_000_000_000, &corroborate)
+                .unwrap(),
+            Some(stale),
+            "有活跃佐证的超期长首请求仍保留等待"
+        );
+
+        // 新消息到达（新一轮）：更新者胜出，陈旧孤儿立即被替换
+        conn.execute_batch(
+            "INSERT INTO message VALUES
+               ('msg_new_round', 'sess_orphan', 4999999900, 4999999900, '{\"role\":\"user\"}', 2);",
+        )
+        .unwrap();
+        assert_eq!(
+            collect_pending_user_ms(&conn, &BTreeSet::new(), 5_000_000_000, &BTreeSet::new())
+                .unwrap(),
+            Some(4_999_999_900),
+            "新一轮消息应立即替换旧等待"
+        );
+
+        // 取消/失败：turn_usage 落 cancelled 轮（umid 匹配）→ 新消息被
+        // 完成集合清掉后，旧孤儿仍因超期无佐证不透出
+        conn.execute_batch(
+            "CREATE TABLE turn_usage (session_id TEXT, turn_id TEXT, status TEXT,
+                started_at INTEGER, completed_at INTEGER, user_message_id TEXT);
+             INSERT INTO turn_usage VALUES
+               ('sess_orphan', 'turn_cancel', 'cancelled', 4999999800, 4999999950, 'msg_new_round');",
+        )
+        .unwrap();
+        // 与 collect_turns 同口径：完成集合由调用方从 turns umid 聚合，这里
+        // 直接以查得形态模拟（turn_usage.user_message_id 进集合）
+        let done: BTreeSet<String> = ["msg_new_round".to_string()].into_iter().collect();
+        assert_eq!(
+            collect_pending_user_ms(&conn, &done, 5_000_000_000, &BTreeSet::new()).unwrap(),
+            None,
+            "取消轮清掉新等待后，超期孤儿不得回填"
         );
         drop(conn);
         let _ = fs::remove_file(&path);
@@ -2822,7 +4303,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            collect_pending_user_ms(&conn, &BTreeSet::new()).unwrap(),
+            collect_pending_user_ms(&conn, &BTreeSet::new(), 5_000, &BTreeSet::new()).unwrap(),
             Some(800),
             "缺 role 的消息与脏时刻行应被跳过"
         );
@@ -2845,7 +4326,7 @@ mod tests {
             .unwrap();
         }
         assert_eq!(
-            collect_pending_user_ms(&conn, &BTreeSet::new()).unwrap(),
+            collect_pending_user_ms(&conn, &BTreeSet::new(), 500, &BTreeSet::new()).unwrap(),
             None,
             "被尾部 64 行挤出的待处理消息不透出（窗口兜底，陈旧信号不放大）"
         );
@@ -2857,7 +4338,7 @@ mod tests {
         conn.execute_batch("CREATE TABLE turn_usage (session_id TEXT);")
             .unwrap();
         assert_eq!(
-            collect_pending_user_ms(&conn, &BTreeSet::new()).unwrap(),
+            collect_pending_user_ms(&conn, &BTreeSet::new(), 0, &BTreeSet::new()).unwrap(),
             None,
             "无 message 表应返回 None"
         );
@@ -2869,7 +4350,7 @@ mod tests {
         conn.execute_batch("CREATE TABLE message (id TEXT PRIMARY KEY, data TEXT);")
             .unwrap();
         assert_eq!(
-            collect_pending_user_ms(&conn, &BTreeSet::new()).unwrap(),
+            collect_pending_user_ms(&conn, &BTreeSet::new(), 0, &BTreeSet::new()).unwrap(),
             None,
             "缺 time_created 核心列应返回 None"
         );

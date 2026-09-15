@@ -124,7 +124,12 @@ function ModelSpeedRow({
   const primarySpeed = model.p50Tps ?? model.avgTps;
   const ratio = model.p50Tps != null && maxP50 > 0 ? model.p50Tps / maxP50 : 0;
   const lowSuccess = model.successRate != null && model.successRate < 0.95;
-  const sampleText = t("speed.samplesCount", { n: formatTokens(model.requests) });
+  // 模型名旁标注速度合格样本数（≠总请求数：无可信生成区间的请求不产生
+  // 速度样本）；总请求数在明细区「请求」格展示
+  const sampleText =
+    model.speedSampleCount == null
+      ? t("speed.samplesNone")
+      : t("speed.speedSamples", { n: formatTokens(model.speedSampleCount) });
   const provider = model.provider || t("speed.providerUnknown");
 
   return (

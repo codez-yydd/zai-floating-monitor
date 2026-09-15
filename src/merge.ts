@@ -108,8 +108,10 @@ export function computeRemoteCost(
 
 /** 合并本地 stats + 远端 usage → 汇总 stats */
 export function mergeStats(local: Stats, remote: RemoteUsage): Stats {
-  // 速度/TTFT 只在本地库有耗时数据：合并远端 token 后保留本地口径
-  //（远端无耗时字段，均值/最快值仍代表本机样本，不做跨设备加权）
+  // 速度/TTFT 及其口径字段只在本地库有耗时数据：合并远端 token 后保留本地
+  // 口径（远端无耗时字段，分子/分母/样本数/质量标记均不参与合并，均值/最快
+  // 值仍代表本机样本，远端 Token 不进入任何速度权重——远端输出再多也不改
+  // 本机 avg_tps；仅远端才有的模型不凭远端输出构造速度）
   const addOverall = (a: OverallStat, b: RemoteUsage["overall"]): OverallStat => ({
     requests: a.requests + b.requests,
     input_tokens: a.input_tokens + b.input_tokens,
@@ -118,17 +120,36 @@ export function mergeStats(local: Stats, remote: RemoteUsage): Stats {
     cache_write_tokens: a.cache_write_tokens + b.cache_write_tokens,
     reasoning_tokens: a.reasoning_tokens + b.reasoning_tokens,
     total_tokens: a.total_tokens + b.total_tokens,
-    avg_tps: a.avg_tps,
-    max_tps: a.max_tps,
-    avg_ttft_ms: a.avg_ttft_ms,
+    avg_tps: a.avg_tps ?? null,
+    max_tps: a.max_tps ?? null,
+    avg_ttft_ms: a.avg_ttft_ms ?? null,
+    speedOutputTokens: a.speedOutputTokens,
+    speedGenerationMs: a.speedGenerationMs,
+    speedSampleCount: a.speedSampleCount,
+    ttftSampleCount: a.ttftSampleCount,
+    speedQuality: a.speedQuality,
   });
 
-  // by_model 按 model_id+provider_id 合并相加
+  // by_model 按 model_id+provider_id 合并相加。本地行 spread 保留全部速度
+  // 契约字段；远端行只叠加 token/请求（速度字段不动），远端独有模型不带速度。
   const key = (m: { model_id: string; provider_id: string }) =>
     `${m.provider_id}|${m.model_id}`;
   const merged = new Map<string, ModelStat>();
   for (const m of local.by_model) {
-    merged.set(key(m), { ...m });
+    // 本机速度权重快照：request_average 行折叠时按输出 Token 加权，而本行
+    // output_tokens 马上会被远端 Token 叠加——合并动它之前冻结本机值供折叠
+    // 用（localSpeedWeightTokens，语义见 types.ts）。已有快照的行（合并结果
+    // 再次作为本地输入，如持久缓存的就是合并结果）保留最初快照，不得把已
+    // 叠加远端 Token 的 output_tokens 二次固化。generation 行不写：其折叠
+    // 权重是 speedOutputTokens/speedGenerationMs 分子分母，与 Token 无关。
+    const row = { ...m };
+    if (
+      row.speedQuality === "request_average" &&
+      row.localSpeedWeightTokens == null
+    ) {
+      row.localSpeedWeightTokens = row.output_tokens;
+    }
+    merged.set(key(m), row);
   }
   for (const m of remote.by_model) {
     const k = key(m);

@@ -29,6 +29,7 @@ import {
   LoadingState,
 } from "./layout";
 import { useI18n } from "./i18n";
+import { useDataCache } from "./DataCache";
 import { useResetDisplay } from "./resetDisplay";
 
 /** 通用快照形状：Codex / Claude 的快照结构一致（stats/trend 同构 +
@@ -196,6 +197,11 @@ export function AgentUsagePanel({
   agentQuotaDelta,
 }: Props) {
   const { t } = useI18n();
+  // 设备筛选「全部」且同步开启时 stats 合并了远端 token，但速度/TTFT 只来自
+  // 本机（远端无耗时数据）——速度卡标签显式标注「本机平均速度」（Codex 无
+  // 速度字段不受影响；筛选仅远端时无速度自动不渲染）
+  const { deviceFilter, syncEnabled } = useDataCache();
+  const mergedRemote = deviceFilter === "all" && syncEnabled;
   const [trendMetric, setTrendMetric] = useState<"cost" | "token">("cost");
   const [sortBy, setSortBy] = useState<"cost" | "token" | "requests">("cost");
 
@@ -373,7 +379,7 @@ export function AgentUsagePanel({
         <Metric label={t("common.output")} value={formatTokens(stats.overall.output_tokens)} />
       </div>
 
-      <SpeedMetricsGrid overall={stats.overall} />
+      <SpeedMetricsGrid overall={stats.overall} mergedRemote={mergedRemote} />
 
       <SectionCard title={t("common.tokenComposition")}>
         <div className="space-y-1.5">
@@ -433,8 +439,10 @@ export function AgentUsagePanel({
                         <span className="min-w-[1.5rem] text-right text-slate-500/80" title={t("common.requestCount")}>{formatTokens(m.requests)}</span>
                         <span className="min-w-[2rem] text-right text-slate-700" title={t("common.totalTokens")}>{formatTokens(m.total_tokens)}</span>
                         {hasSpeedCol && (
-                          <span className="min-w-[1.75rem] text-right text-sky-700/80" title={t("common.avgSpeed")}>
-                            {m.avg_tps != null ? `${formatTps(m.avg_tps)}/s` : "—"}
+                          <span className="min-w-[2.25rem] text-right text-sky-700/80" title={t("common.avgSpeed")}>
+                            {m.avg_tps != null
+                              ? `${m.speedQuality === "request_average" ? "≈" : ""}${formatTps(m.avg_tps)} t/s`
+                              : "—"}
                           </span>
                         )}
                         <span className={`min-w-[2.5rem] text-right font-medium ${hasPrice ? "text-slate-900/90" : "text-slate-500/50"}`}>

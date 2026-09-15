@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "test:speed": "tsc -p scripts/tsconfig.speed.json && node scripts/run-speed-tests.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

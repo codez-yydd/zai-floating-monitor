@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { Currency, CurrentModel, TrendPoint } from "./types";
+import type { Currency, CurrentModel, SpeedQuality, TrendPoint } from "./types";
 import { formatCost, formatMs, formatTps, formatTokens, dateStr } from "./format";
 import { useI18n } from "./i18n";
 
@@ -131,43 +131,64 @@ export function DetailRow({
   );
 }
 
-/** 速度/首字延迟指标卡行。仅数据源带耗时（ZCode/Claude）时 overall 上有值，
- *  无值返回 null（Codex/Cursor 面板自动不渲染，不出现空卡片）。 */
+/** 速度/首字延迟指标卡行。仅数据源带耗时（ZCode/Claude/Kimi）时 overall 上有值，
+ *  无值返回 null（Codex/Cursor 面板自动不渲染，不出现空卡片）。
+ *  - request_average 口径（仅请求总耗时，如 Claude/Kimi）：数值带 ≈ 前缀；
+ *  - mergedRemote（设备筛选含远端合并）时速度只代表本机，标签写
+ *    「本机平均速度」，语义直接可见、不依赖悬浮；
+ *  - max_tps 以「单请求最快」卡片直接可见（不再只藏 title），单位统一 t/s。 */
 export function SpeedMetricsGrid({
   overall,
+  mergedRemote,
 }: {
   overall: {
     avg_tps?: number | null;
     max_tps?: number | null;
     avg_ttft_ms?: number | null;
+    speedQuality?: SpeedQuality | null;
   };
+  /** 当前 stats 是否合并了远端设备数据（速度字段仍只来自本机） */
+  mergedRemote?: boolean;
 }) {
   const { t } = useI18n();
-  const hasTps = overall.avg_tps != null;
-  const hasTtft = overall.avg_ttft_ms != null;
-  if (!hasTps && !hasTtft) return null;
-  const cols = hasTps && hasTtft ? "grid-cols-2" : "grid-cols-1";
+  const hasTps = overall.avg_tps != null && Number.isFinite(overall.avg_tps);
+  const hasMax = overall.max_tps != null && Number.isFinite(overall.max_tps);
+  const hasTtft = overall.avg_ttft_ms != null && Number.isFinite(overall.avg_ttft_ms);
+  if (!hasTps && !hasMax && !hasTtft) return null;
+  const approx = overall.speedQuality === "request_average";
+  const approxPrefix = approx ? "≈" : "";
+  const speedLabel = mergedRemote
+    ? t("common.avgSpeedLocal")
+    : t("common.avgSpeed");
+  const cards: { label: string; value: string; accent?: string }[] = [];
+  if (hasTps) {
+    cards.push({
+      label: speedLabel,
+      value: `${approxPrefix}${formatTps(overall.avg_tps!)} t/s`,
+      accent: "text-sky-700",
+    });
+  }
+  if (hasMax) {
+    cards.push({
+      label: t("common.fastestRequest"),
+      value: `${approxPrefix}${formatTps(overall.max_tps!)} t/s`,
+      accent: "text-sky-700/80",
+    });
+  }
+  if (hasTtft) {
+    cards.push({
+      label: t("common.ttft"),
+      value: formatMs(overall.avg_ttft_ms!),
+      accent: "text-sky-700",
+    });
+  }
+  const cols =
+    cards.length >= 3 ? "grid-cols-3" : cards.length === 2 ? "grid-cols-2" : "grid-cols-1";
   return (
     <div className={`grid ${cols} gap-1.5`}>
-      {hasTps && (
-        <Metric
-          label={t("common.avgSpeed")}
-          value={`${formatTps(overall.avg_tps!)} t/s`}
-          accent="text-sky-700"
-          title={
-            overall.max_tps != null
-              ? `${t("common.fastest")} ${formatTps(overall.max_tps)} tok/s`
-              : undefined
-          }
-        />
-      )}
-      {hasTtft && (
-        <Metric
-          label={t("common.ttft")}
-          value={formatMs(overall.avg_ttft_ms!)}
-          accent="text-sky-700"
-        />
-      )}
+      {cards.map((c) => (
+        <Metric key={c.label} label={c.label} value={c.value} accent={c.accent} />
+      ))}
     </div>
   );
 }

@@ -225,7 +225,11 @@ function SessionRow({
           </span>
           {session.speed_tps != null && (
             <span title={t("common.avgSpeed")}>
-              {t("projects.speed")} {formatTps(session.speed_tps)} t/s
+              {t("projects.speed")}{" "}
+              {/* request_average 为请求平均近似值：与主面板/汇总页同款
+                  ≈ 前缀风格（generation 口径不带） */}
+              {session.speed_quality === "request_average" ? "≈" : ""}
+              {formatTps(session.speed_tps)} t/s
             </span>
           )}
           {session.ttft_ms != null && (

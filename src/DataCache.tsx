@@ -17,6 +17,8 @@ import type {
   CursorSnapshot,
   DeviceInfo,
   KimiSnapshot,
+  ModelStat,
+  OverallStat,
   PricingConfig,
   ProviderCredentialMeta,
   ProviderQuotaEntry,
@@ -144,6 +146,114 @@ const CURSOR_STALE_MS = 240_000;
 const CODEX_STALE_MS = 60_000;
 const CLAUDE_STALE_MS = 60_000;
 const KIMI_STALE_MS = 60_000;
+
+// ===== 速度口径缓存迁移（V24.1 契约：可加总分子/分母 + speedQuality 标记）=====
+// 旧缓存（无版本标记）的 avg_tps/max_tps 由旧算法聚合（逐行速度算术平均、
+// 500 t/s 封顶），缺新契约字段时不能冒充 generation 口径。冷启动恢复时对
+// zai/claude/kimi 三个含速度的缓存做**针对性失效**：剥离旧口径速度字段
+//（TTFT 口径未变，保留 avg_ttft_ms/ttftSampleCount）并把条目 ts 归零，
+// 按需补刷与后台 500ms 首刷会立即重拉；trend/cost/token 等无关统计保留，
+// 期间速度显示 —（宁缺毋滥，不用旧值顶替）。codex/cursor 无速度字段不涉及。
+// 迁移结果落盘后（版本标记 effect 置于各持久化 effect 之后）写入版本标记，
+// 下次冷启动不再重复处理。
+//
+// V3（本机速度权重快照）：V2 时代 mergeStats 合并远端 Token 时未冻结
+// localSpeedWeightTokens，合并结果（持久缓存存的就是合并结果）里
+// request_average 行的 output_tokens 已混入远端 Token——折叠加权会被远端
+// 设备用量污染（远端输出越多，本机 avg_tps 被拉得越偏）。对带
+// request_average 速度但无权重快照的 by_model 行剥离速度字段并 ts 归零
+// 触发重刷；重刷后的行由 mergeStats 写入快照，本迁移不再命中。overall 行
+// 无折叠权重问题、TTFT 族为纯本机口径，均不受污染，不剥离。版本升级为
+// 一次性迁移：V2 已处理过的旧口径行（无速度值）对新判定是无操作，幂等。
+const SPEED_CONTRACT_VERSION = 3;
+const SPEED_VERSION_CACHE_KEY = "zbar-speed-cache-version";
+
+/** 行级判断：有速度值但无任何新契约字段 → 旧口径行（需剥离） */
+function isLegacySpeedRow(row: {
+  avg_tps?: number | null;
+  max_tps?: number | null;
+  speedQuality?: string | null;
+  speedOutputTokens?: number | null;
+  speedGenerationMs?: number | null;
+}): boolean {
+  if (row.avg_tps == null && row.max_tps == null) return false;
+  return (
+    row.speedQuality == null &&
+    row.speedOutputTokens == null &&
+    row.speedGenerationMs == null
+  );
+}
+
+/** V3 行级判断：request_average 行带速度但无本机权重快照 → 该行
+ *  output_tokens 可能已混入远端 Token（V2 时代合并输出），折叠加权会被
+ *  污染，需剥离速度触发重刷。仅用于 by_model 行（overall 不折叠）。 */
+function isUnweightedRequestAvgRow(row: {
+  speedQuality?: string | null;
+  localSpeedWeightTokens?: number | null;
+}): boolean {
+  return (
+    row.speedQuality === "request_average" &&
+    row.localSpeedWeightTokens == null
+  );
+}
+
+/** 剥离旧口径速度字段（保留 TTFT 族字段与全部数值统计）。是否需要剥离由
+ *  调用方按行级判定决定（overall → isLegacySpeedRow；by_model → 再叠加
+ *  isUnweightedRequestAvgRow），本函数只负责剥离本身。 */
+function stripLegacySpeedRow<T extends ModelStat | OverallStat>(row: T): T {
+  const {
+    avg_tps: _avgTps,
+    max_tps: _maxTps,
+    speedOutputTokens: _num,
+    speedGenerationMs: _den,
+    speedSampleCount: _cnt,
+    speedQuality: _q,
+    ...rest
+  } = row;
+  return rest as T;
+}
+
+/** stats 迁移：overall 行按 V1 旧口径判定剥离；by_model 行叠加 V2 无快照
+ *  request_average 判定（折叠权重可能被远端 Token 污染） */
+function migrateLegacySpeedStats<S extends Stats>(s: S): S {
+  return {
+    ...s,
+    overall: isLegacySpeedRow(s.overall) ? stripLegacySpeedRow(s.overall) : s.overall,
+    by_model: s.by_model.map((row) =>
+      isLegacySpeedRow(row) || isUnweightedRequestAvgRow(row)
+        ? stripLegacySpeedRow(row)
+        : row
+    ),
+  };
+}
+
+/** 缓存条目迁移：剥离旧速度并把 ts 归零（触发按需补刷立即重拉） */
+function migrateSpeedEntries<
+  T extends { ts: number } & (
+    | { stats?: Stats | null }
+    | { snapshot?: { stats: Stats } | null }
+  ),
+>(map: Record<string, T>): Record<string, T> {
+  const out: Record<string, T> = {};
+  for (const [k, e] of Object.entries(map)) {
+    if ("stats" in e && e.stats != null) {
+      out[k] = { ...e, stats: migrateLegacySpeedStats(e.stats), ts: 0 };
+    } else if ("snapshot" in e && e.snapshot?.stats != null) {
+      out[k] = {
+        ...e,
+        snapshot: { ...e.snapshot, stats: migrateLegacySpeedStats(e.snapshot.stats) },
+        ts: 0,
+      };
+    } else {
+      out[k] = e;
+    }
+  }
+  return out;
+}
+
+/** 模块级一次性判断：当前 localStorage 缓存是否为速度契约升级前的旧数据 */
+const LEGACY_SPEED_CACHE =
+  (loadCache<number>(SPEED_VERSION_CACHE_KEY) ?? 1) < SPEED_CONTRACT_VERSION;
 
 /** provider 额度缓存老化阈值（与 120s 通用轮询同频）：面板挂载补刷判定
  *  「无缓存或缓存已老化」用（冷启动 localStorage 恢复的旧缓存也视为旧）。 */
@@ -424,8 +534,13 @@ export function DataProvider({ pricing, credentialPresence, children }: Provider
   const trendBucket = bucketOf(preset);
 
   // ===== 按范围缓存（持久化，key: zai/codex=`${df}|${rangeKey}`，cursor=rangeKey）=====
+  // zai/claude/kimi 含速度数据：旧契约缓存冷启动恢复时先剥离旧口径速度字段
+  // 并把 ts 归零（详见 migrateSpeedEntries 注释），刷新到达后自动恢复新口径。
   const [zaiCache, setZaiCache] = useState<Record<string, ZaiEntry>>(
-    () => stripRefreshing(loadCache<Record<string, ZaiEntry>>("zbar-zai-cache") ?? {})
+    () => {
+      const raw = stripRefreshing(loadCache<Record<string, ZaiEntry>>("zbar-zai-cache") ?? {});
+      return LEGACY_SPEED_CACHE ? migrateSpeedEntries(raw) : raw;
+    }
   );
   const [cursorCache, setCursorCache] = useState<Record<string, CursorEntry>>(
     () => stripRefreshing(loadCache<Record<string, CursorEntry>>("zbar-cursor-cache") ?? {})
@@ -434,10 +549,16 @@ export function DataProvider({ pricing, credentialPresence, children }: Provider
     () => stripRefreshing(loadCache<Record<string, AgentEntry>>("zbar-codex-cache") ?? {})
   );
   const [claudeCache, setClaudeCache] = useState<Record<string, AgentEntry>>(
-    () => stripRefreshing(loadCache<Record<string, AgentEntry>>("zbar-claude-cache") ?? {})
+    () => {
+      const raw = stripRefreshing(loadCache<Record<string, AgentEntry>>("zbar-claude-cache") ?? {});
+      return LEGACY_SPEED_CACHE ? migrateSpeedEntries(raw) : raw;
+    }
   );
   const [kimiCache, setKimiCache] = useState<Record<string, KimiEntry>>(
-    () => stripRefreshing(loadCache<Record<string, KimiEntry>>("zbar-kimi-cache") ?? {})
+    () => {
+      const raw = stripRefreshing(loadCache<Record<string, KimiEntry>>("zbar-kimi-cache") ?? {});
+      return LEGACY_SPEED_CACHE ? migrateSpeedEntries(raw) : raw;
+    }
   );
 
   // ===== 其他数据（持久化）=====
@@ -1593,6 +1714,17 @@ export function DataProvider({ pricing, credentialPresence, children }: Provider
   useEffect(() => {
     saveCache("zbar-kimi-cache", kimiCache);
   }, [kimiCache]);
+  // 版本标记写入：必须位于 zai/claude/kimi 三个持久化 effect 之后。同一次
+  // commit 的 effect 按声明顺序同步执行，挂载轮先落盘迁移后的缓存、再写
+  // 版本标记；若两步之间进程被杀，只会残留「版本=旧 + 缓存=已剥离」，
+  // 下次冷启动幂等重跑迁移（isLegacySpeedRow 对新契约行是无操作）。反之
+  // 若先写标记，极端窗口会留下「版本=新 + localStorage 仍为旧口径速度
+  // 条目」，旧 avg_tps 会被当新契约显示。版本已最新时本 effect 幂等空操作，
+  // 正常路径无额外写入（StrictMode 双跑无害）
+  useEffect(() => {
+    if (LEGACY_SPEED_CACHE) saveCache(SPEED_VERSION_CACHE_KEY, SPEED_CONTRACT_VERSION);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   useEffect(() => {
     saveCache("zbar-fxrate", fxRate);
   }, [fxRate]);

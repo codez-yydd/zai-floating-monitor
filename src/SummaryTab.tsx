@@ -12,6 +12,7 @@ import type {
   OverallStat,
   PricingConfig,
   ProviderQuotaEntry,
+  SpeedQuality,
   Stats,
   TrendPoint,
 } from "./types";
@@ -110,8 +111,10 @@ interface AgentSummary {
   loaded: boolean;
   /** 最近使用的模型（额度区标题行展示） */
   currentModel?: CurrentModel | null;
-  /** 平均输出速度 tok/s（数据源带耗时的 Agent 才有：ZCode/Claude） */
+  /** 平均输出速度 tok/s（数据源带耗时的 Agent 才有：ZCode/Claude/Kimi） */
   avgTps?: number | null;
+  /** 速度口径：request_average（仅请求总耗时的近似）时卡片数值带 ≈ 前缀 */
+  speedQuality?: SpeedQuality | null;
   /** 平均首字延迟 ms（仅 ZCode，悬浮提示展示） */
   avgTtftMs?: number | null;
   /** 缓存命中率（有 cache_read 数据时展示） */
@@ -133,10 +136,13 @@ function AgentCostCard({
   agent,
   currency,
   costPct,
+  speedLocal,
 }: {
   agent: AgentSummary;
   currency: Currency;
   costPct: number;
+  /** 设备筛选合并了远端数据时为 true：速度字段只来自本机，标签显式标注 */
+  speedLocal?: boolean;
 }) {
   const { t } = useI18n();
   const brandMap: Record<AgentId, BrandIconName | null> = {
@@ -203,7 +209,7 @@ function AgentCostCard({
           )}
           {agent.avgTps != null && (
             <div
-              className="num text-[9px] font-medium mt-0.5"
+              className="num text-[9px] font-medium mt-0.5 whitespace-nowrap"
               style={{ color: agent.color }}
               title={
                 agent.avgTtftMs != null
@@ -211,7 +217,14 @@ function AgentCostCard({
                   : undefined
               }
             >
-              ⚡ {formatTps(agent.avgTps)} t/s
+              {/* 平均语义直接写在卡片上：request_average 带 ≈；含远端合并时
+                  速度仅代表本机（远端无耗时数据），标签写「本机平均速度」 */}
+              ⚡{" "}
+              {speedLocal
+                ? t("common.avgSpeedLocal")
+                : t("common.avgSpeed")}{" "}
+              {agent.speedQuality === "request_average" ? "≈" : ""}
+              {formatTps(agent.avgTps)} t/s
             </div>
           )}
         </div>
@@ -644,7 +657,13 @@ export function SummaryTab({
     agentQuotaDeltas,
     accountQuotas,
     providerQuota,
+    deviceFilter,
+    syncEnabled,
   } = useDataCache();
+  // 设备筛选「全部」且同步开启时，token/请求/花费合并了远端数据，但速度/
+  // TTFT 字段仍只来自本机（远端无耗时数据）——卡片速度标签需显式标注本机；
+  // 筛选仅远端设备时 stats 无速度字段，速度行自动不渲染
+  const speedLocalLabel = deviceFilter === "all" && syncEnabled;
   // 额度监控区 ZCode 多账号分组的内嵌切换
   const sw = useAccountSwitch();
   const hour5 = quota?.hour5 ?? null;
@@ -880,6 +899,7 @@ export function SummaryTab({
       loaded: stats != null || zaiError != null,
       currentModel: stats?.current_model ?? null,
       avgTps: stats?.overall.avg_tps ?? null,
+      speedQuality: stats?.overall.speedQuality ?? null,
       avgTtftMs: stats?.overall.avg_ttft_ms ?? null,
       cacheHitPct: zaiCacheHitPct,
       metrics: zcodeMetrics,
@@ -917,6 +937,7 @@ export function SummaryTab({
       loaded: claude != null || claudeError != null,
       currentModel: claude?.stats.current_model ?? null,
       avgTps: claude?.stats.overall.avg_tps ?? null,
+      speedQuality: claude?.stats.overall.speedQuality ?? null,
       cacheHitPct: claudeCacheHitPct,
       metrics: claudeMetrics,
       empty: claudeEmpty,
@@ -956,6 +977,7 @@ export function SummaryTab({
       loaded: kimi != null || kimiError != null,
       currentModel: kimi?.stats.current_model ?? null,
       avgTps: kimi?.stats.overall.avg_tps ?? null,
+      speedQuality: kimi?.stats.overall.speedQuality ?? null,
       avgTtftMs: kimi?.stats.overall.avg_ttft_ms ?? null,
       cacheHitPct: kimiCacheHitPct,
       metrics: kimiMetrics,
@@ -1109,6 +1131,7 @@ export function SummaryTab({
               agent={a}
               currency={currency}
               costPct={totalCost > 0 ? a.cost / totalCost : 0}
+              speedLocal={speedLocalLabel}
             />
           ))}
         </div>

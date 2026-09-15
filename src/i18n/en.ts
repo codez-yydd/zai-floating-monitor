@@ -62,7 +62,8 @@ export const en: typeof zh = {
 
     // Speed / current model
     "common.avgSpeed": "Avg speed",
-    "common.fastest": "Fastest",
+    "common.avgSpeedLocal": "Local avg speed",
+    "common.fastestRequest": "Fastest request",
     "common.ttft": "First token",
     "common.currentModel": "Current model",
     "common.justNow": "just now",
@@ -186,7 +187,8 @@ export const en: typeof zh = {
     "speed.overviewSuccess": "Success",
     "speed.ranking": "Model ranking",
     "speed.modelCount": "{n} models",
-    "speed.samplesCount": "{n} requests",
+    "speed.speedSamples": "{n} speed samples",
+    "speed.samplesNone": "No speed samples",
     "speed.providerUnknown": "Unknown source",
     "speed.relativeSpeed": "{pct}% of fastest model",
     "speed.relativeLabel": "Relative to fastest model",
@@ -194,7 +196,7 @@ export const en: typeof zh = {
     "speed.averageSlower": "Average {avg} · slower {slow}",
     "speed.requestSummary": "{n} · {pct} success",
     "speed.p10": "Slow",
-    "speed.p50": "Average",
+    "speed.p50": "Typical",
     "speed.p90": "Fast",
     "speed.ttft": "TTFT",
     "speed.latency": "Latency",

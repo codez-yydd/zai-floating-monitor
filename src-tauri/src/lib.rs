@@ -34,6 +34,7 @@ mod session_hud;
 mod shortcut;
 mod stepfun;
 mod sync;
+mod token_speed;
 mod zcode_crypto;
 mod zcode_sessions;
 

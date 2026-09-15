@@ -23,16 +23,13 @@
 //! × = model_usage 行数（每行一笔请求）；模型集合为会话树时间窗内
 //! distinct model_id（按最近使用降序，注入版 models 口径）。
 //!
-//! 动态速度（真动态）：DB 的请求粒度太粗，速度走 rollout 旁路——
-//! ~/.zcode/cli/rollout/model-io-{sessionId}.jsonl 每笔请求完成即追加
-//! 一行（含 usage.outputTokens），偏移续读增量解析出样本
-//!（start=startedAt，end=读取时刻，rate=output/max(1s, end−start)），
-//! 窗口速度 = 样本与最近 4s 窗口的重叠时长加权均值（1 秒节拍刷新，
-//! DB 查询隔拍执行等效 2 秒不变）。生成中显示窗口速度（长请求进行中
-//! 无新行时保持最后非零），空闲归 0.0；rollout 全缺失/全解析失败回退
-//! DB 最近一笔完成请求口径（TTFT 恒取该值，静态参考），缺失 "–"。
-//! 铁律：rollout 只服务速度展示，绝不并入 Σ/↑/↓/⟲/× 累计口径（累计
-//! 以 db.sqlite model_usage 为唯一来源，防双计）。
+//! 速度：DB 的请求粒度足以提供最近一笔已完成请求的速度，速度走共享
+//! 请求级计算规则；rollout 文件只在 DB 尚未可见时提供旁路参考。每笔请求
+//! 完成后追加一行，偏移续读增量解析；有首字与完成时刻时显示可信生成速度，
+//! 只有请求总耗时则显示带 `≈` 质量标记的请求平均速度。缺失/逆序/未来
+//! 时间不生成速度，也不沿用旧值。速度节拍只负责发现新请求，不让已有请求
+//! 随时间衰减。rollout 只服务速度展示，绝不并入 Σ/↑/↓/⟲/× 累计口径
+//!（累计以 db.sqlite model_usage 为唯一来源，防双计）。
 //!
 //! 生成中判定：会话树内任一成员最新一轮未完成（与 usage_feed 的 runs
 //! 口径同源——turn_usage 尚无该 turn 的完成行）；成员最新 model_usage
@@ -50,7 +47,7 @@
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
@@ -60,6 +57,11 @@ use std::thread;
 use std::time::Duration;
 use tauri::{
     AppHandle, Emitter, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder,
+};
+
+use crate::token_speed::{
+    is_completed_status, request_speed_at, PENDING_FRESH_MS, RequestTiming, SessionTree,
+    SpeedQuality, SpeedSnapshot, SpeedState,
 };
 
 // ============================================================
@@ -124,18 +126,6 @@ const FEED_TICK_MS: u64 = 1000;
 /// set_session_hud_config 等待主线程窗口操作完成的超时上限（与 pet
 /// 同口径：仅事件循环异常退出时兜底，配置已先落盘不丢）
 const HUD_WINDOW_OP_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// rollout 速度滑窗时长（毫秒）：窗口速度 = 各请求样本与窗口的重叠
-/// 时长加权速率均值——大耗时请求按其历史速率摊入窗口，新行进入/旧行
-/// 滑出都会让数字变化（对齐注入版的灵敏动态观感；窗口收窄到 4s，
-/// 请求进入/滑出的数值变化更频繁明显）
-const SPEED_WINDOW_MS: i64 = 4_000;
-/// 速度样本保留时长（毫秒）：滑出窗口的样本仅作缓冲卫生清理（大于
-/// 窗口即可，减少无效样本；内存上每树几十条，可忽略）
-const SAMPLE_RETENTION_MS: i64 = 60_000;
-/// 单样本摊销速率的时长下限（毫秒）：startedAt 与读取时刻几乎重合
-///（极快请求/时钟抖动）时避免速率爆炸
-const SAMPLE_MIN_SPAN_MS: i64 = 1_000;
 
 /// 窗口布局常量（逻辑 px，font_scale = 1 基准）：与 session-hud.html /
 /// session-hud-main.ts 的 CSS 尺寸一一对应（头部拖动区 / 会话行 / 模型
@@ -1242,7 +1232,7 @@ fn feed_loop(app: AppHandle) {
     // rollout 旁路速度监控器与最后快照（速度拍在其上原地更新 speed）
     let mut monitor = RolloutMonitor::default();
     let mut last_snapshot: Option<HudSnapshot> = None;
-    let mut last_fallback: BTreeMap<String, Option<f64>> = BTreeMap::new();
+    let mut last_fallback: BTreeMap<String, Option<SpeedSnapshot>> = BTreeMap::new();
     // 拍交替标志：首拍必为 DB 拍（速度拍依赖已有快照）
     let mut db_tick = false;
     loop {
@@ -1305,7 +1295,7 @@ fn poll_db(
     last_size: &mut Option<(f64, f64)>,
     monitor: &mut RolloutMonitor,
     last_snapshot: &mut Option<HudSnapshot>,
-    last_fallback: &mut BTreeMap<String, Option<f64>>,
+    last_fallback: &mut BTreeMap<String, Option<SpeedSnapshot>>,
 ) {
     let result = (|| -> Result<(), String> {
         let mut cfg = load_session_hud_config().clamped();
@@ -1314,23 +1304,31 @@ fn poll_db(
         let (mut snapshot, trees) =
             collect_session_snapshot(&conn, cfg.window_minutes, now_ms)?;
 
-        // rollout 旁路速度：同步游标 → 增量读新完成请求 → 展示决策。
-        // 仅覆盖 speed 字段；DB 最近完成请求口径保留为 fallback（rollout
-        // 全缺失/全解析失败时回退）。累计字段与 rollout 无关（防双计）。
+        // rollout 旁路速度：先同步树并观察当前轮身份，再增量读新完成
+        // 请求，最后做展示决策。必须先 observe_round：快速连续发问时，
+        // 新轮 rollout 可能已在本次 DB 拍前追加；若先 ingest，随后清理
+        // 旧轮会把这条新轮参考值一并丢掉。
+        // 仅覆盖速度字段；累计字段与 rollout 无关（防双计）。DB 速度在
+        // 无可靠一对一请求 ID 时按完成时刻择优，rollout 只在 DB 尚未出现
+        // 或明确更晚时作参考。
         monitor.sync_trees(&trees, rollout_dir().as_deref());
-        monitor.ingest(now_ms);
         last_fallback.clear();
         for s in &mut snapshot.sessions {
-            last_fallback.insert(s.session_id.clone(), s.speed);
             if let Some(tree) = monitor.tree_mut(&s.session_id) {
-                // 新一轮生成开始（message 信号 false→true 跳变）：清除
-                // 上一轮保持值，速度位回到"测算中"态（生成中且窗口无
-                // 新样本 → None → 前端呼吸占位）
-                if s.msg_generating && !tree.msg_gen_active {
-                    tree.begin_new_round();
-                }
-                tree.msg_gen_active = s.msg_generating;
-                s.speed = tree.display_speed(s.generating, s.speed, now_ms);
+                tree.observe_round(
+                    s.round_key.as_deref(),
+                    s.round_started_at,
+                    s.generating,
+                );
+            }
+        }
+        monitor.ingest(now_ms);
+        for s in &mut snapshot.sessions {
+            let fallback = brief_speed_snapshot(s);
+            last_fallback.insert(s.session_id.clone(), fallback.clone());
+            if let Some(tree) = monitor.tree_mut(&s.session_id) {
+                let chosen = tree.display_speed(s.generating, fallback, now_ms);
+                apply_speed_snapshot(s, chosen);
             }
         }
 
@@ -1463,15 +1461,41 @@ fn poll_db(
     let _ = result; // 静默跳过本轮（库被锁超时/文件缺失等瞬态），下个周期重试
 }
 
-/// 速度拍（与 DB 拍交替，1 秒一次）：仅 rollout 增量读 + 窗口速度重算，
-/// 不查库。速度变化并入快照变化检测——速度字段每秒可刷新，其余字段
-/// 仍随 DB 拍 2 秒更新，内容不变不 emit。
+fn brief_speed_snapshot(brief: &HudSessionBrief) -> Option<SpeedSnapshot> {
+    Some(SpeedSnapshot {
+        value: brief.speed?,
+        quality: brief.speed_quality?,
+        completed_at: brief.speed_completed_at?,
+        request_id: None,
+    })
+}
+
+fn apply_speed_snapshot(brief: &mut HudSessionBrief, snapshot: Option<SpeedSnapshot>) {
+    brief.speed = snapshot.as_ref().map(|speed| speed.value);
+    brief.speed_quality = snapshot.as_ref().map(|speed| speed.quality);
+    brief.speed_completed_at = snapshot.as_ref().map(|speed| speed.completed_at);
+    brief.speed_state = if brief.generating {
+        if snapshot.is_some() {
+            SpeedState::Recent
+        } else {
+            SpeedState::Measuring
+        }
+    } else if snapshot.is_some() {
+        SpeedState::Recent
+    } else {
+        SpeedState::Unavailable
+    };
+}
+
+/// 速度拍（与 DB 拍交替，1 秒一次）：仅增量发现 rollout 中的新完成请求，
+/// 不查库、不重算或衰减已有速度。速度变化并入快照变化检测；其余字段仍
+/// 随 DB 拍 2 秒更新，内容不变不 emit。
 fn poll_speed(
     app: &AppHandle,
     cache: &mut Option<String>,
     monitor: &mut RolloutMonitor,
     last_snapshot: &mut Option<HudSnapshot>,
-    last_fallback: &BTreeMap<String, Option<f64>>,
+    last_fallback: &BTreeMap<String, Option<SpeedSnapshot>>,
 ) {
     let Some(snapshot) = last_snapshot.as_mut() else {
         return; // 首个 DB 拍尚未成功，无内容可更新
@@ -1480,8 +1504,9 @@ fn poll_speed(
     monitor.ingest(now_ms);
     for s in &mut snapshot.sessions {
         if let Some(tree) = monitor.tree_mut(&s.session_id) {
-            let fallback = last_fallback.get(&s.session_id).copied().flatten();
-            s.speed = tree.display_speed(s.generating, fallback, now_ms);
+            let fallback = last_fallback.get(&s.session_id).cloned().flatten();
+            let chosen = tree.display_speed(s.generating, fallback, now_ms);
+            apply_speed_snapshot(s, chosen);
         }
     }
     // 速度变化才 emit（与 DB 拍共用变化检测缓存）
@@ -1533,16 +1558,24 @@ pub(crate) struct HudSessionBrief {
     /// 全生命周期累计：× 模型请求笔数（model_usage 行数，每行一笔
     /// 请求，与注入版 Σ req 口径等价且更实时）
     pub req_count: i64,
-    /// 动态速度（t/s，"该会话最近一次生成的速率"语义，是否在生成由
-    /// 状态点表达）：优先 rollout 旁路滑动窗口速度（生成中实时更新；
-    /// 长请求无新行与空闲均保持最后非零不归 0；新一轮刚开始 → null
-    /// 显示"测算中"呼吸占位），rollout 全缺失回退最近一笔完成请求
-    /// 口径（同值不归 0）；无数据为 null → "–"
+    /// 最新模型请求速度（t/s）。generation 是首字到完成的可信速度，
+    /// request_average 是只有请求总耗时的近似值，前端显示 `≈`；无效
+    /// 或尚未完成请求时为 None。
     pub speed: Option<f64>,
-    /// message 信号驱动的生成中标记（serde skip 不进 payload，仅供
-    /// poll_db 在 rollout 保持值上做"新一轮重置"）
+    /// 速度质量，与 speed 一一对应。
+    pub speed_quality: Option<SpeedQuality>,
+    /// 速度所属请求的有效完成时刻，用于 rollout 先到、DB 后到时择优。
+    pub speed_completed_at: Option<i64>,
+    /// 速度状态：生成中且尚无本轮完成请求时为 measuring。
+    pub speed_state: SpeedState,
+    /// 当前轮可靠身份：优先 user message id，缺失时回退最新 turn id。
+    /// 仅供悬浮版速度状态机使用，不进入 IPC payload。
     #[serde(skip)]
-    pub msg_generating: bool,
+    pub round_key: Option<String>,
+    /// 当前轮起始参考时刻（user message/turn start），仅用于排除上一轮
+    /// 的速度，不进入 IPC payload。
+    #[serde(skip)]
+    pub round_started_at: Option<i64>,
     /// 最近一笔完成请求的 TTFT（time_to_first_token_ms，静态参考）；
     /// None → 前端显示 "–"
     pub ttft_ms: Option<i64>,
@@ -1649,9 +1682,10 @@ pub(crate) fn collect_session_snapshot(
     //    （rowid 尾部扫查，见 MESSAGE_TAIL_ROWS）。两路各 LIMIT 候选
     //    上限，按 last_at 降序保证取到最新会话。
     let mut activity: BTreeMap<String, i64> = BTreeMap::new();
-    // 会话 → 最新 user 消息时刻（生成中判定驱动信号，见 collect_
-    // session_brief 的 msg 分支；仅尾部扫查窗口内有效，与活跃判定一致）
-    let mut msg_times: BTreeMap<String, i64> = BTreeMap::new();
+    // 会话 → 最新 user 消息（生成中判定 + 新轮可靠身份）。仅尾部扫查
+    // 窗口内有效，与活跃判定一致；id 比单纯 generating 边沿更可靠，能
+    // 区分两轮之间未被轮询到空闲状态的快速连续发问。
+    let mut msg_signals: BTreeMap<String, (String, i64)> = BTreeMap::new();
     {
         // 内层子查询先按 started_at 索引倒序取窗口内最近 N 笔（强制
         // SEARCH started_at>? 范围扫；直接对全表 GROUP BY 会被计划器
@@ -1694,12 +1728,11 @@ pub(crate) fn collect_session_snapshot(
         // 作为"新轮已开始"信号，助手消息落库与请求完成同时序，会误判
         let mut stmt = conn
             .prepare(
-                "SELECT session_id, MAX(time_created), \
-                        MAX(CASE WHEN role = 'user' THEN time_created END) \
-                 FROM (SELECT session_id, time_created, \
-                              json_extract(data, '$.role') AS role \
+                "SELECT id, session_id, time_created, \
+                        json_extract(data, '$.role') AS role \
+                 FROM (SELECT id, session_id, time_created, data \
                        FROM message ORDER BY rowid DESC LIMIT ?1) \
-                 WHERE time_created >= ?2 GROUP BY session_id ORDER BY 2 DESC",
+                 WHERE time_created >= ?2 ORDER BY time_created DESC, id DESC",
             )
             .map_err(|e| format!("准备消息活跃查询失败: {e}"))?;
         let rows = stmt
@@ -1708,31 +1741,35 @@ pub(crate) fn collect_session_snapshot(
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(1)?,
                         row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
                     ))
                 },
             )
             .map_err(|e| format!("读取消息活跃失败: {e}"))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| format!("读取消息活跃失败: {e}"))?;
-        for (id, at, user_at) in rows {
-            merge_activity(&mut activity, id.clone(), at);
-            if let Some(ua) = user_at.filter(|t| *t > 0) {
-                msg_times.insert(id, ua);
+        for (message_id, session_id, at, role) in rows {
+            let Some(at) = at else { continue };
+            merge_activity(&mut activity, session_id.clone(), at);
+            if role.as_deref() == Some("user") && at > 0 && !message_id.is_empty() {
+                let replace = msg_signals
+                    .get(&session_id)
+                    .is_none_or(|(old_id, old_at)| at > *old_at || (at == *old_at && message_id > *old_id));
+                if replace {
+                    msg_signals.insert(session_id, (message_id, at));
+                }
             }
         }
     }
 
-    // 2) 会话树归并（注入版 V9 合计口径）：候选中的子代理（parent_id
-    //    非空）不再单独成行，其活动时刻归并到主会话（last_active 取
-    //    max）——主会话自身空闲但子代理在跑时整行不消失。parent_id 列
-    //    缺失（老版本库）降级为无归并无过滤（所有候选视作主会话）。
-    //    候选元信息逐条 PK 点查（session 表主键，候选 ≤ 2×SCAN 上限）。
-    let has_parent_col = has_table(conn, "session")
+    // 2) 会话树归并：共享索引负责任意深度后代、老库降级和环路保护。
+    //    directory 只是展示元信息，缺失时不应让 parent_id 树能力失效。
+    let tree_index = crate::token_speed::load_session_tree_index(conn)?;
+    let has_directory_col = has_table(conn, "session")
         && crate::db::has_column(conn, "session", "id")
-        && crate::db::has_column(conn, "session", "directory")
-        && crate::db::has_column(conn, "session", "parent_id");
+        && crate::db::has_column(conn, "session", "directory");
 
     let mut candidates: Vec<(String, i64)> = activity
         .iter()
@@ -1741,61 +1778,41 @@ pub(crate) fn collect_session_snapshot(
     // 按最近活动倒序（正在生成的会话天然在最顶部）
     candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
-    // 主会话槽位：directory + 归并后的最近活动时刻（子代理候选落进
-    // 父会话槽位，父会话自身候选再落时两者合并）
+    // 主会话槽位：先记一个非空目录回退值与归并后的最近活动时刻。
+    // 最终目录会再次按 root 查询；这样子代理即使更晚/更活跃，也不能
+    // 覆盖主会话自己的 directory。
     let mut mains: BTreeMap<String, (Option<String>, i64)> = BTreeMap::new();
-    // 仅由子代理归并引入的父会话（不在候选里，需补查目录）
-    let mut merged_only: Vec<String> = Vec::new();
     for (id, last_at) in &candidates {
-        // has_parent_col=false（老版本库缺列）不查元信息：directory 与
-        // parent 一律 None（无归并无过滤的降级现状）
-        let (directory, parent) = if has_parent_col {
-            session_meta(conn, id)?
+        let root = tree_index.root_for(id);
+        let directory = if has_directory_col {
+            session_directory(conn, id)?
         } else {
-            (None, None)
+            None
         };
-        if let Some(parent_id) = parent {
-            // 子代理：归并活动到主会话槽位（父会话不在候选也会被带入）
-            if !mains.contains_key(&parent_id) {
-                merged_only.push(parent_id.clone());
-                mains.insert(parent_id.clone(), (None, 0));
-            }
-            let slot = mains.get_mut(&parent_id).expect("父会话槽位已就绪");
-            if *last_at > slot.1 {
-                slot.1 = *last_at;
-            }
-        } else {
-            match mains.get_mut(id) {
-                // 槽位已被其子代理先创建：补目录、活动取 max
-                Some(slot) => {
-                    slot.0 = directory;
-                    if *last_at > slot.1 {
-                        slot.1 = *last_at;
-                    }
-                }
-                None => {
-                    mains.insert(id.clone(), (directory, *last_at));
-                }
-            }
+        let slot = mains.entry(root).or_insert((None, 0));
+        if slot.0.is_none() {
+            slot.0 = usable_directory(directory);
         }
-    }
-    // 仅由归并引入的父会话：补查目录（行缺失保持 None → "#短标识"）
-    for pid in &merged_only {
-        let (directory, _) = session_meta(conn, pid)?;
-        if let Some(slot) = mains.get_mut(pid) {
-            slot.0 = directory;
+        if *last_at > slot.1 {
+            slot.1 = *last_at;
         }
     }
 
-    let mut ordered: Vec<(String, Option<String>, i64)> = mains
-        .into_iter()
-        .map(|(id, (dir, at))| (id, dir, at))
-        .collect();
+    let mut ordered: Vec<(String, Option<String>, i64)> = Vec::with_capacity(mains.len());
+    for (id, (fallback_dir, at)) in mains {
+        // Root directory wins. A root can be absent from `candidates` when
+        // only a child has recent activity, hence this independent lookup
+        // rather than relying on the candidate loop above.
+        let root_dir = if has_directory_col {
+            usable_directory(session_directory(conn, &id)?)
+        } else {
+            None
+        };
+        ordered.push((id, root_dir.or(fallback_dir), at));
+    }
     ordered.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
 
-    // 3) 只对将展示的条目做会话树聚合（行数最多的部分查询到此为止）。
-    //    会话树成员 = 自身 + 全部子代理（session_parent_idx 等值查）；
-    //    徽标计数 = 树内窗口内有活动的子代理数（活跃表 ∩ 子代理集合）。
+    // 3) 只对将展示的条目做会话树聚合；成员和徽标覆盖任意深度后代。
     let total_active = ordered.len();
     let mut sessions: Vec<HudSessionBrief> = Vec::new();
     let mut trees: Vec<SessionTree> = Vec::new();
@@ -1803,34 +1820,19 @@ pub(crate) fn collect_session_snapshot(
         if sessions.len() >= MAX_VISIBLE_SESSIONS {
             continue;
         }
-        let mut members = vec![session_id.clone()];
-        let mut active_subs = 0usize;
-        if has_parent_col {
-            let mut stmt = conn
-                .prepare("SELECT id FROM session WHERE parent_id = ?1")
-                .map_err(|e| format!("读取子代理会话失败: {e}"))?;
-            let children = stmt
-                .query_map([&session_id], |row| row.get::<_, String>(0))
-                .map_err(|e| format!("读取子代理会话失败: {e}"))?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| format!("读取子代理会话失败: {e}"))?;
-            active_subs = children
-                .iter()
-                .filter(|c| activity.contains_key(*c))
-                .count();
-            members.extend(children);
-        }
+        let tree = tree_index.tree(&session_id);
+        let members = tree.members.clone();
+        let active_subs = members
+            .iter()
+            .filter(|member| *member != &session_id && activity.contains_key(*member))
+            .count();
         // 树口径的最新 user 消息时刻（生成中判定的 message 驱动信号）
         let tree_last_msg = members
             .iter()
-            .filter_map(|m| msg_times.get(m))
-            .copied()
-            .max()
-            .unwrap_or(0);
-        trees.push(SessionTree {
-            root: session_id.clone(),
-            members: members.clone(),
-        });
+            .filter_map(|m| msg_signals.get(m))
+            .max_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)))
+            .cloned();
+        trees.push(tree);
         sessions.push(collect_session_brief(
             conn,
             &members,
@@ -1839,7 +1841,8 @@ pub(crate) fn collect_session_snapshot(
             directory.as_deref(),
             last_at,
             active_subs,
-            tree_last_msg,
+            tree_last_msg.as_ref(),
+            now_ms,
         )?);
     }
 
@@ -1971,6 +1974,7 @@ fn collect_model_speeds(conn: &Connection, window_start: i64) -> Vec<HudModelSpe
     let Ok(rows) = rows else {
         return Vec::new();
     };
+    let observed_at_ms = chrono::Utc::now().timestamp_millis();
 
     // 单趟聚合：行按 started_at 降序，每模型首条可信样本即"最近一笔"。
     // 输出排序键 last_at 随聚合暂存，出口重排。
@@ -1992,19 +1996,28 @@ fn collect_model_speeds(conn: &Connection, window_start: i64) -> Vec<HudModelSpe
         }
         // 完成判定：status 列缺失按全完成降级；列存在时行值为 NULL/
         // error/cancelled 均不计（与 collect_session_brief 同口径）
-        if has_status && status.as_deref() != Some("completed") {
+        if has_status && !is_completed_status(status.as_deref()) {
             continue;
         }
-        // 可信样本：两时刻齐全、时序正常（completed > first > 0）且
-        // output > 0（0 速度无意义），否则跳过不产生样本
-        let (Some(first), Some(completed)) = (first, completed) else {
+        let Some(snapshot) = request_speed_at(
+            &RequestTiming {
+                output_tokens: output,
+                started_at: Some(started_at),
+                first_token_at: first,
+                completed_at: completed,
+                ..RequestTiming::default()
+            },
+            observed_at_ms,
+        ) else {
             continue;
         };
-        if first <= 0 || completed <= first || output <= 0 {
+        let Some((first, completed)) = first.zip(completed) else {
             continue;
-        }
-        let gen_ms = completed - first;
-        let tps = output as f64 * 1000.0 / gen_ms as f64;
+        };
+        let Some(gen_ms) = completed.checked_sub(first).filter(|value| *value > 0) else {
+            continue;
+        };
+        let tps = snapshot.value;
         let entry = aggs.entry(model).or_insert(ModelSpeedAgg {
             last_at: started_at,
             last_tps: tps,
@@ -2065,28 +2078,22 @@ fn merge_activity(map: &mut BTreeMap<String, i64>, session_id: String, at: i64) 
         .or_insert(at);
 }
 
-/// 会话元信息：项目目录（directory 最后一段在调用方解析，此处回传原值）
-/// 与父会话 id（非空 = 子代理会话）。仅在 session 表含 directory/
-/// parent_id 列时调用（调用方以 has_parent_col 守卫）；行缺失返回
-/// (None, None)。
-fn session_meta(
-    conn: &Connection,
-    session_id: &str,
-) -> Result<(Option<String>, Option<String>), String> {
+/// 会话元信息：项目目录（directory 最后一段在调用方解析，此处回传原值）。
+/// parent_id 由共享 SessionTreeIndex 读取，避免目录列缺失时树能力一起降级。
+fn session_directory(conn: &Connection, session_id: &str) -> Result<Option<String>, String> {
     match conn.query_row(
-        "SELECT directory, parent_id FROM session WHERE id = ?1",
+        "SELECT directory FROM session WHERE id = ?1",
         [session_id],
-        |row| {
-            Ok((
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, Option<String>>(1)?,
-            ))
-        },
+        |row| row.get::<_, Option<String>>(0),
     ) {
-        Ok((directory, parent)) => Ok((directory, parent)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok((None, None)),
+        Ok(directory) => Ok(directory),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(format!("读取会话信息失败: {e}")),
     }
+}
+
+fn usable_directory(directory: Option<String>) -> Option<String> {
+    directory.filter(|value| !value.trim().is_empty())
 }
 
 /// 会话树（主会话 + 全部子代理）摘要：model_usage 按成员 IN 等值查
@@ -2095,8 +2102,8 @@ fn session_meta(
 /// cache_read)，↓ = Σ output，⟲ = Σ cache_read，Σ = ↑+↓+⟲，× = 行数
 ///（每行一笔请求）；子代理并入主会话行、永不单独成行（V9 防双计）。
 /// 另产出：模型集合（时间窗内 distinct，按最近使用降序）、生成中判定
-///（树内任一成员最新轮未完成即生成中）、动态速度/TTFT（最近一笔完成
-/// 请求；生成中显示计算值、空闲归 0.0）。
+///（树内任一成员最新轮未完成即生成中）、请求速度/TTFT（最近一笔完成
+/// 请求；无有效请求级时间数据时为空值，生成状态由 speed_state 单独表达）。
 fn collect_session_brief(
     conn: &Connection,
     members: &[String],
@@ -2105,7 +2112,8 @@ fn collect_session_brief(
     directory: Option<&str>,
     last_active_at: i64,
     active_subs: usize,
-    tree_last_msg_ms: i64,
+    tree_last_msg: Option<&(String, i64)>,
+    now_ms: i64,
 ) -> Result<HudSessionBrief, String> {
     // 列探测降级（老版本库缺列按常量 0/NULL 补齐，与 usage_feed 同款）
     let has = |col: &str| crate::db::has_column(conn, "model_usage", col);
@@ -2117,6 +2125,8 @@ fn collect_session_brief(
     let status_expr = if has_status { "status" } else { "NULL" };
     let dur_expr = opt_expr(has("duration_ms"), "duration_ms");
     let ttft_expr = opt_expr(has("time_to_first_token_ms"), "time_to_first_token_ms");
+    let first_expr = opt_expr(has("first_token_at"), "first_token_at");
+    let completed_expr = opt_expr(has("completed_at"), "completed_at");
 
     // 树成员 IN 等值查：占位数与成员数一致（成员 ≤ 1 + 子代理数，
     // 个位数量级）
@@ -2124,7 +2134,7 @@ fn collect_session_brief(
     let sql = format!(
         "SELECT session_id, {in_expr}, {out_expr}, {cr_expr}, \
                 COALESCE(model_id, ''), {turn_expr}, {status_expr}, started_at, \
-                {dur_expr}, {ttft_expr} \
+                {dur_expr}, {ttft_expr}, {first_expr}, {completed_expr} \
          FROM model_usage WHERE session_id IN ({placeholders})"
     );
     let mut stmt = conn
@@ -2136,7 +2146,7 @@ fn collect_session_brief(
 
     // 单趟聚合：逐行累加（↑ 按行 clamp 负值——个别行的 cache_read 大于
     // input 时取 0，注入版"保守取小值"同款）+ 模型集合（时间窗）+ 成员
-    // 最新一笔跟踪（生成中判定）+ 最近一笔完成请求（速度/TTFT）
+    // 最新一笔跟踪（生成中判定）+ 完成请求候选（速度/TTFT）
     let mut agg = SessionAgg::default();
     while let Some(row) = rows
         .next()
@@ -2158,60 +2168,96 @@ fn collect_session_brief(
         let cache_read = cell(3)?;
         let model: String = row.get(4).map_err(|e| format!("读取会话聚合失败: {e}"))?;
         let turn: Option<String> = take_text(5)?;
+        let completed_turn = turn.clone();
         let status: Option<String> = take_text(6)?;
-        let started_at = cell(7)?;
+        let started_at: Option<i64> = opt_cell(7)?;
+        let started_ms = started_at.unwrap_or(0);
         let dur: Option<i64> = opt_cell(8)?;
         let ttft: Option<i64> = opt_cell(9)?;
+        let first_token_at: Option<i64> = opt_cell(10)?;
+        let completed_at: Option<i64> = opt_cell(11)?;
 
         // 合计（子代理并入主会话行；防双计靠"子代理永不单独成行"）
         agg.plain_in += (input - cache_read).max(0);
-        agg.out_tokens += output;
-        agg.cache_read += cache_read;
+        agg.out_tokens += output.max(0);
+        agg.cache_read += cache_read.max(0);
         agg.req_count += 1;
 
         // 模型集合：时间窗内 distinct，记录各模型最近使用时刻（排序用）
-        if started_at >= window_start && !model.is_empty() {
+        if started_at.is_some_and(|value| value >= window_start) && !model.is_empty() {
             agg.models
                 .entry(model.clone())
                 .and_modify(|t| {
-                    if started_at > *t {
-                        *t = started_at;
+                    if started_ms > *t {
+                        *t = started_ms;
                     }
                 })
-                .or_insert(started_at);
+                .or_insert(started_ms);
         }
 
         // 最近一笔完成请求判定（速度/TTFT 数据源；status 列缺失按全完成
         // 降级——老库 model_usage 完成即落行，无 running 行）。须在
         // turn/status 被 tail 跟踪移动之前取值
-        let is_completed = !has_status || status.as_deref() == Some("completed");
+        let is_completed = !has_status || is_completed_status(status.as_deref());
 
         // 成员最新一笔（生成中判定按成员跟踪，树内取或）。守卫分支保证
         // turn/status 的移动在各自分支内无条件发生（条件内移动会触发
         // maybe-moved 报错）
-        match agg.tails.get_mut(&member) {
-            Some(tail) if started_at >= tail.latest_at => {
-                tail.latest_at = started_at;
-                tail.turn = turn;
-                tail.status = status;
-            }
-            Some(_) => {}
-            None => {
-                agg.tails.insert(
-                    member,
-                    MemberTail {
-                        latest_at: started_at,
-                        turn,
-                        status,
-                    },
-                );
+        if started_ms > 0 {
+            match agg.tails.get_mut(&member) {
+                Some(tail) if started_ms >= tail.latest_at => {
+                    tail.latest_at = started_ms;
+                    tail.turn = turn;
+                    tail.status = status;
+                }
+                Some(_) => {}
+                None => {
+                    agg.tails.insert(
+                        member,
+                        MemberTail {
+                            latest_at: started_ms,
+                            turn,
+                            status,
+                        },
+                    );
+                }
             }
         }
 
-        if is_completed && started_at >= agg.latest_completed_at {
-            agg.latest_completed_at = started_at;
-            agg.latest_completed = Some(LatestCompleted { output, dur, ttft });
-        }
+        let request_order = completed_at
+            .filter(|value| *value > 0)
+            .or_else(|| {
+                started_at.and_then(|started| {
+                    started.checked_add(dur.filter(|value| *value > 0).unwrap_or(0))
+                })
+            })
+            .unwrap_or(started_ms);
+        // Keep the newest non-terminal/failed row as an invalid candidate so
+        // an older completed request cannot remain visible while a newer
+        // request in the same round is running or has been cancelled.
+        let derived_ttft = is_completed.then(|| {
+            ttft.or_else(|| {
+                first_token_at
+                    .zip(started_at)
+                    .filter(|(first, started)| *first > *started)
+                    .map(|(first, started)| first - started)
+            })
+        });
+        agg.completed_candidates.push((
+            request_order,
+            LatestCompleted {
+                turn_id: completed_turn,
+                timing: RequestTiming {
+                    output_tokens: if is_completed { output.max(0) } else { 0 },
+                    started_at: started_at.filter(|value| *value > 0),
+                    first_token_at,
+                    completed_at,
+                    duration_ms: dur,
+                    request_id: None,
+                },
+                ttft: derived_ttft.flatten(),
+            },
+        ));
     }
 
     // 生成中判定（树内取或）：任一成员最新一轮未完成即生成中。
@@ -2242,21 +2288,88 @@ fn collect_session_brief(
     // 与请求完成同时序，会把刚完成的轮误判回生成中）；窗口档位限制已在
     // 活跃发现阶段生效；无消息（0）不触发。首笔完成请求落库后其
     // started_at 必然晚于消息时刻，判定自动交还原轮级口径。
+    // A1 新鲜期：消息只在 PENDING_FRESH_MS 内独立支撑"等待首请求"——
+    // 超期的孤儿消息（真实主库观察到约 12 小时未匹配）不再永久冒充活
+    // 跃轮；耗时很长的首请求若已落库首行请求，则由上方 tails 的未完成
+    // 轮口径接管（可复核活跃证据），不受新鲜期影响。
     let tree_latest_req = agg.tails.values().map(|t| t.latest_at).max().unwrap_or(0);
-    let msg_generating = tree_last_msg_ms > tree_latest_req;
+    let msg_generating = tree_last_msg
+        .map(|(_, at)| {
+            *at > tree_latest_req && now_ms.saturating_sub(*at) <= PENDING_FRESH_MS
+        })
+        .unwrap_or(false);
     if msg_generating {
         generating = true;
     }
 
-    // DB 口径速度（rollout 缺失/未观测时的 fallback）："最近生成速率"
-    // 语义，生成中与空闲同值不归 0（空闲保持显示该值，是否在生成由
-    // 状态点表达）。TTFT 恒为最近一笔完成请求的值（静态参考）。
-    let lc = agg.latest_completed.as_ref();
-    let (lc_out, lc_dur, lc_ttft) = match lc {
-        Some(c) => (c.output, c.dur, c.ttft),
-        None => (0, None, None),
+    // New-round identity is independent of the generating edge. A user
+    // message id survives a fast consecutive question even when no poll sees
+    // idle; if that signal is unavailable, a new model turn id is the safe
+    // fallback. The timestamp is used only as a lower bound for eligible
+    // completed speeds.
+    // A1：超期孤儿消息（晚于全部请求、超出新鲜期且无活跃佐证）既不驱动
+    // 生成态，也不再作为轮边界——否则它会永久排除此前所有请求的速度，
+    // 让空闲会话显示 Unavailable。此时回退最新模型轮的 turn 边界。
+    let boundary_msg = tree_last_msg.filter(|(_, at)| {
+        *at <= tree_latest_req || now_ms.saturating_sub(*at) <= PENDING_FRESH_MS
+    });
+    let latest_turn = agg
+        .tails
+        .values()
+        .filter_map(|tail| tail.turn.as_deref().filter(|turn| !turn.is_empty()).map(|turn| (turn, tail.latest_at)))
+        .max_by_key(|(_, at)| *at);
+    let latest_turn = latest_turn.map(|(turn, at)| (turn.to_string(), at));
+    let (round_key, round_started_at) = if let Some((message_id, at)) = boundary_msg {
+        (Some(format!("message:{message_id}")), (*at > 0).then_some(*at))
+    } else if let Some((turn, at)) = latest_turn.as_ref() {
+        (Some(format!("turn:{turn}")), (*at > 0).then_some(*at))
+    } else {
+        (None, None)
     };
-    let speed = turn_speed(lc_out, lc_dur, lc_ttft);
+
+    // A new user message is a round boundary, not merely a lower bound on
+    // completion time: an older request can finish after that message while
+    // its model_usage row is still the newest DB row. Exclude such a row by
+    // its request start. Without a message signal, the latest model turn id
+    // is the fallback boundary. This keeps a cancelled/empty new round from
+    // inheriting the previous round's DB speed as well as its rollout speed.
+    let latest_completed = agg
+        .completed_candidates
+        .into_iter()
+        .filter(|(_, completed)| {
+            if let Some(round_start) = round_started_at {
+                completed
+                    .timing
+                    .started_at
+                    .is_some_and(|started| started >= round_start)
+            } else if let Some((turn, _)) = latest_turn.as_ref() {
+                completed.turn_id.as_deref() == Some(turn.as_str())
+            } else {
+                true
+            }
+        })
+        .max_by(|(left_order, _), (right_order, _)| left_order.cmp(right_order))
+        .map(|(_, completed)| completed);
+
+    // DB 口径速度：最新完成模型请求的可信生成速度，缺首字时间时才
+    // 允许显式 request-average 近似。不能再用 turn_usage 总耗时估算。
+    let lc = latest_completed.as_ref();
+    let speed_snapshot = lc.and_then(|completed| request_speed_at(&completed.timing, now_ms));
+    let speed = speed_snapshot.as_ref().map(|snapshot| snapshot.value);
+    let speed_quality = speed_snapshot.as_ref().map(|snapshot| snapshot.quality);
+    let speed_completed_at = speed_snapshot.as_ref().map(|snapshot| snapshot.completed_at);
+    let lc_ttft = lc.and_then(|completed| completed.ttft);
+    let speed_state = if generating {
+        if speed.is_some() {
+            SpeedState::Recent
+        } else {
+            SpeedState::Measuring
+        }
+    } else if speed.is_some() {
+        SpeedState::Recent
+    } else {
+        SpeedState::Unavailable
+    };
 
     // 模型集合序列化：按最近使用降序（当前模型排首）逗号拼接，注入版
     // models 口径；前端显示首个 + 计数、title 给全量
@@ -2287,7 +2400,11 @@ fn collect_session_brief(
         total: agg.plain_in + agg.out_tokens + agg.cache_read,
         req_count: agg.req_count,
         speed,
-        msg_generating,
+        speed_quality,
+        speed_completed_at,
+        speed_state,
+        round_key,
+        round_started_at,
         ttft_ms: lc_ttft,
     })
 }
@@ -2303,17 +2420,18 @@ struct SessionAgg {
     models: BTreeMap<String, i64>,
     /// 各成员最新一笔（生成中判定按成员取或）
     tails: BTreeMap<String, MemberTail>,
-    /// 最近一笔完成请求的 started_at（比较键，初值 MIN 保证首行入选）
-    latest_completed_at: i64,
-    /// 最近一笔完成请求（速度/TTFT 共用数据源）
-    latest_completed: Option<LatestCompleted>,
+    /// 请求候选（先按当前轮边界过滤，再选最近一笔）。未完成/失败的
+    /// 最新行也作为无效候选保留，避免旧请求在新请求进行中继续污染速度；
+    /// 同时避免旧请求在新用户消息之后才完成时污染新轮速度。
+    completed_candidates: Vec<(i64, LatestCompleted)>,
 }
 
-/// 树内最近一笔 completed 请求摘要（速度 fallback / TTFT 共用数据源，
-/// 只保留这两个消费方需要的最小字段）
+/// 树内最近一笔请求摘要（速度 fallback / TTFT 共用数据源；无效候选的
+/// output_tokens 为 0，因而只用于清空旧速度，不会被当作完成请求展示）。
+#[derive(Clone)]
 struct LatestCompleted {
-    output: i64,
-    dur: Option<i64>,
+    turn_id: Option<String>,
+    timing: RequestTiming,
     ttft: Option<i64>,
 }
 
@@ -2323,23 +2441,6 @@ struct MemberTail {
     latest_at: i64,
     turn: Option<String>,
     status: Option<String>,
-}
-
-/// 动态速度（t/s，口径照抄注入版每轮条，数据源为最近一笔完成请求）：
-/// gen = dur − ttft（下限 1ms）；ttft 缺失 → gen = dur；ttft ≥ 90%×dur
-///（整块下发）→ gen = ttft；dur 缺失/≤0 或 out ≤ 0 → None（前端显示
-/// "–"）。仅在生成中状态调用；空闲由调用方直接归 0.0。
-fn turn_speed(out: i64, dur: Option<i64>, ttft: Option<i64>) -> Option<f64> {
-    let dur = dur.filter(|d| *d > 0)?;
-    if out <= 0 {
-        return None;
-    }
-    let gen = match ttft {
-        None => dur,
-        Some(t) if t >= dur * 9 / 10 => t,
-        Some(t) => (dur - t).max(1),
-    };
-    Some(out as f64 * 1000.0 / gen.max(1) as f64)
 }
 
 /// 数值列降级表达式：列存在取 COALESCE(col, 0)，缺失取常量 0
@@ -2422,7 +2523,7 @@ fn project_name(directory: Option<&str>, short: &str) -> String {
 }
 
 // ============================================================
-// rollout 旁路速度源（增量读取 + 滑动窗口）
+// rollout 旁路速度源（增量读取 + 最近请求快照）
 // ============================================================
 //
 // 数据事实（2026-09 本机实测）：~/.zcode/cli/rollout/model-io-
@@ -2433,15 +2534,6 @@ fn project_name(directory: Option<&str>, short: &str) -> String {
 // 铁律：rollout 是旁路数据源，只服务速度展示，绝不并入 Σ/↑/↓/⟲/×
 // 累计口径（累计以 db.sqlite model_usage 为唯一来源，防双计）。
 
-/// 会话树（主会话 + 子代理）成员清单：DB 轮询产出，驱动 rollout 文件
-/// 游标集合（每个成员一个 model-io-{id}.jsonl）。
-pub(crate) struct SessionTree {
-    /// 主会话 id（行的展示标识）
-    pub(crate) root: String,
-    /// 树成员（root + 全部子代理）
-    pub(crate) members: Vec<String>,
-}
-
 /// rollout 单文件游标：偏移续读（参考 zcode_sessions 的 file_progress
 /// 模式，仅存内存不落盘——文件由 ZCode 当日清理，HUD 只跟踪活跃会话）。
 struct RolloutCursor {
@@ -2449,37 +2541,37 @@ struct RolloutCursor {
     offset: u64,
 }
 
-/// 速度样本：一次模型请求完成的摊销速率
-#[derive(Clone, Copy)]
-struct SpeedSample {
-    /// 请求开始时刻（rollout startedAt，毫秒）
-    start_ms: i64,
-    /// 读到该行的本地时刻（毫秒；文件按请求完成追加，近似完成时刻）
-    end_ms: i64,
-    /// 摊销速率 tokens/s = outputTokens / max(1s, end − start)
-    rate: f64,
-}
-
-/// 单会话树的速度跟踪器：文件游标 + 样本环形缓冲 + 展示策略状态
-///（保持最后非零速度）。
+/// 单会话树的速度跟踪器：文件游标 + 最新 rollout 请求 + 展示策略状态。
+/// rollout 只提供尚未落入 DB 时的参考速度，不参与任何 token 累计。
 struct TreeSpeed {
     root: String,
     cursors: Vec<RolloutCursor>,
-    samples: VecDeque<SpeedSample>,
-    /// 最后一次非零窗口速度（"最近生成速率"保持值：生成中窗口归零与
-    /// 空闲态都保持显示，新一轮 message 信号开始时重置）
-    last_nonzero: Option<f64>,
-    /// 是否解析到过任何样本：区分"rollout 全缺失/全解析失败"（回退
-    /// DB 最近完成请求口径）与"有数据但窗口已空"（保持最后非零）
+    latest_rollout: Option<SpeedSnapshot>,
+    latest_rollout_order: Option<i64>,
+    /// 已看到的可靠 rollout request id，防止 truncate/重复读取导致重复
+    /// 请求再次成为候选。没有可靠 id 时不猜测去重关系。
+    seen_request_ids: BTreeSet<String>,
     ever_parsed: bool,
-    /// message 信号驱动的生成中是否处于活跃（DB 拍同步；false→true
-    /// 跳变 = 新一轮开始，触发保持值重置）
-    msg_gen_active: bool,
+    /// 当前生成轮起始时刻；生成中只接受不早于该时刻的速度。
+    round_started_at: Option<i64>,
+    /// 用户消息/turn 身份；比 generating 边沿更可靠。没有身份时保留
+    /// generating 边沿作为老库降级路径。
+    round_key: Option<String>,
+    last_generating: bool,
+}
+
+fn rollout_order(timing: &RequestTiming) -> Option<i64> {
+    timing.completed_at.or_else(|| {
+        timing
+            .started_at
+            .zip(timing.duration_ms)
+            .and_then(|(started, duration)| started.checked_add(duration))
+    }).or(timing.started_at)
 }
 
 impl TreeSpeed {
-    /// 新树：每个成员一个游标；新游标从当前文件末尾起读——历史行早于
-    /// 滑窗（读了也是陈旧速率），只追增量行才有"实时跳动"意义
+    /// 新树：每个成员一个游标；新游标从当前文件末尾起读，避免把历史
+    /// 请求误当成当前可见会话刚出现时的新速度。
     fn new(root: &str, members: &[String], dir: Option<&Path>) -> Self {
         let cursors = members
             .iter()
@@ -2493,18 +2585,42 @@ impl TreeSpeed {
         Self {
             root: root.to_string(),
             cursors,
-            samples: VecDeque::new(),
-            last_nonzero: None,
+            latest_rollout: None,
+            latest_rollout_order: None,
+            seen_request_ids: BTreeSet::new(),
             ever_parsed: false,
-            msg_gen_active: false,
+            round_started_at: None,
+            round_key: None,
+            last_generating: false,
         }
     }
 
-    /// 新一轮生成开始（message 信号驱动判定为真）：清除上一轮保持值，
-    /// 速度位回到"测算中"态（生成中且窗口无样本 → None → 前端呼吸
-    /// 占位），首笔完成请求落库后窗口速度即真实新值
-    fn begin_new_round(&mut self) {
-        self.last_nonzero = None;
+    /// 观察当前轮身份。身份变更时无论 generating 是否经过 false，都清除
+    /// 上一轮 rollout 速度；取消后的 idle 快照仍带着当前身份，因此不会
+    /// 把旧 rollout 重新显示出来。身份完全缺失时才退回 false→true 边沿。
+    fn observe_round(
+        &mut self,
+        round_key: Option<&str>,
+        started_at: Option<i64>,
+        generating: bool,
+    ) {
+        let identity_changed = match (self.round_key.as_deref(), round_key) {
+            (Some(current), Some(next)) => current != next,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        let fallback_changed = round_key.is_none() && generating && !self.last_generating;
+        if identity_changed || fallback_changed {
+            self.latest_rollout = None;
+            self.latest_rollout_order = None;
+            self.round_started_at = started_at.filter(|value| *value > 0);
+        } else if self.round_started_at.is_none() {
+            self.round_started_at = started_at.filter(|value| *value > 0);
+        }
+        if let Some(key) = round_key {
+            self.round_key = Some(key.to_string());
+        }
+        self.last_generating = generating;
     }
 
     /// 成员增减后刷新游标集合：已知文件保留偏移续读，新文件从当前
@@ -2523,11 +2639,15 @@ impl TreeSpeed {
         self.cursors = next;
     }
 
-    /// 增量读取新完成请求并更新样本缓冲：文件 stat 极轻，size 未变
+    /// 增量读取新完成请求并更新最新旁路快照：文件 stat 极轻，size 未变
     /// 跳过；size < offset 视为 truncate/重建归零重读；文件缺失静默
     /// 跳过；只消费完整行，末尾半行留待补完后续读；解析失败的行跳过
     ///（ZCode 私有格式无 schema 承诺）。
     fn ingest(&mut self, now_ms: i64) {
+        // An older request can be appended after a newer user message while
+        // the previous request is still finishing. Its completion time alone
+        // is not enough to make it a current-round sample.
+        let round_started_at = self.round_started_at;
         for cursor in &mut self.cursors {
             let Ok(meta) = fs::metadata(&cursor.path) else {
                 continue; // 文件缺失（未运行/已被清理）静默
@@ -2557,72 +2677,87 @@ impl TreeSpeed {
                 if line.is_empty() {
                     continue;
                 }
-                if let Some((start_ms, output)) = parse_rollout_line(line) {
-                    self.samples.push_back(SpeedSample {
-                        start_ms,
-                        end_ms: now_ms,
-                        rate: amortized_rate(output, start_ms, now_ms),
-                    });
+                if let Some(request) = parse_rollout_line(line) {
+                    if round_started_at.is_some_and(|started| {
+                        request
+                            .timing
+                            .started_at
+                            .is_none_or(|request_started| request_started < started)
+                    }) {
+                        continue;
+                    }
+                    if let Some(request_id) = request.timing.request_id.as_ref() {
+                        if !self.seen_request_ids.insert(request_id.clone()) {
+                            continue;
+                        }
+                    }
+                    // The append observation time is never used as a synthetic
+                    // completion time. The rollout record must carry either a
+                    // real completedAt or a trusted durationMs.
                     self.ever_parsed = true;
+                    let order = rollout_order(&request.timing);
+                    let replace = match (self.latest_rollout_order, order) {
+                        (None, _) => true,
+                        (Some(current), Some(next)) => next >= current,
+                        (Some(_), None) => false,
+                    };
+                    if replace {
+                        self.latest_rollout_order = order;
+                        self.latest_rollout = request_speed_at(&request.timing, now_ms);
+                    }
                 }
             }
             cursor.offset += consumed as u64 + 1;
         }
-        // 环形缓冲卫生：滑出保留期的样本丢弃
-        self.samples
-            .retain(|s| s.end_ms >= now_ms - SAMPLE_RETENTION_MS);
     }
 
-    /// 窗口速度（tokens/s）：各样本与 [now−W, now] 的重叠时长 × 摊销
-    /// 速率求和后除以窗口时长——大耗时请求按历史速率摊入窗口，新行
-    /// 进入/旧行滑出都会让数字变化，量级正确不虚高
-    fn window_speed(&self, now_ms: i64) -> f64 {
-        let from = now_ms - SPEED_WINDOW_MS;
-        let mut weighted = 0.0f64;
-        for s in &self.samples {
-            let overlap_end = s.end_ms.min(now_ms);
-            let overlap_start = s.start_ms.max(from);
-            if overlap_end > overlap_start {
-                weighted += (overlap_end - overlap_start) as f64 * s.rate;
-            }
-        }
-        weighted / SPEED_WINDOW_MS as f64
-    }
-
-    /// 展示速度决策（口径：速度列 = "该会话最近一次生成的速率"，
-    /// 是否正在生成由状态点表达）：
-    /// - rollout 全缺失/全解析失败（从未解析到样本）→ DB 最近一笔完成
-    ///   请求口径（fallback），生成中与空闲同值不归 0（无测速能力时
-    ///   给最近参考值）；
-    /// - 生成中：窗口速度实时更新（并存为保持值）；窗口归零（长请求
-    ///   进行中无新完成行）→ 保持最后非零；无保持值（新一轮刚开始，
-    ///   保持值已随 message 信号重置）→ None（"–"，前端"测算中"呼吸
-    ///   占位，不显示上一轮陈旧值）；
-    /// - 空闲：冻结保持最后非零（回答完一直显示该轮真实速率，不随
-    ///   窗口滑动衰减），无观测历史回退 DB 口径。
+    /// DB 与 rollout 的择优：DB 是权威来源；rollout 可以在 DB 尚未可见
+    /// 时提供较新的参考。当前表面没有能可靠映射两者的一对一请求 ID，
+    /// 因此不声称按 ID 合并：只按有效 completion timestamp 比较；相同
+    /// 时刻 DB 胜出，rollout 严格更晚才胜出。并发请求若时间相同不会被
+    /// 盲目合并，若时间接近但不相同则按时间新旧选择，不做时间窗猜测。
+    /// 生成中新轮只接受本轮之后的请求。
     fn display_speed(
         &mut self,
-        generating: bool,
-        fallback: Option<f64>,
-        now_ms: i64,
-    ) -> Option<f64> {
-        if !self.ever_parsed {
-            return fallback;
+        _generating: bool,
+        fallback: Option<SpeedSnapshot>,
+        _now_ms: i64,
+    ) -> Option<SpeedSnapshot> {
+        let eligible = |speed: &SpeedSnapshot| {
+            // Once a reliable round identity is known, keep the lower bound
+            // after cancellation/idle too. Restricting it to `generating`
+            // would let the old rollout value reappear on the first idle poll.
+            self.round_started_at
+                .is_none_or(|started| speed.completed_at >= started)
+        };
+        let db = fallback.filter(|speed| eligible(speed));
+        let rollout = self.latest_rollout.as_ref().filter(|speed| eligible(speed));
+        // A newer rollout row can be invalid (zero output, reversed/future
+        // timestamps, etc.). It still describes the newest request, so an
+        // older DB value must not survive as if it were current. Equal
+        // completion times remain a DB win; this is a timestamp tie-break,
+        // not proof that the two rows are the same request.
+        if self.latest_rollout.is_none()
+            && self
+                .latest_rollout_order
+                .zip(db.as_ref().map(|speed| speed.completed_at))
+                .is_some_and(|(rollout_order, db_completed)| rollout_order > db_completed)
+        {
+            return None;
         }
-        let w = self.window_speed(now_ms);
-        if generating {
-            if w > 0.0 {
-                self.last_nonzero = Some(w);
-                return Some(w);
+        match (db, rollout) {
+            (Some(db), Some(rollout)) if rollout.completed_at > db.completed_at => {
+                Some(rollout.clone())
             }
-            return self.last_nonzero;
+            (Some(db), _) => Some(db),
+            (None, Some(rollout)) => Some(rollout.clone()),
+            (None, None) => None,
         }
-        self.last_nonzero.or(fallback)
     }
 }
 
 /// rollout 旁路速度监控器（feed 线程私有状态）：按会话树跟踪文件游标
-/// 与样本缓冲。
+/// 与最近请求快照。
 #[derive(Default)]
 struct RolloutMonitor {
     trees: Vec<TreeSpeed>,
@@ -2659,43 +2794,80 @@ impl RolloutMonitor {
     }
 }
 
-/// rollout 单行解析 → (请求开始毫秒, outputTokens)。ZCode 私有格式
-/// 无 schema 承诺：JSON 损坏/字段缺失返回 None 跳过。实测键名
-/// camelCase（usage.outputTokens 与 DB 列名不同）。
-fn parse_rollout_line(line: &[u8]) -> Option<(i64, i64)> {
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct RolloutLine {
-        #[serde(default)]
-        started_at: Option<String>,
-        #[serde(default)]
-        response: Option<RolloutResponse>,
-    }
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct RolloutResponse {
-        #[serde(default)]
-        usage: Option<RolloutUsage>,
-    }
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct RolloutUsage {
-        #[serde(default)]
-        output_tokens: i64,
-    }
-    let parsed: RolloutLine = serde_json::from_slice(line).ok()?;
-    let start_ms = chrono::DateTime::parse_from_rfc3339(parsed.started_at.as_deref()?)
-        .ok()?
-        .timestamp_millis();
-    let output = parsed.response.as_ref()?.usage.as_ref()?.output_tokens;
-    Some((start_ms, output))
+#[derive(Debug, Clone)]
+struct RolloutRequest {
+    timing: RequestTiming,
 }
 
-/// 单样本摊销速率（tokens/s）：output ÷ max(1s, end − start)。跨度
-/// 不足下限（极快请求/时钟抖动/startedAt 在未来）按 1s 兜底防爆炸。
-fn amortized_rate(output: i64, start_ms: i64, end_ms: i64) -> f64 {
-    let span = (end_ms - start_ms).max(SAMPLE_MIN_SPAN_MS);
-    output as f64 / span as f64 * 1000.0
+/// Parse one rollout line into request-level timing. The file is a private
+/// JSONL surface and has changed shape across ZCode versions, so timestamps
+/// accept either RFC3339 strings or millisecond numbers. Missing fields remain
+/// missing and are handled by the shared speed validator.
+fn parse_rollout_line(line: &[u8]) -> Option<RolloutRequest> {
+    let value: serde_json::Value = serde_json::from_slice(line).ok()?;
+    let object = value.as_object()?;
+    let started_at = timestamp_value(object.get("startedAt").or_else(|| object.get("started_at")))?;
+    let response = object.get("response")?.as_object()?;
+    let usage = response.get("usage")?.as_object()?;
+    let output_tokens = usage
+        .get("outputTokens")
+        .or_else(|| usage.get("output_tokens"))
+        .and_then(|value| value.as_i64())?;
+    let first_token_at = timestamp_value(
+        object
+            .get("firstTokenAt")
+            .or_else(|| object.get("first_token_at")),
+    );
+    let completed_at = timestamp_value(
+        object
+            .get("completedAt")
+            .or_else(|| object.get("completed_at")),
+    );
+    let duration_ms = object
+        .get("durationMs")
+        .or_else(|| object.get("duration_ms"))
+        .and_then(value_i64);
+    let request_id = object
+        .get("requestId")
+        .or_else(|| object.get("request_id"))
+        .or_else(|| object.get("id"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+
+    let duration_ms = completed_at
+        .zip(Some(started_at))
+        .and_then(|(completed, started)| {
+            completed
+                .checked_sub(started)
+                .filter(|duration| *duration > 0)
+        })
+        .or(duration_ms);
+    Some(RolloutRequest {
+        timing: RequestTiming {
+            output_tokens,
+            started_at: Some(started_at),
+            first_token_at,
+            completed_at,
+            duration_ms,
+            request_id,
+        },
+    })
+}
+
+fn value_i64(value: &serde_json::Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+}
+
+fn timestamp_value(value: Option<&serde_json::Value>) -> Option<i64> {
+    let value = value?;
+    value_i64(value).or_else(|| {
+        value
+            .as_str()
+            .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+            .map(|date| date.timestamp_millis())
+    })
 }
 
 /// rollout 目录（~/.zcode/cli/rollout）：ZBAR_DB 重定向口径与
@@ -3340,6 +3512,27 @@ mod tests {
     }
 
     #[test]
+    fn 快照_主会话directory优先于子代理目录() {
+        let (conn, path) = hud_db("root-directory");
+        let now = 1_100_000_000_i64;
+        conn.execute_batch(&format!(
+            "INSERT INTO session VALUES
+               ('sess_root', NULL, '/workspace/main-project'),
+               ('sess_child', 'sess_root', '/workspace/wrong-child-project');
+             INSERT INTO model_usage VALUES
+               ('sess_child', 'turn_child', {at}, 'M', 'completed', 10, 20, 0, 0, 0, 30);",
+            at = now - 100,
+        ))
+        .unwrap();
+        let snapshot = collect_session_snapshot(&conn, 10, now).unwrap().0;
+        assert_eq!(snapshot.sessions.len(), 1, "子代理只能归并到根会话");
+        assert_eq!(snapshot.sessions[0].session_id, "sess_root");
+        assert_eq!(snapshot.sessions[0].project, "main-project");
+        drop(conn);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
     fn 短标识_剥离sess前缀取6位() {
         // "sess_" 前缀不剥离的话前 6 位恒为 "sess_s" 无区分度
         assert_eq!(
@@ -3362,7 +3555,8 @@ mod tests {
                ('sess_aaa111', NULL, '/Users/a/proj-alpha'),
                ('sess_bbb222', NULL, '/Users/a/proj-beta'),
                ('sess_ccc333', NULL, ''),
-               ('sess_sub1', 'sess_aaa111', '/Users/a/proj-alpha');
+               ('sess_sub1', 'sess_aaa111', '/Users/a/proj-alpha'),
+               ('sess_sub1_child', 'sess_sub1', '/Users/a/proj-alpha');
              INSERT INTO model_usage VALUES
                -- 会话 A：窗口内 1 秒前有请求（最新，应排第一）
                ('sess_aaa111', 'turn_a', {ta}, 'GLM-5.3', 'completed', 100, 200, 0, 10, 50, 300),
@@ -3370,16 +3564,19 @@ mod tests {
                ('sess_aaa111', 'turn_a0', {ta0}, 'GLM-4.6', 'completed', 5, 6, 0, 0, 0, 11),
                -- 会话 B：窗口内 2 秒前有请求
                ('sess_bbb222', 'turn_b', {tb}, 'GLM-5.3', 'completed', 10, 20, 0, 0, 5, 30),
-               -- 子代理会话：窗口内最活跃但不进列表
-               ('sess_sub1', 'turn_s', {ts}, 'GLM-5.3', 'completed', 999, 999, 0, 0, 0, 1998);
+                -- 子代理会话：窗口内最活跃但不进列表
+                ('sess_sub1', 'turn_s', {ts}, 'GLM-5.3', 'completed', 999, 999, 0, 0, 0, 1998),
+                -- 两层子代理：必须与直接子代理同样并入主会话
+                ('sess_sub1_child', 'turn_s2', {ts2}, 'GLM-5.3', 'completed', 20, 30, 0, 0, 5, 55);
              INSERT INTO message VALUES
                -- 会话 C：无 model_usage，仅用户消息落库（message 信号覆盖）
                ('msg_c1', 'sess_ccc333', {tc}, '{{\"role\":\"user\"}}');",
             ta = in_window(1_000),
             ta0 = in_window(3_600_000),
-            tb = in_window(2_000),
-            ts = in_window(500),
-            tc = in_window(3_000),
+             tb = in_window(2_000),
+             ts = in_window(500),
+             ts2 = in_window(400),
+             tc = in_window(3_000),
         ))
         .unwrap();
 
@@ -3400,17 +3597,17 @@ mod tests {
         // 会话树合计（注入版 V9 口径）：子代理 sess_sub1 的窗口内请求
         // 并入主会话 A（含窗口外早期请求），↑ 逐笔 clamp 非缓存口径
         let a = &snap.sessions[0];
-        // ↑ = max(0,100−50) + max(0,5−0) + max(0,999−0) = 50+5+999
-        assert_eq!(a.in_tokens, 1054);
-        // ↓ = (200+6) + 999
-        assert_eq!(a.out_tokens, 1205);
-        assert_eq!(a.cache_read, 50);
+        // ↑ = 50+5+999+15，两层子代理均并入
+        assert_eq!(a.in_tokens, 1069);
+        // ↓ = (200+6) + 999 + 30
+        assert_eq!(a.out_tokens, 1235);
+        assert_eq!(a.cache_read, 55);
         // Σ = ↑ + ↓ + ⟲（注入版 V15 口径）
-        assert_eq!(a.total, 1054 + 1205 + 50);
+        assert_eq!(a.total, 1069 + 1235 + 55);
         // × = 树内 model_usage 行数（每行一笔请求）
-        assert_eq!(a.req_count, 3);
-        // 子代理徽标：窗口内有活动的子代理数
-        assert_eq!(a.sub_count, 1);
+        assert_eq!(a.req_count, 4);
+        // 子代理徽标：窗口内有活动的两层子代理数
+        assert_eq!(a.sub_count, 2);
         // 模型集合：时间窗内 distinct（GLM-4.6 在窗外不入集），按最近
         // 使用降序拼接
         assert_eq!(a.models.as_deref(), Some("GLM-5.3"));
@@ -3431,14 +3628,14 @@ mod tests {
         assert_eq!(snap.sessions[2].total, 0);
         assert_eq!(snap.sessions[2].req_count, 0);
         // 今日合计（全库不分会话树；测试库全部行都在"今日"本地零点后）：
-        // in = 100+5+999+10、out = 200+6+999+20、⟲ = 50+0+0+5、
-        // total = Σcomputed_total_tokens = 300+11+1998+30、× = 4 行
+        // in = 100+5+999+10+20、out = 200+6+999+20+30、
+        // ⟲ = 50+0+0+5+5、total = Σcomputed_total_tokens，× = 5 行
         let today = &snap.today_total;
-        assert_eq!(today.in_tokens, 1114);
-        assert_eq!(today.out_tokens, 1225);
-        assert_eq!(today.cache_read, 55);
-        assert_eq!(today.total, 2339, "total 应为 Σcomputed_total_tokens（主面板口径）");
-        assert_eq!(today.req_count, 4);
+        assert_eq!(today.in_tokens, 1134);
+        assert_eq!(today.out_tokens, 1255);
+        assert_eq!(today.cache_read, 60);
+        assert_eq!(today.total, 2394, "total 应为 Σcomputed_total_tokens（主面板口径）");
+        assert_eq!(today.req_count, 5);
         // 模型速度区：本测试库无 first_token_at/completed_at 列（老版本
         // 库形态），应降级为空数组而不是报错
         assert!(
@@ -3823,25 +4020,72 @@ mod tests {
     }
 
     #[test]
-    fn 速度_gen三分支与降级() {
-        // 常规：gen = dur − ttft（下限 1ms）→ 100 × 1000 / 4000 = 25.0
-        let s = turn_speed(100, Some(5_000), Some(1_000)).unwrap();
-        assert!((s - 25.0).abs() < 1e-9, "{s}");
-        // ttft 缺失：gen = dur → 100 × 1000 / 5000 = 20.0
-        let s = turn_speed(100, Some(5_000), None).unwrap();
-        assert!((s - 20.0).abs() < 1e-9, "{s}");
-        // ttft ≥ 90%×dur（整块下发）：gen = ttft → 100 × 1000 / 4800
-        let s = turn_speed(100, Some(5_000), Some(4_800)).unwrap();
-        assert!((s - 100.0 * 1000.0 / 4_800.0).abs() < 1e-9, "{s}");
-        // 边界：ttft 恰为 90%×dur → 走整块下发分支
-        let s = turn_speed(100, Some(5_000), Some(4_500)).unwrap();
-        assert!((s - 100.0 * 1000.0 / 4_500.0).abs() < 1e-9, "{s}");
-        // dur 缺失/≤0、out ≤ 0 → None（前端显示 "–"）
-        assert_eq!(turn_speed(100, None, Some(1_000)), None);
-        assert_eq!(turn_speed(100, Some(0), None), None);
-        assert_eq!(turn_speed(100, Some(-5), None), None);
-        assert_eq!(turn_speed(0, Some(5_000), None), None);
-        assert_eq!(turn_speed(-1, Some(5_000), None), None);
+    fn 速度_请求级可信与近似降级() {
+        let trusted = request_speed_at(
+            &RequestTiming {
+                output_tokens: 100,
+                started_at: Some(1_000),
+                first_token_at: Some(2_000),
+                completed_at: Some(6_000),
+                ..RequestTiming::default()
+            },
+            7_000,
+        )
+        .unwrap();
+        assert_eq!(trusted.quality, SpeedQuality::Generation);
+        assert!((trusted.value - 25.0).abs() < 1e-9, "{trusted:?}");
+
+        // 短请求不套 1 秒下限：100 tokens / 10ms = 10,000 t/s。
+        let short = request_speed_at(
+            &RequestTiming {
+                output_tokens: 100,
+                first_token_at: Some(10_000),
+                completed_at: Some(10_010),
+                ..RequestTiming::default()
+            },
+            11_000,
+        )
+        .unwrap();
+        assert!((short.value - 10_000.0).abs() < 1e-9, "{short:?}");
+
+        let approximate = request_speed_at(
+            &RequestTiming {
+                output_tokens: 100,
+                started_at: Some(20_000),
+                duration_ms: Some(500),
+                ..RequestTiming::default()
+            },
+            21_000,
+        )
+        .unwrap();
+        assert_eq!(approximate.quality, SpeedQuality::RequestAverage);
+        assert!((approximate.value - 200.0).abs() < 1e-9, "{approximate:?}");
+
+        let reversed = RequestTiming {
+            output_tokens: 100,
+            first_token_at: Some(30_000),
+            completed_at: Some(29_999),
+            duration_ms: Some(100),
+            ..RequestTiming::default()
+        };
+        assert!(request_speed_at(&reversed, 31_000).is_none());
+        let future = RequestTiming {
+            output_tokens: 100,
+            started_at: Some(40_000),
+            duration_ms: Some(100),
+            ..RequestTiming::default()
+        };
+        assert!(request_speed_at(&future, 40_050).is_none());
+        assert!(request_speed_at(
+            &RequestTiming {
+                output_tokens: 0,
+                started_at: Some(1),
+                duration_ms: Some(1),
+                ..RequestTiming::default()
+            },
+            2
+        )
+        .is_none());
     }
 
     #[test]
@@ -3951,8 +4195,7 @@ mod tests {
                ('sess_m', 'tm1', {t1}, 'GLM-5.3', 'completed', 100, 200, 0, 5_000, 1_000),
                -- 子代理完成请求
                ('sess_s1', 'ts1', {t2}, 'GLM-5.3', 'completed', 50, 100, 0, 4_000, 500),
-               -- 主会话最新完成请求（应作为速度数据源：ttft 7500 ≥ 90%×8000
-               -- → gen = 7500 → 300 × 1000 / 7500 = 40.0）
+                -- 主会话最新完成请求（应作为速度数据源；仅有 duration 时为请求平均速度）
                ('sess_m', 'tm2', {t3}, 'GLM-4.7', 'completed', 10, 300, 0, 8_000, 7_500);",
             t1 = now - 30_000,
             t2 = now - 20_000,
@@ -3971,7 +4214,8 @@ mod tests {
         assert!(m.generating, "{m:?}");
         // 生成中：速度取树内最近一笔完成请求（主会话 tm2，started_at 最新）
         let speed = m.speed.expect("生成中应有速度值");
-        assert!((speed - 40.0).abs() < 1e-9, "{speed}");
+        assert!((speed - 37.5).abs() < 1e-9, "{speed}");
+        assert_eq!(m.speed_quality, Some(SpeedQuality::RequestAverage));
         assert_eq!(m.ttft_ms, Some(7_500));
 
         // 子代理轮落完成行 → 全树空闲 → "最近生成速率"语义：DB fallback
@@ -3985,7 +4229,8 @@ mod tests {
         let m = &snap.sessions[0];
         assert!(!m.generating);
         let idle_speed = m.speed.expect("空闲应保持最近生成速率（DB fallback）");
-        assert!((idle_speed - 40.0).abs() < 1e-9, "{idle_speed}");
+        assert!((idle_speed - 37.5).abs() < 1e-9, "{idle_speed}");
+        assert_eq!(m.speed_quality, Some(SpeedQuality::RequestAverage));
         assert_eq!(m.ttft_ms, Some(7_500));
         drop(conn);
         let _ = fs::remove_file(&path);
@@ -4011,49 +4256,153 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
-    /// rollout 单行测试 JSON（camelCase 键名与实测格式一致，结尾换行）
-    fn line_json(start_ms: i64, output: i64) -> String {
-        let ts = chrono::DateTime::from_timestamp_millis(start_ms)
-            .unwrap()
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        format!(
-            "{{\"sessionId\":\"sess_x\",\"startedAt\":\"{ts}\",\"response\":{{\"usage\":{{\"outputTokens\":{output}}}}}}}\n"
+    #[test]
+    fn 速度_最新进行中请求不泄漏同轮旧值() {
+        let now = 9_600_000_000_i64;
+        let path = std::env::temp_dir().join(format!(
+            "zbar-session-hud-db-{}-speed-running.sqlite",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT);
+             CREATE TABLE turn_usage (
+                session_id TEXT, turn_id TEXT, status TEXT, started_at INTEGER);
+             CREATE TABLE model_usage (
+                session_id TEXT, turn_id TEXT, started_at INTEGER, model_id TEXT,
+                status TEXT, input_tokens INTEGER, output_tokens INTEGER,
+                cache_read_input_tokens INTEGER, duration_ms INTEGER,
+                time_to_first_token_ms INTEGER, first_token_at INTEGER,
+                completed_at INTEGER);
+             CREATE TABLE message (
+                id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+             INSERT INTO session VALUES ('sess_running', NULL, '/running');
+             INSERT INTO model_usage VALUES
+                ('sess_running', 'turn_old', 9_599_997_000, 'M', 'completed',
+                 10, 100, 0, 1_000, 100, 9_599_997_100, 9_599_998_000),
+                ('sess_running', 'turn_new', 9_599_999_000, 'M', 'running',
+                 10, 20, 0, NULL, NULL, NULL, NULL);",
         )
-    }
+        .unwrap();
 
-    /// 速度样本快捷构造
-    fn sample(start_ms: i64, end_ms: i64, rate: f64) -> SpeedSample {
-        SpeedSample {
-            start_ms,
-            end_ms,
-            rate,
-        }
+        let snapshot = collect_session_snapshot(&conn, 10, now).unwrap().0;
+        let brief = &snapshot.sessions[0];
+        assert!(brief.generating);
+        assert_eq!(brief.speed, None, "进行中最新请求不应泄漏上一笔速度");
+        assert_eq!(brief.speed_state, SpeedState::Measuring);
+
+        drop(conn);
+        let _ = fs::remove_file(&path);
     }
 
     #[test]
-    fn 速度_样本摊销速率与窗口重叠求速() {
-        let now = 10_000_000_000_i64;
-        // 摊销速率：10s 内完成 1000 tokens → 100 t/s
-        assert!((amortized_rate(1_000, now - 10_000, now) - 100.0).abs() < 1e-9);
-        // 跨度不足 1s（极快请求）按 1s 兜底 → 1000 t/s
-        assert!((amortized_rate(1_000, now - 200, now) - 1_000.0).abs() < 1e-9);
-        // startedAt 在未来（时钟抖动）→ 同样兜底 1s
-        assert!((amortized_rate(500, now + 5_000, now) - 500.0).abs() < 1e-9);
+    fn 速度_新消息边界排除跨界完成的旧请求() {
+        let (conn, path) = hud_db("speed-round-boundary");
+        let now = 9_700_000_000_i64;
+        // hud_db 的基础表没有速度列，补一个同名完整表无法 ALTER；单独
+        // 使用一张带速度列的测试库，覆盖“旧请求在新消息之后才完成”的
+        // 并发边界。
+        drop(conn);
+        let _ = fs::remove_file(&path);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (
+                id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT);
+             CREATE TABLE turn_usage (
+                session_id TEXT, turn_id TEXT, status TEXT, started_at INTEGER);
+             CREATE TABLE model_usage (
+                session_id TEXT, turn_id TEXT, started_at INTEGER,
+                model_id TEXT, status TEXT,
+                input_tokens INTEGER, output_tokens INTEGER,
+                cache_read_input_tokens INTEGER, duration_ms INTEGER,
+                time_to_first_token_ms INTEGER, first_token_at INTEGER,
+                completed_at INTEGER);
+             CREATE TABLE message (
+                id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+             INSERT INTO session VALUES ('sess_round', NULL, '/round');
+             INSERT INTO turn_usage VALUES ('sess_round', 'turn_old', 'completed', 0);
+             INSERT INTO model_usage VALUES
+                ('sess_round', 'turn_old', 9699995000, 'M', 'completed',
+                 10, 100, 0, 4500, 1000, 9699996000, 9699999500);
+             INSERT INTO message VALUES
+                ('msg_new', 'sess_round', 9699999000, '{\"role\":\"user\"}');",
+        )
+        .unwrap();
 
-        // 窗口重叠求速（W=4s）：重叠时长 × 速率 求和 / 4s
-        let mut tree = TreeSpeed::new("t", &["t".into()], None);
-        // 旧请求横跨窗口起点（now−4s）：重叠 [now−4s, now−2s] = 2s × 10 = 20
-        tree.samples.push_back(sample(now - 6_000, now - 2_000, 10.0));
-        // 窗口内短请求：重叠 1s × 50 = 50
-        tree.samples.push_back(sample(now - 2_000, now - 1_000, 50.0));
-        // 完全在窗口外（end 早于 now−4s）→ 不贡献
-        tree.samples
-            .push_back(sample(now - 30_000, now - 20_000, 999.0));
-        // end 在未来（时钟抖动）按 now 截断：重叠 1s × 8 = 8
-        tree.samples.push_back(sample(now - 1_000, now + 5_000, 8.0));
-        let w = tree.window_speed(now);
-        let w_sec = SPEED_WINDOW_MS as f64 / 1000.0;
-        assert!((w - (20.0 + 50.0 + 8.0) / w_sec).abs() < 1e-9, "{w}");
+        let first = collect_session_snapshot(&conn, 10, now).unwrap().0;
+        let brief = &first.sessions[0];
+        assert!(brief.generating, "新 user 消息应进入生成中状态");
+        assert_eq!(brief.round_key.as_deref(), Some("message:msg_new"));
+        assert_eq!(
+            brief.speed, None,
+            "started_at 早于新消息、但完成在消息之后的旧请求不得泄漏速度"
+        );
+
+        // 新轮请求开始后才允许产生当前轮速度；仍未落 turn_usage 时
+        // generating 保持 true，速度仍来自已完成的 model_usage 请求。
+        conn.execute(
+            "INSERT INTO model_usage VALUES
+             ('sess_round', 'turn_new', 9699999100, 'M', 'completed',
+              10, 200, 0, 500, 100, 9699999200, 9699999600)",
+            [],
+        )
+        .unwrap();
+        let second = collect_session_snapshot(&conn, 10, now).unwrap().0;
+        let brief = &second.sessions[0];
+        assert!(brief.generating);
+        assert_eq!(brief.round_key.as_deref(), Some("message:msg_new"));
+        assert_eq!(brief.speed_quality, Some(SpeedQuality::Generation));
+        assert!((brief.speed.unwrap() - 500.0).abs() < 1e-9);
+
+        drop(conn);
+        let _ = fs::remove_file(&path);
+    }
+
+    /// rollout 单行测试 JSON（camelCase 键名与实测格式一致，结尾换行）
+    fn line_json_with_id(
+        start_ms: i64,
+        output: i64,
+        request_id: Option<&str>,
+        duration_ms: i64,
+    ) -> String {
+        let ts = chrono::DateTime::from_timestamp_millis(start_ms)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let id = request_id
+            .map(|value| format!(",\"requestId\":\"{value}\""))
+            .unwrap_or_default();
+        format!(
+            "{{\"sessionId\":\"sess_x\",\"startedAt\":\"{ts}\"{id},\"durationMs\":{duration_ms},\"response\":{{\"usage\":{{\"outputTokens\":{output}}}}}}}\n"
+        )
+    }
+
+    fn line_json(start_ms: i64, output: i64) -> String {
+        line_json_with_id(start_ms, output, None, 500)
+    }
+
+    #[test]
+    fn rollout解析_无效短请求与多种行形态() {
+        let now = 10_000_000_000_i64;
+        let ts = chrono::DateTime::from_timestamp_millis(now - 10)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let parsed = parse_rollout_line(
+            format!(
+                "{{\"sessionId\":\"sess_x\",\"startedAt\":\"{ts}\",\"durationMs\":10,\"response\":{{\"usage\":{{\"outputTokens\":100}}}}}}\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let speed = request_speed_at(&parsed.timing, now).unwrap();
+        assert_eq!(speed.quality, SpeedQuality::RequestAverage);
+        assert!((speed.value - 10_000.0).abs() < 1e-9, "{speed:?}");
+        assert!(parse_rollout_line(b"{not-json").is_none());
+        assert!(parse_rollout_line(b"{\"startedAt\":\"bad\"}").is_none());
+        assert!(parse_rollout_line(
+            b"{\"startedAt\":\"1970-01-01T00:00:01Z\",\"response\":{}}"
+        )
+        .is_none());
     }
 
     #[test]
@@ -4067,10 +4416,14 @@ mod tests {
             offset: 0,
         }];
 
-        // 写入一行完整 JSON → 解析出 1 个样本，offset 推进到行尾
-        std::fs::write(&path, line_json(now - 1_000, 100)).unwrap();
+        // 写入一行完整 JSON → 解析出 1 个请求，offset 推进到行尾
+        std::fs::write(
+            &path,
+            line_json_with_id(now - 1_000, 100, Some("req-1"), 1_000),
+        )
+        .unwrap();
         tree.ingest(now);
-        assert_eq!(tree.samples.len(), 1);
+        assert_eq!(tree.latest_rollout.as_ref().unwrap().value, 100.0);
         assert_eq!(tree.cursors[0].offset, path.metadata().unwrap().len());
         assert!(tree.ever_parsed);
 
@@ -4085,7 +4438,7 @@ mod tests {
         file.write_all(partial.as_bytes()).unwrap();
         drop(file);
         tree.ingest(now);
-        assert_eq!(tree.samples.len(), 1, "半行不应解析");
+        assert_eq!(tree.latest_rollout.as_ref().unwrap().value, 100.0, "半行不应解析");
         assert_eq!(
             tree.cursors[0].offset,
             path.metadata().unwrap().len() - partial.len() as u64
@@ -4099,57 +4452,142 @@ mod tests {
         file.write_all(b"\n").unwrap();
         drop(file);
         tree.ingest(now);
-        assert_eq!(tree.samples.len(), 2);
+        assert!(tree.latest_rollout.is_some());
+        assert!(
+            (tree.latest_rollout.as_ref().unwrap().value - 200.0).abs() < 1e-9,
+            "半行补全后应解析新请求"
+        );
         assert_eq!(tree.cursors[0].offset, path.metadata().unwrap().len());
 
+        // 同一 requestId 重复出现时只保留一次，不改变最新值。
+        let duplicate = line_json_with_id(now - 500, 999, Some("req-1"), 500);
+        std::fs::write(&path, duplicate).unwrap();
+        tree.cursors[0].offset = 0;
+        tree.ingest(now);
+        assert!((tree.latest_rollout.as_ref().unwrap().value - 200.0).abs() < 1e-9);
+
         // truncate/重建：文件变小 → offset 归零重读，不报错
-        std::fs::write(&path, line_json(now - 200, 700)).unwrap();
-        assert!(path.metadata().unwrap().len() < tree.cursors[0].offset);
+        let previous_offset = tree.cursors[0].offset;
+        std::fs::write(
+            &path,
+            line_json_with_id(now - 200, 700, Some("r2"), 200),
+        )
+        .unwrap();
+        assert!(path.metadata().unwrap().len() < previous_offset);
         tree.ingest(now);
         assert_eq!(tree.cursors[0].offset, path.metadata().unwrap().len());
-        // 样本缓冲含 truncate 后新行的摊销速率（700 tokens / 1s 兜底）
-        assert!(tree.samples.iter().any(|s| (s.rate - 700.0).abs() < 1e-9));
+        // 短跨度按真实 200ms 计算：700 / 0.2s = 3500 t/s，无一秒下限。
+        assert!((tree.latest_rollout.as_ref().unwrap().value - 3_500.0).abs() < 1e-9);
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn 速度_展示策略_最近生成速率语义() {
+    fn 速度_展示策略_无请求ID时按完成时刻选择rollout参考() {
         let now = 12_000_000_000_i64;
         let mut tree = TreeSpeed::new("t", &["t".into()], None);
+        let db = SpeedSnapshot {
+            value: 7.0,
+            quality: SpeedQuality::Generation,
+            completed_at: now - 2_000,
+            request_id: None,
+        };
+        assert_eq!(tree.display_speed(true, Some(db.clone()), now), Some(db.clone()));
 
-        // rollout 全缺失（从未解析到样本）→ DB 最近完成请求口径，
-        // 生成中与空闲同值不归 0（"最近生成速率"语义）
-        assert_eq!(tree.display_speed(true, Some(7.0), now), Some(7.0));
-        assert_eq!(tree.display_speed(false, Some(7.0), now), Some(7.0));
-        assert_eq!(tree.display_speed(false, None, now), None);
+        tree.latest_rollout = Some(SpeedSnapshot {
+            value: 11.0,
+            quality: SpeedQuality::RequestAverage,
+            completed_at: now - 1_000,
+            request_id: Some("rollout-1".into()),
+        });
+        let picked = tree.display_speed(true, Some(db.clone()), now).unwrap();
+        assert_eq!(picked.value, 11.0);
+        assert_eq!(picked.quality, SpeedQuality::RequestAverage);
 
-        // 生成中、有解析史但窗口无样本且无保持值（新一轮刚开始，保持
-        // 值已随 message 信号重置）→ None（"–"，前端"测算中"呼吸占位，
-        // 不回退 DB 旧速度显示上一轮陈旧值）
-        tree.ever_parsed = true;
-        assert_eq!(tree.display_speed(true, Some(7.0), now), None);
+        // A newer but invalid rollout row clears the older DB fallback;
+        // equal timestamps still allow the DB value to win.
+        tree.latest_rollout = None;
+        tree.latest_rollout_order = Some(now - 500);
+        assert!(tree.display_speed(false, Some(db.clone()), now).is_none());
+        tree.latest_rollout_order = Some(db.completed_at);
+        assert_eq!(tree.display_speed(false, Some(db.clone()), now), Some(db.clone()));
 
-        // 生成中、窗口有新行 → 窗口速度（并存为保持值）
-        tree.samples.push_back(sample(now - 1_000, now, 25.0));
-        let s = tree.display_speed(true, Some(7.0), now);
-        assert!(s.unwrap() > 0.0);
-        let kept = tree.last_nonzero;
-        assert!(kept.unwrap() > 0.0);
+        // 新轮尚无完成请求：旧 DB/rollout 速度都被排除，返回 None。
+        tree.observe_round(Some("message:round-2"), Some(now), true);
+        assert!(tree.display_speed(true, Some(db), now + 100).is_none());
 
-        // 生成中、样本滑出窗口归零 → 保持最后非零（不闪 0）
-        tree.samples.clear();
-        assert_eq!(tree.display_speed(true, Some(7.0), now + 10_000), kept);
+        // 新轮完成请求出现后可显示，不随秒级 tick 衰减，也不保持旧值。
+        tree.latest_rollout = Some(SpeedSnapshot {
+            value: 13.0,
+            quality: SpeedQuality::Generation,
+            completed_at: now + 200,
+            request_id: Some("rollout-2".into()),
+        });
+        let current = tree.display_speed(true, None, now + 300).unwrap();
+        assert_eq!(current.value, 13.0);
+    }
 
-        // 空闲 → 冻结保持最后非零（回答完一直显示该轮真实速率，不归 0
-        // 不随窗口滑动衰减），无保持值时回退 DB 口径
-        assert_eq!(tree.display_speed(false, Some(7.0), now + 20_000), kept);
-        tree.last_nonzero = None;
-        assert_eq!(tree.display_speed(false, Some(7.0), now + 20_000), Some(7.0));
+    #[test]
+    fn 速度_快速连续发问取消与rollout缺失不复用上一轮() {
+        let now = 12_500_000_000_i64;
+        let mut tree = TreeSpeed::new("t", &["t".into()], None);
+        let old = SpeedSnapshot {
+            value: 80.0,
+            quality: SpeedQuality::Generation,
+            completed_at: now - 2_000,
+            request_id: Some("old".into()),
+        };
+        tree.latest_rollout = Some(old.clone());
+        tree.latest_rollout_order = Some(old.completed_at);
+        tree.observe_round(Some("message:round-1"), Some(now - 4_000), true);
+        assert_eq!(tree.display_speed(true, Some(old.clone()), now), Some(old.clone()));
 
-        // 新一轮重置：清除保持值 → 生成中无样本回到"测算中"（None）
-        tree.begin_new_round();
-        assert_eq!(tree.display_speed(true, Some(7.0), now + 30_000), None);
+        // 两轮之间没有一次 generating=false 的快照，消息 id 仍能触发清理。
+        tree.observe_round(Some("message:round-2"), Some(now - 500), true);
+        assert!(tree.display_speed(true, Some(old.clone()), now).is_none());
+
+        // 新轮被取消后仍带 round-2 身份；idle 分支不可把 round-1 rollout
+        // 或 DB fallback 重新带回来。
+        tree.observe_round(Some("message:round-2"), Some(now - 500), false);
+        assert!(tree.display_speed(false, Some(old), now).is_none());
+
+        // rollout 文件缺失也不改变当前轮资格：没有新请求就保持无值。
+        tree.latest_rollout = None;
+        assert!(tree.display_speed(false, None, now + 1_000).is_none());
+
+        // 旧请求即使在新消息之后才追加到 rollout，也按 startedAt 排除；
+        // 不能仅用 completedAt 与新轮边界比较。
+        let dir = test_dir("round-boundary-rollout");
+        let path = dir.join("model-io-t.jsonl");
+        tree.cursors = vec![RolloutCursor {
+            path: path.clone(),
+            offset: 0,
+        }];
+        fs::write(
+            &path,
+            line_json_with_id(now - 800, 100, Some("old-after-message"), 700),
+        )
+        .unwrap();
+        tree.ingest(now);
+        assert!(tree.latest_rollout.is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 速度_无用户消息时以turn_id识别快速连续轮() {
+        let now = 12_600_000_000_i64;
+        let mut tree = TreeSpeed::new("t", &["t".into()], None);
+        let old = SpeedSnapshot {
+            value: 20.0,
+            quality: SpeedQuality::RequestAverage,
+            completed_at: now - 1_000,
+            request_id: None,
+        };
+        tree.observe_round(Some("turn:turn-1"), Some(now - 2_000), false);
+        tree.latest_rollout = Some(old.clone());
+        tree.latest_rollout_order = Some(old.completed_at);
+        tree.observe_round(Some("turn:turn-2"), Some(now - 100), true);
+        assert!(tree.display_speed(true, Some(old), now).is_none());
     }
 
     #[test]
@@ -4202,6 +4640,51 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
+    #[test]
+    fn 生成中_超期孤儿消息不再永久驱动生成态() {
+        // A1 悬浮版：12 小时前的未匹配 user 消息晚于树内最新请求，但超出
+        // PENDING_FRESH_MS 且无进行中轮佐证 → 不再视为生成中（窗口开大
+        // 让会话仍因该消息出现在列表里，验证状态本身回落空闲）
+        let (conn, path) = hud_db("msg-stale");
+        let now = 14_000_000_000_i64;
+        let stale = now - 12 * 3600 * 1000;
+        conn.execute_batch(&format!(
+            "INSERT INTO session VALUES ('sess_m', NULL, '/m');
+             INSERT INTO model_usage VALUES
+               ('sess_m', 't_old', {t_old}, 'M', 'completed', 10, 10, 0, 0, 0, 20);
+             ALTER TABLE model_usage ADD COLUMN first_token_at INTEGER;
+             ALTER TABLE model_usage ADD COLUMN completed_at INTEGER;
+             UPDATE model_usage SET first_token_at = {t_first}, completed_at = {t_end}
+               WHERE turn_id = 't_old';
+             INSERT INTO turn_usage VALUES
+               ('sess_m', 't_old', 'completed', {t_old});
+             INSERT INTO message VALUES
+               ('msg_stale', 'sess_m', {stale}, '{{\"role\":\"user\"}}');",
+            t_old = stale - 60_000,
+            t_first = stale - 59_000,
+            t_end = stale - 58_000,
+        ))
+        .unwrap();
+        // 窗口 24 小时：陈旧消息让会话保留可见，但生成态必须回落
+        let snap = collect_session_snapshot(&conn, 24 * 60, now).unwrap().0;
+        assert_eq!(snap.sessions.len(), 1, "{snap:?}");
+        let m = &snap.sessions[0];
+        assert!(!m.generating, "超期孤儿消息不得永久冒充活跃轮: {m:?}");
+        assert_eq!(m.speed_state, SpeedState::Recent, "空闲会话显示最近确认速度");
+
+        // 新鲜期内同形态消息 → 仍驱动生成中（首请求等待）
+        conn.execute_batch(&format!(
+            "DELETE FROM message WHERE id = 'msg_stale';
+             INSERT INTO message VALUES
+               ('msg_fresh', 'sess_m', {fresh}, '{{\"role\":\"user\"}}');",
+            fresh = now - 2_000,
+        ))
+        .unwrap();
+        let snap = collect_session_snapshot(&conn, 24 * 60, now).unwrap().0;
+        assert!(snap.sessions[0].generating, "新鲜消息应驱动生成中");
+        drop(conn);
+        let _ = fs::remove_file(&path);
+    }
     /// 实跑冒烟：依赖本机 ~/.zcode/cli/rollout 真实文件（显式
     /// `cargo test --lib session_hud -- --ignored --nocapture` 运行）
     #[test]
@@ -4240,16 +4723,12 @@ mod tests {
             offset: 0,
         }];
         tree.ingest(now);
-        // 窗口速度按真实"最近 4 秒"计算：本会话恰在活跃生成则非零
-        let w = tree.window_speed(now);
-        tree.ever_parsed = true;
-        let display = tree.display_speed(true, Some(0.0), now);
+        // rollout 只保留最新有效请求；不做窗口加权或秒级衰减。
+        let display = tree.display_speed(true, None, now);
         eprintln!(
-            "文件 {} 解析样本 {} 条（保留期内），{}s 窗口速度 {:.1} t/s，展示值 {:?}",
+            "文件 {} 是否解析到有效请求 {}，展示值 {:?}",
             newest.display(),
-            tree.samples.len(),
-            SPEED_WINDOW_MS / 1000,
-            w,
+            tree.ever_parsed,
             display
         );
         assert!(tree.ever_parsed, "最新 rollout 文件应至少解析出一行");

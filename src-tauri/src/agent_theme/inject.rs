@@ -625,12 +625,12 @@ pub const EFFECTS_JS: &str = r#"// =============================================
 /// 小字统计条（↑ 非缓存输入 ↓ 输出 ⟲ 缓存读 · × 请求数 · 输出速度 ·
 /// TTFT 首字延迟，V5 格式）；并在对话输入框上方固定悬浮会话级实时
 /// 统计条（Σ 会话累计）。V6 起轮次完成后（turn_usage 落库）显示最终
-/// 真实值，生成过程中经 runs 数组（model_usage 已落库、turn_usage 尚未
-/// 写入的进行中轮实时聚合，usage_feed 每 2 秒随 turns 一并导出）+ DOM
-/// 流式输出估算实时跳动（Claude Code CLI 式）；V8 起活动轮判定为 DOM
-/// 驱动（会话 DOM 最后 umid 节点不在 index 即活动轮），首笔模型请求
-/// 完成前的启动窗口也即时渲染。V10 起三态（启动窗口/live/完成）统一为
-/// 同一固定结构、字段等宽补位，任何状态只更新数值不改变结构（行格式
+/// 真实值，生成过程中经 runs 数组（model_usage 已确认的请求、turn_usage
+/// 尚未写入的进行中轮聚合，usage_feed 每 2 秒随 turns 一并导出）更新；
+/// 不从 DOM 文本推算 Token 或速度。V8 起活动轮判定为 DOM 驱动（会话
+/// DOM 最后 umid 节点不在 index 即活动轮），首笔模型请求完成前的启动
+/// 窗口也即时显示等待占位。V10 起三态（启动窗口/live/完成）统一为同一
+/// 固定结构、字段等宽补位，任何状态只更新数值不改变结构（行格式
 /// 与枯萎清理见模板头 V10 变更说明）。V13 起会话条定位为零测量的布局
 /// 方案：ensureStyle 给输入区容器 .chat-composer-region 注入 relative +
 /// padding-top:26px 顶部留白，会话条（absolute top:4px 居中）由
@@ -650,9 +650,16 @@ pub const EFFECTS_JS: &str = r#"// =============================================
 /// store::ensure_versioned_template）。风格与 effects.js 同款：自愈、
 /// 静默失败、空值防御；DOM 选择器集中在头部常量，便于实机比对调整。
 pub const USAGE_JS: &str = r#"// ============================================================
-// ZBAR-THEME-V22
+// ZBAR-THEME-V24
 // ZBar Agent 对话页用量统计条（由 ZBar 落盘并随版本升级覆盖）
 // ============================================================
+// V24 变更（速度快照拆出小文件，速度与用量只消费后端确认数据）：
+//   a) 每轮、进行中轮与会话条均显示 model_usage 已确认请求的计数；
+//      DOM 文本不再参与 token 或速度计算。
+//   b) 速度改为最近一笔完成请求的请求级快照；可信生成速度显示精确值，
+//      只有总耗时的请求平均值带 ≈ 前缀，缺失数据显示 –。
+//   c) 速度快照从 usage-data.js 拆到同目录 usage-speed.js；历史用量仍
+//      每 2 秒刷新，速度小文件独立轮询，数据文件未出现时只显示等待占位。
 // V22 变更（删除会话条 CTX 上下文占用段。用户改主意：CTX 百分比展示
 //   下线（悬浮窗版已先行删除），注入版一并删除， sess 数组保留
 //   model_usage 全量合计口径不变）：
@@ -697,13 +704,13 @@ pub const USAGE_JS: &str = r#"// ===============================================
 //   第二遍渲染前统一读 --zbar-usage-turn-bar（variables.css 渲染 1/0，
 //   变量缺失视为开启，兼容旧 variables.css），关闭时对全部轮节点
 //   removeRow 并跳过 renderOne（removeRow 幂等，已渲染行随关闭清掉、
-//   开启后自动恢复）；估算管线 syncDyn 与会话条不受影响。
+//   开启后自动恢复）；速度快照与会话条不受影响。
 // V18 变更（修复新建任务后（空会话）会话累计条停留在上一个会话数据：
 //   renderAll 开头无 [data-turn-id] 节点时直接早退，renderSessionBar
 //   永不执行，V17 修复的容器判定本身正确但该分支根本到不了会话条渲
 //   染，条停留在上一个会话的累计值永不消失。实机复现：新任务容器
 //   data-session-id="draft" 可见且含焦点）：
-//   a) renderAll 空轮分支在 stopDyn 之后补 removeBar()：会话内无任何
+//   a) renderAll 空轮分支在清理旧状态之后补 removeBar()：会话内无任何
 //      轮节点即移除会话条。其余逻辑零改动。
 // V17 变更（修复新建任务后会话累计条不消失、数据不重置：多会话保活
 //   下旧会话容器在任务切换后仍挂载在 DOM 且通常排在前面，原
@@ -782,28 +789,20 @@ pub const USAGE_JS: &str = r#"// ===============================================
 //     略"极简行 / live 数字段 + 行尾 … 标记 / 完成完整格式）导致段数
 //     与左右宽度随状态持续变化，观感差。统一格式（barLineOf）：
 //     "↑ <in> ↓ <out> ⟲ <cr> · × <req> · <speed> t/s · TTFT <ttft>"。
-//     启动窗口态：数字位显示 0 / 估算值（↓ 为估算输出），TTFT 位显示
-//     "–"（进行中未定）；live 态：真实聚合（含 sub）+ 估算叠加，TTFT
-//     位 "–"；完成态：最终值 + TTFT 数值。估算标识 "~" 改为固定占位
-//     字符位：↓ 字段值固定 1 个前缀字符（live/启动 "~"、完成为空格），
-//     宽度恒定。原行尾 "…" 进行中标记删除（TTFT 位 "–" 已表达进行中，
-//     title 口径说明保留）；启动窗口极简行的省略逻辑删除，合并进统一
-//     格式函数。
+//     启动窗口态与未确认速度统一显示等待占位；live/完成态只显示后端
+//     确认的请求聚合与请求级速度。TTFT 缺失时显示 "–"。
 //   - 数字等宽补位（等宽字体 + tabular-nums 下各字段占位恒定，整行宽
 //     度恒定）：token 值经 fmtTokens 恒定 5 字符（"  998"/" 1.2k"/
 //     "10.5M"，超 999.9M 自然溢出）；req padStart(3)；速度 toFixed(1)
 //     后 padStart(4)，dur 缺失（老库）显示 4 字符占位 "  - "；TTFT
 //     padStart(4)（"x.xs" 恒 4 字符），进行中/缺失显示 "–"。title
 //     hover 明细不受等宽约束（补位结果在 title 消费端 trim）。
-//   - 会话条动态段固定："⋯ <speed> t/s · ↓ ~<est>" 两段永远显示（idle
-//     无活动轮时速度 0.0、估算 0），不再按有无值省略，Σ 行整体宽度恒
-//     定；Σ 数字段同步补位（req padStart(3)，token 经 fmtTokens）。
+//   - 会话条速度段固定显示，缺少确认速度时显示等待占位；Σ 数字段同步
+//     补位（req padStart(3)，token 经 fmtTokens）。
 //   - 顺带修复已完成子代理面板的残留占位：已完成的子代理轮（值已并入
 //     主轮 sub，turns/runs 永无该 umid 行）此前在子代理详情面板永久
-//     显示启动占位行。新增"枯萎"判定（STALE_MS = 90000）：活动轮目标
-//     节点文本连续 90 秒无增长且该 umid 始终不在 index/runIndex →
-//     移除该行并从活动轮目标中移除；目标文本再变化（恢复输出/虚拟列
-//     表重挂）时消费端失效记录重新评估，无害。
+//     显示启动占位行。现在仅由数据索引与请求确认状态决定行内容，不读取
+//     页面文本，也不维护基于文本增长的临时速度状态。
 // V9 变更（子代理消耗实时化：主轮条/会话条随子代理消耗动态更新 + 子代
 //   理详情面板自身统计）。实机核实：子代理详情面板与主对话同 document
 //   （无 iframe），面板有自己的 [data-session-id] 容器（值为子代理会
@@ -825,21 +824,16 @@ pub const USAGE_JS: &str = r#"// ===============================================
 //     返回 Map：会话 id → 活动轮节点；主对话与并行多个子代理面板各
 //     有各的活动轮，互不影响。
 //   - 主轮条 live 态显示 sub：runIndex 命中的行若带 sub（数据侧并入
-//     的子代理实时聚合），数字段按合计显示（↑↓⟲× 加子代理部分，流
-//     式估算仍只叠加本会话活动轮节点），title 分解"含子代理 n 轮：…"
-//     （沿用完成态 title 的分解格式）——子代理消耗实时反映在主对话每
-//     轮条上。
+//     的子代理实时聚合），数字段按合计显示（↑↓⟲× 加子代理部分），
+//     速度仍只消费请求级字段——子代理消耗实时反映在主对话每轮条上。
 //   - 会话条 Σ 口径修正：runs 行合计跳过 m:1 的子代理行（其值已并入
 //     主轮行 sub，随主轮行一并计入——原 V8 按 psess 裸命中，子代理行
 //     与主轮行并存时双计、主轮行缺失时又丢游离完成轮）；父会话暂无
 //     主轮行的子代理行不带 m，仍按 psess 并入，无缝衔接。会话条仍只
 //     渲染主窗口（锚点定位 + 优先取锚点内会话容器 id，子代理面板无
 //     输入区不渲染会话条）。
-//   - 估算器多目标（dyn.targets：sess → {node, 基准长度, 窗口样本}）：
-//     单一 200ms 定时器统一采样驱动，各会话活动轮独立差分估算互不干
-//     扰；目标的建立/换轮重建/清理统一由 renderAll 的 syncDyn 依活动
-//     轮判定结果处理（轮完成 → 活动轮消失 → 目标移除 → 定时器空转
-//     自停），关闭会话条不再连带停估算（live 每轮条仍需估算叠加）。
+//   - 各会话活动轮独立判定，renderAll 只在数据变化时刷新确认值；不创建
+//     基于 DOM 文本差分的采样目标或定时器。
 // V8 变更（启动窗口实时渲染：活动轮判定从数据驱动改为 DOM 驱动）：
 //   实机缺陷：发消息后 agent 已开始思考输出，但每轮统计条不显示、会话
 //   累计条一动不动，直到第一笔模型请求完成后才有内容。根因：V6/V7 的
@@ -849,30 +843,10 @@ pub const USAGE_JS: &str = r#"// ===============================================
 //   轮 → live 条不渲染、估算无目标、会话条 sessionRunTotals 为空——
 //   启动窗口全空白；data-running 兜底实机不可靠（该属性取值存疑）。
 //   V8 活动轮判定改为 DOM 驱动：会话内 DOM 顺序最后一个 data-turn-id
-//   （umid）节点，其 umid 不在 index（完成轮）即为活动轮——既不在
-//   index 也不在 runIndex = 启动窗口活动轮（消息发出节点即在 DOM，无
-//   需任何数据库数据）；在 runIndex = runs 阶段活动轮（同一节点继续
-//   估算叠加）。
-//   - 每轮条（启动窗口轮）：立即渲染动态段 + 进行中标记。真实部分全 0
-//     无意义，不渲染数字段，格式为 "⋯ X.X t/s · ↓ ~X …"（速度与估算
-//     输出来自 DOM 估算，思考/正文文本增长都计入；title 说明"生成中：
-//     第一笔请求完成后显示真实用量"；样本不足逐段省略，最少为 "…"）。
-//     runIndex 命中后（首笔请求完成，2 秒内）自动切换为 live 完整格式
-//     （真实聚合 + 估算叠加）。data-running 等待态渲染分支删除——判定
-//     不再需要它，data-running 不再是任何渲染路径的必要条件（仅保留在
-//     MutationObserver attributeFilter 作额外刷新信号）。
-//   - 估算目标统一（findLiveNode 重构）：活动轮 = 会话 DOM 最后一个不
-//     在 index 的 umid 节点，启动窗口与 runs 阶段同一节点；删除对 runs
-//     的目标依赖与 data-running 依赖；会话限定经最近 data-session-id
-//     容器收敛（防同页多会话 DOM 相邻串扰）。
-//   - 会话累计条：Σ 真实部分照旧（完成轮 + runs），启动窗口轮的估算
-//     输出计入动态段 ↓ ~X（不再叠加进 Σ ↓ 真实数字，避免估算污染
-//     累计）；放弃渲染条件追加"无活动轮"——发消息即出现 ⋯ t/s ·
-//     ↓ ~X 跳动；runs 出现后动态段继续叠加当前流式请求。
-//   - 轮次完成的切换不变：turn_usage 行出现 → 启动窗口/live 态被完成
-//     态替换；估算器在活动轮 umid 进入 index 时重置（findLiveNode 不
-//     再返回该节点 → stopDyn，现状收尾路径）。多会话各自页面实例独立
-//     渲染，活动轮判定限定当前会话容器，互不影响。
+//   （umid）节点，其 umid 不在 index（完成轮）即为活动轮。启动窗口只
+//   显示确认计数的等待占位；runIndex 命中后显示已完成请求的实时聚合。
+//   data-running 不再是渲染必要条件，仅保留在 MutationObserver 的刷新
+//   信号中。每轮完成后 turn_usage 到达即切换最终真实值，多会话各自独立。
 // V7 变更：请求次数图标 ⟳ → ×（原 ⟳ 与缓存读 ⟲ 仅箭头方向之差，过于
 //   相似易混淆；× 读作"共 N 次"，缓存读 ⟲ 保持不变）
 // V6 变更（生成过程实时跳动）：
@@ -883,16 +857,12 @@ pub const USAGE_JS: &str = r#"// ===============================================
 //     形如 { umid, sess, psess, in/out/cr/cw/rt, req, start }（psess
 //     仅子代理会话有值，指回父会话）。
 //   - 每轮条渲染优先级：完成数据（index 命中，最终真实值，V2 起逻辑
-//     不变）> 进行中 run（runIndex 命中）> data-running 等待态 > 不
-//     渲染。进行中轮行 = run 真实聚合 + 当前流式输出估算叠加到 ↓ +
-//     估算速度段 + 尾缀 "…"（title 说明口径：已完成请求为真实值，当
-//     前流式输出为估算）。轮完成后 turn_usage 行在 2 秒内到达，run 行
-//     同步退出 runs，渲染自然切最终真实值——切换时数字可能小幅修正
-//     （最后一笔进行中请求完成后才计入 turn_usage，估算部分被真实值
-//     替换），属预期。
+//     不变）> 进行中 run（runIndex 命中）> 活动轮等待态 > 不渲染。
+//     进行中轮行只显示 run 中已完成请求的确认聚合与请求级速度；轮完成
+//     后 turn_usage 到达即切最终真实值。
 //   - 会话条 Σ = 完成轮合计 + runs 中 sess 或 psess 命中当前会话的行
-//     合计 + DOM 流式估算，生成期间持续跳动；新会话首轮（无任何完成
-//     轮）也即时显示。修复 V5 动态段不生效的两个根因：
+//     合计；生成期间不把 DOM 文本或未确认输出加入累计，新会话首轮
+//     （无任何完成轮）也可显示等待态。修复 V5 动态段不生效的两个根因：
 //     a) renderSessionBar 在 sessionTotals 为 null（会话尚无完成轮，
 //        新会话首轮必现）时提前返回，动态定时器从未启动——生成期间
 //        会话条完全静止；V6 改为完成合计与 run 合计均为空才放弃。
@@ -900,10 +870,8 @@ pub const USAGE_JS: &str = r#"// ===============================================
 //        态同样受影响，见用户反馈"完成后才显示数字"）。V6 目标节点改
 //        由 runIndex 数据驱动（run 命中的 DOM 节点，2 秒内必达），
 //        data-running 仅作数据未达头 2 秒的兜底。
-//   - 更新节奏：真实部分随数据轮询（2 秒），流式估算部分随动态定时器
-//     （200ms，textContent.length 差分 × TOKEN_CHARS 折算 + 滑动窗口
-//     求速），二者合并渲染；等宽 + tabular-nums 防跳动宽度抖动（V5
-//     沿用）。
+//   - 更新节奏：确认数据随数据轮询（2 秒）刷新；活动轮只在收到新数据时
+//     更新等待/实时行，不维护文本差分或独立采样定时器。
 // V5 变更（行格式图标化 + 会话级实时统计条）：
 //   - 每轮行格式调整（数据与渲染管线零改动，仅显示层）："N req" →
 //     "× N"（× = 模型请求次数）、"tok/s" → "t/s"、"首字 X.Xs" →
@@ -915,14 +883,8 @@ pub const USAGE_JS: &str = r#"// ===============================================
 //     （Σ ↑非缓存输入 ↓输出 ⟲缓存读 ×请求数，按 sess 过滤 turns 聚合，
 //     已含并入的子代理部分），随 2 秒数据轮询刷新。找不到锚点/会话 id/
 //     会话无任何轮次（draft 空会话）时不渲染，静默降级。
-//   - 流式生成动态段：轮进行中（data-running="true"）时在累计后追加
-//     "⋯ X.X t/s · ↓ ~Y"（~ 前缀标识估算值）。估算来源：动态定时器每
-//     DYN_TICK_MS 采样 running 轮节点 textContent.length 差分，按
-//     TOKEN_CHARS（3.5 字符/token，中英混合经验值）折算 token，并在
-//     SPEED_WINDOW_MS 滑动窗口内差分求速（防抖动）；不做文本统计专用
-//     observer（复用现有 scheduleRender 监听 + 定时器采样，性能优先）。
-//     轮完成（running 消失）即清定时器并移除估算段，累计值在 2 秒内经
-//     数据轮询切回数据库真实值（直接切换不平滑过渡，真实优先）。
+//   - 流式生成期间只显示已完成请求的确认聚合；没有请求级速度时显示
+//     等待占位。轮完成后数据轮询切回数据库最终值，真实优先。
 //   - 会话条开关：ThemeParams.usage_session_bar 经 variables.css 的
 //     --zbar-usage-session-bar（1/0）透出（effects.js 每秒热重载，改
 //     开关约 1 秒生效）；变量缺失（旧 variables.css）时视为开启（默认
@@ -975,30 +937,27 @@ pub const USAGE_JS: &str = r#"// ===============================================
 //   }] }
 // 导出窗口：turns 最近 7 天、至多 3000 轮；runs 近 10 分钟内有请求的
 //   进行中轮（turn_usage 已有行的完成轮不进 runs）。
-// 展示口径（与 ZBar 面板 db.rs gen_window_expr 一致，保守取小值）：
-//   ↑ = in − cr（非缓存输入）↓ = out ⟲ = cr × = req；速度 =
-//   (out+sub.out)×1000/gen，gen = dur − ttft（≥1ms）；ttft 缺失时
-//   gen = dur；ttft ≥ 90% dur（整块下发）时 gen = ttft；dur 缺失速度
-//   位显示占位（V10 固定结构）；TTFT = ttft（缺失/进行中显示 "–"）。
+// 展示口径：↑ = in − cr（非缓存输入），↓ = out，⟲ = cr，× = req；
+//   速度来自最近一笔完成 model_usage 请求的 speed 快照。generation 为
+//   首字到完成的精确速度，request_average 为仅有总耗时的近似速度并带 ≈；
+//   缺失/无效快照显示 "–"，TTFT 缺失同样显示 "–"。
 // 行格式（V10 起三态统一固定结构）：每轮条任何状态都渲染
 //   "↑ <in> ↓ <out> ⟲ <cr> · × <req> · <speed> t/s · TTFT <ttft>"，
 //   各字段等宽补位（token 5 字符 / req 3 字符 / 速度与 TTFT 各 4 字
-//   符；↓ 前固定 1 字符估算前缀位，进行中 "~"、完成空格），等宽字体 +
-//   tabular-nums 下整行宽度恒定，只更新字段数值不改变结构。
-// 行为：每 2 秒以 script 标签重载 usage-data.js（先删旧再插新，加载失败
-//   保留上次数据；页面隐藏降频 10 秒）；v !== 2 视为无效数据走静默路径
-//   （保留上次数据）；ts 与上次相同则跳过索引重建与重渲染。
+//   符），等宽字体 + tabular-nums 下整行宽度恒定，只更新字段数值不改变
+//   结构；request_average 的 ≈ 前缀由速度字段自身表达近似质量。
+// 行为：usage-data.js 每 2 秒以 script 标签重载（只承载历史计数，先删旧
+//   再插新，加载失败保留上次数据；页面隐藏降频 10 秒）；速度则以独立的
+//   usage-speed.js 小文件每 1 秒重载，速度变更不会触发大文件重写或历史
+//   索引重建。v !== 2 / speed v !== 1 视为无效并保留上次数据；各自 ts
+//   与上次相同则跳过对应的索引/渲染。
 //   MutationObserver + 首次全量扫描定位 [data-turn-id]（V9 起扫描
 //   document 级，覆盖主对话与子代理详情面板）；每轮条按优先级渲染：
 //   完成数据按 umid 命中（同 umid 多节点只在 DOM 顺序最后一个节点出）
-//   > 进行中 runIndex 命中（真实聚合 + 并入的子代理 sub 合计 + 流式
-//   估算）> 启动窗口活动轮（DOM 驱动判定：本会话容器 DOM 最后 umid
-//   节点且数据未达，统一固定结构渲染 0 / 估算值）> 不渲染（避免脏数
-//   据；V10 起枯萎目标维持移除，见 STALE_MS）；虚拟列表
-//   回收重挂按 umid 幂等重渲，节点消失不残留状态。renderAll 尾部同步
-//   驱动会话级实时统计条（活动轮判定在 renderAll 统一计算一次，每轮
-//   条与会话条共用），动态运行期另由 200ms 估算定时器（多会话目标统
-//   一采样）自驱动全量重渲，15 秒兜底渲染覆盖二者的自愈。
+//   > 进行中 runIndex 命中（确认聚合）> 启动窗口活动轮（DOM 驱动判定：
+//   本会话容器 DOM 最后 umid 节点且数据未达，统一固定结构渲染确认等待
+//   占位）> 不渲染；虚拟列表回收重挂按 umid 幂等重渲，节点消失不残留
+//   状态。renderAll 尾部同步驱动会话级统计条，15 秒兜底渲染覆盖自愈。
 // ============================================================
 (function () {
   "use strict";
@@ -1017,15 +976,11 @@ pub const USAGE_JS: &str = r#"// ===============================================
   var ATTR_ROW = "data-zbar-usage-row"; /* 统计条标记（防重复） */
   var STYLE_ID = "zbar-usage-style";
   var LOADER_ID = "zbar-usage-data-loader";
-  var POLL_MS = 2000; /* 数据重载周期（与 Rust 导出周期一致） */
+  var SPEED_LOADER_ID = "zbar-usage-speed-loader";
+  var POLL_MS = 2000; /* 历史用量大文件重载周期 */
+  var SPEED_POLL_MS = 1000; /* 速度小文件重载周期；不重载大文件 */
   var POLL_HIDDEN_MS = 10000; /* 页面隐藏时降频 */
   var FALLBACK_RENDER_MS = 15000; /* 低频兜底渲染周期（死锁/漏渲染自愈） */
-  var STALE_MS = 90000; /* 活动轮枯萎判定阈值（V10）：目标节点文本连续
-    无增长的时长，超时且该 umid 始终不在 index/runIndex → 移除面板残留
-    占位行并从活动轮目标中移除。V20 起已完成子代理轮有自身视图行入
-    index，常规不再触发（见 stale 记录注释），保留作永无数据节点
-    （umid null 的轮、极老版本库无子代理查询等）的兜底清理 */
-
   /* ---- 会话级实时统计条常量（V5，实机调参集中在此处） ---- */
   var SEL_SESSION_ID = "[data-session-id]"; /* 当前会话锚点（属性值为会话 id） */
   var ATTR_SESSION_ID = "data-session-id";
@@ -1049,25 +1004,24 @@ pub const USAGE_JS: &str = r#"// ===============================================
   var SESSION_BAR_Z = 30; /* 会话条 z-index：适度抬高，不遮挡弹层 */
   var VAR_SESSION_BAR = "--zbar-usage-session-bar"; /* 开关变量（variables.css 渲染 1/0） */
   var VAR_TURN_BAR = "--zbar-usage-turn-bar"; /* 每轮统计条开关变量（variables.css 渲染 1/0） */
-  var TOKEN_CHARS = 3.5; /* 输出 token 估算系数：字符数/token（中英混合经验值，实机可调） */
-  var DYN_TICK_MS = 200; /* 动态段刷新周期（每周期采样一次 textContent.length 差分） */
-  var SPEED_WINDOW_MS = 1500; /* 速度滑动窗口（1~2 秒，平滑防抖动） */
-  var SPEED_MIN_MS = 400; /* 参与速度计算的最小窗口（启动初期样本不足时速度记 0） */
 
   /* ---- 定位同目录 usage-data.js：由注入行自身 src 推导目录 ---- */
   var dataUrl = "";
+  var speedUrl = "";
   try {
     var tag =
       document.currentScript ||
       document.querySelector("script[data-zbar-usage]");
     if (tag && tag.src) {
       /* percent-encoded 路径不含裸 "?"，split 取基址安全（同 effects.js） */
-      dataUrl = tag.src.split("?")[0].replace(/[^/]*$/, "") + "usage-data.js";
+      var baseUrl = tag.src.split("?")[0].replace(/[^/]*$/, "");
+      dataUrl = baseUrl + "usage-data.js";
+      speedUrl = baseUrl + "usage-speed.js";
     }
   } catch (e) {
     dataUrl = "";
   }
-  if (!dataUrl) return; /* 拿不到自身地址就无法定位数据文件，静默退出 */
+  if (!dataUrl || !speedUrl) return; /* 拿不到自身地址就无法定位数据文件 */
 
   /* ---- 样式：内联创建样式表，不依赖 ZCode 类名；前景继承 + 半透明
    *      深浅主题均可读。V4 起字号/不透明度消费 variables.css 的
@@ -1142,6 +1096,62 @@ pub const USAGE_JS: &str = r#"// ===============================================
    * V22 起 cp/cu/cw 已删，仅余合计字段）。旧数据文件无 sess 数组：索引
    * 为空对象，会话累计回退旧口径 */
   var sessIndex = {};
+  var lastSpeedTs = null;
+  var lastSpeedData = null;
+
+  function applySpeedData(data) {
+    if (!data || data.v !== 1) return;
+    var turns = data.turns || [];
+    var runs = data.runs || [];
+    var sessions = data.sess || [];
+    var byUmid = {};
+    var byTurn = {};
+    var byRunUmid = {};
+    var bySession = {};
+    for (var i = 0; i < turns.length; i++) {
+      var t = turns[i];
+      if (!t) continue;
+      if (t.umid) byUmid[t.umid] = t.speed || null;
+      if (t.turn && t.sess) byTurn[t.sess + "\u0000" + t.turn] = t.speed || null;
+    }
+    for (var j = 0; j < runs.length; j++) {
+      var r = runs[j];
+      if (r && r.umid) byRunUmid[r.umid] = r.speed || null;
+    }
+    for (var k = 0; k < sessions.length; k++) {
+      var s = sessions[k];
+      if (s && s.s) bySession[s.s] = s;
+    }
+    for (var ti = 0; ti < lastTurns.length; ti++) {
+      var lt = lastTurns[ti];
+      if (!lt) continue;
+      var turnSpeed = null;
+      var foundTurn = false;
+      if (lt.umid && Object.prototype.hasOwnProperty.call(byUmid, lt.umid)) {
+        turnSpeed = byUmid[lt.umid];
+        foundTurn = true;
+      } else if (lt.turn && lt.sess &&
+        Object.prototype.hasOwnProperty.call(byTurn, lt.sess + "\u0000" + lt.turn)) {
+        turnSpeed = byTurn[lt.sess + "\u0000" + lt.turn];
+        foundTurn = true;
+      }
+      if (foundTurn) lt.speed = turnSpeed;
+    }
+    for (var ri = 0; ri < lastRuns.length; ri++) {
+      var lr = lastRuns[ri];
+      if (lr && lr.umid && Object.prototype.hasOwnProperty.call(byRunUmid, lr.umid)) {
+        lr.speed = byRunUmid[lr.umid];
+      }
+    }
+    for (var sk = 0; sk < sessions.length; sk++) {
+      var ss = sessions[sk];
+      if (!ss || !ss.s) continue;
+      if (sessIndex[ss.s]) {
+        sessIndex[ss.s].speed = ss.speed || null;
+        sessIndex[ss.s].speedState = ss.speedState;
+      }
+    }
+  }
 
   function rebuildIndex(data) {
     index = {};
@@ -1169,9 +1179,10 @@ pub const USAGE_JS: &str = r#"// ===============================================
         if (sv && sv.s) sessIndex[sv.s] = sv;
       }
     }
+    applySpeedData(lastSpeedData);
   }
 
-  /* ---- 数据轮询：script 标签方式重载（onload/onerror 均静默） ---- */
+  /* ---- 历史数据轮询：script 标签方式重载（onload/onerror 均静默） ---- */
   var loading = false;
 
   function loadData() {
@@ -1212,6 +1223,46 @@ pub const USAGE_JS: &str = r#"// ===============================================
     setTimeout(pollLoop, document.hidden ? POLL_HIDDEN_MS : POLL_MS);
   }
 
+  /* ---- 速度小文件轮询：独立于大文件，完成后约一秒内只传输小快照 ---- */
+  var speedLoading = false;
+
+  function loadSpeed() {
+    if (speedLoading || !speedUrl) return;
+    speedLoading = true;
+    var old = document.getElementById(SPEED_LOADER_ID);
+    if (old && old.parentNode) old.parentNode.removeChild(old);
+    var s = document.createElement("script");
+    s.id = SPEED_LOADER_ID;
+    s.onload = function () {
+      speedLoading = false;
+      try {
+        var data = window.__ZBAR_USAGE_SPEED__;
+        if (!data || data.v !== 1) return;
+        if (data.ts === lastSpeedTs) return;
+        lastSpeedTs = data.ts;
+        lastSpeedData = data;
+        applySpeedData(data);
+        scheduleRender();
+      } catch (e) {
+        /* 速度旁路失败不影响历史计数 */
+      }
+    };
+    s.onerror = function () {
+      speedLoading = false;
+    };
+    s.src = speedUrl + "?t=" + Date.now();
+    (document.head || document.documentElement).appendChild(s);
+  }
+
+  function speedPollLoop() {
+    try {
+      loadSpeed();
+    } catch (e) {
+      /* 静默 */
+    }
+    setTimeout(speedPollLoop, document.hidden ? POLL_HIDDEN_MS : SPEED_POLL_MS);
+  }
+
   /* ---- 格式化（速度口径见文件头说明） ---- */
   function trimTail(s) {
     return s.replace(/\.0$/, "");
@@ -1234,22 +1285,14 @@ pub const USAGE_JS: &str = r#"// ===============================================
     return (Math.round(ms / 100) / 10).toFixed(1) + "s";
   }
 
-  /* V10：速度字段等宽补位——恒定 4 字符（" 0.0"~"99.9"，≥100 自然溢
-   * 出）；null（dur 缺失老库）显示 4 字符占位 "  - " */
+  /* 速度字段只消费 Rust 确认的请求级快照；请求平均值显式带 ≈，缺失
+   * 或无效值统一显示等待占位。 */
   function padSpeed(s) {
-    return s == null ? "  - " : s.toFixed(1).padStart(4, " ");
-  }
-
-  /* 生成窗口：与 db.rs gen_window_expr 同口径（保守取小值） */
-  function genMs(t) {
-    var d = t.dur;
-    if (d == null || d <= 0) return 0;
-    var ttft = t.ttft;
-    if (ttft != null && ttft >= 0 && ttft <= d) {
-      if (ttft * 10 >= d * 9) return ttft; /* 整块下发：gen = ttft */
-      return Math.max(1, d - ttft);
+    if (!s || typeof s.value !== "number" || !isFinite(s.value) || s.value <= 0) {
+      return "  – ";
     }
-    return d;
+    var prefix = s.quality === "request_average" ? "≈" : "";
+    return (prefix + s.value.toFixed(1)).padStart(4, " ");
   }
 
   /* ---- 统一行格式（V10）：三态共用同一固定结构，只更新字段数值 ----
@@ -1257,17 +1300,17 @@ pub const USAGE_JS: &str = r#"// ===============================================
    * 各字段等宽补位（等宽字体 + tabular-nums 下整行宽度恒定）：
    * - token 字段经 fmtTokens 恒定 5 字符；
    * - req padStart(3)；
-   * - 速度经 padSpeed 恒定 4 字符（null = dur 缺失老库，显示占位）；
+   * - 速度经 padSpeed 恒定占位（null = 尚无确认速度）；
    * - TTFT padStart(4)（"x.xs" 恒 4 字符），null（进行中未定/老库缺
    *   失）显示 "–" 占位；
-   * - ↓ 前固定 1 字符估算前缀位：进行中（live/启动窗口）"~"、完成
-   *   空格，宽度恒定。
-   * 三态入参：启动窗口数字位 0 / 估算值（↓ 为估算输出）；live 真实
-   * 聚合（含 sub）+ 估算叠加；完成最终值 + TTFT 数值。 */
+   * - 速度快照的 request_average 质量由 padSpeed 添加 ≈ 前缀；没有快照
+   *   时使用等待占位，计数位始终只来自确认数据。
+   * 启动窗口只显示确认计数的等待占位；live/完成态均只显示数据库
+   * 已确认的请求聚合与速度。 */
   function barLineOf(v) {
     return (
       "↑ " + fmtTokens(v.inp) +
-      " ↓ " + (v.est ? "~" : " ") + fmtTokens(v.out) +
+      " ↓ " + fmtTokens(v.out) +
       " ⟲ " + fmtTokens(v.cr) +
       " · × " + String(v.req).padStart(3, " ") +
       " · " + padSpeed(v.speed) + " t/s" +
@@ -1276,27 +1319,19 @@ pub const USAGE_JS: &str = r#"// ===============================================
   }
 
   function lineOf(t) {
-    var subOut = t.sub ? t.sub.out || 0 : 0;
-    var g = genMs(t);
     return barLineOf({
       inp: Math.max(0, (t["in"] || 0) - (t.cr || 0)),
       out: t.out || 0,
       cr: t.cr || 0,
       req: t.req || 0,
-      /* dur 缺失（g = 0）时速度位显示占位（V10 固定结构，原省略删除） */
-      speed: g >= 1 ? ((t.out || 0) + subOut) * 1000 / g : null,
-      ttft: t.ttft != null && t.ttft >= 0 ? fmtSeconds(t.ttft) : null,
-      est: false
+      speed: t.speed || null,
+       ttft: t.ttft != null && t.ttft >= 0 ? fmtSeconds(t.ttft) : null
     });
   }
 
-  /* ---- 进行中轮行（V6）：run 真实聚合 + 当前流式输出估算叠加到 ↓ +
-   *      估算速度段。V10 统一固定结构：结构恒定只更新数值（速度 0 时
-   *      显示 0.0，TTFT 位 "–" 表达进行中，原行尾 … 标记删除）。V9：数
-   *      字段合计数据侧并入的子代理实时聚合（r.sub），estTok 仍只叠加
-   *      本会话活动轮节点；非估算目标的并行 live 节点 estTok/estSpeed
-   *      为 0，同样渲染完整固定结构 ---- */
-  function liveLineOf(r, estTok, estSpeed) {
+  /* ---- 进行中轮行：只显示已完成 model_usage 请求的确认聚合；尚未有
+   *      请求级速度时保留 "–"，不从 DOM 文本推算 token 或 t/s。 ---- */
+  function liveLineOf(r) {
     var s = r.sub;
     var inp = (r["in"] || 0) + (s ? s["in"] || 0 : 0);
     var out = (r.out || 0) + (s ? s.out || 0 : 0);
@@ -1304,12 +1339,11 @@ pub const USAGE_JS: &str = r#"// ===============================================
     var req = (r.req || 0) + (s ? s.req || 0 : 0);
     return barLineOf({
       inp: Math.max(0, inp - cr),
-      out: out + estTok,
+      out: out,
       cr: cr,
       req: req,
-      speed: estSpeed > 0 ? estSpeed : 0,
-      ttft: null,
-      est: true
+      speed: r.speed || null,
+       ttft: null
     });
   }
 
@@ -1338,11 +1372,10 @@ pub const USAGE_JS: &str = r#"// ===============================================
   function renderOne(node, turnId, isLast, activeMap) {
     var t = index[turnId];
     if (!t) {
-      /* V6：进行中 run 命中——真实聚合 + 流式估算实时条（只在最后一个
+      /* V6：进行中 run 命中——已确认聚合 + 请求级速度（只在最后一个
        * 节点渲染）。2 秒竞态窗口内 index 与 runIndex 并存时走上方完成
        * 分支（完成数据优先），此处天然只在"确实未完成"时到达。
-       * V9：数字段含数据侧并入的子代理聚合（见 liveLineOf），估算只
-       * 叠加本会话活动轮节点（estFor）。V16 起不再有悬浮 title */
+       * V9：数字段含数据侧并入的子代理聚合（见 liveLineOf）。V16 起不再有悬浮 title */
       var r = runIndex[turnId];
       if (r) {
         if (!isLast) {
@@ -1350,35 +1383,22 @@ pub const USAGE_JS: &str = r#"// ===============================================
           return;
         }
         var live = ensureRow(node, turnId);
-        var est = estFor(node);
-        var text = liveLineOf(r, est.tok, est.speed);
+        var text = liveLineOf(r);
         if (live.textContent !== text) live.textContent = text;
         live.setAttribute("data-zbar-usage-row-state", "live");
         return;
       }
-      /* V8：启动窗口活动轮（DOM 驱动判定，见 findLiveNodes）——消息发
-       * 出节点即在 DOM，无需等待任何数据库数据，立即渲染。V10：统一
-       * 固定结构（数字位 0 / 估算值，↓ 为估算输出带 ~ 前缀，TTFT 位
-       * "–"；原"逐段省略"极简行删除），首笔请求完成（runIndex 命中）
-       * 后切 live 态、turn_usage 落库后切完成态，结构全程不变。run 数
-       * 据未达不再是渲染阻塞项；V9 多容器：节点为其所属会话的活动轮
-       * （activeMap 按会话 id 索引）即渲染。V10：枯萎目标维持移除 */
+      /* 启动窗口活动轮：消息节点已经存在于 DOM，但尚无确认请求时只
+       * 渲染等待占位；首笔 model_usage 请求出现后自动切换 live 态。 */
       if (activeMap.get(sessOf(node)) === node) {
-        var liveSess = sessOf(node);
-        if (staleHolds(liveSess, node, turnId)) {
-          removeRow(node, turnId);
-          return;
-        }
-        var estStart = estFor(node);
         var startRow = ensureRow(node, turnId);
         var startText = barLineOf({
           inp: 0,
-          out: estStart.tok,
+          out: 0,
           cr: 0,
           req: 0,
-          speed: estStart.speed > 0 ? estStart.speed : 0,
+          speed: null,
           ttft: null,
-          est: true
         });
         if (startRow.textContent !== startText) startRow.textContent = startText;
         startRow.setAttribute("data-zbar-usage-row-state", "live");
@@ -1400,54 +1420,21 @@ pub const USAGE_JS: &str = r#"// ===============================================
     row.setAttribute("data-zbar-usage-row-state", "data");
   }
 
-  /* ---- 会话级实时统计条（V5 引入，V6 实时化，V8 启动窗口化，V9 子代
+  /* ---- 会话级统计条（V5 引入，V6 进行中确认数据，V8 启动窗口化，V9 子代
    *      理实时化）：fixed 悬浮于对话输入框上方，Σ = 完成轮合计（sess
    *      过滤 turns 原始数组，已含并入的子代理部分）+ 进行中 run 合计
    *      （本会话行含并入的子代理 sub + 未打 m 标记的子代理行按 psess
-   *      命中，见 sessionRunTotals），生成期间数字持续跳动；V8 起估算
-   *      输出不再叠加进 Σ ↓ 真实数字，改在动态段显示（V15 起格式为
-   *      "X.X t/s · ≈X"：速度段去 ⋯ 前缀、估算段改 ≈ 前缀），且动态段
-   *      从活动轮判定即启动（含 runs 未达的启动窗口轮）。独立管线：renderAll 尾部调用（活动轮
-   *      判定由 renderAll 统一计算传入，V9 起为多容器 Map）+ 动态定时
-   *      器统一采样自驱动，任何 DOM/数据异常都 try 静默，不影响每轮条。
+   *      命中，见 sessionRunTotals），生成期间只显示已确认数字；无确认
+   *      数据时显示等待占位。活动轮判定从 DOM 读取，但仅用于确定渲染位置，
+   *      不读取回复文字或启动任何速度采样器。独立管线：renderAll 尾部调用
+   *      （活动轮判定由 renderAll 统一计算传入，V9 起为多容器 Map），任何
+   *      DOM/数据异常都 try 静默，不影响每轮条。
    *      开关经 --zbar-usage-session-bar（variables.css 渲染 1/0，热重
    *      载生效）读取，变量缺失视为开启（默认 true，与 ThemeParams 默
    *      认值一致） ---- */
   var sessionBar = null; /* 已挂载的会话条元素（跨渲染复用，幂等更新） */
   var mountWarned = false; /* 挂载异常一次性告警标志（V14）：此前挂载
     catch 静默吞掉异常（含 V13 的 ReferenceError），兜底态无法被发现 */
-  /* 流式估算状态（V9 多目标）：会话 id → { node, startChars, samples }，
-   * 单一定时器统一采样驱动，各会话活动轮独立差分估算互不干扰；目标的
-   * 建立/换轮重建/清理统一由 syncDyn 依活动轮判定结果处理 */
-  var dyn = { timer: 0, targets: new Map() };
-  var EST_ZERO = { tok: 0, speed: 0 }; /* 非估算节点的空估算（共享只读） */
-  /* 枯萎目标记录（V10）：sess → { id: umid, chars: 枯萎时文本长度 }。
-   * 目标文本连续 STALE_MS 无增长且 umid 始终不在 index/runIndex 时写入
-   * （永无数据行兜底；V20 前的常规触发源——已完成被并入主轮的子代理
-   * 轮——现已有自身视图行入 index，不再触发）：同会话同 umid 的活动轮
-   * 不再重建估算目标、不再渲染启动占位行；目标文本变化（恢复输出/
-   * 虚拟列表重挂内容变化）时消费端 staleHolds 失效记录，重新评估
-   * （无害） */
-  var stale = new Map();
-
-  /* 枯萎记录是否仍对该节点生效：umid 相同且文本长度无变化视为仍枯萎；
-   * 文本已变化则删除记录并放行（重新评估） */
-  function staleHolds(sess, node, turnId) {
-    var st = stale.get(sess);
-    if (!st || st.id !== turnId) return false;
-    var ch = 0;
-    try {
-      ch = (node.textContent || "").length;
-    } catch (e) {
-      ch = 0;
-    }
-    if (ch !== st.chars) {
-      stale.delete(sess);
-      return false;
-    }
-    return true;
-  }
-
   function sessionBarEnabled() {
     try {
       var v = (
@@ -1608,8 +1595,8 @@ pub const USAGE_JS: &str = r#"// ===============================================
    * 活动轮。修复 V8 锚点扫描扫不到子代理面板的缺陷（面板在
    * workspace-main 锚点之外）。判定不依赖 runs 数据：既不在 index 也
    * 不在 runIndex = 启动窗口活动轮；在 runIndex = runs 阶段活动轮（同
-   * 一节点继续估算叠加），V8 口径不变。返回 Map：会话 id → 活动轮节点
-   * （每轮条启动窗口分支、live 估算叠加与会话条动态段共用同一次判定）。
+   * 一节点继续显示已确认聚合），V8 口径不变。返回 Map：会话 id → 活动轮
+   * 节点（每轮条启动窗口分支、live 行与会话条共用同一次判定）。
    * 嵌套容器防御：只认属主为本容器的节点（最近 [data-session-id] 祖先
    * 必须是本容器），防把子容器（子代理面板）的轮算进父容器。零容器时
    * 退化为 document 末节点（键取空串，与 sessOf 无容器返回值一致） */
@@ -1667,131 +1654,6 @@ pub const USAGE_JS: &str = r#"// ===============================================
     sessionBar = null;
   }
 
-  /* 估算定时器：仅存在估算目标时运行，全空必清（防泄漏） */
-  function stopDyn() {
-    if (dyn.timer) {
-      clearInterval(dyn.timer);
-      dyn.timer = 0;
-    }
-    dyn.targets.clear();
-  }
-
-  /* 估算目标管理（V9，renderAll 每次调用）：activeMap 为最新活动轮判
-   * 定（sess → 节点）。目标节点变化（换轮）或消失（轮完成/虚拟列表回
-   * 收）即重建/移除，新活动轮出现即建立目标——起始基准 = 建立时刻的
-   * 首采样，检测延迟内的少量输出不计（保守取小）。有目标保证定时器运
-   * 行，无目标停止。轮完成时 umid 进入 index → findLiveNodes 不再返回
-   * 该会话 → 目标移除，Σ 与每轮条在 2 秒内经数据轮询切回 turn_usage
-   * 真实值，直接切换不平滑过渡 */
-  function syncDyn(activeMap) {
-    try {
-      var changed = false;
-      dyn.targets.forEach(function (tgt, sess) {
-        if (!tgt.node || !tgt.node.isConnected || activeMap.get(sess) !== tgt.node) {
-          dyn.targets.delete(sess);
-          changed = true;
-        }
-      });
-      activeMap.forEach(function (node, sess) {
-        if (!dyn.targets.has(sess)) {
-          var chars = 0;
-          try {
-            chars = (node.textContent || "").length;
-          } catch (e2) {
-            chars = 0;
-          }
-          /* V10：lastChars/lastGrow 供枯萎判定追踪文本增长 */
-          dyn.targets.set(sess, {
-            node: node,
-            startChars: chars,
-            samples: [],
-            lastChars: chars,
-            lastGrow: Date.now()
-          });
-          changed = true;
-        }
-      });
-      if (!changed) return;
-      if (dyn.targets.size) {
-        if (!dyn.timer) dyn.timer = setInterval(dynTick, DYN_TICK_MS);
-      } else {
-        stopDyn();
-      }
-    } catch (e) {
-      /* 静默 */
-    }
-  }
-
-  /* 统一采样驱动（每 DYN_TICK_MS）：全部目标各采样一次 textContent
-   * 长度差分，滑动窗口只保留窗口内样本（窗口恒定，样本数有界）；节点
-   * 被回收的目标在此清除。200ms 周期本身就是节流；全量重渲同时覆盖每
-   * 轮条（估算 ↓ 与速度段）与各会话条（Σ 跳动）。
-   * V5 曾在此检查 data-running 属性——实机不可靠，V6 已移除，V9 沿用。
-   * V10 枯萎判定：目标文本连续 STALE_MS 无增长且该 umid 始终不在
-   * index/runIndex（V20 起已完成子代理轮有自身视图行入 index，常规
-   * 不再触发，此处为永无数据节点的兜底清理）——移除该行并从活动轮
-   * 目标中移除（记录进 stale，文本再变化时消费端 staleHolds 重新评
-   * 估，无害） */
-  function dynTick() {
-    try {
-      var now = Date.now();
-      dyn.targets.forEach(function (tgt, sess) {
-        if (!tgt.node || !tgt.node.isConnected) {
-          dyn.targets.delete(sess);
-          return;
-        }
-        var c = (tgt.node.textContent || "").length;
-        tgt.samples.push({ t: now, c: c });
-        while (tgt.samples.length > 2 && now - tgt.samples[0].t > SPEED_WINDOW_MS) {
-          tgt.samples.shift();
-        }
-        if (c > tgt.lastChars) {
-          tgt.lastChars = c;
-          tgt.lastGrow = now;
-        } else if (now - tgt.lastGrow > STALE_MS) {
-          var tid = tgt.node.getAttribute(ATTR_TURN_ID);
-          if (tid && !index[tid] && !runIndex[tid]) {
-            stale.set(sess, { id: tid, chars: c });
-            removeRow(tgt.node, tid);
-            dyn.targets.delete(sess);
-          }
-        }
-      });
-      if (!dyn.targets.size) stopDyn();
-      renderAll();
-    } catch (e) {
-      /* 单轮采样失败静默，下个周期再试 */
-    }
-  }
-
-  /* 当前流式估算（V6 取代 V5 的 dynSegmentText 拼串；V9 按会话取目标）：
-   * tok = 目标建立时刻起的字符增量 ÷ TOKEN_CHARS；speed = 滑动窗口差分
-   * 求速（样本不足 SPEED_MIN_MS 时记 0，消费端省略速度段）。消费口径：
-   * 各会话 live 行（runIndex 命中）叠加到 ↓（~ 前缀），启动窗口行与
-   * 会话条动态段独立显示（会话条 V15 起为 ≈est，不并入真实数字）；
-   * 非估算运行（无定时器/无目标）返回 EST_ZERO */
-  function dynEstimate(sess) {
-    if (!dyn.timer) return EST_ZERO;
-    var tgt = dyn.targets.get(sess);
-    if (!tgt) return EST_ZERO;
-    try {
-      var node = tgt.node;
-      var chars = (node.textContent || "").length;
-      var tok = Math.max(0, (chars - tgt.startChars) / TOKEN_CHARS);
-      var speed = 0;
-      if (tgt.samples.length) {
-        var old = tgt.samples[0];
-        var dt = Date.now() - old.t;
-        if (dt >= SPEED_MIN_MS && chars > old.c) {
-          speed = ((chars - old.c) / TOKEN_CHARS) * 1000 / dt;
-        }
-      }
-      return { tok: tok, speed: speed };
-    } catch (e) {
-      return EST_ZERO;
-    }
-  }
-
   /* 节点所属会话 id（V9）：向上取最近 [data-session-id] 容器属性值；
    * 无容器返回空串（与 findLiveNodes 的零容器兜底键一致） */
   function sessOf(node) {
@@ -1801,14 +1663,6 @@ pub const USAGE_JS: &str = r#"// ===============================================
     } catch (e) {
       return "";
     }
-  }
-
-  /* 节点的实时估算（V9）：仅当该节点是其所属会话的当前估算目标时返回
-   * 估算，否则空估算（非活动/非目标的并行 live 节点显示纯真实聚合） */
-  function estFor(node) {
-    var sess = sessOf(node);
-    var tgt = dyn.targets.get(sess);
-    return tgt && tgt.node === node ? dynEstimate(sess) : EST_ZERO;
   }
 
   /* V17：会话条挂载点选择。多会话保活时 document 首个
@@ -1838,8 +1692,7 @@ pub const USAGE_JS: &str = r#"// ===============================================
 
   function renderSessionBar(anchor, activeMap) {
     if (!sessionBarEnabled()) {
-      /* V9：估算目标已独立管理（syncDyn），关闭会话条不再连带停估算
-       * ——live 每轮条仍需估算叠加 */
+      /* 会话条独立开关；每轮统计条仍由 turnBarEnabled 单独控制。 */
       removeBar();
       return;
     }
@@ -1853,8 +1706,7 @@ pub const USAGE_JS: &str = r#"// ===============================================
     /* V21 双口径判定：sess 全量合计命中（新口径）时 runs 不再叠加
      * （runs 行即 model_usage 已落库行的聚合，全量合计已含，叠加即
      * 双计）；未命中（旧数据文件/查询降级）回退旧口径 totals +
-     * runTotals 叠加（V6/V9 既有行为）。估算段 ≈est 独立于两口径，
-     * 始终保留 */
+     * runTotals 叠加（V6/V9 既有行为）。速度只消费 sess 行快照。 */
     var sv = sessIndex[sessId];
     var useSess = !!(sv && sv.tt != null);
     var totals = sessionTotals(sessId);
@@ -1869,12 +1721,8 @@ pub const USAGE_JS: &str = r#"// ===============================================
       removeBar();
       return;
     }
-    var est = dyn.timer ? dynEstimate(sessId) : EST_ZERO;
-    /* Σ 真实部分：新口径 = sess 全量合计（含失败轮，实时——每笔请求
-     * 完成 model_usage 即落行，2 秒轮询内跳动）；旧口径 = 完成轮合计 +
-     * 进行中 run 合计。V8：流式估算输出不叠加进 ↓ 真实数字（避免估算
-     * 污染累计），改入下方动态段 ≈est。轮完成切换时刻数字可能小幅修
-     * 正，属预期误差 */
+    /* Σ 口径：新数据使用 model_usage 全量会话树合计；旧数据文件回退
+     * 完成轮 + 已确认进行中请求。DOM 文本永远不进入这些数字。 */
     var tin = useSess ? (sv.up || 0) : (totals ? totals.tin : 0) + (runTotals ? runTotals.tin : 0);
     var tout = useSess
       ? sv.down || 0
@@ -1901,12 +1749,21 @@ pub const USAGE_JS: &str = r#"// ===============================================
       { t: "⟲ " + fmtTokens(tcr) },
       { t: "× " + String(treq).padStart(3, " ") }
     ];
-    /* V10 动态段固定：两段永远显示（idle 无活动轮时速度 0.0、估算 0），
-     * 不再按有无值省略，Σ 行整体宽度恒定。启动窗口轮（runs 未达）与
-     * runs 阶段统一走此段。V15：速度段去掉 ⋯ 前缀（与每轮条一致）；
-     * 估算段改 ≈ 前缀（生成中未落库的输出估算，不计入累计） */
-    segs.push({ t: padSpeed(est.speed || 0) + " t/s" });
-    segs.push({ t: "≈" + fmtTokens(est.tok) });
+    /* 速度字段来自会话级 model_usage 请求快照；新一轮尚未出现确认请求
+     * 时清掉上一轮的展示值。activeMap 只负责识别当前 DOM 轮，runIndex
+     * 告诉我们是否已经有本轮确认请求；它不读取回复文字。request_average
+     * 已由 padSpeed 带 ≈ 前缀，绝不把 DOM 文本当 token 或 t/s。 */
+    var sessionSpeed = sv && sv.speed ? sv.speed : null;
+    if (active) {
+      var activeNode = activeMap.get(sessId);
+      var activeId = activeNode && activeNode.getAttribute
+        ? activeNode.getAttribute(ATTR_TURN_ID)
+        : "";
+      if (!activeId || !runIndex[activeId] || (sv && sv.speedState === "measuring")) {
+        sessionSpeed = null;
+      }
+    }
+    segs.push({ t: padSpeed(sessionSpeed) + " t/s" });
     /* V21 曾在此追加 "CTX NN%" 上下文占用段（三档变色，消费 sess 行的
      * cp 字段），V22 随展示下线删除（数据端 cp/cu/cw 字段一并移除，
      * 旧数据文件残留值被忽略） */
@@ -1963,7 +1820,6 @@ pub const USAGE_JS: &str = r#"// ===============================================
     var anchor = document.querySelector(SEL_PANE_ANCHOR);
     var nodes = document.querySelectorAll(SEL_TURN);
     if (!nodes.length) {
-      stopDyn(); /* 会话清空即停估算（防幽灵目标空转） */
       /* V18：空会话（新建任务/清空对话）同样要推进会话条——此前此处
        * 早退导致 renderSessionBar 永不执行，条停留在上一个会话的
        * 累计值永不消失（实机复现：新任务容器 data-session-id="draft"
@@ -1982,17 +1838,13 @@ pub const USAGE_JS: &str = r#"// ===============================================
       seen[id] = true;
       lastOf[id] = nodes[i];
     }
-    /* V9：多容器活动轮判定（每会话一个活动轮，Map：sess → 节点；每轮
-     * 条启动窗口分支、live 估算叠加与会话条动态段共用同一次判定结果，
-     * 见 findLiveNodes） */
+    /* 多容器活动轮判定（每会话一个活动轮，Map：sess → 节点）；它只
+     * 决定启动窗口等待行，不采样 DOM 文本。 */
     var activeMap = findLiveNodes();
-    /* 估算目标管理（V9 多目标）：依最新判定建立/重建/清理各会话目标 */
-    syncDyn(activeMap);
     /* 第二遍：逐节点渲染（仅"最后一个"节点出内容，其余节点清旧行）。
      * V19：每轮统计条开关——循环前读一次 --zbar-usage-turn-bar（变量
      * 缺失视为开启，兼容旧 variables.css），关闭时对全部轮节点
-     * removeRow 并跳过 renderOne（幂等清掉已渲染行，开启后自动恢复）；
-     * syncDyn 估算目标与会话条管线不受影响 */
+     * removeRow 并跳过 renderOne（幂等清掉已渲染行，开启后自动恢复）。 */
     var turnBarOn = turnBarEnabled();
     for (var i = 0; i < nodes.length; i++) {
       var id = nodes[i].getAttribute(ATTR_TURN_ID);
@@ -2007,8 +1859,7 @@ pub const USAGE_JS: &str = r#"// ===============================================
     rendered.forEach(function (rowEl, id) {
       if (!seen[id] || !rowEl.isConnected) rendered.delete(id);
     });
-    /* 会话级实时统计条（V5）：独立管线，失败不影响每轮条；
-     * 动态运行期另由 DYN_TICK_MS 定时器统一采样自驱动刷新 */
+    /* 会话级统计条独立渲染，失败不影响每轮条。 */
     try {
       renderSessionBar(anchor, activeMap);
     } catch (e) {
@@ -2055,6 +1906,7 @@ pub const USAGE_JS: &str = r#"// ===============================================
    * window resize 重定位监听（已删除） */
   scheduleRender(); /* 立即渲染已挂载的轮次，不等首个数据周期 */
   pollLoop();
+  speedPollLoop();
   /* 死锁/漏渲染兜底：低频定时器不经过 scheduled 检查直接调用一次
    * renderAll——即使未来出现新的意外状态（调度标志卡死、事件丢失等）
    * 也能在一个兜底周期内自愈，恢复统计条显示 */
@@ -3482,7 +3334,9 @@ mod tests {
         assert!(!THEME_CSS.contains("ZBAR-THEME-V9"), "版本头应已升到 V10");
         assert!(EFFECTS_JS.contains("ZBAR-THEME-V5"));
         assert!(!EFFECTS_JS.contains("ZBAR-THEME-V4"), "版本头应已升到 V5");
-        // usage.js V22（删除会话条 CTX 上下文占用段：用户改主意，CTX 百分
+        // usage.js V24（速度快照拆出 usage-speed.js 小文件；历史用量大文件
+        // 仍按 2 秒节拍更新，注入版独立轮询速度小文件）+ V23（删除会话条
+        // CTX 上下文占用段：用户改主意，CTX 百分
         // 比展示下线——渲染端删除 "CTX NN%" 段与三档变色样式，数据端
         // usage_feed 同步删除 sess 行 cp/cu/cw 字段与 CTX 查询，逐段
         // span 渲染结构保留）；V21（数据端新增 sess 会话级统计数组：
@@ -3497,7 +3351,7 @@ mod tests {
         // 复主轮行被子代理运行静默踢出 runs 的缺陷）；V19 新增每轮统计
         // 条开关参数 usage_turn_bar（默认开启）：renderAll 第二遍渲染前
         // 统一读 --zbar-usage-turn-bar（变量缺失视为开启），关闭时对全
-        // 部轮节点 removeRow 并跳过 renderOne，syncDyn 与会话条不受影
+        // 部轮节点 removeRow 并跳过 renderOne，速度快照与会话条不受影
         // 响；V18 修复新建任务后（空会话）会话累计条停留在上一个
         // 会话数据：renderAll 无轮节点分支早退导致 renderSessionBar 永
         // 不执行，该分支补 removeBar；V17 修复新建任务后会话累计条不消
@@ -3515,11 +3369,27 @@ mod tests {
         // 占位枯萎清理；V9 子代理消耗实时化：document 级扫描 + 多容器
         // 活动轮 + 主轮 live 行 sub 合计 + 会话条 Σ 跳过 m 行；V8 启动
         // 窗口实时渲染；V7 请求图标 ⟳ → ×；V6 生成过程实时跳动）
-        assert!(USAGE_JS.contains("ZBAR-THEME-V22"));
-        assert!(!USAGE_JS.contains("ZBAR-THEME-V21"), "版本头应已升到 V22");
+        assert!(USAGE_JS.contains("ZBAR-THEME-V24"));
+        assert!(!USAGE_JS.contains("ZBAR-THEME-V23"), "版本头应已升到 V24");
         assert!(!USAGE_JS.contains("ZBAR-THEME-V19"), "版本头不应回退");
         assert!(!USAGE_JS.contains("ZBAR-THEME-V18"), "版本头不应回退");
         assert!(!USAGE_JS.contains("ZBAR-THEME-V10"), "版本头不应回退");
+        // V24 速度旁路：速度数据有独立小文件、独立 loader 与独立节拍；
+        // 大文件仍按 2 秒历史节拍，不因速度变化重载。
+        assert!(USAGE_JS.contains("usage-speed.js"), "应定位速度小文件");
+        assert!(USAGE_JS.contains("var SPEED_LOADER_ID = \"zbar-usage-speed-loader\""));
+        assert!(USAGE_JS.contains("var POLL_MS = 2000"));
+        assert!(USAGE_JS.contains("var SPEED_POLL_MS = 1000"));
+        assert!(USAGE_JS.contains("function loadSpeed"));
+        assert!(USAGE_JS.contains("function speedPollLoop"));
+        let speed_lo = USAGE_JS.find("function loadSpeed").expect("loadSpeed 应存在");
+        let speed_hi = USAGE_JS
+            .find("function speedPollLoop")
+            .expect("speedPollLoop 应存在");
+        let speed_loader_body = &USAGE_JS[speed_lo..speed_hi];
+        assert!(speed_loader_body.contains("SPEED_LOADER_ID"));
+        assert!(speed_loader_body.contains("speedUrl"));
+        assert!(!speed_loader_body.contains("dataUrl"));
         // V22 CTX 删除特征：渲染段、变色样式、sv.cp 消费点全部零残留
         //（注释中的历史记载不算特征）
         assert!(
@@ -3581,10 +3451,6 @@ mod tests {
             .expect("空轮分支应包含 return");
         let empty_branch = &ra_body[br_off..br_off + br_len];
         assert!(
-            empty_branch.contains("stopDyn()"),
-            "空轮分支应保留 stopDyn（会话清空停估算目标）"
-        );
-        assert!(
             empty_branch.contains("removeBar();"),
             "V18 空轮分支应调用 removeBar（空会话时移除会话条，防残留上一会话累计）: {empty_branch}"
         );
@@ -3641,8 +3507,8 @@ mod tests {
             "首字延迟应显示为 TTFT 且 padStart(4)，进行中/缺失显示 – 占位：{bar_body}"
         );
         assert!(
-            bar_body.contains("(v.est ? \"~\" : \" \")"),
-            "↓ 估算前缀应为固定 1 字符占位位（进行中 ~ / 完成空格）：{bar_body}"
+            !bar_body.contains("v.est") && !bar_body.contains("~"),
+            "每轮条不得保留 DOM 估算前缀：{bar_body}"
         );
         assert!(
             !bar_body.contains("+ \" req\"")
@@ -3657,8 +3523,10 @@ mod tests {
             "token 字段应经 fmtTokens padStart(5) 等宽补位"
         );
         assert!(
-            USAGE_JS.contains("function padSpeed") && USAGE_JS.contains("s == null ? \"  - \""),
-            "速度应 padStart(4)，dur 缺失（老库）显示 4 字符占位"
+            USAGE_JS.contains("function padSpeed")
+                && USAGE_JS.contains("return \"  – \";")
+                && USAGE_JS.contains("s.quality === \"request_average\""),
+            "速度应显示确认值、近似值前缀与等待占位"
         );
         assert!(
             USAGE_JS.contains("\"–\""),
@@ -3672,16 +3540,15 @@ mod tests {
             !USAGE_JS.contains("WAIT_TEXT"),
             "行尾 … 进行中标记应已删除（TTFT 位 – 已表达进行中）"
         );
-        // 完成态：经统一格式函数渲染（est 前缀位为空格），不再逐段拼接；
-        //（限定 lineOf 函数体检查——头部变更注释会合法提及旧格式）
+        // 完成态：经统一格式函数渲染，不再逐段拼接。
         let lo = USAGE_JS.find("function lineOf").expect("lineOf 应存在");
         let hi = USAGE_JS
             .find("function liveLineOf")
             .expect("liveLineOf 应存在（lineOf 后下一个函数，V16 起 titleOf 已删）");
         let line_body = &USAGE_JS[lo..hi];
         assert!(
-            line_body.contains("barLineOf({") && line_body.contains("est: false"),
-            "完成态应经统一格式函数渲染（est 前缀位为空格）：{line_body}"
+            line_body.contains("barLineOf({") && !line_body.contains("est:"),
+            "完成态应经统一格式函数渲染且不得带估算字段：{line_body}"
         );
         assert!(
             !line_body.contains("parts.push")
@@ -3755,9 +3622,11 @@ mod tests {
                 && !USAGE_JS.contains("chat-composer-region{padding-bottom"),
             "V11 输入区上移规则与 COMPOSER_GAP_PX 常量定义应已删除（输入框还原原位）"
         );
-        assert!(USAGE_JS.contains("TOKEN_CHARS"), "token 估算系数常量应存在");
-        assert!(USAGE_JS.contains("DYN_TICK_MS"), "动态段刷新周期常量应存在");
-        assert!(USAGE_JS.contains("SPEED_WINDOW_MS"), "速度滑动窗口常量应存在");
+        assert!(!USAGE_JS.contains("TOKEN_CHARS"), "不得保留 DOM 文本 token 估算系数");
+        assert!(!USAGE_JS.contains("DYN_TICK_MS"), "不得保留 DOM 文本采样定时器");
+        assert!(!USAGE_JS.contains("SPEED_WINDOW_MS"), "不得保留速度滑动窗口估算");
+        assert!(!USAGE_JS.contains("textContent.length"), "不得从 DOM 文本长度估算 token");
+        assert!(USAGE_JS.contains("request_average"), "应保留请求平均速度质量标记");
         assert!(
             USAGE_JS.contains("data-zbar-usage-session"),
             "会话条防重复挂载标记应存在"
@@ -3860,25 +3729,20 @@ mod tests {
             USAGE_JS.contains("attributeFilter: [ATTR_TURN_ID, ATTR_RUNNING]"),
             "data-running 应仅保留为 MutationObserver 刷新信号"
         );
-        // 会话条：放弃渲染条件追加"无活动轮"（启动窗口即时显示）；估算
-        // 输出移入动态段 ≈est（V15 起前缀），不再叠加进 Σ ↓ 真实数字
+        // 会话条：无确认数据且无活动轮时不渲染；有活动轮时显示确认等待
+        // 占位，不把 DOM 文本或未确认输出写入 Σ。
         assert!(
             USAGE_JS.contains("!totals && !runTotals && !active"),
             "会话条放弃渲染条件应含无活动轮判定（启动窗口即时显示）"
         );
-        assert!(
-            USAGE_JS.contains("\"≈\" + fmtTokens(est.tok)"),
-            "会话条动态段应含流式估算输出 ≈est（V15：↓ ~ 改 ≈ 前缀）"
-        );
-        // V10 动态段固定：两段永远显示（idle 无活动轮时速度 0.0、估算 0），
-        // 不再按有无值省略，Σ 行整体宽度恒定；Σ 数字段同步补位。V15：
-        // Σ 段为会话总 Token（tsum），速度段去 ⋯ 前缀、估算段 ≈ 前缀；
-        // V21 段对象形态（{t: 文本}，逐段 span 渲染），文字内容不变
+        // 会话条速度段固定消费 sess 行的请求级快照；没有快照时显示 –。
         assert!(
             USAGE_JS.contains("var tsum = tin + tout + tcr;")
-                && USAGE_JS.contains("segs.push({ t: padSpeed(est.speed || 0) + \" t/s\" });")
-                && USAGE_JS.contains("segs.push({ t: \"≈\" + fmtTokens(est.tok) });"),
-            "会话条动态段两段应固定显示（idle 时 0.0 / 0，不再按有无值省略）"
+                && USAGE_JS.contains("var sessionSpeed = sv && sv.speed ? sv.speed : null;")
+                && USAGE_JS.contains("if (!activeId || !runIndex[activeId]")
+                && USAGE_JS.contains("segs.push({ t: padSpeed(sessionSpeed) + \" t/s\" });")
+                && !USAGE_JS.contains("fmtTokens(est."),
+            "会话条应只显示确认累计与请求级速度"
         );
         assert!(
             USAGE_JS.contains("String(treq).padStart(3, \" \")"),
@@ -3904,29 +3768,18 @@ mod tests {
             USAGE_JS.contains("font-variant-numeric:tabular-nums"),
             "会话条应 tabular-nums 防数字跳动宽度抖动"
         );
-        // V6 估算口径特征：dynEstimate 返回 {tok,speed} 供消费端叠加；
-        // 旧 "↓ ~Y" 独立估算段已移除（V5 历史变更注释保留提及，全文
-        // 检索无意义，改查消费端拼串特征）
+        // DOM 文本估算已移除：无估算函数、无独立采样定时器、无估算消费
+        // 段，只保留后端确认的请求聚合。
         assert!(
-            USAGE_JS.contains("function dynEstimate"),
-            "流式估算应收敛为 dynEstimate（tok/speed 叠加口径）"
-        );
-        assert!(
-            USAGE_JS.contains("EST_ZERO"),
-            "非估算节点应有空估算常量兜底"
-        );
-        assert!(
-            !USAGE_JS.contains("function dynSegmentText"),
-            "V5 的 dynSegmentText 拼串应已被 dynEstimate 取代"
-        );
-        assert!(
-            USAGE_JS.contains("clearInterval"),
-            "动态定时器结束时必须清除（防泄漏）"
+            !USAGE_JS.contains("function dynEstimate")
+                && !USAGE_JS.contains("function dynSegmentText")
+                && !USAGE_JS.contains("clearInterval"),
+            "不得保留 DOM 文本估算函数或独立速度定时器"
         );
         // V9 子代理消耗实时化特征：document 级扫描（子代理详情面板与主
         // 对话同 document，面板在 workspace-main 锚点之外）、多容器活动
-        // 轮判定、估算器多目标统一采样、主轮 live 行 sub 合计、会话条
-        // Σ 跳过 m:1 子代理行并计入主行 sub
+        // 轮判定、主轮 live 行 sub 合计、会话条 Σ 跳过 m:1 子代理行并
+        // 计入主行 sub；速度仍由后端请求级快照提供。
         assert!(
             USAGE_JS.contains("var nodes = document.querySelectorAll(SEL_TURN)"),
             "renderAll 应 document 级扫描每轮节点（覆盖锚点外的子代理面板）"
@@ -3937,18 +3790,18 @@ mod tests {
             "活动轮判定应遍历所有会话容器并以 Map 返回（sess → 活动轮节点）"
         );
         assert!(
-            USAGE_JS.contains("dyn.targets") && USAGE_JS.contains("function syncDyn"),
-            "估算器应支持多目标（sess → 采样状态）并统一管理"
+            !USAGE_JS.contains("dyn.targets") && !USAGE_JS.contains("function syncDyn"),
+            "不得保留按 DOM 文本采样的多目标估算器"
         );
         assert!(
-            USAGE_JS.contains("function estFor") && USAGE_JS.contains("function sessOf"),
-            "估算应按节点所属会话取目标（estFor/sessOf）"
+            !USAGE_JS.contains("function estFor") && USAGE_JS.contains("function sessOf"),
+            "活动轮应按节点所属会话判定且不创建估算目标"
         );
         assert!(
             USAGE_JS.contains("var s = r.sub;")
                 && USAGE_JS.contains("req: req,")
-                && USAGE_JS.contains("est: true"),
-            "主轮 live 行数字段应合计并入的子代理聚合 sub（V10 经统一格式函数渲染）"
+                && !USAGE_JS.contains("est: true"),
+            "主轮 live 行数字段应合计并入的子代理聚合 sub"
         );
         assert!(
             !USAGE_JS.contains("liveTitleOf")
@@ -3971,25 +3824,18 @@ mod tests {
             !USAGE_JS.contains("dyn.node")
                 && !USAGE_JS.contains("function startDyn(")
                 && !USAGE_JS.contains("function findLiveNode("),
-            "V8 单目标估算/单节点活动轮判定的旧接口应已移除"
+            "V8 单节点活动轮判定的旧接口应已移除"
         );
-        // V10 枯萎判定：修复已完成子代理面板的残留占位——活动轮目标文
-        // 本连续 STALE_MS 无增长且该 umid 始终不在 index/runIndex（值已
-        // 并入主轮 sub，turns/runs 永无该行）→ removeRow 并从活动轮目
-        // 标中移除；文本再变化时消费端重新评估
+        // 不再维护“枯萎”目标：活动轮的生命周期完全由 DOM 节点与确认
+        // 数据索引决定。
         assert!(
-            USAGE_JS.contains("STALE_MS = 90000"),
-            "枯萎判定阈值常量应存在（模板头部常量区）"
+            !USAGE_JS.contains("STALE_MS") && !USAGE_JS.contains("function staleHolds"),
+            "不得保留基于文本增长的枯萎判定"
         );
-        assert!(
-            USAGE_JS.contains("function staleHolds")
-                && USAGE_JS.contains("!index[tid] && !runIndex[tid]"),
-            "枯萎判定应为文本连续无增长且 umid 始终不在 index/runIndex"
-        );
-        // 用量条核心特征：同目录数据文件推导 + 统计口径与等待态
+        // 用量条核心特征：同目录数据文件推导 + 统计口径、速度快照与等待态
         assert!(USAGE_JS.contains("usage-data.js"));
-        assert!(USAGE_JS.contains("genMs"));
-        assert!(USAGE_JS.contains("ttft * 10 >= d * 9"), "整块下发口径应与 db.rs 一致");
+        assert!(USAGE_JS.contains("speed"));
+        assert!(!USAGE_JS.contains("ttft * 10 >= d * 9"), "速度不得在前端重算");
         assert!(USAGE_JS.contains("data-zbar-usage-row"), "统计条防重复标记应存在");
         // V2 实机修复特征：数据版本校验、umid 匹配键、DOM 顺序最后节点
         // 渲染、ts 未变跳过重建与重渲染

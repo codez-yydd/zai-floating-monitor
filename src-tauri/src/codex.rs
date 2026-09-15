@@ -1056,6 +1056,7 @@ pub fn query_stats(from_ms: i64, to_ms: i64) -> Result<db::Stats, String> {
                         avg_tps: row.get(7)?,
                         max_tps: row.get(8)?,
                         avg_ttft_ms: row.get(9)?,
+                        ..Default::default()
                     },
                 })
             },
@@ -1098,6 +1099,7 @@ pub fn query_stats(from_ms: i64, to_ms: i64) -> Result<db::Stats, String> {
                     avg_tps: row.get(9)?,
                     max_tps: row.get(10)?,
                     avg_ttft_ms: row.get(11)?,
+                    ..Default::default()
                 },
             })
         })
@@ -1588,6 +1590,9 @@ pub fn query_project_sessions(
                     tps_count: row.get(10)?,
                     ttft_sum: row.get(11)?,
                     ttft_count: row.get(12)?,
+                    gen_out: None,
+                    gen_ms: None,
+                    gen_count: 0,
                 })
             },
         )

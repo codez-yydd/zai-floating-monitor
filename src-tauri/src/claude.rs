@@ -695,7 +695,7 @@ pub fn query_stats(from_ms: i64, to_ms: i64) -> Result<db::Stats, String> {
         false,
     );
 
-    let overall: db::OverallStat = conn
+    let mut overall: db::OverallStat = conn
         .query_row(
             &format!(
                 "SELECT
@@ -724,6 +724,7 @@ pub fn query_stats(from_ms: i64, to_ms: i64) -> Result<db::Stats, String> {
                         avg_tps: row.get(7)?,
                         max_tps: row.get(8)?,
                         avg_ttft_ms: row.get(9)?,
+                        ..Default::default()
                     },
                 })
             },
@@ -750,7 +751,7 @@ pub fn query_stats(from_ms: i64, to_ms: i64) -> Result<db::Stats, String> {
         ))
         .map_err(|e| format!("准备 Claude 模型分组查询失败: {e}"))?;
 
-    let by_model = stmt
+    let mut by_model = stmt
         .query_map(rusqlite::params![from_ms, to_ms], |row| {
             Ok(db::ModelStat {
                 model_id: row.get(0)?,
@@ -766,12 +767,26 @@ pub fn query_stats(from_ms: i64, to_ms: i64) -> Result<db::Stats, String> {
                     avg_tps: row.get(9)?,
                     max_tps: row.get(10)?,
                     avg_ttft_ms: row.get(11)?,
+                    ..Default::default()
                 },
             })
         })
         .map_err(|e| format!("读取 Claude 模型分组失败: {e}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("读取 Claude 模型分组失败: {e}"))?;
+
+    // B3 速度质量标记：Claude 导入库只有请求总耗时（jsonl 的 durationMs），
+    // 速度是包含首字等待的**请求平均**近似——显式标 request_average（TS 侧
+    // 以 ≈ 前缀区分），不与 ZCode 的可信生成速度混为同一种 t/s；无速度
+    // 时不标（None）。
+    if overall.speed.avg_tps.is_some() {
+        overall.speed.speed_quality = Some(crate::token_speed::SpeedQuality::RequestAverage);
+    }
+    for model in &mut by_model {
+        if model.speed.avg_tps.is_some() {
+            model.speed.speed_quality = Some(crate::token_speed::SpeedQuality::RequestAverage);
+        }
+    }
 
     let (earliest_ms, latest_ms): (Option<i64>, Option<i64>) = conn
         .query_row(
@@ -1195,6 +1210,9 @@ pub fn query_project_sessions(
                     tps_count: row.get(10)?,
                     ttft_sum: row.get(11)?,
                     ttft_count: row.get(12)?,
+                    gen_out: None,
+                    gen_ms: None,
+                    gen_count: 0,
                 })
             },
         )

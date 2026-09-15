@@ -82,8 +82,26 @@ export type FoldedModelStat = ModelStat & { variants?: MergedModelVariant[] };
 /**
  * 把仅大小写/空白/不可见字符/provider 差异的模型行折叠为一行。
  * - 数值字段全部求和；
- * - avg_tps 仅对非空行按 output_tokens 加权平均，分母为 0 时回退 null（避免 NaN 打开速度列）；
- * - max_tps 取组内最大；avg_ttft_ms 取代表行值（TTFT 仅本机库有，维持本机样本口径）；
+ * - 速度按口径折叠（不再用全部 output_tokens 给 avg_tps 加权——那会把
+ *   请求时长差异与远端 Token 混进权重，两个 100 Token/1s + 100 Token/0.1s
+ *   的变体会得出 550 t/s 而非真实的 200/1.1 ≈ 181.8 t/s）：
+ *   - generation 行（带可加总分子/分母：speedOutputTokens/speedGenerationMs/
+ *     speedSampleCount）：分子、分母、样本数分别求和，avg = Σ分子×1000/Σ分母；
+ *     max_tps 取组内最大；
+ *   - request_average 行（claude/kimi，仅 avg_tps 无分子分母）：按**本机**
+ *     输出 Token 加权平均合并近似（该口径本身就是 ≈ 参考值，保持旧展示
+ *     语义）。权重优先用 mergeStats 在叠加远端 Token 前冻结的本机快照
+ *     （localSpeedWeightTokens，输出行回填合计保持幂等）；快照缺失（纯
+ *     本机链路）回退 output_tokens——纯本机数据二者相等，行为不变。远端
+ *     Token 只进 total/output 展示列，不得改变本机显示速度；
+ *   - 两种口径不得混算：同组同时出现时只保留 generation 结果（保守取舍，
+ *     请求平均参考值不混入生成口径；数据链路各来源独立折叠，正常不会发生）；
+ *   - 缺新契约字段的旧行（旧缓存/旧同步数据）：不以全部 Token 伪造分母，
+ *     速度折叠为 null（界面显示 —；DataCache 有版本迁移触发刷新兜底）；
+ * - avg_ttft_ms / ttftSampleCount 按有效 TTFT 样本数加权平均（带正样本数
+ *   与有效均值的行参与，Σ(avg×count)÷Σcount；输出行携带合计样本数，重复
+ *   折叠走同一公式，幂等）。组内没有任何带样本数的行（旧数据）保持旧行为
+ *   取代表行值。TTFT 仅本机库有，维持本机样本口径；
  * - 显示名与 provider 取 total_tokens 最大行的原始写法（并列时取先出现者），保留用户熟悉的形态；
  * - 输出按合并后 total_tokens 降序；Map 保持插入序，结果确定。幂等，可安全重复调用。
  *
@@ -101,10 +119,24 @@ export function foldModelStatRows(rows: ModelStat[]): FoldedModelStat[] {
     cache_write_tokens: number;
     reasoning_tokens: number;
     total_tokens: number;
-    /** avg_tps 加权分子/分母（仅非空行参与） */
-    tpsNum: number;
-    tpsDen: number;
-    maxTps: number | null;
+    /** generation 口径可加总分子/分母/样本数（仅带新契约的行参与求和） */
+    genNum: number;
+    genDen: number;
+    genCount: number;
+    /** request_average 口径的近似合并分子/分母（按本机输出 Token 加权） */
+    raNum: number;
+    raDen: number;
+    /** request_average 口径实际参与加权的本机输出权重合计（快照优先、
+     *  缺失回退 output_tokens）。折叠输出据此回填 localSpeedWeightTokens，
+     *  保证折叠结果再次折叠时权重不变（幂等） */
+    raWeight: number;
+    /** 各口径内的单请求最快值（不跨口径取最大） */
+    genMax: number | null;
+    raMax: number | null;
+    /** TTFT 有效样本加权和（Σ avg×count）与样本合计（Σ count）；
+     *  无任何带样本数的行时保持代表行旧行为（ttftDen = 0 即此态） */
+    ttftNum: number;
+    ttftDen: number;
   }
   const groups = new Map<string, Group>();
   for (const m of rows) {
@@ -121,9 +153,16 @@ export function foldModelStatRows(rows: ModelStat[]): FoldedModelStat[] {
         cache_write_tokens: 0,
         reasoning_tokens: 0,
         total_tokens: 0,
-        tpsNum: 0,
-        tpsDen: 0,
-        maxTps: null,
+        genNum: 0,
+        genDen: 0,
+        genCount: 0,
+        raNum: 0,
+        raDen: 0,
+        raWeight: 0,
+        genMax: null,
+        raMax: null,
+        ttftNum: 0,
+        ttftDen: 0,
       };
       groups.set(key, g);
     }
@@ -139,17 +178,60 @@ export function foldModelStatRows(rows: ModelStat[]): FoldedModelStat[] {
     if (vs && vs.length > 0) g.variants.push(...vs);
     else g.variants.push({ model_id: m.model_id, requests: m.requests });
     if (m.total_tokens > g.rep.total_tokens) g.rep = m;
-    if (m.avg_tps != null && Number.isFinite(m.avg_tps)) {
-      const w = Math.max(0, m.output_tokens);
-      g.tpsNum += m.avg_tps * w;
-      g.tpsDen += w;
+    // 速度按口径分别累加（见函数 docstring；旧契约行不参与任何速度合并）
+    const genDen = m.speedGenerationMs;
+    if (
+      m.speedOutputTokens != null &&
+      genDen != null &&
+      genDen > 0 &&
+      m.speedSampleCount != null &&
+      m.speedSampleCount > 0
+    ) {
+      g.genNum += m.speedOutputTokens;
+      g.genDen += genDen;
+      g.genCount += m.speedSampleCount;
+      if (m.max_tps != null && Number.isFinite(m.max_tps)) {
+        g.genMax = g.genMax == null ? m.max_tps : Math.max(g.genMax, m.max_tps);
+      }
+    } else if (
+      m.speedQuality === "request_average" &&
+      m.avg_tps != null &&
+      Number.isFinite(m.avg_tps)
+    ) {
+      // 无可加总分子/分母，按输出 Token 加权合并（≈ 参考值的近似）。权重
+      // 优先用 mergeStats 冻结的本机输出快照（localSpeedWeightTokens）：
+      // 合并远端后 output_tokens 已叠加远端 Token，远端设备的用量不得改变
+      // 本机显示速度；快照缺失（纯本机链路，二者相等）回退 output_tokens。
+      // 输出为 0 的行没有可信权重，不参与。
+      const w = Math.max(0, m.localSpeedWeightTokens ?? m.output_tokens);
+      if (w > 0) {
+        g.raNum += m.avg_tps * w;
+        g.raDen += w;
+        g.raWeight += w;
+      }
+      if (m.max_tps != null && Number.isFinite(m.max_tps)) {
+        g.raMax = g.raMax == null ? m.max_tps : Math.max(g.raMax, m.max_tps);
+      }
     }
-    if (m.max_tps != null && Number.isFinite(m.max_tps)) {
-      g.maxTps = g.maxTps == null ? m.max_tps : Math.max(g.maxTps, m.max_tps);
+    // TTFT 按有效样本数加权平均（仅本机库有 TTFT 数据，维持本机样本口径）：
+    // 带正样本数与有效均值的行参与（Σ avg×count ÷ Σ count，样本多的行更
+    // 可信，避免 total_tokens 最大但只有 1 个 TTFT 样本的代表行独占均值）；
+    // 缺样本数的旧行无权重信息，不参与加权（组内一个带样本数的行都没有时
+    // 回落代表行旧行为，见输出段）
+    if (
+      m.ttftSampleCount != null &&
+      m.ttftSampleCount > 0 &&
+      m.avg_ttft_ms != null &&
+      Number.isFinite(m.avg_ttft_ms)
+    ) {
+      g.ttftNum += m.avg_ttft_ms * m.ttftSampleCount;
+      g.ttftDen += m.ttftSampleCount;
     }
   }
   const out: FoldedModelStat[] = [];
   for (const g of groups.values()) {
+    const gen = g.genDen > 0 && g.genCount > 0;
+    const ra = !gen && g.raDen > 0;
     out.push({
       model_id: g.rep.model_id,
       provider_id: g.rep.provider_id,
@@ -160,9 +242,29 @@ export function foldModelStatRows(rows: ModelStat[]): FoldedModelStat[] {
       cache_write_tokens: g.cache_write_tokens,
       reasoning_tokens: g.reasoning_tokens,
       total_tokens: g.total_tokens,
-      avg_tps: g.tpsDen > 0 ? g.tpsNum / g.tpsDen : null,
-      max_tps: g.maxTps,
-      avg_ttft_ms: g.rep.avg_ttft_ms ?? null,
+      avg_tps: gen
+        ? (g.genNum * 1000) / g.genDen
+        : ra
+          ? g.raNum / g.raDen
+          : null,
+      max_tps: gen ? g.genMax : ra ? g.raMax : null,
+      // TTFT：有带样本数的行 → 样本数加权平均；组内全缺样本数（旧数据）
+      // → 保持旧行为取代表行值。输出行样本数 = 加权合计，重复折叠走同一
+      // 公式（avg×count 重新展开）结果不变 → 幂等
+      avg_ttft_ms:
+        g.ttftDen > 0 ? g.ttftNum / g.ttftDen : (g.rep.avg_ttft_ms ?? null),
+      // 可加总字段与质量标记只在对应口径成立时携带（与 Rust 契约一致缺省省略，
+      // 折叠输出仍是合法输入 → 幂等）
+      speedOutputTokens: gen ? g.genNum : undefined,
+      speedGenerationMs: gen ? g.genDen : undefined,
+      speedSampleCount: gen ? g.genCount : undefined,
+      ttftSampleCount:
+        g.ttftDen > 0 ? g.ttftDen : (g.rep.ttftSampleCount ?? undefined),
+      speedQuality: gen ? "generation" : ra ? "request_average" : undefined,
+      // request_average 行回填本机权重快照合计（= 参与加权的权重之和）：
+      // 折叠结果再次折叠/再次合并时权重保持本机口径不变（幂等）；
+      // generation 行不带（不用 Token 权重）
+      localSpeedWeightTokens: ra ? g.raWeight : undefined,
       variants: g.variants.length > 1 ? g.variants : undefined,
     });
   }

@@ -997,14 +997,40 @@ pub(crate) fn collect_pet_snapshot(
         .collect();
 
     // pu（待处理用户消息）：与 usage-data.js 同口径（共用查询函数与完成
-    // 轮内存匹配）；查询失败按 null 降级（unwrap_or(None)），不阻塞摘要
+    // 轮内存匹配；A1 起带新鲜期与进行中轮佐证——宠物核心自身的 90 秒
+    // 预判窗口远短于 PENDING_FRESH_MS，新鲜期对宠物无行为影响）；查询
+    // 失败按 null 降级（unwrap_or(None)），不阻塞摘要。
+    // 佐证集合与 usage_feed 同口径（见 usage_feed 的 A1 归并注释）：除
+    // run 自身会话外，一并纳入会话树根——主会话待处理消息超期但仅子
+    // 代理会话有活跃轮时，经根归并仍是可复核的活跃佐证，宠物侧不会比
+    // 注入/HUD 判断提前丢弃 pu。树索引加载失败降级为空索引（root_for
+    // 返回会话自身，佐证回落到仅 session_id 的旧口径），与 pu 信号的
+    // 降级策略一致，不阻塞摘要；runs 为空时佐证集合必为空，跳过加载
+    // 使空闲路径零额外查询
     let done_umids: std::collections::BTreeSet<String> = turns
         .iter()
         .filter_map(|t| t.user_message_id.clone())
         .collect();
-    let pending_user =
-        crate::agent_theme::usage_feed::collect_pending_user_ms(conn, &done_umids)
-            .unwrap_or(None);
+    let tree_index = if runs.is_empty() {
+        crate::token_speed::SessionTreeIndex::empty()
+    } else {
+        crate::token_speed::load_session_tree_index(conn).unwrap_or_default()
+    };
+    let mut corroborating_sessions: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
+    for run in &runs {
+        corroborating_sessions.insert(run.session_id.clone());
+        if tree_index.has_parent() {
+            corroborating_sessions.insert(tree_index.root_for(&run.session_id));
+        }
+    }
+    let pending_user = crate::agent_theme::usage_feed::collect_pending_user_ms(
+        conn,
+        &done_umids,
+        now_ms,
+        &corroborating_sessions,
+    )
+    .unwrap_or(None);
     // ta/fe（V6）：与 usage-data.js 同口径（共用查询函数）；查询失败按
     // null 降级，不阻塞摘要。ta 窗口 = usage_feed::TOOL_WINDOW_MS（10
     // 分钟崩溃残留兜底），fe 窗口 = turns 查询窗口（失败轮落库瞬间必在

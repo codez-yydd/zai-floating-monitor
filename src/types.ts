@@ -1,6 +1,37 @@
 // 与 Rust 后端 serde 结构一一对应
 
-export interface ModelStat {
+/** 速度口径质量标记（与 Rust token_speed::SpeedQuality 契约一致）：
+ *  - generation：真实首 Token → 完成事件时间的生成速度（zcode 新契约）；
+ *  - request_average：仅有请求总耗时的近似值（claude/kimi），界面带 ≈。 */
+export type SpeedQuality = "generation" | "request_average";
+
+/** 速度口径的可加总字段（Rust SpeedMetrics flatten 进 ModelStat/OverallStat，
+ *  camelCase、缺省省略；同步链路旧数据无这些字段，按缺省处理）。 */
+export interface SpeedContractFields {
+  /** 速度合格样本的输出 token 合计（可加总分子；无合格样本省略） */
+  speedOutputTokens?: number | null;
+  /** 速度合格样本的生成毫秒合计（可加总分母；为 0/缺失时不显示速度） */
+  speedGenerationMs?: number | null;
+  /** 速度合格样本数（独立于请求数的计数） */
+  speedSampleCount?: number | null;
+  /** TTFT 有效样本数（avg_ttft_ms 自己的样本集合，与速度样本独立） */
+  ttftSampleCount?: number | null;
+  /** 速度口径质量标记（无速度省略） */
+  speedQuality?: SpeedQuality | null;
+  /**
+   * 本机输出 Token 快照（mergeStats 冻结，request_average 折叠权重专用）：
+   * mergeStats 叠加远端 Token 之前，把本机行当时的 output_tokens 冻结在此。
+   * 合并后的 output_tokens 已含远端 Token，不能充当仅反映本机样本的
+   * avg_tps 的加权权重（否则远端设备用量会改变本机显示速度）。纯前端
+   * 内部字段——Rust 契约与远端同步协议均不产生/不消费；foldModelStatRows
+   * 折叠时缺失回退 output_tokens（纯本机数据二者相等，行为不变）。
+   * 仅 request_average 口径使用：generation 折叠的权重是
+   * speedOutputTokens/speedGenerationMs 分子分母，与本字段无关。
+   */
+  localSpeedWeightTokens?: number | null;
+}
+
+export interface ModelStat extends SpeedContractFields {
   model_id: string;
   provider_id: string;
   requests: number;
@@ -10,14 +41,15 @@ export interface ModelStat {
   cache_write_tokens: number;
   reasoning_tokens: number;
   total_tokens: number;
-  /** 平均输出速度 tok/s（数据源带耗时时才有：ZCode/Claude） */
+  /** 平均输出速度 tok/s：zcode = speedOutputTokens×1000/speedGenerationMs
+   *  （生成口径）；claude/kimi = 逐行请求平均的聚合（request_average，带 ≈） */
   avg_tps?: number | null;
   max_tps?: number | null;
   /** 平均首字延迟 ms（仅 ZCode 库有 TTFT 数据） */
   avg_ttft_ms?: number | null;
 }
 
-export interface OverallStat {
+export interface OverallStat extends SpeedContractFields {
   requests: number;
   input_tokens: number;
   output_tokens: number;
@@ -522,6 +554,9 @@ export interface ModelSpeedStat {
   modelId: string;
   provider: string;
   requests: number;
+  /** 速度合格样本数（通过行级判定的请求数；与 requests 总数口径不同，
+   *  无可信样本为 null） */
+  speedSampleCount: number | null;
   /** 成功率（completed 行占比，0–1；status 列缺失的老库为 null） */
   successRate: number | null;
   avgTps: number | null;
@@ -1087,6 +1122,11 @@ export interface SessionSummary {
   cost_usd: number;
   /** 会话级平均输出速度 tok/s（源无耗时数据为 null，如 codex） */
   speed_tps: number | null;
+  /** 会话速度口径标记（与 Stats 的 speedQuality 契约一致）：
+   *  request_average = 请求平均近似值，界面带 ≈ 前缀；generation 不带；
+   *  无速度为 null。注意 Rust SessionSummary 未启用 serde rename_all，
+   *  JSON 字段名为 snake_case，与相邻的 speed_tps/ttft_ms 同形态。 */
+  speed_quality: SpeedQuality | null;
   /** 会话级平均首字延迟 ms（仅 zcode 有 TTFT 数据，其余源为 null） */
   ttft_ms: number | null;
 }

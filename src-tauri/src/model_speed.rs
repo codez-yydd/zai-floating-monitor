@@ -4,16 +4,18 @@
 //!
 //! 口径（速度参考 zcode-token-usage-statusbar：token/s = output_tokens ÷
 //! (completed_at − first_token_at)，按请求时间戳而非 duration_ms 列）：
-//! - 平均速度 = Σoutput ÷ Σ(completed_at − first_token_at)，仅统计
-//!   status='completed' 且两时刻齐全的行；
+//! - 行级有效性共用 token_speed::generation_sample（B1）：完成状态（空/
+//!   success/缺列按完成降级）、output > 0、completed > first > 0、
+//!   first ≥ started、观测时刻拒绝未来；平均速度 = Σoutput ÷ Σ生成毫秒；
 //! - 慢/均/快速度 = 每请求速度（output × 1000 ÷ 生成毫秒）的
 //!   P10/P50/P90 分位（行拉到 Rust 内存排序计算；近 7 天量级 < 1 万行）；
 //! - 首 token 延迟 = first_token_at − started_at 的 min/avg/P90；
 //! - 请求耗时 = completed_at − started_at 的 avg/P90；
 //! - 输入/输出 token = 全部行 input_tokens（原值，已含缓存读）/
 //!   output_tokens 的 avg/max；
-//! - 成功率 = completed 行占比（status 列缺失的老库返回 null，前端
-//!   显示 —）。
+//! - 成功率 = completed 行占比（完成判定与速度样本共用
+//!   token_speed::is_completed_status：空串/success/completed/缺状态都按
+//!   完成；status 列缺失的老库返回 null，前端显示 —）。
 //!
 //! 异常行防御：started_at/first_token_at/completed_at 任一为 NULL、
 //! 非正或时序倒置（first < started、completed < first、completed <
@@ -38,6 +40,9 @@ pub struct ModelSpeedStat {
     pub provider: String,
     /// 请求数（窗口内 model_usage 行数）
     pub requests: i64,
+    /// 速度合格样本数（generation_sample 行级判定通过的请求数；与 requests
+    /// 总数口径不同——无可信生成区间的请求不产生速度样本，null = 无可信样本）
+    pub speed_sample_count: Option<i64>,
     /// 成功率（completed 行占比，0–1；status 列缺失的老库为 null）
     pub success_rate: Option<f64>,
     /// 平均速度 t/s（Σoutput ÷ Σ生成毫秒；无可信行为 null）
@@ -96,7 +101,7 @@ pub fn get_model_speed(days: Option<i64>) -> Result<Vec<ModelSpeedStat>, String>
     let days = days.unwrap_or(7).max(0);
     let now_ms = chrono::Utc::now().timestamp_millis();
     let conn = crate::zcode_sessions::open_main_db_readonly_uri()?;
-    Ok(collect_model_speed(&conn, range_start_ms(days, now_ms))?)
+    Ok(collect_model_speed(&conn, range_start_ms(days, now_ms), now_ms)?)
 }
 
 /// 单模型聚合中间态（窗口内逐行累加，出口组装 DTO）
@@ -156,9 +161,13 @@ fn provider_short(raw: &str) -> String {
 /// 纯聚合逻辑（不依赖真实 ~/.zcode，供单元测试）：读窗口内 model_usage
 /// 行，按 model_id 分组组装统计。老版本库核心列缺失返回空数组（速度
 /// 面板整体静默关闭）；非核心列缺失按 NULL 降级（对应统计为 null）。
+/// B1：速度样本改用 token_speed::generation_sample 共享行级判定（原先只
+/// 查 `completed > first > 0`，现补齐 first ≥ started、未来时刻拒绝等
+/// 校验，与注入/悬浮/汇总统计同一口径）。
 pub(crate) fn collect_model_speed(
     conn: &Connection,
     from_ms: i64,
+    observed_at_ms: i64,
 ) -> Result<Vec<ModelSpeedStat>, String> {
     if !has_table(conn, "model_usage")
         || !crate::db::has_column(conn, "model_usage", "model_id")
@@ -226,7 +235,11 @@ pub(crate) fn collect_model_speed(
         if g.provider_raw.is_none() && !provider.is_empty() {
             g.provider_raw = Some(provider);
         }
-        if has_status_col && status.as_deref() == Some("completed") {
+        // 完成计数：与速度样本共用同一判定（token_speed::is_completed_status
+        // 接受空串/success/completed/缺状态为完成）。原先只认 "completed"，
+        // 导致 status="success"/"" 的行既参与速度样本（共享判定通过）又被
+        // 成功率分子排除——参与速度的行反而拉低成功率的口径分裂不再存在。
+        if has_status_col && crate::token_speed::is_completed_status(status.as_deref()) {
             g.completed += 1;
         } else if !has_status_col {
             // 老库无 status 列：model_usage 完成即落行，全部视作完成
@@ -250,14 +263,23 @@ pub(crate) fn collect_model_speed(
                 g.durs.push(c - started);
             }
         }
-        // 速度样本：completed 状态行且 completed > first > 0（时序齐全；
-        // 状态列缺失的老库按全完成降级参与——速度统计本身不依赖轮状态）
-        let is_completed = !has_status_col || status.as_deref() == Some("completed");
-        if is_completed && output > 0 {
-            if let (Some(c), Some(f)) = (completed, first) {
-                if c > f && f > 0 {
-                    g.speed_pairs.push((output as f64, (c - f) as f64));
-                }
+        // 速度样本：共享行级判定（B1）——完成状态行经 token_speed::
+        // generation_sample 校验（completed > first > 0、first ≥ started、
+        // 拒绝未来时刻；状态列缺失的老库按全完成降级参与）
+        let is_completed = !has_status_col
+            || crate::token_speed::is_completed_status(status.as_deref());
+        if is_completed {
+            let timing = crate::token_speed::RequestTiming {
+                output_tokens: output,
+                started_at: (started > 0).then_some(started),
+                first_token_at: first,
+                completed_at: completed,
+                duration_ms: None,
+                request_id: None,
+            };
+            if let Some(sample) = crate::token_speed::generation_sample(&timing, observed_at_ms) {
+                g.speed_pairs
+                    .push((sample.output_tokens as f64, sample.generation_ms as f64));
             }
         }
     }
@@ -305,6 +327,8 @@ pub(crate) fn collect_model_speed(
             model_id: model,
             provider: provider_raw_short(&g.provider_raw),
             requests: g.requests,
+            speed_sample_count: (!g.speed_pairs.is_empty())
+                .then_some(g.speed_pairs.len() as i64),
             success_rate,
             avg_tps,
             p10_tps: p10,
@@ -436,13 +460,15 @@ mod tests {
             c4 = t0 + 30_500,
         ))
         .unwrap();
-        let stats = collect_model_speed(&conn, t0).unwrap();
+        let stats = collect_model_speed(&conn, t0, t0 + 1_000_000).unwrap();
         assert_eq!(stats.len(), 2, "{stats:?}");
         // 排序：A（3 请求）在前，C（1 请求）在后
         let a = &stats[0];
         assert_eq!(a.model_id, "GLM-5.3");
         assert_eq!(a.provider, "bigmodel-individual", "provider 应取 account: 后简名");
         assert_eq!(a.requests, 3);
+        // 速度合格样本数：2（error 行不计），与总请求数 3 口径不同
+        assert_eq!(a.speed_sample_count, Some(2));
         // 成功率 2/3
         assert!((a.success_rate.unwrap() - 2.0 / 3.0).abs() < 1e-9);
         // 平均速度 = (100+50)×1000 ÷ (1000+500) = 100.0；P10/P50/P90 均 100
@@ -469,6 +495,7 @@ mod tests {
         assert_eq!(c.model_id, "GLM-4.7");
         assert_eq!(c.provider, "doubao");
         assert_eq!(c.requests, 1);
+        assert_eq!(c.speed_sample_count, Some(1));
         assert!((c.avg_tps.unwrap() - 75.0).abs() < 1e-6);
         assert_eq!(c.ttft_min_ms, Some(100));
         drop(conn);
@@ -497,12 +524,13 @@ mod tests {
             c3 = t0 + 300,
         ))
         .unwrap();
-        let stats = collect_model_speed(&conn, t0).unwrap();
+        let stats = collect_model_speed(&conn, t0, t0 + 1_000_000).unwrap();
         assert_eq!(stats.len(), 1);
         let m = &stats[0];
         assert_eq!(m.requests, 3);
         assert_eq!(m.success_rate, Some(1.0));
         assert_eq!(m.avg_tps, None, "全部速度样本不可信应为 null");
+        assert_eq!(m.speed_sample_count, None, "无速度样本时样本数为 null");
         assert_eq!(m.p50_tps, None);
         // TTFT：t2 行 first(800) ≥ started 但 completed<first 不影响 TTFT；
         // 样本 = [800, 100] → min 100、P90 800
@@ -539,9 +567,10 @@ mod tests {
             c1 = t0 + 1500,
         ))
         .unwrap();
-        let stats = collect_model_speed(&conn, t0).unwrap();
+        let stats = collect_model_speed(&conn, t0, t0 + 1_000_000).unwrap();
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].success_rate, None, "缺 status 列成功率应为 null");
+        assert_eq!(stats[0].speed_sample_count, Some(1));
         assert!((stats[0].avg_tps.unwrap() - 100.0).abs() < 1e-6);
         drop(conn);
         let _ = std::fs::remove_file(&path2);
@@ -569,7 +598,7 @@ mod tests {
             c1 = t0 + 1500,
         ))
         .unwrap();
-        let stats = collect_model_speed(&conn, t0).unwrap();
+        let stats = collect_model_speed(&conn, t0, t0 + 1_000_000).unwrap();
         assert_eq!(stats.len(), 1, "缺 provider_id 列不应整体失败");
         assert_eq!(stats[0].provider, "", "缺 provider_id 列 provider 应为空");
         assert_eq!(stats[0].requests, 1);
@@ -585,9 +614,103 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&path3);
         let conn = Connection::open(&path3).unwrap();
-        assert!(collect_model_speed(&conn, 0).unwrap().is_empty());
+        assert!(collect_model_speed(&conn, 0, 1).unwrap().is_empty());
         drop(conn);
         let _ = std::fs::remove_file(&path3);
+    }
+
+    #[test]
+    fn 聚合_共享行级判定补齐first起点与未来时刻拒绝() {
+        // B1：排行原先只查 completed > first > 0；切到共享判定后，
+        // first < started 与未来时刻的行不再产生速度样本。
+        let (conn, path) = speed_db("shared-validity");
+        let t0 = 3_000_000_000_i64;
+        conn.execute_batch(&format!(
+            "INSERT INTO model_usage (session_id, turn_id, started_at, first_token_at,
+                completed_at, model_id, provider_id, status, input_tokens, output_tokens) VALUES
+              -- first 早于 started：无速度样本（TTFT 为负同样不计）
+              ('s1', 't1', {t0}, {f1}, {c1}, 'M1', 'account:p', 'completed', 100, 100),
+              -- 未来时刻（晚于观测时刻 t0+10_000）：无速度样本
+              ('s1', 't2', {t2}, {f2}, {c2}, 'M1', 'account:p', 'completed', 100, 300),
+              -- 合法样本：100 tok / 1s → 100 t/s
+              ('s1', 't3', {t3}, {f3}, {c3}, 'M1', 'account:p', 'completed', 100, 100);",
+            t0 = t0,
+            f1 = t0 - 100,
+            c1 = t0 + 1_000,
+            t2 = t0 + 20_000,
+            f2 = t0 + 20_100,
+            c2 = t0 + 21_100,
+            t3 = t0 + 2_000,
+            f3 = t0 + 2_100,
+            c3 = t0 + 3_100,
+        ))
+        .unwrap();
+        // 观测时刻 t0+10_000：未来行被拒，first<started 行被拒 → 仅 t3
+        let stats = collect_model_speed(&conn, t0, t0 + 10_000).unwrap();
+        assert_eq!(stats.len(), 1);
+        let m = &stats[0];
+        assert_eq!(m.requests, 3);
+        assert_eq!(m.success_rate, Some(1.0));
+        assert_eq!(m.speed_sample_count, Some(1));
+        assert!((m.avg_tps.unwrap() - 100.0).abs() < 1e-6);
+        drop(conn);
+
+        // 观测时刻移到未来之后：未来行恢复参与 → (100+300)×1000÷(1000+1000)
+        // = 200 t/s；first < started 的行仍被拒
+        let conn = Connection::open(&path).unwrap();
+        let stats = collect_model_speed(&conn, t0, t0 + 1_000_000).unwrap();
+        let m = &stats[0];
+        assert_eq!(m.speed_sample_count, Some(2));
+        assert!((m.avg_tps.unwrap() - 200.0).abs() < 1e-6);
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn 聚合_success与空状态按完成计入成功率() {
+        // 完成判定统一回归：success/空状态行与 completed 行共用
+        // token_speed::is_completed_status。此前成功率分子只认 "completed"，
+        // 而速度样本用共享判定（接受 success/空状态）——同一行既参与速度
+        // 又拉低成功率的口径分裂；修复后两口径一致。
+        let (conn, path) = speed_db("success-status");
+        let t0 = 4_000_000_000_i64;
+        conn.execute_batch(&format!(
+            "INSERT INTO model_usage (session_id, turn_id, started_at, first_token_at,
+                completed_at, model_id, provider_id, status, input_tokens, output_tokens) VALUES
+              -- success 状态：合格速度样本（100tok/1s），计入完成
+              ('s1', 't1', {t0}, {f1}, {c1}, 'M1', 'account:p', 'success', 100, 100),
+              -- 空状态：合格速度样本（100tok/500ms），计入完成
+              ('s1', 't2', {t2}, {f2}, {c2}, 'M1', 'account:p', '', 100, 100),
+              -- error 状态：不计入完成、output=0 也无速度样本
+              ('s1', 't3', {t3}, {f3}, {c3}, 'M1', 'account:p', 'error', 100, 0);",
+            t0 = t0,
+            f1 = t0 + 500,
+            c1 = t0 + 1500,
+            t2 = t0 + 10_000,
+            f2 = t0 + 10_200,
+            c2 = t0 + 10_700,
+            t3 = t0 + 20_000,
+            f3 = t0 + 20_100,
+            c3 = t0 + 20_200,
+        ))
+        .unwrap();
+        let stats = collect_model_speed(&conn, t0, t0 + 1_000_000).unwrap();
+        assert_eq!(stats.len(), 1, "{stats:?}");
+        let m = &stats[0];
+        assert_eq!(m.requests, 3);
+        // 成功率 = 2/3（success + 空状态计入完成，error 排除）
+        assert!(
+            (m.success_rate.unwrap() - 2.0 / 3.0).abs() < 1e-9,
+            "{:?}",
+            m.success_rate
+        );
+        // 速度样本同为 2 行（success + 空状态）：参与速度的行集与完成
+        // 分子完全一致
+        assert_eq!(m.speed_sample_count, Some(2));
+        // 均速 = (100+100)×1000 ÷ (1000+500) ≈ 133.33
+        assert!((m.avg_tps.unwrap() - 133.333).abs() < 0.01);
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

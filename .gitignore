@@ -41,7 +41,9 @@ __pycache__/
 ios/**/xcuserdata/
 ios/**/xcshareddata/xcuserdata/
 ios/**/*.xcuserstate
-ios/**/DerivedData/
 ios/**/*.moved-aside
+ios/**/DerivedData/
 ios/**/Pods/
 
+# 速度折叠常驻测试的 tsc 编译产物（npm run test:speed 生成）
+.tmp-speed-test/

@@ -15,6 +15,7 @@
 //! 源目录可能已被删除），macOS/Windows 文件系统大小写不敏感故折叠小写，
 //! 使 /Users/a/Proj 与 /users/a/proj 聚合到同一项目。
 
+use rusqlite::Connection;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Mutex, OnceLock};
@@ -140,11 +141,22 @@ pub(crate) struct ProjectSessionModelRow {
     /// 按「会话 × 模型」分组输出 SUM/COUNT，会话级 = 各分组 SUM/COUNT 分别
     /// 累加后相除（等价于面板公式限定会话范围，避免二次平均偏差）；
     /// 无耗时来源（codex）为 None/0。
+    /// **zcode 路径恒 None/0**（B4）：zcode 会话速度改用下方 gen_* 可加总
+    /// 生成口径（token_speed::generation_sample 行级判定），防止同一数值
+    /// 在主面板（生成口径）与项目页（旧请求平均）之间静默错位；
+    /// claude/kimi 保留本字段（各自的 request_average 源质量）。
     pub tps_sum: Option<f64>,
     pub tps_count: i64,
     /// 有效 TTFT 行的总和与行数（仅 zcode 主库有数据）
     pub ttft_sum: Option<f64>,
     pub ttft_count: i64,
+    /// zcode 生成口径可加总字段（B4）：合格样本输出合计（分子）、生成
+    /// 毫秒合计（分母）、样本数。会话级速度 = Σ分子 × 1000 ÷ Σ分母；
+    /// 无合格样本为 None/0（速度显示 —，不回落旧口径冒充）。仅 zcode
+    /// 路径填充。
+    pub gen_out: Option<i64>,
+    pub gen_ms: Option<i64>,
+    pub gen_count: i64,
 }
 
 impl Billable for ProjectSessionModelRow {
@@ -215,8 +227,14 @@ pub struct SessionSummary {
     pub cache_write_tokens: u64,
     pub requests: u64,
     pub cost_usd: f64,
-    /// 会话级平均输出速度（tok/s，口径与主面板一致；源无耗时数据为 None）
+    /// 会话级平均输出速度（tok/s，口径与主面板一致；源无耗时数据为 None）。
+    /// zcode 会话 = 生成口径加权均速（合格样本 Σoutput×1000÷Σ生成毫秒）；
+    /// claude/kimi = 请求平均（speed_quality=request_average，界面带 ≈）。
     pub speed_tps: Option<f64>,
+    /// 速度口径质量标记（"generation" | "request_average"）：与 Stats 的
+    /// speedQuality 契约一致，前端据此区分可信生成速度与请求平均近似；
+    /// 无速度为 None。
+    pub speed_quality: Option<String>,
     /// 会话级平均首字延迟（ms，仅 zcode 主库有 TTFT 数据；无则为 None）
     pub ttft_ms: Option<f64>,
 }
@@ -378,6 +396,105 @@ fn accumulate_zcode_with_derived(
     Ok(())
 }
 
+/// zcode 会话明细的行级生成速度聚合（B4）：对当页会话集合读
+/// status/started_at/first_token_at/completed_at/output_tokens，经共享
+/// token_speed::generation_sample 行级判定后按 (session_id, model_id) 累加
+/// 可加总分子/分母/样本数并写回各行 gen_* 字段。zcode 会话速度不再使用
+/// 旧 duration−TTFT 估算口径（与主面板 query_stats 的生成口径一致，防止
+/// 后台局部变更后项目页静默错位）。老库缺事件时间列时全部保持 None/0
+/// （速度显示 —，不回落旧口径冒充数值）。
+fn fill_zcode_generation_speed(
+    conn: &Connection,
+    rows: &mut [ProjectSessionModelRow],
+    from_ms: i64,
+    to_ms: i64,
+) {
+    if rows.is_empty() {
+        return;
+    }
+    let has = |col: &str| db::has_column(conn, "model_usage", col);
+    if !has("first_token_at") || !has("completed_at") || !has("output_tokens") {
+        return; // 老库缺列：无生成样本，gen_* 保持默认 None/0
+    }
+    let sessions: BTreeSet<String> = rows.iter().map(|r| r.session_id.clone()).collect();
+    let session_list: Vec<String> = sessions.into_iter().collect();
+    let (status, first, completed) = (
+        if has("status") { "status" } else { "NULL" },
+        "first_token_at",
+        "completed_at",
+    );
+    let placeholders = vec!["?"; session_list.len()].join(", ");
+    let sql = format!(
+        "SELECT session_id, COALESCE(model_id, ''), {status}, started_at, \
+                {first}, {completed}, COALESCE(output_tokens, 0) \
+         FROM model_usage \
+         WHERE started_at >= ?1 AND started_at < ?2 AND session_id IN ({placeholders})"
+    );
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return;
+    };
+    let mut bind: Vec<&dyn rusqlite::ToSql> = vec![&from_ms, &to_ms];
+    for session in &session_list {
+        bind.push(session);
+    }
+    let queried = stmt.query_map(bind.as_slice(), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<i64>>(3)?,
+            row.get::<_, Option<i64>>(4)?,
+            row.get::<_, Option<i64>>(5)?,
+            row.get::<_, i64>(6)?,
+        ))
+    });
+    let Ok(queried) = queried else {
+        return;
+    };
+    #[derive(Default)]
+    struct GenAgg {
+        out: i64,
+        ms: i64,
+        count: i64,
+    }
+    let observed_at_ms = chrono::Utc::now().timestamp_millis();
+    let mut aggs: BTreeMap<(String, String), GenAgg> = BTreeMap::new();
+    for row in queried.flatten() {
+        let (session, model, status, started, first, completed, output) = row;
+        if !crate::token_speed::is_completed_status(status.as_deref()) {
+            continue;
+        }
+        let timing = crate::token_speed::RequestTiming {
+            output_tokens: output.max(0),
+            started_at: started.filter(|value| *value > 0),
+            first_token_at: first,
+            completed_at: completed,
+            duration_ms: None,
+            request_id: None,
+        };
+        if let Some(sample) = crate::token_speed::generation_sample(&timing, observed_at_ms) {
+            let agg = aggs.entry((session, model)).or_default();
+            agg.out += sample.output_tokens;
+            agg.ms += sample.generation_ms;
+            agg.count += 1;
+        }
+    }
+    for row in rows.iter_mut() {
+        match aggs.get(&(row.session_id.clone(), row.model_id.clone())) {
+            Some(agg) if agg.count > 0 => {
+                row.gen_out = Some(agg.out);
+                row.gen_ms = Some(agg.ms);
+                row.gen_count = agg.count;
+            }
+            _ => {
+                row.gen_out = None;
+                row.gen_ms = None;
+                row.gen_count = 0;
+            }
+        }
+    }
+}
+
 /// zcode 会话明细主路径：派生库映射 + 主库行（SQL 侧分页，与 codex
 /// 同构）。project_key 传 UNKNOWN_PROJECT 时匹配无映射的会话。
 fn zcode_project_sessions_with_derived(
@@ -404,11 +521,11 @@ fn zcode_project_sessions_with_derived(
             |row| row.get(0),
         )
         .map_err(|e| format!("查询 zcode 派生库项目会话总数失败: {e}"))?;
-    // 速度/TTFT 聚合列（口径与主面板 db::speed_agg_columns 一致，传 SUM/COUNT
-    // 供会话级合并；按列有无动态降级，同 db::query_stats 的探测习惯）。
-    // 表达式引用的 output_tokens/duration_ms/time_to_first_token_ms 仅主库
-    // model_usage（别名 mu）持有，JOIN 的 zs.session_meta 无同名列，无歧义。
-    let speed = db::session_speed_agg_columns(
+    // 速度聚合（B4）：速度走行级生成口径（fill_zcode_generation_speed），
+    // SQL 只保留 TTFT 独立指标的 SUM/COUNT 片段。表达式引用的
+    // duration_ms/time_to_first_token_ms 仅主库 model_usage（别名 mu）持有，
+    // JOIN 的 zs.session_meta 无同名列，无歧义。
+    let ttft = db::session_ttft_agg_columns(
         db::has_column(&conn, "model_usage", "duration_ms"),
         db::has_column(&conn, "model_usage", "time_to_first_token_ms"),
     );
@@ -421,7 +538,7 @@ fn zcode_project_sessions_with_derived(
                         COALESCE(SUM(mu.output_tokens),0),
                         COALESCE(SUM(mu.cache_read_input_tokens),0),
                         COALESCE(SUM(mu.cache_creation_input_tokens),0)
-                        {speed}
+                        {ttft}
                  FROM model_usage mu
                  LEFT JOIN zs.session_meta sm ON sm.session_id = mu.session_id
                  WHERE mu.started_at >= ?1 AND mu.started_at < ?2
@@ -442,7 +559,7 @@ fn zcode_project_sessions_with_derived(
             ),
         )
         .map_err(|e| format!("准备 zcode 派生库项目会话查询失败: {e}"))?;
-    let rows = stmt
+    let mut rows = stmt
         .query_map(
             rusqlite::params![
                 from_ms,
@@ -463,16 +580,20 @@ fn zcode_project_sessions_with_derived(
                     output_tokens: row.get(6)?,
                     cache_read_tokens: row.get(7)?,
                     cache_write_tokens: row.get(8)?,
-                    tps_sum: row.get(9)?,
-                    tps_count: row.get(10)?,
-                    ttft_sum: row.get(11)?,
-                    ttft_count: row.get(12)?,
+                    tps_sum: None,
+                    tps_count: 0,
+                    ttft_sum: row.get(9)?,
+                    ttft_count: row.get(10)?,
+                    gen_out: None,
+                    gen_ms: None,
+                    gen_count: 0,
                 })
             },
         )
         .map_err(|e| format!("读取 zcode 派生库项目会话失败: {e}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("读取 zcode 派生库项目会话失败: {e}"))?;
+    fill_zcode_generation_speed(&conn, &mut rows, from_ms, to_ms);
     Ok((total.max(0) as u32, rows))
 }
 
@@ -746,8 +867,9 @@ fn zcode_project_sessions(
         return Ok((0, Vec::new()));
     };
     let conn = db::open_db()?;
-    // 速度/TTFT 聚合列（口径同主面板，按列有无动态降级）
-    let speed = db::session_speed_agg_columns(
+    // 速度聚合（B4）：速度走行级生成口径（fill_zcode_generation_speed），
+    // SQL 只保留 TTFT 独立指标片段；按列有无动态降级
+    let ttft = db::session_ttft_agg_columns(
         db::has_column(&conn, "model_usage", "duration_ms"),
         db::has_column(&conn, "model_usage", "time_to_first_token_ms"),
     );
@@ -757,7 +879,7 @@ fn zcode_project_sessions(
                 COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
                 COALESCE(SUM(cache_read_input_tokens),0),
                 COALESCE(SUM(cache_creation_input_tokens),0)
-                {speed}
+                {ttft}
          FROM model_usage
          WHERE started_at >= ?1 AND started_at < ?2
          GROUP BY \"{session_col}\", \"{cwd_col}\", model_id"
@@ -779,10 +901,13 @@ fn zcode_project_sessions(
                     output_tokens: row.get(7)?,
                     cache_read_tokens: row.get(8)?,
                     cache_write_tokens: row.get(9)?,
-                    tps_sum: row.get(10)?,
-                    tps_count: row.get(11)?,
-                    ttft_sum: row.get(12)?,
-                    ttft_count: row.get(13)?,
+                    tps_sum: None,
+                    tps_count: 0,
+                    ttft_sum: row.get(10)?,
+                    ttft_count: row.get(11)?,
+                    gen_out: None,
+                    gen_ms: None,
+                    gen_count: 0,
                 },
             ))
         })
@@ -796,15 +921,21 @@ fn zcode_project_sessions(
         first_at: i64,
         last_at: i64,
     }
-    let mut by_session: BTreeMap<String, SessionBuild> = BTreeMap::new();
+    // 先过滤出目标项目的全部行，一次性做行级生成速度聚合（B4，与主面板
+    // 同口径），再按会话分组组装
+    let mut filtered: Vec<ProjectSessionModelRow> = Vec::new();
     for (raw_cwd, row) in rows {
         let key = raw_cwd
             .as_deref()
             .and_then(normalize_cwd)
             .unwrap_or_else(|| UNKNOWN_PROJECT.to_string());
-        if key != project_key {
-            continue;
+        if key == project_key {
+            filtered.push(row);
         }
+    }
+    fill_zcode_generation_speed(&conn, &mut filtered, from_ms, to_ms);
+    let mut by_session: BTreeMap<String, SessionBuild> = BTreeMap::new();
+    for row in filtered {
         let build = by_session
             .entry(row.session_id.clone())
             .or_insert_with(|| SessionBuild {
@@ -975,6 +1106,10 @@ struct SessionBuild {
     /// 有效 TTFT 行总和与行数（仅 zcode 有数据）
     ttft_sum: Option<f64>,
     ttft_count: i64,
+    /// zcode 生成口径可加总分子/分母/样本数（B4；跨分组累加后相除）
+    gen_out: i64,
+    gen_ms: i64,
+    gen_count: i64,
 }
 
 /// 跨分组的 SUM 合并（None 视为该分组无可信样本，跳过）
@@ -984,6 +1119,38 @@ fn sum_opt(a: Option<f64>, b: Option<f64>) -> Option<f64> {
         (Some(x), None) => Some(x),
         (None, Some(y)) => Some(y),
         (None, None) => None,
+    }
+}
+
+/// 会话级速度与口径标记（query_sessions 装配段抽出的纯函数，供单元测试）：
+/// 优先 zcode 生成口径（分子/分母相除，可加总）；无 gen 字段时回落各源
+/// tps_sum/tps_count 的请求平均（claude/kimi，标 request_average，前端带
+/// ≈ 前缀）；两者皆无 → (None, None)（不显示 0，也不冒充口径标记）。
+/// 标记与值必须成对产出：前端 SessionSummary.speed_quality 依赖它区分
+/// 可信生成速度与请求平均近似。
+fn session_speed(
+    gen_out: i64,
+    gen_ms: i64,
+    gen_count: i64,
+    tps_sum: Option<f64>,
+    tps_count: i64,
+) -> (Option<f64>, Option<String>) {
+    if gen_ms > 0 && gen_count > 0 {
+        (
+            Some(gen_out as f64 * 1000.0 / gen_ms as f64),
+            Some("generation".to_string()),
+        )
+    } else if gen_count > 0 {
+        // 有合格样本但分母异常（理论不可达：样本要求 span > 0）
+        (None, None)
+    } else {
+        match tps_sum {
+            Some(sum) if tps_count > 0 => (
+                Some(sum / tps_count as f64),
+                Some("request_average".to_string()),
+            ),
+            _ => (None, None),
+        }
     }
 }
 
@@ -1056,33 +1223,44 @@ fn query_sessions(
             build.tps_count += row.tps_count.max(0);
             build.ttft_sum = sum_opt(build.ttft_sum, row.ttft_sum);
             build.ttft_count += row.ttft_count.max(0);
+            build.gen_out += row.gen_out.unwrap_or(0).max(0);
+            build.gen_ms += row.gen_ms.unwrap_or(0).max(0);
+            build.gen_count += row.gen_count.max(0);
         }
     }
 
     let mut items: Vec<SessionSummary> = builders
         .into_iter()
-        .map(|((source, session_id), build)| SessionSummary {
-            session_id,
-            source,
-            wall_duration_ms: (build.last_at - build.first_at).max(0),
-            first_at: build.first_at,
-            last_at: build.last_at,
-            models: build.models.into_iter().collect(),
-            input_tokens: build.input_tokens,
-            output_tokens: build.output_tokens,
-            cache_read_tokens: build.cache_read_tokens,
-            cache_write_tokens: build.cache_write_tokens,
-            requests: build.requests,
-            cost_usd: build.cost_usd,
-            // 会话级平均 = 可信样本总和 / 样本数（无可信样本时为 None）
-            speed_tps: match build.tps_sum {
-                Some(sum) if build.tps_count > 0 => Some(sum / build.tps_count as f64),
-                _ => None,
-            },
-            ttft_ms: match build.ttft_sum {
-                Some(sum) if build.ttft_count > 0 => Some(sum / build.ttft_count as f64),
-                _ => None,
-            },
+        .map(|((source, session_id), build)| {
+            // 会话级速度与口径标记（生成口径优先，回落请求平均；见
+            // session_speed doc）
+            let (speed_tps, speed_quality) = session_speed(
+                build.gen_out,
+                build.gen_ms,
+                build.gen_count,
+                build.tps_sum,
+                build.tps_count,
+            );
+            SessionSummary {
+                session_id,
+                source,
+                wall_duration_ms: (build.last_at - build.first_at).max(0),
+                first_at: build.first_at,
+                last_at: build.last_at,
+                models: build.models.into_iter().collect(),
+                input_tokens: build.input_tokens,
+                output_tokens: build.output_tokens,
+                cache_read_tokens: build.cache_read_tokens,
+                cache_write_tokens: build.cache_write_tokens,
+                requests: build.requests,
+                cost_usd: build.cost_usd,
+                speed_tps,
+                speed_quality,
+                ttft_ms: match build.ttft_sum {
+                    Some(sum) if build.ttft_count > 0 => Some(sum / build.ttft_count as f64),
+                    _ => None,
+                },
+            }
         })
         .collect();
     items.sort_by(|a, b| b.last_at.cmp(&a.last_at).then(a.session_id.cmp(&b.session_id)));
@@ -1135,6 +1313,146 @@ pub async fn get_project_sessions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// zcode 会话行级生成速度聚合（B4）：共享判定 + 可加总分子分母 +
+    /// 会话级合成（模拟 query_sessions 的 build 累加）。
+    #[test]
+    fn zcode会话生成速度_行级聚合与会话级合成() {
+        let path = std::env::temp_dir().join(format!(
+            "zbar-projects-gen-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE model_usage (
+                session_id TEXT, turn_id TEXT, started_at INTEGER, status TEXT,
+                first_token_at INTEGER, completed_at INTEGER,
+                output_tokens INTEGER, duration_ms INTEGER,
+                time_to_first_token_ms INTEGER, model_id TEXT);",
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO model_usage VALUES
+              -- 会话 s1 模型 M：两笔合格样本（1000tok/8s + 200tok/1s）
+              ('s1', 't1', 1000, 'completed', 92000, 100000, 1000, 100000, 92000, 'M'),
+              ('s1', 't2', 2000, 'completed', 2100, 3100, 200, 1100, 100, 'M'),
+              -- 会话 s1 模型 M：逆序行（无样本）
+              ('s1', 't3', 3000, 'completed', 5100, 5000, 500, NULL, NULL, 'M'),
+              -- 会话 s1 模型 M：未完成行（无样本）
+              ('s1', 't4', 4000, 'running', NULL, NULL, 500, NULL, NULL, 'M'),
+              -- 会话 s2 模型 M：首 Token 缺失（duration 可用也不算生成样本）
+              ('s2', 't5', 5000, 'completed', NULL, 6000, 300, 1000, NULL, 'M');",
+        )
+        .unwrap();
+
+        let mut rows = vec![
+            ProjectSessionModelRow {
+                session_id: "s1".to_string(),
+                model_id: "M".to_string(),
+                first_at: 1000,
+                last_at: 4000,
+                requests: 4,
+                input_tokens: 0,
+                output_tokens: 2200,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                tps_sum: None,
+                tps_count: 0,
+                ttft_sum: Some(92100.0),
+                ttft_count: 2,
+                gen_out: None,
+                gen_ms: None,
+                gen_count: 0,
+            },
+            ProjectSessionModelRow {
+                session_id: "s2".to_string(),
+                model_id: "M".to_string(),
+                first_at: 5000,
+                last_at: 5000,
+                requests: 1,
+                input_tokens: 0,
+                output_tokens: 300,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                tps_sum: None,
+                tps_count: 0,
+                ttft_sum: None,
+                ttft_count: 0,
+                gen_out: None,
+                gen_ms: None,
+                gen_count: 0,
+            },
+        ];
+        fill_zcode_generation_speed(&conn, &mut rows, 0, 100_000);
+        let s1 = &rows[0];
+        assert_eq!(s1.gen_out, Some(1_200), "合格输出 = 1000+200");
+        assert_eq!(s1.gen_ms, Some(9_000), "合格生成毫秒 = 8000+1000");
+        assert_eq!(s1.gen_count, 2);
+        // 会话级合成（query_sessions 的分子/分母相除）：1200×1000÷9000
+        let avg = s1.gen_out.unwrap() as f64 * 1000.0 / s1.gen_ms.unwrap() as f64;
+        assert!((avg - 133.33).abs() < 0.01, "{avg}");
+        // 首字缺失的 s2：无生成样本 → 速度 None（不回落旧口径冒充数值）
+        let s2 = &rows[1];
+        assert_eq!(s2.gen_out, None);
+        assert_eq!(s2.gen_ms, None);
+        assert_eq!(s2.gen_count, 0);
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 会话速度口径标记传递（前端 ≈ 前缀依赖 speed_quality）：generation /
+    /// request_average / 无速度三分支的值与标记必须成对正确；SessionSummary
+    /// 未启用 serde rename_all，JSON 字段名必须为 snake_case speed_quality
+    /// （与前端 SessionSummary 类型声明一致）。
+    #[test]
+    fn 会话速度口径与speed_quality字段名() {
+        // zcode 生成口径：分子/分母相除（1200×1000÷9000 ≈ 133.33），标记
+        // generation（前端不带 ≈）
+        let (tps, q) = session_speed(1_200, 9_000, 2, None, 0);
+        assert!((tps.unwrap() - 133.33).abs() < 0.01, "{tps:?}");
+        assert_eq!(q.as_deref(), Some("generation"));
+
+        // claude/kimi 请求平均：tps_sum/tps_count（30÷3 = 10），标记
+        // request_average（前端带 ≈）
+        let (tps, q) = session_speed(0, 0, 0, Some(30.0), 3);
+        assert!((tps.unwrap() - 10.0).abs() < 1e-9, "{tps:?}");
+        assert_eq!(q.as_deref(), Some("request_average"));
+
+        // 无任何速度样本：值与标记同时为 None（不显示 0、不冒充口径）
+        let (tps, q) = session_speed(0, 0, 0, None, 0);
+        assert_eq!(tps, None);
+        assert_eq!(q, None);
+
+        // gen 样本存在但分母异常（理论不可达分支）：不回落请求平均冒充
+        let (tps, q) = session_speed(100, 0, 1, Some(30.0), 3);
+        assert_eq!(tps, None);
+        assert_eq!(q, None);
+
+        // 序列化字段名回归：snake_case speed_quality（非 camelCase）
+        let summary = SessionSummary {
+            session_id: "s".into(),
+            source: "claude".into(),
+            first_at: 1,
+            last_at: 2,
+            wall_duration_ms: 1,
+            models: vec![],
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            requests: 0,
+            cost_usd: 0.0,
+            speed_tps: Some(10.0),
+            speed_quality: Some("request_average".into()),
+            ttft_ms: None,
+        };
+        let json = serde_json::to_value(&summary).unwrap();
+        assert!(json.get("speed_quality").is_some(), "{json}");
+        assert!(json.get("speedQuality").is_none(), "{json}");
+        // 既有字段形态保持：speed_tps 同为 snake_case
+        assert!(json.get("speed_tps").is_some(), "{json}");
+    }
 
     /// cwd 归一化：空串/空白、~ 与 $HOME 展开、反斜杠、/private 前缀折叠、
     /// 尾部斜杠、根路径保留。大小写折叠按目标平台分别断言。

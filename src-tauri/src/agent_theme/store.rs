@@ -66,6 +66,9 @@ pub const PET_JS: &str = "pet.js";
 /// 用量数据文件（usage_feed 后台任务周期导出，非模板不做版本化；
 /// usage.js 按自身 src 推导同目录地址加载）
 pub const USAGE_DATA_FILE: &str = "usage-data.js";
+/// 速度快照小文件（usage_feed 只写请求级速度与状态；注入版独立于
+/// usage-data.js 重载，避免速度变化重写最近 7 天的大历史用量文件）
+pub const USAGE_SPEED_FILE: &str = "usage-speed.js";
 /// 心跳小文件（usage_feed 后台任务每周期重写，仅注入版宠物开启时）：
 /// 内容 `window.__ZBAR_USAGE_HB__ = <ms>`，注入版宠物壳每 2 秒经 script
 /// 时间戳重载读取喂给宠物核心（与大文件的 hb 写放大权衡见 usage_feed
@@ -1016,6 +1019,19 @@ pub const EFFECTS_JS_VERSION: u32 = 5;
 /// sess 行的 cp/cu/cw 字段与 CTX 查询（context_window 模块整体移除）。
 /// 逐段 span 渲染结构保留（V21 引入，当前无配色段，行为与单串等价）；
 /// sess 的 model_usage 全量合计口径（tt/up/down/cr/rq）不变。
+/// V24：速度快照拆出 usage-speed.js 小文件；历史 usage-data.js 仍按 2 秒
+/// 节拍更新，注入版独立轮询速度小文件。速度与用量展示只消费后端确认的请求级快照。每轮、进行中轮与会话
+/// 条不再从 DOM 文本估算 token 或 t/s；可信生成速度与带 ≈ 前缀的请求平均
+/// 速度由 usage_feed/session_hud 统一导出，缺失时显示等待占位。会话条与
+/// 每轮条开关继续独立生效。
+/// V24.1（数据端修订，usage.js 脚本不变、USAGE_JS_VERSION 不升）：a) 大小
+/// 文件分工收窄——完成轮（turns）与空闲会话（sess）的**稳定**速度随 2 秒
+/// 大文件发布，1 秒旁路只携带活跃会话/进行中轮（turns 恒为空数组、文件仍
+/// 为 v1 形态，3000 历史轮场景旁路从数百 KiB 降到 <1KiB；旧脚本可继续消
+/// 费）；b) 生成态独立布尔量（不再由 speedState==measuring 反推，"正在
+/// 生成+本轮已有速度"与"速度暂时为空回落 measuring"两种状态并存不误判）；
+/// c) 待处理用户消息加新鲜期与活跃佐证（超期孤儿消息不再永久冒充测速中，
+/// 取消/失败/新轮照常立即清旧等待）。
 /// V20：配合数据端双修复——a) turns 新增子代理自身视图行（sess 为子代
 /// 理会话 id、umid 为子轮自己的用户消息 id、数值与 dur/ttft 为子轮自身
 /// 口径，带 subagent:1 标记；主轮行仍照常含并入的 sub 数值，两行并存）：
@@ -1025,7 +1041,7 @@ pub const EFFECTS_JS_VERSION: u32 = 5;
 /// sessionTotals 按 t.sess 精确匹配无任何双计路径，渲染管线零改动；
 /// b) 数据端 usage_feed 父会话保活：主轮派发子代理后自身静默不再满 10
 /// 分钟被踢出 runs，主轮条、会话累计与子代理孤儿并入保持实时值。
-pub const USAGE_JS_VERSION: u32 = 22;
+pub const USAGE_JS_VERSION: u32 = 24;
 
 /// 桌面像素宠物脚本 pet.js 的版本化落盘标记。
 /// 版本头写在模板首行注释（ZBAR-THEME-V 标记，提取器与

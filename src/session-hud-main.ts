@@ -56,9 +56,14 @@ interface HudSessionBrief {
   total: number;
   /** 模型请求笔数（model_usage 行数） */
   reqCount: number;
-  /** 动态速度 t/s（最近一笔完成请求；生成中显示计算值、空闲归 0.0，
-   *  null → "–"） */
+  /** 最新完成模型请求的速度；null → "–"。 */
   speed: number | null;
+  /** generation = 可信首字到完成；request_average = 仅请求总耗时的近似。 */
+  speedQuality?: "generation" | "request_average" | null;
+  /** 速度所属请求的完成时刻。 */
+  speedCompletedAt?: number | null;
+  /** measuring = 生成中但本轮尚无已确认速度。 */
+  speedState?: "measuring" | "recent" | "unavailable";
   /** 最近一笔完成请求 TTFT（毫秒，静态参考）；null → "–" */
   ttftMs: number | null;
 }
@@ -228,10 +233,14 @@ function fmtTokens(n: number): string {
   return String(Math.round(n));
 }
 
-/** 速度文案：null（无最近完成轮/数据不足）→ "–"，否则一位小数并按
- *  4 字符补位（与 req padStart(3) 同思路，稳定行宽） */
-function fmtSpeed(speed: number | null): string {
-  return speed == null ? "–" : speed.toFixed(1).padStart(4, " ");
+/** 速度文案：只接受正的已确认数值；请求平均值明确用 ≈ 标记。 */
+function fmtSpeed(
+  speed: number | null,
+  quality?: "generation" | "request_average" | null
+): string {
+  if (speed == null || !Number.isFinite(speed) || speed <= 0) return "–";
+  const prefix = quality === "request_average" ? "≈" : "";
+  return `${prefix}${speed.toFixed(1)}`.padStart(4, " ");
 }
 
 /** TTFT 文案：null（缺失/进行中）→ "–"，否则秒一位小数（如 5.8s）
@@ -478,7 +487,7 @@ function renderModels(visible: boolean): void {
       fmtTokens(s.outTokens),
       fmtTokens(s.cacheRead),
       String(s.reqCount).padStart(3, "0"),
-      fmtSpeed(s.speed),
+      fmtSpeed(s.speed, s.speedQuality),
       fmtTtft(s.ttftMs),
     ];
     const prev = prevFields.get(s.sessionId);
@@ -527,7 +536,8 @@ function renderModels(visible: boolean): void {
       // 速度位"测算中"占位：生成中但无窗口数据且无保持值（speed 为
       // null）→ 呼吸动画 + tooltip（回答完成 1 秒内显示真实速率并触发
       // 既有 flash 高亮——"–"到数值的跳变走字段级 diff）
-      const measuring = s.speed == null && s.generating;
+      const measuring =
+        s.speedState === "measuring" || (s.speed == null && s.generating);
       const speedEl = fieldSpan(cur[5], changed(5));
       if (measuring) {
         speedEl.classList.add("hud-measuring");
@@ -548,7 +558,7 @@ function renderModels(visible: boolean): void {
       metrics.title = msg.metricsLine(
         String(s.total),
         String(s.reqCount),
-        fmtSpeed(s.speed).trim(),
+        fmtSpeed(s.speed, s.speedQuality).trim(),
         fmtTtft(s.ttftMs).trim()
       );
 

@@ -45,7 +45,9 @@ export const common = {
 
   // 速度 / 当前模型
   "common.avgSpeed": "平均速度",
-  "common.fastest": "最快",
+  // 设备筛选合并远端数据时速度只代表本机（远端无耗时数据）的可见标注
+  "common.avgSpeedLocal": "本机平均速度",
+  "common.fastestRequest": "单请求最快",
   "common.ttft": "首字延迟",
   "common.currentModel": "当前模型",
   "common.justNow": "刚刚",
