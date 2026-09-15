@@ -125,22 +125,144 @@ fn data_base_dir_from_setting(raw: &str) -> Option<std::path::PathBuf> {
     path.is_absolute().then_some(path)
 }
 
-/// 读取 ZCode 数据目录 config.json 中登录 Coding Plan 后自动写入的凭证
-/// （只读，绝不写回——该文件由 ZCode 客户端维护，外部写回极易把
-/// ZCode 的登录态搞坏；key 的增删与刷新由 ZCode 客户端自行管理）。
-/// 整个额度查询路径都不写 ZCode 数据目录；全应用唯一受控写该目录的位置
-/// 是 accounts.rs 的切换事务（先退出 ZCode 再原文回写，详见其模块头注释）。
-/// 返回 (provider_key, api_key, base_url)，其中 base_url 取该 provider
-/// 的 options.baseURL（用于推断额度接口端点，缺失时为空串）。
+// ===== ZCode 3.12+ 账号级套餐凭证（credentials.json，只读）=====
+
+/// ZCode 3.12+ 在 credentials.json 中写入的账号级套餐凭证键前缀，形态为
+/// `account-provider:coding-plan:<providerId>:account:<identity>:api-key`
+/// （本机实测形如 `account-provider:coding-plan:account:bigmodel-individual-coding-plan:account:29701779269890662:api-key`）。
+/// ZCode 判定套餐资格（entitled）依赖这些键，且跨账号累积存在。
+const ACCOUNT_PROVIDER_PREFIX: &str = "account-provider:";
+
+/// 账号级套餐凭证键的统一后缀。
+const PLAN_KEY_SUFFIX: &str = ":api-key";
+
+/// 账号级套餐凭证键中标记账号标识段的分隔串（`:account:<identity>`）。
+const PLAN_KEY_IDENTITY_MARK: &str = ":account:";
+
+/// 键名是否为账号级套餐凭证键（纯函数，便于单测）：
+/// `account-provider:` 前缀 + 含 `coding-plan` + `:api-key` 后缀。
+/// identity 段是否可解析只影响优先级，不影响是否入选（键形态以后可能微调）。
+fn is_account_provider_plan_key(name: &str) -> bool {
+    name.starts_with(ACCOUNT_PROVIDER_PREFIX)
+        && name.contains("coding-plan")
+        && name.ends_with(PLAN_KEY_SUFFIX)
+}
+
+/// 从账号级套餐凭证键名中取账号标识（最后一个 `:account:` 之后、`:api-key`
+/// 之前的段：`...:account:29701779269890662:api-key` → `29701779269890662`）。
+/// 该标识与账号指纹（zcode_crypto 从 JWT 取出的 user_id）同源，用于优先
+/// 命中当前账号的凭证；形态不符返回 None（纯函数，便于单测）。
+fn plan_key_identity(name: &str) -> Option<&str> {
+    let body = name.strip_suffix(PLAN_KEY_SUFFIX)?;
+    let (_, identity) = body.rsplit_once(PLAN_KEY_IDENTITY_MARK)?;
+    (!identity.is_empty()).then_some(identity)
+}
+
+/// 从 credentials.json 解析结果中挑选账号级套餐凭证（纯函数，便于单测）：
+/// - 只认 is_account_provider_plan_key 命中的键；
+/// - 值为空/纯空白、解密失败（跨平台 secret 不同）的键跳过；
+/// - identity（当前账号指纹）匹配者优先，否则取第一个非空键。
+///
+/// 返回值是 (credentials.json 的键名, 解密后的 apiKey)。
+/// pub(crate)：accounts.rs 的 snapshot_credential 需按"快照自己的凭证原文 +
+/// 快照指纹"复现同一挑选口径（多账号面板不能依赖现场 config.json）。
+pub(crate) fn pick_account_provider_plan_key(
+    creds: &serde_json::Value,
+    identity: Option<&str>,
+    secret: &[u8],
+) -> Option<(String, String)> {
+    let candidates: Vec<(String, String)> = creds
+        .as_object()?
+        .iter()
+        .filter(|(k, _)| is_account_provider_plan_key(k))
+        .filter_map(|(k, v)| {
+            let raw = v.as_str()?;
+            // 键值是 enc:v1: 密文：只解密不重写；解密失败静默跳过
+            // （本路径整体静默降级，绝不因此报错）
+            let api_key = crate::zcode_crypto::decrypt_value(raw, secret)
+                .ok()?
+                .trim()
+                .to_string();
+            (!api_key.is_empty()).then(|| (k.clone(), api_key))
+        })
+        .collect();
+    if let Some(want) = identity {
+        if let Some(found) = candidates
+            .iter()
+            .find(|(k, _)| plan_key_identity(k) == Some(want))
+        {
+            return Some(found.clone());
+        }
+    }
+    candidates.into_iter().next()
+}
+
+/// 读取 credentials.json 并挑选账号级套餐凭证（只读 + 全链路静默失败：
+/// 文件不存在/读取失败/解析失败/无匹配键/解密失败一律 None，由调用方回退
+/// config.json 路径，绝不因此报错）。
+fn pick_from_credentials(dir: &std::path::Path) -> Option<(String, String)> {
+    let raw = std::fs::read_to_string(dir.join("credentials.json")).ok()?;
+    let creds: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    // 身份优先用同一份解析结果的指纹（与 accounts 侧同源：JWT 的 user_id）
+    let identity = crate::zcode_crypto::fingerprint_of_credentials(&creds).map(|fp| fp.user_id);
+    let secret = crate::zcode_crypto::credential_secret();
+    pick_account_provider_plan_key(&creds, identity.as_deref(), &secret)
+}
+
+/// 从 config.json 原文取 Coding Plan provider 的 options.baseURL（纯解析，
+/// 便于单测）。新形态凭证键里只有 apiKey、没有端点信息，端点仍按原口径从
+/// config.json 的 coding-plan provider 读；缺失/异常给空串，由
+/// base_from_provider_url 兜底为默认端点（bigmodel 系 = open.bigmodel.cn）。
+fn plan_base_url_from_config(raw: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|root| {
+            root.get("provider")
+                .and_then(|p| p.as_object())
+                .and_then(pick_coding_plan_api_key)
+        })
+        .map(|(_, _, base_url)| base_url)
+        .unwrap_or_default()
+}
+
+/// 读取 config.json 原文并取其 Coding Plan provider 的 baseURL；文件缺失/
+/// 读取失败给空串（由 base_from_provider_url 兜底默认端点），不报错。
+fn plan_base_url(dir: &std::path::Path) -> String {
+    match std::fs::read_to_string(dir.join("config.json")) {
+        Ok(raw) => plan_base_url_from_config(&raw),
+        Err(_) => String::new(),
+    }
+}
+
+/// 读取 ZCode 数据目录登录态中的 Coding Plan 凭证（只读，绝不写回——该目录
+/// 由 ZCode 客户端维护，外部写回极易把 ZCode 的登录态搞坏；key 的增删与刷新
+/// 由 ZCode 客户端自行管理，全应用唯一受控写该目录的位置是 accounts.rs 的
+/// 切换事务）。
+///
+/// 凭证来源分两级：
+/// 1. 优先 credentials.json 的账号级套餐凭证键（ZCode 3.12+）——该版本起
+///    config.json 的 coding-plan provider apiKey 不再随账号登录刷新（本机实测
+///    与一个月前快照逐字符相同），只用它会张冠李戴（查成其他账号的套餐）；
+/// 2. 回退 config.json 的 coding-plan provider（老版本 ZCode 的唯一来源）。
+///
+/// 返回 (provider_key, api_key, base_url)：第 1 级的 provider_key 是
+/// credentials.json 的原始键名（仅供诊断，调用方不依赖），第 2 级与升级前
+/// 完全一致；base_url 取对应 provider 的 options.baseURL（缺失为空串，
+/// 由 base_from_provider_url 兜底端点）。第 1 级任何一步失败（文件不存在/
+/// 解析失败/解密失败/无匹配键）都静默回退第 2 级，不改动任何既有错误文案。
 ///
 /// 错误文案统一以「未找到 ZCode Coding Plan 凭证」开头：前端 QuotaPanel /
 /// SummaryTab 以该固定前缀识别登录引导分支（后端改前缀须与前端同步）。
 fn pick_from_config() -> Result<(String, String, String), String> {
-    let path = zcode_v2_dir()
-        .map_err(|e| {
-            format!("未找到 ZCode Coding Plan 凭证：{e}，请先在 ZCode 客户端登录 Coding Plan 订阅")
-        })?
-        .join("config.json");
+    let dir = zcode_v2_dir().map_err(|e| {
+        format!("未找到 ZCode Coding Plan 凭证：{e}，请先在 ZCode 客户端登录 Coding Plan 订阅")
+    })?;
+    // 第 1 级：账号级套餐凭证（失败静默，走下方 config.json 回退）
+    if let Some((credential_key, api_key)) = pick_from_credentials(&dir) {
+        return Ok((credential_key, api_key, plan_base_url(&dir)));
+    }
+    // 第 2 级：config.json 的 coding-plan provider（错误文案契约不变）
+    let path = dir.join("config.json");
     if !path.exists() {
         return Err("未找到 ZCode Coding Plan 凭证（ZCode 数据目录下 config.json 不存在），请先在 ZCode 客户端登录 Coding Plan 订阅".into());
     }
@@ -295,8 +417,9 @@ pub(crate) fn query_quota_with(token: &str, base_url: &str) -> Result<QuotaResul
 
 /// 请求额度接口并解析（凭证自动推断版）。
 ///
-/// 凭证与接口端点均自动推断：读取 ZCode 客户端本地登录态选出的 provider，
-/// 按其 options.baseURL 判断走 api.z.ai 还是 open.bigmodel.cn。
+/// 凭证与接口端点均自动推断（见 pick_from_config）：优先取 credentials.json
+/// 的账号级套餐凭证键，取不到再回退 config.json 的 coding-plan provider，
+/// 端点按其 options.baseURL 判断走 api.z.ai 还是 open.bigmodel.cn。
 /// 对外行为与错误文案不变（pick_from_config 的错误前缀被前端识别为登录引导分支）。
 pub fn query_quota() -> Result<QuotaResult, String> {
     let (_provider_key, token, base_url) = pick_from_config()?;
@@ -542,5 +665,129 @@ mod tests {
             "https://open.bigmodel.cn"
         );
         assert_eq!(base_from_provider_url(""), "https://open.bigmodel.cn");
+    }
+
+    // ===== ZCode 3.12+ 账号级套餐凭证（credentials.json 新键）=====
+
+    /// 账号级套餐凭证键名判定与 identity 提取（示例键取自本机实测形态）
+    #[test]
+    fn account_provider_plan_key_matching() {
+        let real =
+            "account-provider:coding-plan:account:bigmodel-individual-coding-plan:account:29701779269890662:api-key";
+        assert!(is_account_provider_plan_key(real));
+        assert_eq!(plan_key_identity(real), Some("29701779269890662"));
+        // 无 providerId 段的形态同样命中（identity 取最后一个 :account: 之后）
+        assert_eq!(
+            plan_key_identity(
+                "account-provider:coding-plan:bigmodel-coding-plan:account:111:api-key"
+            ),
+            Some("111")
+        );
+        // 非新形态键一律不命中
+        for name in [
+            "zcodejwttoken",
+            "oauth:bigmodel:access_token",
+            "account-provider:coding-plan:account:bigmodel-coding-plan:account:111",
+            "account-provider:other:account:111:api-key",
+            "x-coding-plan-account:111:api-key",
+        ] {
+            assert!(!is_account_provider_plan_key(name), "不应命中: {name}");
+        }
+        // 形态不符时 identity 为 None（只影响优先级，不影响入选）
+        assert_eq!(
+            plan_key_identity("account-provider:coding-plan:x:api-key"),
+            None
+        );
+        assert_eq!(plan_key_identity("zcodejwttoken"), None);
+    }
+
+    /// 凭证挑选：identity 匹配优先、空值/解密失败跳过、无匹配返回 None。
+    /// 测试值用明文（decrypt_value 对非 enc:v1: 值原样放行），无需真实 secret。
+    #[test]
+    fn pick_account_provider_plan_key_prefers_identity() {
+        let creds = serde_json::json!({
+            "zcodejwttoken": "jwt",
+            // 键序在 JSON 解析后不可依赖，故分场景断言
+            "account-provider:coding-plan:account:bigmodel-team-coding-plan:account:222:api-key": "key-222",
+            "account-provider:coding-plan:account:bigmodel-individual-coding-plan:account:111:api-key": "key-111",
+            // 非新形态键与空值必须被忽略
+            "account-provider:coding-plan:account:bigmodel-coding-plan:account:333:api-key": "   ",
+            "oauth:bigmodel:access_token": "not-a-plan-key"
+        });
+
+        // identity 命中 111 → 必须取 111（即使 222 在排序上更靠前）
+        let got = pick_account_provider_plan_key(&creds, Some("111"), b"secret").unwrap();
+        assert_eq!(got.1, "key-111");
+        assert!(plan_key_identity(&got.0) == Some("111"));
+
+        // identity 命中 222 → 取 222
+        let got = pick_account_provider_plan_key(&creds, Some("222"), b"secret").unwrap();
+        assert_eq!(got.1, "key-222");
+
+        // identity 无匹配（或指纹解密失败为 None）→ 取第一个非空键
+        let got = pick_account_provider_plan_key(&creds, Some("999"), b"secret").unwrap();
+        assert!(got.1 == "key-111" || got.1 == "key-222", "应回退到非空键");
+        let got_none = pick_account_provider_plan_key(&creds, None, b"secret").unwrap();
+        assert_eq!(got_none.1, got.1, "无指纹与指纹不匹配同一回退口径");
+
+        // 无匹配键 / 非对象 / 仅有空值 → None
+        assert!(pick_account_provider_plan_key(
+            &serde_json::json!({"zcodejwttoken": "jwt"}),
+            None,
+            b"secret"
+        )
+        .is_none());
+        assert!(pick_account_provider_plan_key(&serde_json::json!([1, 2]), None, b"secret").is_none());
+        assert!(pick_account_provider_plan_key(
+            &serde_json::json!({
+                "account-provider:coding-plan:account:bigmodel-coding-plan:account:111:api-key": ""
+            }),
+            None,
+            b"secret"
+        )
+        .is_none());
+    }
+
+    /// 解密失败的密文键（跨平台 secret 不同）静默跳过，退回其他可用键；
+    /// 全部解不开时返回 None（绝不报错）
+    #[test]
+    fn pick_account_provider_plan_key_skips_undecryptable() {
+        let broken = "enc:v1:AAAA.BBBB.CCCC"; // 段数正确但认证必失败
+        let creds = serde_json::json!({
+            "account-provider:coding-plan:account:bigmodel-coding-plan:account:111:api-key": broken,
+            "account-provider:coding-plan:account:bigmodel-coding-plan:account:222:api-key": "key-222"
+        });
+        // identity 命中解不开的 111 → 落到可用键 222，而非返回坏值
+        let got = pick_account_provider_plan_key(&creds, Some("111"), b"secret").unwrap();
+        assert_eq!(got.1, "key-222");
+
+        let only_broken = serde_json::json!({
+            "account-provider:coding-plan:account:bigmodel-coding-plan:account:111:api-key": broken
+        });
+        assert!(pick_account_provider_plan_key(&only_broken, Some("111"), b"secret").is_none());
+    }
+
+    /// config.json 端点解析：取 coding-plan provider 的 options.baseURL，
+    /// 缺失/异常给空串（由 base_from_provider_url 兜底默认端点）
+    #[test]
+    fn plan_base_url_from_config_reads_provider_base() {
+        let config = r#"{
+            "provider": {
+                "builtin:bigmodel-coding-plan": {
+                    "options": {"apiKey": "k", "baseURL": "https://open.bigmodel.cn/api/anthropic"}
+                }
+            }
+        }"#;
+        assert_eq!(
+            plan_base_url_from_config(config),
+            "https://open.bigmodel.cn/api/anthropic"
+        );
+        // key 不含 baseURL / 无 provider / 坏 JSON → 空串
+        assert_eq!(
+            plan_base_url_from_config(r#"{"provider":{"builtin:zai-coding-plan":{"options":{"apiKey":"k"}}}}"#),
+            ""
+        );
+        assert_eq!(plan_base_url_from_config(r#"{"other":1}"#), "");
+        assert_eq!(plan_base_url_from_config("not json"), "");
     }
 }

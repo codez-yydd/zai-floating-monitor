@@ -13,6 +13,12 @@
 //!   内部状态覆盖或破坏登录态，必须先退出（CLI 进程不动，新调用自然读新配置）。
 //! - 切换前先把两文件原文备份到 `~/.zbar/accounts/.last/`（点开头不被快照
 //!   扫描命中），任何一步失败走回滚，保证零损坏。
+//! - 切换写 credentials.json 时以快照原文为基础，**合并现场新增/更新的
+//!   `account-provider:` 前缀键**（ZCode 3.12+ 的账号级套餐凭证键，ZCode 判定
+//!   套餐资格依赖它们，且跨账号累积存在）；其余键一律以快照为准。合并不可用
+//!   （任一侧解析失败）时降级为原文整串回写，绝不让合并逻辑使切换失败。
+//! - 切换前用现场数据刷新"即将被切走账号"的**已存在**快照（不新建条目），
+//!   保证被切走账号的快照不会停留在过期键集上。
 //! - 指纹（user_id）解密失败时降级为 unknown-id 快照，不阻塞捕获。
 
 use crate::pricing::config_dir;
@@ -353,20 +359,32 @@ fn default_display_name(fp: Option<&Fingerprint>, email: Option<&str>, id: &str)
         .unwrap_or_else(|| format!("账号-{}", &id[..id.len().min(8)]))
 }
 
-/// 捕获当前登录：读两文件原文 → 提取指纹 → upsert 快照。
-/// 重复捕获同一账号时保留原 created_at，只刷新凭证数据；
-/// display_name 在旧快照未被手动重命名（name_locked=false）时才刷新。
-pub fn capture_account() -> Result<CaptureOutcome, String> {
-    let _guard = accounts_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-    let live = read_live_files()?;
-    let raw = live.credentials.clone().ok_or(
-        "未找到 ZCode 登录凭证（ZCode 数据目录下 credentials.json 不存在），请先在 ZCode 客户端登录后再捕获",
-    )?;
-    let creds: Value = serde_json::from_str(&raw)
-        .map_err(|e| format!("credentials.json 格式异常: {e}"))?;
+/// 现场两文件原文 → 快照 upsert 核心（capture_account 与"切换到其他账号前
+/// 刷新被切走账号快照"共用，编译期保证两处解析与 upsert 语义一致）。
+/// base 为快照基目录（生产为 ~/.zbar；单测注入临时目录）。
+///
+/// update_only=true 只刷新指纹命中的**已存在**快照（切换路径专用：不在切换
+/// 路径产生新账号条目；指纹解密降级成 unknown-* 时自然落空，静默跳过）。
+/// update_only=false 为常规捕获：无对应快照则新建（凭证键集异常导致指纹
+/// 提取失败时，与升级前一致地退化为 unknown-* 快照，不阻塞捕获）。
+///
+/// 返回 Ok(None) = 没有可处理的当前账号（credentials.json 不存在、不是合法
+/// JSON，或 update_only 下无对应快照），由调用方决定报错还是跳过；
+/// Err 只表示快照读取/落盘失败。
+fn upsert_snapshot_at(
+    base: &Path,
+    live: &LiveFiles,
+    update_only: bool,
+) -> Result<Option<CaptureOutcome>, String> {
+    let raw = match live.credentials.as_deref() {
+        Some(raw) => raw,
+        None => return Ok(None),
+    };
+    let creds: Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        // 非法 JSON：无法提取指纹（捕获路径另行报"格式异常"，切换路径跳过）
+        Err(_) => return Ok(None),
+    };
     let fp = fingerprint_of_credentials(&creds); // 解密失败降级 None，不阻塞
     let id = snapshot_id_of(fp.as_ref());
     let fingerprint = fp.as_ref().map(|f| f.user_id.clone()).unwrap_or_default();
@@ -378,7 +396,7 @@ pub fn capture_account() -> Result<CaptureOutcome, String> {
         crate::quota::pick_coding_plan_api_key(&providers).map(|(k, _, _)| k);
 
     let now = now_ms();
-    let (snapshot, updated_existing) = match load_snapshot_at(&config_dir()?, &id) {
+    let (snapshot, updated_existing) = match load_snapshot_at(base, &id) {
         Some(old) => (
             AccountSnapshot {
                 version: 1,
@@ -393,13 +411,15 @@ pub fn capture_account() -> Result<CaptureOutcome, String> {
                 email,
                 created_at: old.created_at,
                 updated_at: now,
-                credentials_raw: raw,
+                credentials_raw: raw.to_string(),
                 config_providers: providers,
                 login_provider,
                 name_locked: old.name_locked,
             },
             true,
         ),
+        // 只更新已存在的快照：不新建条目（切换路径不产生新账号）
+        None if update_only => return Ok(None),
         None => {
             let display_name = default_display_name(fp.as_ref(), email.as_deref(), &id);
             (
@@ -411,7 +431,7 @@ pub fn capture_account() -> Result<CaptureOutcome, String> {
                     email,
                     created_at: now,
                     updated_at: now,
-                    credentials_raw: raw,
+                    credentials_raw: raw.to_string(),
                     config_providers: providers,
                     login_provider,
                     name_locked: false,
@@ -421,11 +441,39 @@ pub fn capture_account() -> Result<CaptureOutcome, String> {
         }
     };
     let account = AccountMeta::from(&snapshot);
-    save_snapshot_at(&config_dir()?, &snapshot)?;
-    Ok(CaptureOutcome {
+    save_snapshot_at(base, &snapshot)?;
+    Ok(Some(CaptureOutcome {
         account,
         updated_existing,
-    })
+    }))
+}
+
+/// 捕获路径的"无当前账号可捕获"文案（与升级前逐字一致）。
+/// 只在异常路径调用：为保住 upsert 核心单一入口而多解析一次凭证，代价可忽略。
+fn capture_without_credentials_error(live: &LiveFiles) -> String {
+    match live.credentials.as_deref() {
+        Some(raw) => match serde_json::from_str::<Value>(raw) {
+            Err(e) => format!("credentials.json 格式异常: {e}"),
+            // 可解析的凭证必然产出快照（最差是 unknown-* 降级），正常到不了这里
+            Ok(_) => "未找到 ZCode 登录凭证（ZCode 数据目录下 credentials.json 内容异常），请先在 ZCode 客户端登录后再捕获".into(),
+        },
+        None => "未找到 ZCode 登录凭证（ZCode 数据目录下 credentials.json 不存在），请先在 ZCode 客户端登录后再捕获".into(),
+    }
+}
+
+/// 捕获当前登录：读两文件原文 → 提取指纹 → upsert 快照。
+/// 重复捕获同一账号时保留原 created_at，只刷新凭证数据；
+/// display_name 在旧快照未被手动重命名（name_locked=false）时才刷新。
+pub fn capture_account() -> Result<CaptureOutcome, String> {
+    let _guard = accounts_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let live = read_live_files()?;
+    match upsert_snapshot_at(&config_dir()?, &live, false)? {
+        Some(outcome) => Ok(outcome),
+        None => Err(capture_without_credentials_error(&live)),
+    }
 }
 
 /// 列出全部快照 + 实时推断当前登录账号。
@@ -500,14 +548,24 @@ pub fn switch_account(
         }
     }
 
+    // 4.5 刷新"即将被切走的当前账号"的已存在快照（不新建条目，见
+    // upsert_snapshot_at）。目的：让被切走账号的快照不停留在过期键集上
+    // （ZCode 升级新增的 account-provider: 套餐键等）。凭证缺失/不可解析/
+    // 指纹无对应快照时静默跳过，不阻断切换；只有快照落盘失败才中止——本步在
+    // 退出 ZCode 之前，失败时 ~/.zcode 零改动，符合零改动契约。
+    if let Err(e) = upsert_snapshot_at(&config_dir()?, &live, true) {
+        return Err(format!("刷新当前账号快照失败（{e}），已取消切换"));
+    }
+
     // 5. 退出 ZCode 桌面应用（未运行直接跳过；失败零改动）
     quit_zcode().map_err(|e| format!("{e}，已取消切换"))?;
 
-    // 6. credentials.json 按原文整串回写
-    if let Err(e) = atomic_write(
-        &credentials_path()?,
-        &snapshot.credentials_raw,
-    ) {
+    // 6. credentials.json 合并写回：以快照原文为基础，保留现场新增/更新的
+    // account-provider: 套餐凭证键（原样整串回写会抹掉 ZCode 3.12+ 的套餐键，
+    // 导致 ZCode 端套餐失效）；解析失败时自动降级为原文整串回写
+    let merged_credentials =
+        merge_credentials_with_live(&snapshot.credentials_raw, live.credentials.as_deref());
+    if let Err(e) = atomic_write(&credentials_path()?, &merged_credentials) {
         return rollback(&live, format!("写入 credentials.json 失败（{e}）"));
     }
 
@@ -542,15 +600,39 @@ pub fn switch_account(
         return rollback(&live, format!("写入 config.json 失败（{e}）"));
     }
 
-    // 8. 重读校验：两文件必须都是合法 JSON，否则回滚
+    // 8. 重读校验：两文件必须都是合法 JSON；credentials.json 还必须包含快照
+    // 原文解析出的全部键（合并写回不得丢键），否则回滚。
+    // 快照原文解析失败时跳过附加校验（与合并逻辑的降级保护同口径）。
+    let snapshot_keys: Option<Vec<String>> =
+        serde_json::from_str::<Value>(&snapshot.credentials_raw)
+            .ok()
+            .and_then(|v| v.as_object().map(|o| o.keys().cloned().collect()));
     for (name, path) in [
         ("credentials.json", credentials_path()?),
         ("config.json", zcode_config_path()?),
     ] {
-        match fs::read_to_string(&path) {
-            Ok(raw) if serde_json::from_str::<Value>(&raw).is_ok() => {}
-            Ok(_) | Err(_) => {
+        let parsed = match fs::read_to_string(&path) {
+            Ok(raw) => match serde_json::from_str::<Value>(&raw) {
+                Ok(v) => v,
+                Err(_) => {
+                    return rollback(
+                        &live,
+                        format!("写入后校验 {name} 失败（内容不是合法 JSON）"),
+                    );
+                }
+            },
+            Err(_) => {
                 return rollback(&live, format!("写入后校验 {name} 失败（内容不是合法 JSON）"));
+            }
+        };
+        if name == "credentials.json" {
+            if let (Some(expected), Some(obj)) = (&snapshot_keys, parsed.as_object()) {
+                if let Some(missing) = expected.iter().find(|k| !obj.contains_key(k.as_str())) {
+                    return rollback(
+                        &live,
+                        format!("写入后校验 credentials.json 失败（丢失快照键 {missing}）"),
+                    );
+                }
             }
         }
     }
@@ -561,6 +643,44 @@ pub fn switch_account(
         switched_to: snapshot.display_name,
         zcode_relaunched: relaunched,
     })
+}
+
+/// credentials.json 中账号级套餐凭证键的公共前缀（ZCode 3.12+ 新增形态：
+/// `account-provider:coding-plan:<providerId>:account:<identity>:api-key`，
+/// 本机实测形如 `account-provider:coding-plan:account:bigmodel-individual-coding-plan:account:29701779269890662:api-key`）。
+/// ZCode 判定套餐资格（entitled）依赖这些键，且跨账号累积存在。
+const ACCOUNT_PROVIDER_KEY_PREFIX: &str = "account-provider:";
+
+/// credentials.json 写回内容：以快照原文为基础，合并现场新增/更新的
+/// `account-provider:` 前缀键。
+///
+/// 动机：升级前捕获的老快照只有旧键集，原文整串回写会把 ZCode 3.12+ 写入的
+/// 账号级套餐凭证键抹掉，ZCode 端随即 credential-failed（套餐无法识别）；
+/// 而现场文件里这些键是跨账号累积的（含目标账号自己的键），合并写回即可保住
+/// 套餐资格。其余键（zcodejwttoken / oauth:* 等身份键）一律以快照为准——
+/// 切换本身靠它们生效，绝不能被现场覆盖。
+///
+/// 降级保护（只返回 String、不返回 Result）：现场不存在、或快照/现场任一侧
+/// 不是合法 JSON 对象时，退回"快照原文整串回写"的原行为，绝不让合并逻辑
+/// 使切换失败。键值是 `enc:v1:` 密文，只搬运不解密（跨平台 secret 不同，
+/// 解密再加密只会破坏凭证）。
+fn merge_credentials_with_live(snapshot_raw: &str, live_raw: Option<&str>) -> String {
+    let Some(live_raw) = live_raw else {
+        return snapshot_raw.to_string(); // 现场无文件：无可合并内容
+    };
+    let (Ok(Value::Object(mut snap)), Ok(Value::Object(live))) = (
+        serde_json::from_str::<Value>(snapshot_raw),
+        serde_json::from_str::<Value>(live_raw),
+    ) else {
+        return snapshot_raw.to_string(); // 任一侧解析失败：降级为原文整串回写
+    };
+    for (key, value) in live {
+        // 快照无此键 → 插入；已有同名键 → 覆盖（现场值更新鲜）
+        if key.starts_with(ACCOUNT_PROVIDER_KEY_PREFIX) {
+            snap.insert(key, value);
+        }
+    }
+    serde_json::to_string_pretty(&Value::Object(snap)).unwrap_or_else(|_| snapshot_raw.to_string())
 }
 
 /// 切换前备份两文件原文到 ~/.zbar/accounts/.last/（tmp+rename+0600）。
@@ -675,10 +795,27 @@ pub struct AccountQuotaEntry {
     pub error: Option<String>,
 }
 
-/// 快照的额度查询凭证：优先捕获时记录的 login_provider（切换事务逐 key 覆盖
-/// 不清理，live config/快照可能混入其他账号的同前缀 key，固定序 pick 会错取），
-/// 该 key 缺失或 apiKey 失效时回退固定序（老快照无 login_provider 也走这里）。
+/// 快照的额度查询凭证，优先级从高到低（每级失败一律静默降级，新路径绝不报错）：
+/// 1. 快照自带 credentials_raw 里的账号级套餐凭证键（ZCode 3.12+）。这是唯一与
+///    "该快照身份"严格同源的来源：3.12+ 起 config.json 的 coding-plan apiKey
+///    不再随账号登录刷新（本机实测停在另一账号的 key），而切换前刷新快照会把
+///    现场 config 刷进被切走账号的快照，只用 config 会让多账号面板两条都显示
+///    同一份额度；identity 传快照指纹（与键名 `:account:<identity>` 同源）精确
+///    命中本账号的键；
+/// 2. 捕获时记录的 login_provider（切换事务逐 key 覆盖不清理，live config/快照
+///    可能混入其他账号的同前缀 key，固定序 pick 会错取）；
+/// 3. 固定序 pick（老快照无 login_provider 也走这里）。
+///
+/// base_url：第 1 级与 pick_from_config 第 1 级同口径（取 coding-plan
+/// provider 的 options.baseURL），但**只从快照自身的 config_providers 取**——
+/// 快照查询与当前登录态无关，绝不读现场 config.json；取不到给空串由
+/// base_from_provider_url 兜底。第 2/3 级的 base_url 随选中 provider 返回。
 fn snapshot_credential(snap: &AccountSnapshot) -> Option<(String, String, String)> {
+    // 第 1 级：快照自己的凭证原文（老快照/跨平台搬运时密文解不开属正常，静默回退）
+    if let Some((credential_key, api_key)) = snapshot_plan_credential(snap) {
+        return Some((credential_key, api_key, snapshot_base_url(snap)));
+    }
+    // 第 2 级：捕获时记录的 login_provider
     if let Some(key) = &snap.login_provider {
         if let Some((api_key, base_url)) = snap
             .config_providers
@@ -688,7 +825,39 @@ fn snapshot_credential(snap: &AccountSnapshot) -> Option<(String, String, String
             return Some((key.clone(), api_key, base_url));
         }
     }
+    // 第 3 级：固定序 pick
     crate::quota::pick_coding_plan_api_key(&snap.config_providers)
+}
+
+/// snapshot_credential 第 1 级：从快照自带的 credentials_raw 中挑选该账号的
+/// 账号级套餐凭证键（挑选口径与 quota.rs 的 pick_from_config 第 1 级一致），
+/// identity 用快照指纹（快照 fingerprint 即该账号 user_id，与键名
+/// `:account:<identity>` 同源）。任何一步失败——credentials_raw 非法 JSON/
+/// 非对象、解密失败（跨平台 secret 不同）、无匹配键——一律静默 None，
+/// 由调用方回退 config_providers 路径。
+fn snapshot_plan_credential(snap: &AccountSnapshot) -> Option<(String, String)> {
+    let creds: Value = serde_json::from_str(&snap.credentials_raw).ok()?;
+    let secret = crate::zcode_crypto::credential_secret();
+    crate::quota::pick_account_provider_plan_key(&creds, Some(&snap.fingerprint), &secret)
+}
+
+/// snapshot_credential 第 1 级的 base_url：只从快照自身的 config_providers 取
+/// （选中口径沿用 login_provider → 固定序 pick，与第 2/3 级一致），绝不读现场
+/// config.json——同一份快照在任何登录态下查询都得到相同端点。取不到给空串，
+/// 由 base_from_provider_url 兜底默认端点（bigmodel 系 = open.bigmodel.cn）。
+fn snapshot_base_url(snap: &AccountSnapshot) -> String {
+    if let Some(key) = &snap.login_provider {
+        if let Some((_, base_url)) = snap
+            .config_providers
+            .get(key)
+            .and_then(crate::quota::provider_credential)
+        {
+            return base_url;
+        }
+    }
+    crate::quota::pick_coding_plan_api_key(&snap.config_providers)
+        .map(|(_, _, base_url)| base_url)
+        .unwrap_or_default()
 }
 
 /// 查询全部账号快照各自的订阅额度。
@@ -1487,7 +1656,9 @@ mod tests {
     }
 
     /// 快照凭证选择：login_provider 优先——即使混入的其他账号 key 在固定序里
-    /// 更靠前，也必须用捕获时记录的那个；字段缺失或其 apiKey 失效则回退固定序
+    /// 更靠前，也必须用捕获时记录的那个；字段缺失或其 apiKey 失效则回退固定序。
+    /// 本用例的 credentials_raw 不含账号级套餐凭证键（`{"k":"v"}`），
+    /// snapshot_credential 第 1 级落空，验证的正是第 2/3 级（config_providers）语义。
     #[test]
     fn snapshot_credential_prefers_login_provider() {
         let mut snap = sample_snapshot("u1", "一号");
@@ -1521,6 +1692,376 @@ mod tests {
             .unwrap()["options"]["apiKey"] = serde_json::json!("");
         let got = snapshot_credential(&snap).unwrap();
         assert_eq!(got.0, "builtin:bigmodel-coding-plan");
+    }
+
+    /// 快照的 login_provider → config_providers（含 baseURL），模拟"切换前刷新"
+    /// 后的现场：被切走账号的快照里可能存着其他账号的 apiKey。
+    fn snapshot_with_providers(id: &str) -> AccountSnapshot {
+        let mut snap = sample_snapshot(id, "一号");
+        snap.config_providers = serde_json::from_str(
+            r#"{
+                "builtin:bigmodel-coding-plan": {
+                    "options": {
+                        "apiKey": "config-key-of-other-account",
+                        "baseURL": "https://open.bigmodel.cn/api/anthropic"
+                    }
+                },
+                "builtin:zai-coding-plan": {
+                    "options": {
+                        "apiKey": "config-key-zai",
+                        "baseURL": "https://api.z.ai/api/anthropic"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        snap
+    }
+
+    /// 第 1 级（最高优先级）：快照自带 credentials_raw 的账号级套餐凭证键，
+    /// identity 按快照指纹精确命中本账号——同一份凭证原文里混有外账号的键
+    /// （ZCode 跨账号累积是常态）时，必须取本账号的 key，绝不取 config 的。
+    /// 测试值用明文（decrypt_value 对非 enc:v1: 值原样放行），无需真实 secret。
+    #[test]
+    fn snapshot_credential_prefers_own_account_plan_key() {
+        let mut snap = snapshot_with_providers("111");
+        snap.login_provider = Some("builtin:bigmodel-coding-plan".into());
+        // 键序在 JSON 解析后不可依赖：两个账号各一个键，本账号（111）不在首位
+        snap.credentials_raw = serde_json::json!({
+            "zcodejwttoken": "jwt",
+            "account-provider:coding-plan:account:bigmodel-team-coding-plan:account:222:api-key": "plan-key-222",
+            "account-provider:coding-plan:account:bigmodel-individual-coding-plan:account:111:api-key": "plan-key-111"
+        })
+        .to_string();
+
+        let got = snapshot_credential(&snap).unwrap();
+        assert_eq!(got.1, "plan-key-111", "必须命中快照指纹（111）的凭证");
+        assert!(
+            got.0.ends_with(":account:111:api-key"),
+            "第 1 级返回 credentials.json 原始键名（诊断用），实得 {}",
+            got.0
+        );
+        assert_eq!(
+            got.2, "https://open.bigmodel.cn/api/anthropic",
+            "base_url 取自快照自身 config_providers 的 login_provider"
+        );
+    }
+
+    /// 第 1 级无匹配（老快照的 credentials_raw 没有新形态键）→ 静默回退第 2/3 级，
+    /// login_provider 优先与固定序语义不变，base_url 随选中 provider 返回
+    #[test]
+    fn snapshot_credential_falls_back_without_plan_keys() {
+        let mut snap = snapshot_with_providers("111");
+        snap.login_provider = Some("builtin:zai-coding-plan".into());
+        // 老版本 ZCode 的凭证原文：只有身份键，没有账号级套餐凭证键
+        snap.credentials_raw = r#"{"zcodejwttoken":"jwt"}"#.into();
+
+        let got = snapshot_credential(&snap).unwrap();
+        assert_eq!(got.0, "builtin:zai-coding-plan");
+        assert_eq!(got.1, "config-key-zai");
+        assert_eq!(got.2, "https://api.z.ai/api/anthropic");
+    }
+
+    /// 第 1 级候选键存在但密文解不开（跨平台搬运 secret 不同）→ 静默跳过并回退
+    /// config_providers，绝不把坏值或错误串抛给调用方
+    #[test]
+    fn snapshot_credential_skips_undecryptable_plan_key() {
+        let mut snap = snapshot_with_providers("111");
+        snap.login_provider = Some("builtin:zai-coding-plan".into());
+        snap.credentials_raw = serde_json::json!({
+            // 段数正确但认证必失败的密文
+            "account-provider:coding-plan:account:bigmodel-coding-plan:account:111:api-key": "enc:v1:AAAA.BBBB.CCCC"
+        })
+        .to_string();
+
+        let got = snapshot_credential(&snap).unwrap();
+        assert_eq!(got.0, "builtin:zai-coding-plan", "解不开时回退 config_providers");
+        assert_eq!(got.1, "config-key-zai");
+    }
+
+    /// 第 1 级的 credentials_raw 非法 JSON / 非对象 → 同样静默回退
+    /// （老快照损坏或异常形态不得让额度面板整条报错）
+    #[test]
+    fn snapshot_credential_falls_back_on_bad_credentials_raw() {
+        for raw in ["not json", "[1, 2]", ""] {
+            let mut snap = snapshot_with_providers("111");
+            snap.login_provider = Some("builtin:zai-coding-plan".into());
+            snap.credentials_raw = raw.into();
+            let got = snapshot_credential(&snap)
+                .unwrap_or_else(|| panic!("credentials_raw={raw:?} 时应回退 config_providers"));
+            assert_eq!(got.1, "config-key-zai", "credentials_raw={raw:?}");
+        }
+        // 第 1/2/3 级全落空（config_providers 无可用凭证）→ None 契约不变
+        let mut empty = sample_snapshot("111", "一号");
+        empty.credentials_raw = "not json".into();
+        assert!(snapshot_credential(&empty).is_none());
+    }
+
+    /// 构造纯文本 JWT（decrypt_value 对非 enc:v1: 值原样放行，测试无需真实 secret）
+    fn plaintext_jwt(user_id: &str) -> String {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+        use base64::Engine as _;
+        format!(
+            "{}.{}.sig",
+            B64.encode(br#"{"alg":"HS256"}"#),
+            B64.encode(format!(r#"{{"user_id":"{user_id}"}}"#).as_bytes())
+        )
+    }
+
+    /// 现场两文件（凭证含 user_id，config 含一个 coding-plan provider）
+    fn live_for(user_id: &str) -> LiveFiles {
+        LiveFiles {
+            credentials: Some(format!(
+                r#"{{"zcodejwttoken":"{}"}}"#,
+                plaintext_jwt(user_id)
+            )),
+            config: Some(
+                r#"{"provider":{"builtin:bigmodel-coding-plan":{"options":{"apiKey":"k1","baseURL":"https://open.bigmodel.cn/api/anthropic"}}}}"#
+                    .into(),
+            ),
+        }
+    }
+
+    /// credentials.json 合并写回（merge_credentials_with_live）：
+    /// 快照缺的新形态套餐键从现场补齐、同名键取现场（更新鲜）、
+    /// 其余键一律以快照为准（身份键绝不能被现场覆盖）
+    #[test]
+    fn merge_credentials_fills_account_provider_keys() {
+        let snapshot = r#"{
+            "zcodejwttoken": "snap-jwt",
+            "oauth:bigmodel:access_token": "snap-at",
+            "account-provider:coding-plan:account:bigmodel-coding-plan:account:111:api-key": "snap-old"
+        }"#;
+        let live = r#"{
+            "zcodejwttoken": "live-jwt",
+            "oauth:bigmodel:access_token": "live-at",
+            "account-provider:coding-plan:account:bigmodel-coding-plan:account:111:api-key": "live-fresh",
+            "account-provider:coding-plan:account:bigmodel-coding-plan:account:222:api-key": "live-other-account"
+        }"#;
+        let merged: Value =
+            serde_json::from_str(&merge_credentials_with_live(snapshot, Some(live))).unwrap();
+        let obj = merged.as_object().unwrap();
+
+        // 身份键以快照为准（切换靠它们生效）
+        assert_eq!(obj.get("zcodejwttoken").unwrap(), "snap-jwt");
+        assert_eq!(obj.get("oauth:bigmodel:access_token").unwrap(), "snap-at");
+        // 快照缺的新形态键 → 从现场补齐（跨账号累积是 ZCode 常态，一律搬运）
+        assert_eq!(
+            obj.get("account-provider:coding-plan:account:bigmodel-coding-plan:account:222:api-key")
+                .unwrap(),
+            "live-other-account"
+        );
+        // 同名键 → 取现场值（更新鲜）
+        assert_eq!(
+            obj.get("account-provider:coding-plan:account:bigmodel-coding-plan:account:111:api-key")
+                .unwrap(),
+            "live-fresh"
+        );
+        // 快照原有的键一个都不能丢
+        for key in serde_json::from_str::<Value>(snapshot)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+        {
+            assert!(obj.contains_key(key), "快照键 {key} 不得丢失");
+        }
+    }
+
+    /// 非 account-provider: 前缀的现场键（含现场新增的其他键）不得进入结果
+    #[test]
+    fn merge_credentials_keeps_snapshot_only_for_other_keys() {
+        let snapshot = r#"{"zcodejwttoken":"snap","oauth:active_provider":"snap-p"}"#;
+        let live = r#"{
+            "zcodejwttoken": "live",
+            "oauth:active_provider": "live-p",
+            "web-remote-control:external-relay:pass_hash": "h",
+            "brand-new-key": "v"
+        }"#;
+        let merged: Value =
+            serde_json::from_str(&merge_credentials_with_live(snapshot, Some(live))).unwrap();
+        let obj = merged.as_object().unwrap();
+        assert_eq!(obj.len(), 2, "非 account-provider: 前缀键一律以快照为准");
+        assert_eq!(obj.get("zcodejwttoken").unwrap(), "snap");
+        assert_eq!(obj.get("oauth:active_provider").unwrap(), "snap-p");
+    }
+
+    /// 降级保护：现场缺失、现场/快照任一侧不是 JSON 对象 → 原文整串回写
+    #[test]
+    fn merge_credentials_falls_back_to_raw() {
+        let snapshot = r#"{"zcodejwttoken":"snap-jwt"}"#;
+        // 现场无文件（None）→ 原文
+        assert_eq!(merge_credentials_with_live(snapshot, None), snapshot);
+        // 现场不是合法 JSON / 不是对象 → 原文
+        assert_eq!(
+            merge_credentials_with_live(snapshot, Some("not json")),
+            snapshot
+        );
+        assert_eq!(
+            merge_credentials_with_live(snapshot, Some("[1,2]")),
+            snapshot
+        );
+        // 快照自身不是合法 JSON 对象（老文件损坏）→ 原文，不因合并丢内容
+        assert_eq!(
+            merge_credentials_with_live("not json", Some(r#"{"a":"b"}"#)),
+            "not json"
+        );
+    }
+
+    /// 切换路径的 upsert（update_only=true）：只刷新指纹命中的已存在快照，
+    /// 绝不新建条目；created_at / name_locked 语义与捕获一致
+    #[test]
+    fn upsert_update_only_never_creates_snapshot() {
+        let base = TempBase::new("upsert-only");
+        let live = live_for("u1");
+
+        // 基目录下无 u1 快照 → Ok(None)，且不落任何文件（静默跳过）
+        assert!(
+            upsert_snapshot_at(&base.0, &live, true).unwrap().is_none(),
+            "指纹无对应快照时应跳过"
+        );
+        let dir = base.0.join("accounts");
+        assert_eq!(
+            fs::read_dir(&dir).map(|e| e.count()).unwrap_or(0),
+            0,
+            "update_only 下不得新建任何快照文件"
+        );
+
+        // 已有 u1 快照（未锁定名）→ 只刷新内容，保留 created_at
+        let mut old = sample_snapshot("u1", "旧名字");
+        old.created_at = 1000;
+        old.credentials_raw = r#"{"zcodejwttoken":"old"}"#.into();
+        save_snapshot_at(&base.0, &old).unwrap();
+
+        let outcome = upsert_snapshot_at(&base.0, &live, true)
+            .unwrap()
+            .expect("应命中已存在快照");
+        assert!(outcome.updated_existing, "命中已存在快照");
+        let got = load_snapshot_at(&base.0, "u1").unwrap();
+        assert_eq!(
+            got.credentials_raw,
+            live.credentials.clone().unwrap(),
+            "凭证刷新为现场原文"
+        );
+        assert_eq!(
+            got.login_provider.as_deref(),
+            Some("builtin:bigmodel-coding-plan"),
+            "记录捕获时选中的 provider"
+        );
+        assert_eq!(got.created_at, 1000, "created_at 保留");
+        assert_eq!(got.display_name, "账号-u1", "未锁定名时按默认优先级刷新");
+        assert!(
+            !got.config_providers.is_empty(),
+            "config_providers 同步刷新"
+        );
+        assert_eq!(load_meta_list_at(&base.0).len(), 1, "不产生新条目");
+
+        // 已锁定名 → 保留手动命名
+        let mut locked = sample_snapshot("u1", "手动名");
+        locked.name_locked = true;
+        save_snapshot_at(&base.0, &locked).unwrap();
+        upsert_snapshot_at(&base.0, &live, true).unwrap();
+        assert_eq!(
+            load_snapshot_at(&base.0, "u1").unwrap().display_name,
+            "手动名",
+            "name_locked=true 时不得覆盖 display_name"
+        );
+    }
+
+    /// 捕获路径（update_only=false）：无对应快照时新建；凭证缺失/非法 JSON
+    /// 时 Ok(None)，由调用方按升级前文案报错
+    #[test]
+    fn upsert_capture_creates_and_reports_missing_credentials() {
+        let base = TempBase::new("upsert-create");
+        let live = live_for("u2");
+        let outcome = upsert_snapshot_at(&base.0, &live, false)
+            .unwrap()
+            .expect("捕获路径应新建快照");
+        assert!(!outcome.updated_existing, "首次捕获是新条目");
+        assert_eq!(outcome.account.id, "u2");
+        assert_eq!(outcome.account.display_name, "账号-u2");
+
+        // 凭证不存在 / 非法 JSON → Ok(None)（调用方报错）
+        assert!(upsert_snapshot_at(
+            &base.0,
+            &LiveFiles {
+                credentials: None,
+                config: None
+            },
+            false
+        )
+        .unwrap()
+        .is_none());
+        assert!(upsert_snapshot_at(
+            &base.0,
+            &LiveFiles {
+                credentials: Some("not json".into()),
+                config: None
+            },
+            false
+        )
+        .unwrap()
+        .is_none());
+
+        // 升级前语义：凭证是合法 JSON 但取不到指纹（如数组）→ 仍建 unknown-* 快照
+        let before = load_meta_list_at(&base.0).len();
+        let odd = upsert_snapshot_at(
+            &base.0,
+            &LiveFiles {
+                credentials: Some("[1,2]".into()),
+                config: None
+            },
+            false,
+        )
+        .unwrap()
+        .expect("可解析的凭证照旧产出快照");
+        assert!(
+            odd.account.id.starts_with("unknown-"),
+            "取不到指纹时退化为 unknown-* 快照"
+        );
+        assert_eq!(
+            load_meta_list_at(&base.0).len(),
+            before + 1,
+            "降级捕获只新增一个条目"
+        );
+
+        // 切换路径（update_only）下同一份凭证不命中任何快照 → 跳过，不留垃圾条目。
+        // 必须用独立基目录：unknown-* 的 id 由毫秒时间戳生成，若与上面刚创建的
+        // unknown 快照落在同一毫秒，本调用会命中并刷新它（返回 Some）——那属于
+        // 生产语义的正常表现，却会让"前提是无快照可命中"的断言变成 flaky。
+        let fresh = TempBase::new("upsert-only-odd");
+        assert!(upsert_snapshot_at(
+            &fresh.0,
+            &LiveFiles {
+                credentials: Some("[1,2]".into()),
+                config: None
+            },
+            true
+        )
+        .unwrap()
+        .is_none());
+        // 不新增条目：目录不存在（无任何快照）即"零落盘"
+        assert_eq!(
+            fs::read_dir(fresh.0.join("accounts"))
+                .map(|e| e.count())
+                .unwrap_or(0),
+            0,
+            "update_only 下不得新建任何快照文件"
+        );
+
+        // 错误文案与升级前逐字一致（前端按此文案引导登录）
+        assert_eq!(
+            capture_without_credentials_error(&LiveFiles {
+                credentials: None,
+                config: None
+            }),
+            "未找到 ZCode 登录凭证（ZCode 数据目录下 credentials.json 不存在），请先在 ZCode 客户端登录后再捕获"
+        );
+        assert!(capture_without_credentials_error(&LiveFiles {
+            credentials: Some("not json".into()),
+            config: None
+        })
+        .starts_with("credentials.json 格式异常: "));
     }
 }
 
