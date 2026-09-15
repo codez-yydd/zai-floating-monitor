@@ -1,6 +1,6 @@
 /**
- * 桌面宠物形象清单（共享模块）：皮肤页宠物卡（ThemePanel，宠物设置的
- * 唯一入口，注入版/悬浮窗两形态共用 pet.json 配置）使用。
+ * 桌面宠物形象清单（共享模块）：皮肤免注入子页（SkinStandalonePanel，
+ * 宠物设置的唯一入口，内置版/悬浮窗两形态共用 pet.json 配置）使用。
  *
  * V8 起全部形象统一为 Petdex 图集形态（内建 cat/bot 字符网格形象已随
  * 核心渲染收敛移除）：「智谱 Z 娘」为软件内置形象（随安装包分发、默认
@@ -20,12 +20,12 @@ import { PillGroup, PillButton } from "./layout";
 
 // ===== 自定义宠物（Petdex 导入）=====
 
-/** 宠物导入文件（拖放路由用）：zip 包 / pet.json 元信息（皮肤页的
- *  png/webp 投放已安装时保留壁纸导入语义） */
+/** 宠物导入文件（拖放路由用）：zip 包 / pet.json 元信息（免注入子页
+ *  SkinStandalonePanel 与裸图集一起全量路由给宠物导入；需注入子页
+ *  ThemePanel 不收宠物投放） */
 export const PET_IMPORT_FILE_RE = /\.(zip|json)$/i;
-/** 宠物导入图集文件（拖放路由用）：皮肤页仅在未安装皮肤（壁纸导入
- *  不可用）时把 png/webp 路由给宠物导入（与原设置页语义一致），避免
- *  抢占已安装用户的壁纸导入主流程 */
+/** 宠物导入图集文件（拖放路由用）：免注入子页把 png/webp 全量路由给
+ *  宠物导入（壁纸导入语义整体留在需注入子页 ThemePanel，两页互不抢占） */
 export const PET_IMPORT_IMAGE_RE = /\.(png|webp)$/i;
 
 /** 宠物尺寸档位名词条（与 PET_SIZE_LEVEL_PCT 下标一一对应，"默认"=档 3） */
@@ -197,9 +197,9 @@ function PetThumb({ entry }: { entry: CustomPetEntry }) {
  *   选中，无删除按钮）；
  * - 自定义组：Rust 生成的 idle 首帧缩略图卡（带删除按钮）；
  * - 导入区：拖放目标提示（原生文件对话框在 Accessory 应用不可用，
- *   与壁纸导入同样走 Tauri 拖放事件，由宿主面板路由到
- *   controller.importFromPath；png/webp 投放仅皮肤未安装时路由宠物
- *   导入，见 PET_IMPORT_IMAGE_RE）。
+ *   与壁纸导入同样走 Tauri 拖放事件，由宿主面板（免注入子页
+ *   SkinStandalonePanel）路由到 controller.importFromPath；png/webp
+ *   在该页全量路由宠物导入，见 PET_IMPORT_IMAGE_RE）。
  */
 export function PetStyleSection({
   value,
@@ -296,9 +296,9 @@ export function PetStyleSection({
         </p>
       )}
 
-      {/* 导入区：拖放目标提示（文件拖到面板窗口即导入，见宿主面板的
-          onDragDropEvent 路由；皮肤页已安装时 png/webp 走壁纸导入，
-          仅未安装时路由宠物导入，见 PET_IMPORT_IMAGE_RE） */}
+      {/* 导入区：拖放目标提示（文件拖到面板窗口即导入，见宿主面板
+          （免注入子页 SkinStandalonePanel）的 onDragDropEvent 路由；
+          壁纸导入语义整体留在需注入子页 ThemePanel） */}
       <div className="rounded-md border border-dashed border-slate-900/15 px-2 py-1.5 text-center">
         <p className="text-[9px] text-slate-500 leading-relaxed">
           {controller.importing

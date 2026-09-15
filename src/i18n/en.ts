@@ -629,8 +629,17 @@ export const en: typeof zh = {
   } satisfies typeof settings),
 
   ...({
-    "theme.title": "Live Wallpaper",
-    "theme.toolbarEntry": "Live wallpaper",
+    "theme.title": "Skin",
+    "theme.toolbarEntry": "Skin",
+    // Sub-page titles / hub entry card titles: no-injection (standalone
+    // windows, no skin install needed) / requires skin injection into ZCode
+    "theme.sectionStandalone": "No injection · standalone windows",
+    "theme.sectionInjected": "Requires ZCode injection",
+    // One-line descriptions of the two entry cards on the hub page
+    "theme.hubStandaloneDesc":
+      "Session HUD and desktop pet — usable without installing the skin",
+    "theme.hubInjectedDesc":
+      "Live wallpaper skin and injected usage bars — install and inject into ZCode first",
     "theme.loading": "Loading wallpaper state…",
 
     "theme.cardTitle": "ZCode Live Wallpaper",
@@ -746,10 +755,10 @@ export const en: typeof zh = {
     "theme.petBuiltinLoading": "Loading built-in pet…",
     "theme.petCustomEmpty":
       "No custom pets yet. Drop a Petdex pet package onto the window to import one.",
-    // Skin page variant: png/webp drops route to wallpaper import once the
-    // skin is installed; before that they route to pet import
+    // Standalone sub-page variant: pet import is this page's only drop
+    // semantic — zip / pet.json and bare png/webp sheets are all accepted
     "theme.petImportHintSkin":
-      "Import a custom pet: drop a Petdex package onto the window (zip / pet.json with its spritesheet alongside; pack bare png/webp sheets into a zip first — or drop them directly before the skin is installed)",
+      "Import a custom pet: drop a Petdex package onto the window (zip / pet.json with its spritesheet alongside; bare png/webp sheets can be dropped directly too)",
     "theme.petImporting": "Importing pet…",
     "theme.petImportDone": "Pet imported ✓ Tap it in the pet card to use",
     "theme.petImportFail": "Failed to import pet: {msg}",

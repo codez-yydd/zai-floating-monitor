@@ -1,13 +1,25 @@
 /**
- * 动态壁纸页词典：Agent 应用卡片（安装/还原/进度）与效果参数区的文案。
+ * 皮肤域词典：三层页面结构共用——
+ * 1. SkinHubPanel 分类页（theme.title + theme.hub*Desc 入口说明）；
+ * 2. SkinStandalonePanel 免注入子页（会话悬浮窗 + 桌面宠物，
+ *    theme.sectionStandalone 兼作页标题）；
+ * 3. ThemePanel 需注入子页（Agent 安装/壁纸库/效果参数，
+ *    theme.sectionInjected 兼作页标题）。
  * 进度 stage 文案（theme.stage.*）与 Rust 侧 zbar://agent-theme-progress
  * 事件的 stage 值一一对应。
  */
 
 export const theme = {
-  "theme.title": "动态壁纸",
-  // 主面板工具栏入口按钮（🎨）
-  "theme.toolbarEntry": "动态壁纸",
+  "theme.title": "皮肤",
+  // 主面板工具栏入口按钮（SVG 调色板图标）
+  "theme.toolbarEntry": "皮肤",
+  // 子页标题/分类页入口卡标题：免注入（独立窗口功能，不依赖皮肤安装）/
+  // 需注入（需先安装皮肤注入 ZCode）
+  "theme.sectionStandalone": "免注入 · 独立窗口",
+  "theme.sectionInjected": "需注入 ZCode",
+  // 分类页两张入口卡的一行说明
+  "theme.hubStandaloneDesc": "会话悬浮窗与桌面宠物，无需安装皮肤即可使用",
+  "theme.hubInjectedDesc": "动态壁纸皮肤与注入版统计条，需先安装并注入 ZCode",
   "theme.loading": "正在读取壁纸状态…",
 
   // ===== Agent 应用卡片 =====
@@ -129,9 +141,10 @@ export const theme = {
   "theme.petGroupCustom": "自定义形象（Petdex 宠物）",
   "theme.petBuiltinLoading": "内置形象加载中…",
   "theme.petCustomEmpty": "还没有自定义宠物。把 Petdex 宠物包拖到窗口即可导入。",
-  // 皮肤页形态：已安装时 png/webp 投放路由给壁纸导入；未安装时路由宠物导入
+  // 免注入子页形态：宠物导入是本页唯一拖放语义，zip/pet.json 与裸图集
+  // png/webp 都可直接拖入（壁纸导入语义整体留在需注入子页）
   "theme.petImportHintSkin":
-    "导入自定义宠物：将 Petdex 宠物包拖入窗口（zip 包 / pet.json 与图集同目录；裸图集 png/webp 请打包为 zip 后导入，未安装皮肤时可直接拖入）",
+    "导入自定义宠物：将 Petdex 宠物包拖入窗口（zip 包 / pet.json 与图集同目录；裸图集 png/webp 也可直接拖入）",
   "theme.petImporting": "正在导入宠物…",
   "theme.petImportDone": "宠物已导入 ✓ 在宠物卡点击即可选用",
   "theme.petImportFail": "导入宠物失败：{msg}",

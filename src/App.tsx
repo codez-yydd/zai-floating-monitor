@@ -7,6 +7,8 @@ import { DataProvider } from "./DataCache";
 import { ResizeHandles } from "./ResizeHandles";
 import { ReportsPanel } from "./ReportsPanel";
 import { ThemePanel } from "./ThemePanel";
+import { SkinHubPanel } from "./SkinHubPanel";
+import { SkinStandalonePanel } from "./SkinStandalonePanel";
 import { ADD_SERVICE_EVENT } from "./AddServiceMenu";
 import { fetchPricing, hasProviderCredentials, saveCurrency } from "./api";
 import { startUpdateScheduler } from "./updater";
@@ -26,7 +28,17 @@ import {
   type AgentVisibility,
 } from "./agentVisibility";
 
-type View = "stats" | "pricing" | "sync" | "reports" | "theme" | "settings";
+// 皮肤域三层视图：skinHub（分类页）→ skinStandalone（免注入子页）/
+// theme（需注入子页）；分类页本身不发起任何注入状态检测
+type View =
+  | "stats"
+  | "pricing"
+  | "sync"
+  | "reports"
+  | "skinHub"
+  | "skinStandalone"
+  | "theme"
+  | "settings";
 
 export default function App() {
   const { locale } = useI18n();
@@ -205,7 +217,7 @@ export default function App() {
             onGoPricing={() => setView("pricing")}
             onGoSync={() => setView("sync")}
             onGoReports={() => setView("reports")}
-            onGoTheme={() => setView("theme")}
+            onGoTheme={() => setView("skinHub")}
             onGoSettings={() => setView("settings")}
             initialAdd={pendingAddProvider}
             onInitialAddConsumed={() => setPendingAddProvider(null)}
@@ -223,8 +235,16 @@ export default function App() {
             currency={currency}
             agentVisibility={agentVisibility}
           />
+        ) : view === "skinHub" ? (
+          <SkinHubPanel
+            onBack={backToStats}
+            onOpenStandalone={() => setView("skinStandalone")}
+            onOpenInjected={() => setView("theme")}
+          />
+        ) : view === "skinStandalone" ? (
+          <SkinStandalonePanel onBack={() => setView("skinHub")} />
         ) : view === "theme" ? (
-          <ThemePanel onBack={backToStats} />
+          <ThemePanel onBack={() => setView("skinHub")} />
         ) : view === "settings" ? (
           <SettingsPanel
             onBack={backToStats}
