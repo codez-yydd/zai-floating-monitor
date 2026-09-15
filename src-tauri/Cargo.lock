@@ -6037,7 +6037,7 @@ dependencies = [
 
 [[package]]
 name = "zai-floating-monitor"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
