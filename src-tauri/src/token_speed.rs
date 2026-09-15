@@ -70,6 +70,7 @@ pub(crate) struct RequestTiming {
 
 /// Compute a speed without applying a minimum duration or a stale-value
 /// fallback. This form is useful for already validated historical rows.
+#[cfg(test)]
 pub(crate) fn request_speed(request: &RequestTiming) -> Option<SpeedSnapshot> {
     request_speed_at(request, 0)
 }

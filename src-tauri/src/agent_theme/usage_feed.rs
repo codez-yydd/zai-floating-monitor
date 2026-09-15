@@ -2059,6 +2059,7 @@ impl SessionUsageAgg {
 ///   id 仅聚合自身；
 /// - 查询失败返回 Err（调用方按附加通道降级为空 sess，不阻塞 turns/runs
 ///   导出——渲染端对无 sess 数据回退旧口径）。
+#[cfg(test)]
 pub(crate) fn collect_session_stats(
     conn: &Connection,
     turns: &[UsageTurn],
