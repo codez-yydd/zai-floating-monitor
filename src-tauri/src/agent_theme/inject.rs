@@ -645,14 +645,93 @@ pub const EFFECTS_JS: &str = r#"// =============================================
 /// 代理面板轮走完成态显示真实 token 值（此前永无该行，误判活动轮渲染
 /// 全 0 占位并枯萎移除）；会话累计按 sess 精确匹配无任何双计路径，渲染
 /// 管线零改动。
+/// V25 起每轮条与会话条追加"平均 / 快 / 慢"聚合段、会话条下方追加模型
+/// 分组速度行（数据端 usage_feed 的 turns[].sa / sess[].sa / 顶层
+/// models[]，只用精确生成样本，随 2 秒大文件发布；1 秒速度旁路不变）：
+/// 样本 < 2 时隐藏聚合段，模型行按最近值三档变色并带全量口径 title，
+/// 模型行显示时动态抬高输入区顶部留白。
+/// V26 起速度展示视觉与语言修复（仅渲染端）：语言三信号判定（DOM
+/// lang/CJK 文本 → navigator.language → 默认 zh）+ WORDS 词表统一标签
+/// （均/快/慢 ↔ avg/fast/slow）；模型区改带底板组件并与会话行同左缘/
+/// 宽度锚定，行内弹性布局（截断只发生在模型名，数值永不截断）；留白
+/// 按实际字号与底板几何精确计算（修复压输入面板）；tooltip 固定两行
+/// 模板（见模板头 V26 变更）。
 /// 数据源为本目录下 usage-data.js（键名契约见 usage_feed 模块头；每轮
 /// 条匹配键为 umid 字段）。版本化落盘（头部 ZBAR-THEME-V 标记，见
 /// store::ensure_versioned_template）。风格与 effects.js 同款：自愈、
 /// 静默失败、空值防御；DOM 选择器集中在头部常量，便于实机比对调整。
 pub const USAGE_JS: &str = r#"// ============================================================
-// ZBAR-THEME-V24
+// ZBAR-THEME-V26
 // ZBar Agent 对话页用量统计条（由 ZBar 落盘并随版本升级覆盖）
 // ============================================================
+// V26 变更（速度展示视觉与语言修复。用户实测反馈：中文界面全部显示英文
+//   标签（navigator.language 在 ZCode 的 WebView 里返回英文，判定不可
+//   靠）、模型速度行无底板直接叠在动态壁纸上混成一片、模型区与会话行
+//   左右边界不齐、行尾 worst 数值被整段截断、标签词三套混用（avg/fast/
+//   min 与 avg/best/worst 与 recent）、tooltip 换行参差、第三行模型行
+//   压到输入面板、行距过小。数据端 usage_feed 零改动，v:2 / v:1 契约
+//   不变）：
+//   a) 语言判定改三信号优先级（任一命中即定，结果缓存一次）：
+//      ① documentElement.lang 以 zh 开头，或页面可见文本前 2000 字符
+//         含 CJK 字符——直接反映用户所见 ZCode 界面语言；
+//      ② navigator.language 以 zh 开头；
+//      ③ 默认 zh（本项目用户主体中文，且中文标签更短更整齐）。
+//      词表集中到 WORDS 常量对象（中英两套），标签统一 均/快/慢 ↔
+//      avg/fast/slow，彻底废弃 best/worst/min/recent 混用；tooltip 的
+//      "最近/latest" 与 "笔/requests" 同表。
+//   b) 模型速度区改带底板组件：半透明深色底（亮暗 prefers-color-scheme
+//      两档）+ 1px 细边框 + 8px 圆角 + backdrop-blur + 内边距，任何壁纸
+//      上可读。底板恒为深色，最近值三档变色恒用亮色系（删除原亮暗两套
+//      媒体查询——深底上暗色系对比度不足）；底板自供对比度，整条低透
+//      明（--zbar-usage-opacity）只保留在会话行上，不再压暗模型区。
+//   c) 对齐与弹性：会话条容器 align-items:center → stretch——模型底板
+//      与会话行同一左边界、同一宽度锚定（复用会话条定位锚点与宽度，不
+//      各自为政）；每行改 flex：模型名 flex:1 1 auto + min-width:0 +
+//      ellipsis（截断只发生在模型名），数值区（最近值/单位/跟随小字）
+//      flex:none + nowrap 永不截断；删除旧行 70vw/420px 双上限的独立
+//      宽度（此前与居中会话行错位、行尾 worst 被裁即源于 mextra
+//      flex:0 1 auto 可收缩）。
+//   d) 交叠修复：V25 留白增量 = 行数 × 固定 14px，用户调大字号或底板
+//      自身增高（内边距/行距/边框）后即压到输入面板。改按与 CSS 同源
+//      的几何常量精确计算（实际字号 × 行高系数 + 底板内边距 + 行间距 +
+//      边框 + 安全间隙，取 max(26px 基数, 需求值)），字号经
+//      --zbar-usage-font-size 实际值读取；行高 1.4× → 1.6×、行间 3px、
+//      底板与会话行间 5px，层级与呼吸感同步修正（用户反馈行距过小）。
+//   e) tooltip 改固定两行模板："模型 · 最近 71.6 t/s ↵ 均 38.4 · 快
+//      71.6 · 慢 12.4 · 5 笔"（en 同构 latest/avg/fast/slow/requests），
+//      显式换行消除悬挂分隔符开头与自动换行参差，删除 "颜色按最近值
+//      分档" 冗余说明。
+// V25 变更（速度聚合 + 模型分组速度：每轮条与会话条追加"平均 / 快 / 慢"
+//   聚合段，会话条下方追加模型分组速度行；口径对齐免注入悬浮窗模型速度
+//   区，两处共用 token_speed::generation_sample 的行级唯一真源）：
+//   a) 数据端 usage_feed 新增三处附加字段（usage-data.js 的 v 保持 2、
+//      usage-speed.js 的 v 保持 1，旧脚本忽略未知字段平滑兼容；1 秒速度
+//      旁路内容零变化——聚合只在 2 秒大文件拍产出）：
+//      turns[].sa 与 sess[].sa = {avg,max,min,n}：avg = Σ输出 ÷ Σ生成毫秒
+//      × 1000（加权均速），max/min = 样本池单笔最快/最慢，n = 精确生成
+//      样本笔数（只用 first_token_at/completed_at 齐全的精确样本，
+//      request_average 近似样本不进池）；无精确样本时省略该键。
+//      顶层 models[] = 窗口级按 model_id 分组的 [{model,tps,avg,max,min,n}]
+//      （最近使用降序至多 3 组，对齐免注入悬浮窗模型速度区；老库缺
+//      model_id 列时整个键省略 → 本脚本不渲染模型行）。
+//   b) 每轮条（完成态）：速度位之后追加紧凑聚合段 "· 均38 快71 慢12"
+//      （整数，单位沿用该行已有的 t/s 不重复标）；样本 n < 2 时隐藏该段
+//      （单笔样本 均=快=慢 无信息量）；进行中轮（live 行）与启动窗口占位
+//      不加聚合段（进行中轮数据端不产出 sa）。子代理每轮条走同一
+//      renderOne 路径天然获得聚合，无需单独处理。
+//   c) 会话条：速度段后追加同构聚合段（同样 n < 2 隐藏）；条下方追加模型
+//      行容器（最多 3 行：模型名 truncate + 最近值等宽三档变色（≥70 绿 /
+//      ≥40 黄 / <40 红，与免注入悬浮窗同阈值）+ 小号灰 "· 均 x · 快 y ·
+//      慢 z"，行 title 给模型全名与全量口径）。无样本或会话条开关关闭时
+//      不渲染模型行。
+//   d) 会话条 DOM 由单行改为两段式（容器 + 逐段 span 行 + 模型行容器）：
+//      逐段 span 渲染结构与无变化零 DOM 操作策略保留（行与模型行各自
+//      用自己的内容比对，元素重建时自然重渲）；模型行显示时动态加大输入
+//      区容器顶部留白（--zbar-usage-pad-top，基数 26px + 每行 14px），
+//      隐藏时移除变量还原 26px；region 缺失的 fixed 兜底路径不施加留白，
+//      挂载自愈逻辑不变。
+//   e) 语言：本脚本无 i18n 通道，按 navigator.language 判定——zh 开头用
+//      "均/快/慢"（与免注入悬浮窗中文一致），其余用 "avg/fast/min"。
 // V24 变更（速度快照拆出小文件，速度与用量只消费后端确认数据）：
 //   a) 每轮、进行中轮与会话条均显示 model_usage 已确认请求的计数；
 //      DOM 文本不再参与 token 或速度计算。
@@ -922,6 +1001,10 @@ pub const USAGE_JS: &str = r#"// ===============================================
 //     dur / ttft                    主轮自身总耗时 / 首字延迟毫秒（可 null）
 //     sub: { n, req, in, out, cr, cw, rt }  并入的子代理聚合（可 null）
 //     models: "GLM-5.3,..."         该轮模型（去重逗号拼接，含子代理）
+//     sa: { avg, max, min, n }      V25 该轮精确生成样本聚合（无样本则
+//                                   省略）：加权均速 / 单笔最快 / 单笔最慢
+//                                   （t/s）+ 样本笔数；n < 2 时本脚本隐藏
+//                                   聚合段（数据端照常导出原值）
 //   }],
 //     runs: [{           进行中轮实时聚合（V6 附加字段；空数组也输出）
 //     umid / sess        匹配键与会话（同上；子代理轮 umid 指向子代理
@@ -934,18 +1017,31 @@ pub const USAGE_JS: &str = r#"// ===============================================
 //                        合计口径显示，title 分解明细
 //     in / out / cr / cw / rt / req  该轮已完成请求的聚合
 //     start              首个请求开始毫秒
-//   }] }
+//   }],
+//     sess: [{ s, tt, up, down, cr, rq, speed, speedState, sa }]  会话级
+//     统计（V21 附加数组，model_usage 全量合计；V25 起带会话树口径的
+//     sa 聚合）
+//     models: [{ model, tps, avg, max, min, n }]  V25 窗口级模型分组速度
+//     （按最近使用降序至多 3 组；model_id 列缺失的老版本库整个键省略 →
+//     本脚本不渲染模型行）
+//   } }
 // 导出窗口：turns 最近 7 天、至多 3000 轮；runs 近 10 分钟内有请求的
 //   进行中轮（turn_usage 已有行的完成轮不进 runs）。
 // 展示口径：↑ = in − cr（非缓存输入），↓ = out，⟲ = cr，× = req；
 //   速度来自最近一笔完成 model_usage 请求的 speed 快照。generation 为
 //   首字到完成的精确速度，request_average 为仅有总耗时的近似速度并带 ≈；
 //   缺失/无效快照显示 "–"，TTFT 缺失同样显示 "–"。
+// V25 聚合口径：sa 与 models 的 avg/max/min 只取精确生成样本（见文件头
+//   V25 变更 a），与上方的"最近速度"是两条独立通道（后者可能是近似
+//   样本）；聚合段在样本 n < 2 时隐藏，模型行则始终显示"最近值 + 聚合"
+//   （对齐免注入悬浮窗模型速度区）。
 // 行格式（V10 起三态统一固定结构）：每轮条任何状态都渲染
 //   "↑ <in> ↓ <out> ⟲ <cr> · × <req> · <speed> t/s · TTFT <ttft>"，
 //   各字段等宽补位（token 5 字符 / req 3 字符 / 速度与 TTFT 各 4 字
 //   符），等宽字体 + tabular-nums 下整行宽度恒定，只更新字段数值不改变
 //   结构；request_average 的 ≈ 前缀由速度字段自身表达近似质量。
+// V25 起完成态在速度位后追加 "· 均38 快71 慢12"（整数，不重复标单位；
+//   样本 n < 2 整体不出现），live 行与启动窗口占位不追加（见 V25 变更 b）。
 // 行为：usage-data.js 每 2 秒以 script 标签重载（只承载历史计数，先删旧
 //   再插新，加载失败保留上次数据；页面隐藏降频 10 秒）；速度则以独立的
 //   usage-speed.js 小文件每 1 秒重载，速度变更不会触发大文件重写或历史
@@ -998,12 +1094,94 @@ pub const USAGE_JS: &str = r#"// ===============================================
   var SEL_COMPOSER = ".chat-composer-region"; /* 输入区容器选择器，会话条
     挂载目标（V14 补回 V13 遗漏的定义，此前挂载块读未声明变量抛
     ReferenceError 被静默吞掉） */
-  var COMPOSER_PAD_TOP_PX = 26; /* 输入区容器顶部留白（px）：ensureStyle 以
-    !important 写死 26px（CSS 内无法引用 JS 变量），调整留白高度须同步
-    修改两处——本常量（文档对照）与 ensureStyle 的 padding-top 规则 */
+  var COMPOSER_PAD_TOP_PX = 26; /* 输入区容器顶部留白基数（px）：ensureStyle
+    的 padding-top 为 var(--zbar-usage-pad-top,26px) !important（CSS 内无法
+    引用 JS 变量，故基数写死在兜底值里），调整须同步本常量与 CSS 兜底 */
   var SESSION_BAR_Z = 30; /* 会话条 z-index：适度抬高，不遮挡弹层 */
   var VAR_SESSION_BAR = "--zbar-usage-session-bar"; /* 开关变量（variables.css 渲染 1/0） */
   var VAR_TURN_BAR = "--zbar-usage-turn-bar"; /* 每轮统计条开关变量（variables.css 渲染 1/0） */
+  /* ---- V25：速度聚合段与模型分组速度行常量 ---- */
+  var VAR_PAD_TOP = "--zbar-usage-pad-top"; /* 输入区容器顶部留白（px）：
+    renderSessionBar 在模型行显示时以行内变量动态抬高（V26 起按
+    padForModels 以实际字号与底板几何精确计算，基数 26px 兜底），
+    隐藏/迁移/移除会话条时 removeProperty 还原 CSS 兜底 26px */
+  var MODEL_ROWS_MAX = 3; /* 模型行上限（数据端已截断到 3，渲染端再兜一刀） */
+  /* ---- V26：模型区底板几何常量（留白计算的唯一依据，与 ensureStyle
+   * 里 .zbar-usage-models / .zbar-usage-mrow 的 CSS 数值一一同步，改任
+   * 一侧必须同步另一侧）。V25 的留白增量 = 行数 × 固定 14px，字号调大
+   * 或底板自带内边距/行距/边框增高后，第三行即压到输入面板（用户实测
+   * 截图）；V26 改按实际渲染几何求和，并以 --zbar-usage-font-size 的
+   * 实际值（而非写死 10px）参与计算，字号调大留白同步放大 ---- */
+  var SESSION_BAR_TOP_PX = 4; /* 会话条容器 top（CSS 内写死 top:4px 须与
+    本常量同步，同 COMPOSER_PAD_TOP_PX 模式；仅留白计算消费） */
+  var MODEL_ROW_H_FACTOR = 1.6; /* 模型行高系数（.zbar-usage-mrow height
+    calc(字号 * 1.6) 同源；V25 为 1.4，行距过小一并放宽） */
+  var MODEL_ROW_GAP_PX = 3; /* 模型行间距（.zbar-usage-models 的 gap 同步） */
+  var MODELS_PAD_V_PX = 5; /* 底板纵向内边距（padding:5px 9px 纵向值同步） */
+  var MODELS_MARGIN_TOP_PX = 5; /* 底板与会话行的间距（margin-top 同步） */
+  var MODELS_CLEARANCE_PX = 6; /* 底板下沿与输入卡片的安全间隙 */
+  /* 模型行三档变色阈值（与免注入悬浮窗模型速度区、主面板速度卡同阈值） */
+  var TPS_FAST_MIN = 70; /* ≥ 绿 */
+  var TPS_MID_MIN = 40; /* ≥ 黄，其余红 */
+  /* ---- V26：语言判定（三信号优先级，任一命中即定，缓存一次） ----
+   * V25 只按 navigator.language 判定，在 ZCode 的 WebView 里返回英文，
+   * 中文界面全部显示英文标签（用户实测反馈）。V26 改：
+   * ① DOM 探测（最优先，直接反映用户所见界面语言）：documentElement
+   *    的 lang 以 zh 开头，或页面可见文本前 2000 字符含 CJK 字符；
+   * ② navigator.language 以 zh 开头；
+   * ③ 默认 zh（本项目用户主体中文，且中文标签更短更整齐）。
+   * SPA 首帧尚未渲染时文本探测可能拿不到 CJK，由 ②/③ 兜底，判定结果
+   * 仍为 zh；不在渲染路径重复探测 */
+  var LANG_ZH = (function () {
+    try {
+      var docLang =
+        document.documentElement.lang ||
+        document.documentElement.getAttribute("lang") ||
+        "";
+      if (/^zh/i.test(String(docLang))) return true;
+      var text =
+        (document.body &&
+          (document.body.innerText || document.body.textContent)) ||
+        "";
+      if (/[\u4e00-\u9fff]/.test(String(text).slice(0, 2000))) return true;
+    } catch (e) {
+      /* DOM 探测失败继续下一信号 */
+    }
+    try {
+      var navLang = navigator.language || navigator.userLanguage || "";
+      if (/^zh/i.test(String(navLang))) return true;
+    } catch (e2) {
+      /* 读不到语言走默认 */
+    }
+    return true;
+  })();
+  /* ---- V26 语言词典（集中一个常量对象，彻底废弃 V25 的 avg/fast/min、
+   * avg/best/worst 与 recent 三套混用）：
+   * - avg/fast/slow：紧凑聚合段（"均38 快72 慢12"）与模型行跟随小字
+   *   （"· 均 38.4 · 快 71.6 · 慢 12.4"）共用同一组标签；
+   * - sep：标签与数值间是否插空格（中文紧邻"均38"，英文插空格"avg 38"）；
+   * - latest / n：tooltip 的"最近/latest"与样本数单位"笔/requests"。
+   * en 词表保留为完整对照（判定三信号全为 zh 命中，见 LANG_ZH），后续
+   * 若需放开英文界面或测试驱动可直接切换 */
+  var WORDS = {
+    zh: {
+      avg: "均",
+      fast: "快",
+      slow: "慢",
+      sep: "",
+      latest: "最近",
+      n: "笔"
+    },
+    en: {
+      avg: "avg",
+      fast: "fast",
+      slow: "slow",
+      sep: " ",
+      latest: "latest",
+      n: "requests"
+    }
+  };
+  var W = WORDS[LANG_ZH ? "zh" : "en"];
 
   /* ---- 定位同目录 usage-data.js：由注入行自身 src 推导目录 ---- */
   var dataUrl = "";
@@ -1053,28 +1231,104 @@ pub const USAGE_JS: &str = r#"// ===============================================
       /* V8：等待态渲染分支已删除（活动轮判定不再需要 data-running），
        * 本样式保留作防御；当前无渲染路径产出 waiting 态 */
       "[" + ATTR_ROW + "][data-zbar-usage-row-state=waiting]{opacity:calc(var(--zbar-usage-opacity,.55)*.636)}" +
-      /* V13：输入区容器顶部留白（高度写死 26px，与 COMPOSER_PAD_TOP_PX
-       * 同步）——会话条 DOM 挂进容器、住进留白，输入框多行/窗口缩放随
-       * 文档流自动跟随。relative 通常无副作用（region 自带 z-20，设计
-       * 上已是定位元素）；若 ZCode 改用其它定位方案，本 !important 规
-       * 则有覆盖风险，实机回访留意 */
-      ".chat-composer-region{position:relative !important;padding-top:26px !important;}" +
+      /* V13：输入区容器顶部留白（基数 26px，与 COMPOSER_PAD_TOP_PX 同步）
+       * ——会话条 DOM 挂进容器、住进留白，输入框多行/窗口缩放随文档流
+       * 自动跟随。V25：留白改为读 --zbar-usage-pad-top（兜底 26px），
+       * renderSessionBar 在模型行显示时以行内变量把留白抬到 26 + 14×行数
+       * px（模型行住进多出来的留白里），隐藏/迁移时 removeProperty 还原。
+       * relative 通常无副作用（region 自带 z-20，设计上已是定位元素）；
+       * 若 ZCode 改用其它定位方案，本 !important 规则有覆盖风险，实机
+       * 回访留意 */
+      ".chat-composer-region{position:relative !important;padding-top:var(" +
+      VAR_PAD_TOP + "," + COMPOSER_PAD_TOP_PX + "px) !important;}" +
       /* 会话累计条（V5）：不占消息布局。V13 定位改 absolute：住进输入
-       * 区容器顶部留白（left + translateX 水平居中），不再 fixed/bottom */
+       * 区容器顶部留白（left + translateX 水平居中），不再 fixed/bottom。
+       * V25：容器改为纵向 flex（逐段 span 行在上、模型行容器在下）。
+       * V26：align-items:center → stretch——模型底板与会话行同一左边
+       * 界、同一宽度锚定（条宽由最宽子元素撑起，两段都拉满，左缘天然
+       * 对齐；绝对定位的 left/translateX 仍按条宽水平居中不变）。
+       * V26：整条低透明（--zbar-usage-opacity）从容器下移到会话行——
+       * 模型底板自供对比度（深色半透明底 + 近白文字），不吃低透明，
+       * 否则底板与文字同被压暗、壁纸上仍不可读（用户实测反馈主因） */
       "[" + ATTR_SESSION_BAR + "]{" +
       "position:absolute;top:4px;left:50%;transform:translateX(-50%);" +
       "z-index:" + SESSION_BAR_Z + ";" +
+      "display:flex;flex-direction:column;align-items:stretch;" +
       "font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;" +
       "font-size:var(--zbar-usage-font-size,10px);" +
       "font-weight:400;line-height:1.5;" +
-      "letter-spacing:.02em;color:inherit;opacity:var(--zbar-usage-opacity,.55);" +
+      "letter-spacing:.02em;color:inherit;" +
       "font-variant-numeric:tabular-nums;" +
       "user-select:none;-webkit-user-select:none;" +
       "pointer-events:none;white-space:nowrap;}" +
+      /* V26：会话行承接原容器低透明（观感与 V25 及更早版本一致）。
+       * 本行也是 V25 会话条总量行的逐段 span 宿主——旧实现直接写在
+       * 会话条容器上，现在容器被模型行共用，行内文本比对与重建只在
+       * 行元素上进行 */
+      "[" + ATTR_SESSION_BAR + "] .zbar-usage-sb-line{" +
+      "white-space:nowrap;opacity:var(--zbar-usage-opacity,.55);}" +
       /* V13 兜底：region 缺失时条挂 body 并打上标记，退回旧 V5 行为
        * （fixed 贴窗底，bottom 见 SESSION_BAR_BOTTOM_PX） */
       "[" + ATTR_SESSION_BAR + "][" + ATTR_SESSION_BAR_FIXED + "]{" +
-      "position:fixed;top:auto;bottom:" + SESSION_BAR_BOTTOM_PX + "px;}";
+      "position:fixed;top:auto;bottom:" + SESSION_BAR_BOTTOM_PX + "px;}" +
+      "[" + ATTR_SESSION_BAR + "] .zbar-usage-models{" +
+      /* V26 模型区底板组件：半透明深色底 + 细边框 + 圆角 + 毛玻璃 +
+       * 内边距，任何壁纸上可读（用户实测：无底板三行小字与动态壁纸混
+       * 成一片）。亮暗两档背景随 prefers-color-scheme 适配（同为深色，
+       * 亮色档降不透明度、提边框亮度以贴近亮色界面）；:empty 整体隐藏
+       * （无模型行时不得露出空底板），行距 gap 与 margin-top 见几何
+       * 常量（MODEL_ROW_GAP_PX / MODELS_MARGIN_TOP_PX，两处须同步） */
+      "display:flex;flex-direction:column;align-items:stretch;" +
+      "gap:" + MODEL_ROW_GAP_PX + "px;" +
+      "margin-top:" + MODELS_MARGIN_TOP_PX + "px;" +
+      "padding:" + MODELS_PAD_V_PX + "px 9px;box-sizing:border-box;" +
+      "border-radius:8px;border:1px solid rgba(148,163,184,.28);" +
+      "background:rgba(2,6,23,.72);" +
+      "-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);" +
+      "color:rgba(241,245,249,.92);opacity:1;}" +
+      "@media (prefers-color-scheme: light){" +
+      "[" + ATTR_SESSION_BAR + "] .zbar-usage-models{" +
+      "background:rgba(15,23,42,.6);border-color:rgba(248,250,252,.38);}}" +
+      "[" + ATTR_SESSION_BAR + "] .zbar-usage-models:empty{display:none;}" +
+      /* V25 模型分组速度行（对齐免注入悬浮窗模型速度区：小号、等宽、
+       * 最近值三档变色 + 单位 + 跟随灰字）。V26：行内改弹性——模型名
+       * flex:1 1 auto 占满余量（min-width:0 + ellipsis，截断只发生在
+       * 模型名），数值区 flex:none + nowrap 永不截断（用户实测行尾
+       * worst 值被整段裁掉，根因是 mextra flex:0 1 auto 可收缩）；删除
+       * 旧 70vw/420px 双上限的独立宽度（宽度随底板锚定，与上面
+       * 会话行同缘）；行高 = 字号 × 1.6（与 MODEL_ROW_H_FACTOR 同源，
+       * 须同步），pointer-events:auto 让行可悬浮出 title（整条会话条为
+       * pointer-events:none 不挡输入区，模型行住在上方留白里、不与输入
+       * 卡片重叠） */
+      "[" + ATTR_SESSION_BAR + "] .zbar-usage-mrow{" +
+      "display:flex;align-items:center;gap:6px;" +
+      "height:calc(var(--zbar-usage-font-size,10px) * " + MODEL_ROW_H_FACTOR + ");" +
+      "font-size:calc(var(--zbar-usage-font-size,10px) * .9);" +
+      "line-height:1;pointer-events:auto;cursor:default;}" +
+      /* 行间细分割线（底板上同样式的中性半透明；行距由容器 gap 承担） */
+      "[" + ATTR_SESSION_BAR + "] .zbar-usage-mrow + .zbar-usage-mrow{" +
+      "border-top:1px solid rgba(148,163,184,.22);}" +
+      /* 模型名：唯一可收缩截断的段（flex:1 1 auto 吃掉余量，数值区恒
+       * 右缘对齐；名字过长时 ellipsis，行 title 兜底全名） */
+      "[" + ATTR_SESSION_BAR + "] .zbar-usage-mname{" +
+      "flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}" +
+      /* 数值区（最近值三档变色）：永不收缩、永不截断 */
+      "[" + ATTR_SESSION_BAR + "] .zbar-usage-mval{" +
+      "flex:none;white-space:nowrap;font-variant-numeric:tabular-nums;}" +
+      /* 单位后缀：独立静态节点，不参与三档变色（同免注入模型速度区） */
+      "[" + ATTR_SESSION_BAR + "] .zbar-usage-munit{" +
+      "flex:none;white-space:nowrap;font-size:calc(var(--zbar-usage-font-size,10px) * .8);opacity:.75;}" +
+      /* 均 / 快 / 慢跟随小字：更暗一档表达层级；flex:none 保证数值永不
+       * 截断（V26 修复，原 flex:0 1 auto 会被行尾裁切） */
+      "[" + ATTR_SESSION_BAR + "] .zbar-usage-mextra{" +
+      "flex:none;white-space:nowrap;" +
+      "font-size:calc(var(--zbar-usage-font-size,10px) * .8);opacity:.72;}" +
+      /* 三档变色：V26 起恒用亮色系——底板恒为深色（见 .zbar-usage-models），
+       * 原亮色主题的暗色系（#059669/#d97706/#dc2626）在深底上对比度不
+       * 足，删除原亮暗两套媒体查询 */
+      "[" + ATTR_SESSION_BAR + "] .zbar-usage-tps-fast{color:#34d399;}" +
+      "[" + ATTR_SESSION_BAR + "] .zbar-usage-tps-mid{color:#fbbf24;}" +
+      "[" + ATTR_SESSION_BAR + "] .zbar-usage-tps-slow{color:#f87171;}";
       /* V21 的 CTX 三档变色样式（黄/红两个 class 规则）已随 V22 CTX 段
        * 删除（无渲染路径再产出这两个 class） */
     (document.head || document.documentElement).appendChild(st);
@@ -1096,6 +1350,10 @@ pub const USAGE_JS: &str = r#"// ===============================================
    * V22 起 cp/cu/cw 已删，仅余合计字段）。旧数据文件无 sess 数组：索引
    * 为空对象，会话累计回退旧口径 */
   var sessIndex = {};
+  /* V25 模型分组速度（数据端顶层 models[]，窗口级、最近使用降序至多 3
+   * 组）：旧数据文件无该键 → 空数组，模型行区不渲染（行为与 V24 一致）；
+   * 老库缺 model_id 列时数据端整个键省略，同样落在这里 */
+  var lastModels = [];
   var lastSpeedTs = null;
   var lastSpeedData = null;
 
@@ -1179,6 +1437,12 @@ pub const USAGE_JS: &str = r#"// ===============================================
         if (sv && sv.s) sessIndex[sv.s] = sv;
       }
     }
+    /* V25 模型分组速度：旧数据文件/老库缺 model_id 列时缺键或空数组 →
+     * 模型行区不渲染；数据端已按最近使用降序截断，这里再兜一刀上限 */
+    lastModels =
+      data && data.models && data.models.length
+        ? data.models.slice(0, MODEL_ROWS_MAX)
+        : [];
     applySpeedData(lastSpeedData);
   }
 
@@ -1295,6 +1559,67 @@ pub const USAGE_JS: &str = r#"// ===============================================
     return (prefix + s.value.toFixed(1)).padStart(4, " ");
   }
 
+  /* ---- V25 速度聚合段（数据端 sa 字段，见文件头 V25 变更 a/b）----
+   * 口径：avg = 加权均速、max/min = 样本池单笔极值，n = 精确样本笔数。
+   * 渲染规则：整数取整（单位沿用该行已有的 t/s 不重复标）；n < 2 时
+   * 整段隐藏（单笔样本 均=快=慢 无信息量）；数据缺失/非有限数同样隐藏
+   * （旧数据文件无 sa 字段 → 整段不出现，行为与 V24 一致）。 */
+  function aggTextOf(sa) {
+    if (!sa || !(sa.n >= 2)) return "";
+    var vals = [sa.avg, sa.max, sa.min];
+    for (var i = 0; i < vals.length; i++) {
+      if (typeof vals[i] !== "number" || !isFinite(vals[i])) return "";
+    }
+    return (
+      W.avg + W.sep + Math.round(vals[0]) + " " +
+      W.fast + W.sep + Math.round(vals[1]) + " " +
+      W.slow + W.sep + Math.round(vals[2])
+    );
+  }
+
+  /* 模型行与 title 用的全量口径小字（一位小数，不取整；中间点分隔，
+   * 与免注入悬浮窗 modelSpeedExtra 同形） */
+  function fmtTps(v) {
+    return typeof v === "number" && isFinite(v) ? v.toFixed(1) : "–";
+  }
+
+  /* V26：跟随小字统一走 WORDS 词表（"· 均 38.4 · 快 71.6 · 慢 12.4" /
+   * "· avg 38.4 · fast 71.6 · slow 12.4"），废弃 best/worst 混用 */
+  function modelExtraOf(m) {
+    return (
+      "· " + W.avg + " " + fmtTps(m.avg) +
+      " · " + W.fast + " " + fmtTps(m.max) +
+      " · " + W.slow + " " + fmtTps(m.min)
+    );
+  }
+
+  /* V26 模型行 title：固定两行模板——
+   *   "GLM-5.3 · 最近 71.6 t/s"
+   *   "均 38.4 · 快 71.6 · 慢 12.4 · 5 笔"
+   * （en："GLM-5.3 · latest 71.6 t/s" / "avg 38.4 · fast 71.6 ·
+   *   slow 12.4 · 5 requests"）。显式 \n 换行：原生 title 按空白自动
+   * 折行时会出现 "·" 悬挂行首、语句被裁参差不齐（用户实测），固定
+   * 断点后两行均短于折行阈值，不再触发自动换行；V25 尾部的"颜色按
+   * 最近值分档"冗余说明删除。name 截断时第一行兜底模型全名 */
+  function modelTitleOf(m) {
+    return (
+      m.model + " · " + W.latest + " " + fmtTps(m.tps) + " t/s\n" +
+      W.avg + " " + fmtTps(m.avg) +
+      " · " + W.fast + " " + fmtTps(m.max) +
+      " · " + W.slow + " " + fmtTps(m.min) +
+      " · " + (m.n || 0) + " " + W.n
+    );
+  }
+
+  /* 模型行最近值三档变色 class（≥70 绿 / ≥40 黄 / 其余红，与免注入悬浮窗
+   * 及主面板速度卡同阈值） */
+  function tpsClassOf(tps) {
+    if (typeof tps !== "number" || !isFinite(tps)) return "";
+    if (tps >= TPS_FAST_MIN) return "zbar-usage-tps-fast";
+    if (tps >= TPS_MID_MIN) return "zbar-usage-tps-mid";
+    return "zbar-usage-tps-slow";
+  }
+
   /* ---- 统一行格式（V10）：三态共用同一固定结构，只更新字段数值 ----
    * "↑ <in> ↓ <out> ⟲ <cr> · × <req> · <speed> t/s · TTFT <ttft>"
    * 各字段等宽补位（等宽字体 + tabular-nums 下整行宽度恒定）：
@@ -1305,15 +1630,20 @@ pub const USAGE_JS: &str = r#"// ===============================================
    *   失）显示 "–" 占位；
    * - 速度快照的 request_average 质量由 padSpeed 添加 ≈ 前缀；没有快照
    *   时使用等待占位，计数位始终只来自确认数据。
+   * V25：v.agg（数据端 sa）存在且样本 ≥ 2 时，速度位之后追加紧凑聚合段
+   * "· 均38 快71 慢12"；三处调用点差异——完成态传聚合、live 行与启动
+   * 窗口占位不传（进行中轮数据端不产出 sa，见文件头 V25 变更 b）。
    * 启动窗口只显示确认计数的等待占位；live/完成态均只显示数据库
    * 已确认的请求聚合与速度。 */
   function barLineOf(v) {
+    var agg = v.agg ? aggTextOf(v.agg) : "";
     return (
       "↑ " + fmtTokens(v.inp) +
       " ↓ " + fmtTokens(v.out) +
       " ⟲ " + fmtTokens(v.cr) +
       " · × " + String(v.req).padStart(3, " ") +
       " · " + padSpeed(v.speed) + " t/s" +
+      (agg ? " · " + agg : "") +
       " · TTFT " + (v.ttft == null ? "–" : v.ttft).padStart(4, " ")
     );
   }
@@ -1325,12 +1655,15 @@ pub const USAGE_JS: &str = r#"// ===============================================
       cr: t.cr || 0,
       req: t.req || 0,
       speed: t.speed || null,
+      agg: t.sa || null,
        ttft: t.ttft != null && t.ttft >= 0 ? fmtSeconds(t.ttft) : null
     });
   }
 
   /* ---- 进行中轮行：只显示已完成 model_usage 请求的确认聚合；尚未有
-   *      请求级速度时保留 "–"，不从 DOM 文本推算 token 或 t/s。 ---- */
+   *      请求级速度时保留 "–"，不从 DOM 文本推算 token 或 t/s。
+   *      V25：进行中轮不显示聚合段（数据端 runs 行不产出 sa，聚合属于
+   *      完成态口径）。 ---- */
   function liveLineOf(r) {
     var s = r.sub;
     var inp = (r["in"] || 0) + (s ? s["in"] || 0 : 0);
@@ -1635,7 +1968,8 @@ pub const USAGE_JS: &str = r#"// ===============================================
   }
 
   /* V13：ensureBar 只负责单例创建与断连自愈，挂载位置（region 正常路
-   * 径 / body 兜底路径）由 renderSessionBar 依 region 是否存在决定 */
+   * 径 / body 兜底路径）由 renderSessionBar 依 region 是否存在决定。
+   * V25：条容器改为两段式（行 + 模型行容器），两者各自按内容比对重建 */
   function ensureBar() {
     if (sessionBar && sessionBar.isConnected) {
       return sessionBar;
@@ -1647,11 +1981,110 @@ pub const USAGE_JS: &str = r#"// ===============================================
     return bar;
   }
 
+  /* V25 行元素（总量 · 速度 · 聚合段）与模型行容器：都是条的直属子节点，
+   * 按类名幂等取用（条被重建时元素随之新建，比对自然不命中 → 重渲；
+   * 这正是既有的"元素即状态"自愈策略） */
+  function ensureBarLine(bar) {
+    var line = bar.querySelector(":scope > .zbar-usage-sb-line");
+    if (!line) {
+      line = document.createElement("div");
+      line.className = "zbar-usage-sb-line";
+      bar.appendChild(line);
+    }
+    return line;
+  }
+
+  function ensureModelsBox(bar) {
+    var box = bar.querySelector(":scope > .zbar-usage-models");
+    if (!box) {
+      box = document.createElement("div");
+      box.className = "zbar-usage-models";
+      bar.appendChild(box);
+    }
+    return box;
+  }
+
+  /* ---- V26 动态留白精确计算（修复 V25 模型行压到输入面板）----
+   * V25 增量 = 行数 × 固定 14px：字号被调大（行高随 --zbar-usage-font-
+   * size 缩放而留白不随）或底板自带内边距/行距/边框增高后，最后一行
+   * 即与输入卡片上缘交叠（用户实测截图第三行压面板）。V26 按与 CSS
+   * 同源的几何常量逐项求和（见常量区注释），字号读变量实际值 */
+  function usageFontSize() {
+    try {
+      var v = parseFloat(
+        (
+          getComputedStyle(document.documentElement).getPropertyValue(
+            "--zbar-usage-font-size"
+          ) || ""
+        ).trim()
+      );
+      return isFinite(v) && v > 0 ? v : 10; /* 与 CSS 兜底 10px 同步 */
+    } catch (e) {
+      return 10;
+    }
+  }
+
+  /* 有效模型行数：与 renderModelRows 的过滤条件一致（无 model 的行不
+   * 渲染，留白也不该为它预留），避免 V25 按 lastModels.length 高估 */
+  function validModelCount() {
+    var n = 0;
+    for (var i = 0; i < lastModels.length && i < MODEL_ROWS_MAX; i++) {
+      if (lastModels[i] && lastModels[i].model) n++;
+    }
+    return n;
+  }
+
+  /* 需求留白 = 条 top + 会话行高（字号 × 1.5，与容器 line-height 同源）
+   * + 底板间距 + 底板高（行数 × 行高系数 × 字号 + 行距 × (行数-1)
+   * + 纵向内边距 × 2 + 边框 1px × 2）+ 安全间隙；不低于基数 26px
+   * （无模型行时等价于 V25 之前的原状） */
+  function padForModels(rows, fs) {
+    if (rows <= 0) return COMPOSER_PAD_TOP_PX;
+    var need =
+      SESSION_BAR_TOP_PX +
+      fs * 1.5 +
+      MODELS_MARGIN_TOP_PX +
+      rows * fs * MODEL_ROW_H_FACTOR +
+      (rows - 1) * MODEL_ROW_GAP_PX +
+      MODELS_PAD_V_PX * 2 +
+      2 +
+      MODELS_CLEARANCE_PX;
+    return Math.max(COMPOSER_PAD_TOP_PX, Math.round(need));
+  }
+
+  /* V25 动态留白：模型行住进输入区容器顶部留白的增量部分。变量只施加在
+   * 当前挂载的 region 上——会话条迁移到另一个 region（多会话保活切换）
+   * 或隐藏时，旧 region 的变量必须移除，否则旧输入区永久多出几十像素。
+   * px <= 基数时不设变量（回落到 CSS 兜底 26px，等价于无模型行） */
+  var paddedRegion = null; /* 已施加增量留白的 region（迁移/隐藏时还原） */
+  function setRegionPad(region, px) {
+    if (paddedRegion && paddedRegion !== region) {
+      try {
+        paddedRegion.style.removeProperty(VAR_PAD_TOP);
+      } catch (e) {}
+      paddedRegion = null;
+    }
+    if (!region) return;
+    try {
+      if (px > COMPOSER_PAD_TOP_PX) {
+        region.style.setProperty(VAR_PAD_TOP, px + "px");
+        paddedRegion = region;
+      } else {
+        region.style.removeProperty(VAR_PAD_TOP);
+        paddedRegion = null;
+      }
+    } catch (e) {
+      /* 内联样式不可写（极端只读样式环境）时静默：留白退回 26px，
+       * 模型行可能被输入区遮住，但不影响输入区本身可用 */
+    }
+  }
+
   function removeBar() {
     if (sessionBar && sessionBar.parentNode) {
       sessionBar.parentNode.removeChild(sessionBar);
     }
     sessionBar = null;
+    setRegionPad(null, 0);
   }
 
   /* 节点所属会话 id（V9）：向上取最近 [data-session-id] 容器属性值；
@@ -1764,6 +2197,11 @@ pub const USAGE_JS: &str = r#"// ===============================================
       }
     }
     segs.push({ t: padSpeed(sessionSpeed) + " t/s" });
+    /* V25：会话条速度段后追加会话树口径的聚合段（"均38 快71 慢12"，
+     * 样本 < 2 隐藏——aggTextOf 返回空串时不入段）。sa 只随 2 秒大文件
+     * 发布，1 秒旁路不携带，故它随大文件拍自然刷新。 */
+    var aggText = aggTextOf(sv && sv.sa);
+    if (aggText) segs.push({ t: aggText });
     /* V21 曾在此追加 "CTX NN%" 上下文占用段（三档变色，消费 sess 行的
      * cp 字段），V22 随展示下线删除（数据端 cp/cu/cw 字段一并移除，
      * 旧数据文件残留值被忽略） */
@@ -1773,11 +2211,14 @@ pub const USAGE_JS: &str = r#"// ===============================================
     }
     var bar = ensureBar();
     /* V13：挂载进输入区容器（幂等迁移）——条 absolute 住进 CSS 注入的
-     * 26px 顶部留白，零坐标测量、随文档流自适应。V17：挂载点经
+     * 顶部留白，零坐标测量、随文档流自适应。V17：挂载点经
      * pickComposerRegion 选择（可见优先并跟随当前会话容器，多会话保
      * 活时不再首中隐藏旧会话的输入区容器）。region 缺失（选择器失效/
      * 结构变更）退回旧路径：挂 body、打兜底标记切 fixed +
-     * SESSION_BAR_BOTTOM_PX（迁回 region 时移除标记自动还原） */
+     * SESSION_BAR_BOTTOM_PX（迁回 region 时移除标记自动还原）。
+     * V26：留白按 padForModels 以实际字号与底板几何精确计算（修复 V25
+     * 固定 14px/行在字号调大或底板增高后压到输入面板）——挂进 region 时
+     * 按有效行数抬高、无模型行或走 body 兜底路径时还原 26px */
     try {
       var region = pickComposerRegion(sessId);
       if (region) {
@@ -1785,11 +2226,13 @@ pub const USAGE_JS: &str = r#"// ===============================================
         if (bar.hasAttribute(ATTR_SESSION_BAR_FIXED)) {
           bar.removeAttribute(ATTR_SESSION_BAR_FIXED);
         }
+        setRegionPad(region, padForModels(validModelCount(), usageFontSize()));
       } else {
         if (bar.parentElement !== document.body) {
           document.body.appendChild(bar);
         }
         bar.setAttribute(ATTR_SESSION_BAR_FIXED, "");
+        setRegionPad(null, 0); /* 兜底路径 fixed 贴底，不需要输入区留白 */
       }
     } catch (e) {
       /* 挂载异常：一次性告警（V14 前此处静默吞掉了 ReferenceError，
@@ -1799,18 +2242,78 @@ pub const USAGE_JS: &str = r#"// ===============================================
         try { console.warn("[ZBar] usage session bar mount error:", e); } catch (e2) {}
       }
     }
-    /* V21：内容变化时逐段重建（textContent 读值含全部子节点文本，拼接
-     * 串比对与旧单串比对等价）；无变化零 DOM 操作 */
-    if (bar.textContent !== text) {
-      while (bar.firstChild) bar.removeChild(bar.firstChild);
-      for (var sj = 0; sj < segs.length; sj++) {
-        if (sj) bar.appendChild(document.createTextNode(" · "));
-        var sp = document.createElement("span");
-        if (segs[sj].c) sp.className = segs[sj].c;
-        sp.textContent = segs[sj].t;
-        bar.appendChild(sp);
-      }
+    /* V21：内容变化时逐段重建（行元素 textContent 读值含全部段文本，
+     * 拼接串比对与旧单串比对等价）；无变化零 DOM 操作。V25：行与模型行
+     * 容器分离，行元素只承载总量/速度/聚合段，模型行各自重建 */
+    renderBarLine(bar, text, segs);
+    renderModelRows(bar);
+  }
+
+  /* V25 会话条行重建：与旧实现同款"逐段 span + 全串比对"（textContent
+   * 读值含全部段文本）；行元素被重建时其 textContent 为空，比对自然不
+   * 命中 → 自动重渲（元素即状态的自愈语义不变） */
+  function renderBarLine(bar, text, segs) {
+    var line = ensureBarLine(bar);
+    if (line.textContent === text) return;
+    while (line.firstChild) line.removeChild(line.firstChild);
+    for (var sj = 0; sj < segs.length; sj++) {
+      if (sj) line.appendChild(document.createTextNode(" · "));
+      var sp = document.createElement("span");
+      if (segs[sj].c) sp.className = segs[sj].c;
+      sp.textContent = segs[sj].t;
+      line.appendChild(sp);
     }
+  }
+
+  /* V25 模型分组速度行（会话条下方，最多 3 行；对齐免注入悬浮窗模型速度
+   * 区：模型名 truncate + 最近值等宽三档变色 + 单位小字 + 跟随灰字）。
+   * V26：行内弹性布局——模型名是唯一可截断段（ellipsis），数值区
+   * flex:none 永不截断；底板宽度随会话条锚定（与上方会话行同左缘）；
+   * 聚合小字与 title 统一走 WORDS 词表（均/快/慢 ↔ avg/fast/slow），
+   * title 为固定两行模板。各节点一律用 textContent 写外部字符串（无
+   * HTML 注入面）；内容比对用行容器的整体签名属性（容器被重建时属性
+   * 缺失 → 自动重渲），无变化零 DOM 操作。数据端 models 为空（旧数据
+   * 文件/老库缺列/无样本）时清空容器，:empty 规则隐藏空底板，不渲染
+   * 任何行 */
+  function renderModelRows(bar) {
+    var box = ensureModelsBox(bar);
+    var rows = [];
+    var sig = "";
+    for (var mi = 0; mi < lastModels.length && mi < MODEL_ROWS_MAX; mi++) {
+      var m = lastModels[mi];
+      if (!m || !m.model) continue;
+      sig += m.model + "\u0000" + m.tps + "\u0000" + m.avg + "\u0000" +
+        m.max + "\u0000" + m.min + "\u0000" + m.n + "\u0001";
+    }
+    if (box.getAttribute("data-zbar-usage-msig") === sig) return;
+    while (box.firstChild) box.removeChild(box.firstChild);
+    for (var i = 0; i < lastModels.length && i < MODEL_ROWS_MAX; i++) {
+      var mm = lastModels[i];
+      if (!mm || !mm.model) continue;
+      var row = document.createElement("div");
+      row.className = "zbar-usage-mrow";
+      /* 行 title 同时兜底模型全名（名字截断时）与速度口径 */
+      row.title = modelTitleOf(mm);
+      var name = document.createElement("span");
+      name.className = "zbar-usage-mname";
+      name.textContent = mm.model;
+      var val = document.createElement("span");
+      val.className = "zbar-usage-mval " + tpsClassOf(mm.tps);
+      val.textContent = fmtTps(mm.tps);
+      var unit = document.createElement("span");
+      unit.className = "zbar-usage-munit";
+      unit.textContent = " t/s";
+      var extra = document.createElement("span");
+      extra.className = "zbar-usage-mextra";
+      extra.textContent = modelExtraOf(mm);
+      row.appendChild(name);
+      row.appendChild(val);
+      row.appendChild(unit);
+      row.appendChild(extra);
+      rows.push(row);
+    }
+    for (var ri = 0; ri < rows.length; ri++) box.appendChild(rows[ri]);
+    box.setAttribute("data-zbar-usage-msig", sig);
   }
 
   function renderAll() {
@@ -3369,8 +3872,14 @@ mod tests {
         // 占位枯萎清理；V9 子代理消耗实时化：document 级扫描 + 多容器
         // 活动轮 + 主轮 live 行 sub 合计 + 会话条 Σ 跳过 m 行；V8 启动
         // 窗口实时渲染；V7 请求图标 ⟳ → ×；V6 生成过程实时跳动）
-        assert!(USAGE_JS.contains("ZBAR-THEME-V24"));
-        assert!(!USAGE_JS.contains("ZBAR-THEME-V23"), "版本头应已升到 V24");
+        // V25（速度聚合 + 模型分组速度：每轮条/会话条追加 均/快/慢 聚合段，
+        // 会话条下方追加模型分组速度行；数据端 usage_feed 同步新增
+        // turns[].sa / sess[].sa / 顶层 models[]，随 2 秒大文件发布，
+        // usage-data.js 的 v 保持 2、usage-speed.js 内容不变）
+        assert!(USAGE_JS.contains("ZBAR-THEME-V26"));
+        assert!(!USAGE_JS.contains("ZBAR-THEME-V25"), "版本头应已升到 V26");
+        assert!(!USAGE_JS.contains("ZBAR-THEME-V24"), "版本头不应回退");
+        assert!(!USAGE_JS.contains("ZBAR-THEME-V23"), "版本头不应回退");
         assert!(!USAGE_JS.contains("ZBAR-THEME-V19"), "版本头不应回退");
         assert!(!USAGE_JS.contains("ZBAR-THEME-V18"), "版本头不应回退");
         assert!(!USAGE_JS.contains("ZBAR-THEME-V10"), "版本头不应回退");
@@ -3390,6 +3899,169 @@ mod tests {
         assert!(speed_loader_body.contains("SPEED_LOADER_ID"));
         assert!(speed_loader_body.contains("speedUrl"));
         assert!(!speed_loader_body.contains("dataUrl"));
+        // V25 速度聚合段特征：语言词典（zh → 均/快/慢，其余 → avg/fast/min）
+        // + 样本 < 2 隐藏 + 取整紧凑格式；聚合只在完成态入行（liveLineOf
+        // 不传 agg），且位于速度位之后、TTFT 之前
+        // V26 语言判定与词典特征：三信号优先级（DOM lang/CJK 文本 →
+        // navigator.language → 默认 zh；navigator.language 在 ZCode 的
+        // WebView 里返回英文，V25 据此判定导致中文界面显示英文标签）+
+        // 词表集中 WORDS 常量对象（均/快/慢 ↔ avg/fast/slow，废弃
+        // best/worst/min/recent 混用）
+        assert!(
+            USAGE_JS.contains("var LANG_ZH = (function ()"),
+            "V26 语言判定应保留缓存式 IIFE（三信号优先级，启动判一次）"
+        );
+        assert!(
+            USAGE_JS.contains("/[\\u4e00-\\u9fff]/.test"),
+            "语言判定应含页面文本 CJK 探测（直接反映用户所见界面语言）"
+        );
+        assert!(
+            USAGE_JS.contains("document.documentElement.lang")
+                && USAGE_JS.contains("navigator.language"),
+            "语言判定应先 DOM 探测再 navigator.language"
+        );
+        assert!(
+            USAGE_JS.contains("var WORDS = {")
+                && USAGE_JS.contains("avg: \"均\"")
+                && USAGE_JS.contains("avg: \"avg\"")
+                && USAGE_JS.contains("latest: \"最近\"")
+                && USAGE_JS.contains("latest: \"latest\"")
+                && USAGE_JS.contains("n: \"笔\"")
+                && USAGE_JS.contains("n: \"requests\""),
+            "词表应集中在 WORDS 常量对象（中英两套，tooltip 同表）"
+        );
+        assert!(
+            !USAGE_JS.contains("\"best\"")
+                && !USAGE_JS.contains("\"worst\"")
+                && !USAGE_JS.contains("\"recent\"")
+                && !USAGE_JS.contains("· worst"),
+            "best/worst/recent 标签应彻底废弃（统一 均/快/慢 ↔ avg/fast/slow）"
+        );
+        let agg_lo = USAGE_JS
+            .find("function aggTextOf")
+            .expect("aggTextOf 应存在");
+        let agg_body = &USAGE_JS[agg_lo..agg_lo + 600];
+        assert!(
+            agg_body.contains("sa.n >= 2"),
+            "聚合段应在样本 < 2 时隐藏（单笔样本 均=快=慢 无信息量）: {agg_body}"
+        );
+        assert!(
+            agg_body.contains("Math.round("),
+            "聚合段取整（整数展示）: {agg_body}"
+        );
+        assert!(
+            USAGE_JS.contains("agg: t.sa || null"),
+            "完成态每轮条应传入数据端 sa 聚合"
+        );
+        assert!(
+            USAGE_JS.contains("(agg ? \" · \" + agg : \"\")"),
+            "聚合段应追加在速度位之后、TTFT 之前"
+        );
+        let live_lo = USAGE_JS
+            .find("function liveLineOf")
+            .expect("liveLineOf 应存在");
+        let live_body = &USAGE_JS[live_lo..];
+        let live_body = &live_body[..live_body.find("\n  }").expect("liveLineOf 结尾")];
+        assert!(
+            !live_body.contains("agg"),
+            "进行中轮（live 行）不应携带聚合段: {live_body}"
+        );
+        // V25 模型分组速度行特征：数据索引 + 渲染函数 + 三档变色 +
+        // 动态留白变量与迁移还原（挂载自愈路径不变）
+        assert!(
+            USAGE_JS.contains("lastModels ="),
+            "V25 应索引数据端顶层 models 数组"
+        );
+        assert!(
+            USAGE_JS.contains("data.models.slice(0, MODEL_ROWS_MAX)"),
+            "模型行渲染端应兜底截断到 3 行"
+        );
+        assert!(USAGE_JS.contains("function renderModelRows"));
+        assert!(USAGE_JS.contains("\"zbar-usage-mrow\""));
+        assert!(USAGE_JS.contains("zbar-usage-tps-fast"));
+        assert!(USAGE_JS.contains("TPS_FAST_MIN = 70") && USAGE_JS.contains("TPS_MID_MIN = 40"));
+        assert!(
+            USAGE_JS.contains("VAR_PAD_TOP = \"--zbar-usage-pad-top\""),
+            "V25 模型行留白应走 --zbar-usage-pad-top 变量"
+        );
+        assert!(
+            USAGE_JS.contains("padding-top:var(")
+                && USAGE_JS.contains("COMPOSER_PAD_TOP_PX + \"px) !important;}"),
+            "输入区留白应读动态变量并保留 26px 兜底"
+        );
+        assert!(
+            USAGE_JS.contains("function setRegionPad"),
+            "V25 留白应有迁移/隐藏还原路径（多会话保活切换不残留）"
+        );
+        // V26 模型区底板与弹性布局特征：深色半透明底板（亮暗两档）+
+        // 圆角 + 毛玻璃；会话条容器 stretch 对齐（模型区与会话行同左缘/
+        // 宽度锚定）；模型名唯一可截断（ellipsis），数值区 flex:none
+        // 永不截断；旧独立宽度上限删除
+        assert!(
+            USAGE_JS.contains("backdrop-filter:blur(6px)")
+                && USAGE_JS.contains("border-radius:8px")
+                && USAGE_JS.contains("background:rgba(2,6,23,.72)"),
+            "模型区应有深色半透明底板（毛玻璃 + 圆角，任何壁纸上可读）"
+        );
+        assert!(
+            USAGE_JS.contains("prefers-color-scheme: light")
+                && USAGE_JS.contains("background:rgba(15,23,42,.6)"),
+            "底板背景应随 prefers-color-scheme 亮暗两档适配"
+        );
+        assert!(
+            USAGE_JS.contains("zbar-usage-models:empty{display:none;"),
+            "无模型行时空底板应整体隐藏"
+        );
+        assert!(
+            USAGE_JS.contains("flex-direction:column;align-items:stretch;"),
+            "会话条容器应 stretch 对齐（模型区与会话行同一左边界/宽度锚定）"
+        );
+        assert!(
+            USAGE_JS.contains(
+                "flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}"
+            ),
+            "模型名应 flex:1 1 auto + ellipsis（截断只发生在模型名）"
+        );
+        assert!(
+            USAGE_JS.contains(".zbar-usage-mval{\" +\n      \"flex:none;white-space:nowrap;")
+                && USAGE_JS.contains(".zbar-usage-mextra{\" +\n      \"flex:none;white-space:nowrap;"),
+            "数值区与跟随小字应 flex:none（行尾数值永不截断，修复 V25 worst 被裁）"
+        );
+        assert!(
+            !USAGE_JS.contains("max-width:min(70vw,420px)"),
+            "模型行旧独立宽度上限应删除（宽度随底板与会话条锚定）"
+        );
+        assert!(
+            USAGE_JS.contains("color:#34d399;")
+                && !USAGE_JS.contains("color:#059669;"),
+            "三档变色应恒用亮色系（底板恒深色，暗色系对比度不足）"
+        );
+        // V26 留白精确计算与 tooltip 特征：按实际字号与底板几何求和
+        // （修复 V25 固定 14px/行在字号调大或底板增高后压到输入面板）；
+        // tooltip 固定两行模板（显式 \n，无悬挂分隔符、无冗余分档说明）
+        assert!(
+            USAGE_JS.contains("function usageFontSize")
+                && USAGE_JS.contains("function padForModels")
+                && USAGE_JS.contains("padForModels(validModelCount(), usageFontSize())"),
+            "留白应按实际字号与有效行数精确计算（字号调大留白同步放大）"
+        );
+        assert!(
+            USAGE_JS.contains("--zbar-usage-font-size")
+                && USAGE_JS.contains("function usageFontSize"),
+            "留白计算的字号应读 --zbar-usage-font-size 实际值"
+        );
+        assert!(
+            USAGE_JS.contains("W.latest + \" \" + fmtTps(m.tps) + \" t/s\\n\""),
+            "模型行 title 应为固定两行模板（显式换行防悬挂分隔符）"
+        );
+        assert!(
+            !USAGE_JS.contains("color by latest value"),
+            "tooltip 冗余分档说明应删除"
+        );
+        assert!(
+            !USAGE_JS.contains("innerHTML"),
+            "模型行同样只用 textContent 写入外部字符串（无注入面）"
+        );
         // V22 CTX 删除特征：渲染段、变色样式、sv.cp 消费点全部零残留
         //（注释中的历史记载不算特征）
         assert!(
@@ -3566,12 +4238,12 @@ mod tests {
         );
         // V13 会话条挂载进输入区容器 + CSS 留白定位特征：region relative
         // + padding-top 留白规则、条 absolute 居中、幂等迁移挂载、兜底
-        // fixed 属性切换；V11 输入区上移规则应已删除（输入框还原原位）
+        // fixed 属性切换；V11 输入区上移规则应已删除（输入框还原原位）。
+        // V25：留白改读 --zbar-usage-pad-top（兜底 26px），模型行显示时由
+        // renderSessionBar 抬高，隐藏/迁移时还原
         assert!(
-            USAGE_JS.contains(
-                ".chat-composer-region{position:relative !important;padding-top:26px !important;}"
-            ),
-            "输入区容器应有 relative + 26px 顶部留白规则（与 COMPOSER_PAD_TOP_PX 同步）"
+            USAGE_JS.contains(".chat-composer-region{position:relative !important;padding-top:var("),
+            "输入区容器应有 relative + 顶部留白规则（V25 起读动态变量、兜底 26px）"
         );
         assert!(
             USAGE_JS.contains("COMPOSER_PAD_TOP_PX = 26"),

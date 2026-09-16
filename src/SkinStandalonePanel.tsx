@@ -88,12 +88,12 @@ export function SkinStandalonePanel({ onBack }: Props) {
   const customPets = useCustomPets(refreshPetCfgQuiet);
 
   // ===== 会话悬浮窗（session-hud.json/SessionHudConfig 唯一真相源：
-  // 总开关 + 活跃窗口档位 + 透明度 + 显示项，改完 setSessionHudConfig
-  // 即时生效；不依赖皮肤安装）=====
+  // 总开关 + 活跃窗口档位 + 显示项，改完 setSessionHudConfig 即时生效；
+  // 不依赖皮肤安装）。透明度/字体缩放不在本页——两者入口已移入悬浮窗
+  // 自身的设置面板（见 session-hud.html / session-hud-main.ts），配置
+  // 字段 opacity/fontScale 仍由悬浮窗侧读写。滑块防抖管道（宽度 V3 /
+  // 透明度 V4 相继移除）随之清空，不再保留最新配置镜像
   const [hudCfg, setHudCfg] = useState<SessionHudConfig | null>(null);
-  const hudCfgRef = useRef<SessionHudConfig | null>(null);
-  // 透明度滑块防抖 timer（拖动连续触发，300ms 合并落盘）
-  const hudSaveTimer = useRef<number | undefined>(undefined);
   // applyHud 提交代数：仅最新一次提交的响应可写回状态，防止在途慢响
   // 应（先发出的提交后返回）覆盖用户已提交/拖动到的新值
   const hudApplySeq = useRef(0);
@@ -146,20 +146,14 @@ export function SkinStandalonePanel({ onBack }: Props) {
   // 本地面板不渲染——该功能不依赖皮肤安装）
   useEffect(() => {
     getSessionHudConfig()
-      .then((c) => {
-        hudCfgRef.current = c;
-        setHudCfg(c);
-      })
+      .then((c) => setHudCfg(c))
       .catch((e) => setError(t("theme.hudLoadFail", { msg: String(e) })));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 卸载清理：冲掉未触发的悬浮窗保存防抖与反馈清除 timer
+  // 卸载清理：冲掉未触发的成功反馈清除 timer
   useEffect(() => {
     return () => {
-      if (hudSaveTimer.current !== undefined) {
-        window.clearTimeout(hudSaveTimer.current);
-      }
       if (flashTimer.current !== undefined) {
         window.clearTimeout(flashTimer.current);
       }
@@ -204,19 +198,19 @@ export function SkinStandalonePanel({ onBack }: Props) {
   /**
    * 应用会话悬浮窗配置（session-hud.json 唯一真相源，set_session_hud_
    * config 改完即生效，不走参数防抖管道）：乐观更新 + 失败回读回滚——
-   * 总开关切换即时建/关窗并启停轮询；透明度/显示项/活跃档位经
+   * 总开关切换即时建/关窗并启停轮询；显示项/活跃档位经
    * zbar://session-hud-params 热推悬浮窗即时生效（档位影响下一轮查询）。
+   * 透明度与字体缩放不在本页（入口在悬浮窗自身的设置面板，各有专用轻量
+   * 命令，只改对应字段）。
    */
   const applyHud = async (next: SessionHudConfig) => {
-    hudCfgRef.current = next;
     setHudCfg(next);
-    // 记下提交代数：返回时仅当代数仍为最新才写回（透明度滑块等快速
-    // 连续提交场景下，先发出的慢响应不得覆盖后发出的新值）
+    // 记下提交代数：返回时仅当代数仍为最新才写回（快速连续提交场景下，
+    // 先发出的慢响应不得覆盖后发出的新值）
     const seq = ++hudApplySeq.current;
     try {
       const back = await setSessionHudConfig(next);
       if (seq !== hudApplySeq.current) return;
-      hudCfgRef.current = back;
       setHudCfg(back);
     } catch (e) {
       if (seq !== hudApplySeq.current) return;
@@ -224,7 +218,6 @@ export function SkinStandalonePanel({ onBack }: Props) {
       try {
         const back = await getSessionHudConfig();
         if (seq !== hudApplySeq.current) return;
-        hudCfgRef.current = back;
         setHudCfg(back);
       } catch {
         /* 回读失败保持当前态（下次切换再对齐） */
@@ -232,31 +225,11 @@ export function SkinStandalonePanel({ onBack }: Props) {
     }
   };
 
-  /**
-   * HUD 滑块共享管道：本地即时反馈 + 300ms 防抖合并落盘（与效果参数
-   * 滑块的防抖思路一致，避免拖动期间高频写配置文件与建/关窗流程）。
-   * 提交统一走 applyHud（含 hudApplySeq 防乱序守卫）。
-   */
-  const scheduleHudSave = (next: SessionHudConfig) => {
-    hudCfgRef.current = next;
-    setHudCfg(next);
-    if (hudSaveTimer.current !== undefined) {
-      window.clearTimeout(hudSaveTimer.current);
-    }
-    hudSaveTimer.current = window.setTimeout(() => {
-      if (hudCfgRef.current) void applyHud(hudCfgRef.current);
-    }, 300);
-  };
-
-  /** 透明度滑块（百分比刻度 25~100，存储值 = 刻度/100） */
-  const handleHudOpacity = (pct: number) => {
-    if (!hudCfgRef.current) return;
-    scheduleHudSave({ ...hudCfgRef.current, opacity: pct / 100 });
-  };
-
   // 注：悬浮窗宽度滑块已移除（V3）——窗口改为可自由拖拽调整大小，
   // 尺寸由 Rust 侧 Resized 挂点持久化到 session-hud.json 的 width/
-  // height（设置卡不再提供宽度入口）
+  // height（设置卡不再提供宽度入口）；透明度滑块与字体滑块也已移除
+  //（V4）——两者入口在悬浮窗自身的设置面板内，本页只保留总开关/
+  // 活跃档位/显示项
 
   /**
    * 处理拖放（免注入页版）：多文件时只取第一个，本页只承载宠物形象
@@ -300,11 +273,12 @@ export function SkinStandalonePanel({ onBack }: Props) {
         {error && <AlertBanner>{error}</AlertBanner>}
         {flash && <AlertBanner type="success">{flash}</AlertBanner>}
 
-        {/* 会话悬浮窗区（Session HUD 设置唯一入口，配置源
+        {/* 会话悬浮窗区（Session HUD 设置入口，配置源
             session-hud.json/SessionHudConfig）：总开关 + 活跃窗口档位 +
-            透明度 + 显示项勾选。配置读取成功即渲染（不依赖皮肤安装）；
+            显示项勾选（字体缩放与透明度入口在悬浮窗自身的设置面板内，
+            见 session-hud.html）。配置读取成功即渲染（不依赖皮肤安装）；
             改完经 set_session_hud_config 即时生效——开关即时建/关窗并
-            启停轮询，其余经参数事件热推悬浮窗（透明度滑块带防抖） */}
+            启停轮询，其余经参数事件热推悬浮窗 */}
         {hudCfg && (
           <SettingsCard
             title={t("theme.hudTitle")}
@@ -336,8 +310,8 @@ export function SkinStandalonePanel({ onBack }: Props) {
                 />
               </label>
 
-              {/* 活跃窗口档位 + 透明度 + 显示项：总开关关闭时降透明度
-                  并阻断交互（保留设置值，重新开启即恢复） */}
+              {/* 活跃窗口档位 + 显示项：总开关关闭时降透明度并阻断交互
+                   （保留设置值，重新开启即恢复） */}
               <div
                 className={`flex flex-col gap-2.5 pt-2 border-t border-slate-900/6 ${
                   hudCfg.enabled ? "" : "opacity-40 pointer-events-none"
@@ -373,18 +347,6 @@ export function SkinStandalonePanel({ onBack }: Props) {
                 <p className="text-[9px] text-slate-500 leading-relaxed">
                   {t("theme.hudWindowHint")}
                 </p>
-
-                {/* 透明度滑块（百分比刻度，300ms 防抖落盘热生效） */}
-                <ParamSlider
-                  label={t("theme.hudOpacity")}
-                  hint={t("theme.hudOpacityHint")}
-                  value={Math.round(hudCfg.opacity * 100)}
-                  min={25}
-                  max={100}
-                  step={1}
-                  format={(v) => `${v}%`}
-                  onChange={handleHudOpacity}
-                />
 
                 {/* 显示项勾选（首行分隔线，样式同设置页既有 checkbox
                     模式）：勾选即时热推悬浮窗重建列表。数据行整行开关
@@ -533,52 +495,5 @@ export function SkinStandalonePanel({ onBack }: Props) {
 
       </PageBody>
     </PageShell>
-  );
-}
-
-/** 单个设置滑块：标签 + 当前值 + range（与 ThemePanel 的 ParamSlider 同款）；
- *  hint 为可选的滑块下方小字说明 */
-function ParamSlider({
-  label,
-  hint,
-  value,
-  min,
-  max,
-  step,
-  format,
-  onChange,
-}: {
-  label: string;
-  hint?: string;
-  value: number;
-  min: number;
-  max: number;
-  step: number;
-  format: (v: number) => string;
-  onChange: (v: number) => void;
-}) {
-  return (
-    <label className="block">
-      <div className="flex items-center justify-between mb-1">
-        <span className="text-[10px] text-slate-600">{label}</span>
-        <span className="num text-[10px] font-medium text-slate-800">
-          {format(value)}
-        </span>
-      </div>
-      <input
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={(e) => onChange(parseFloat(e.target.value))}
-        className="accent-sky-500 w-full"
-      />
-      {hint && (
-        <div className="text-[9px] text-slate-500 leading-relaxed mt-0.5">
-          {hint}
-        </div>
-      )}
-    </label>
   );
 }

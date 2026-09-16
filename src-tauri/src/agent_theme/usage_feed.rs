@@ -34,6 +34,9 @@
 //!                         （调试/未来消费预留），旧渲染脚本忽略未知
 //!                         字段，v 保持 2
 //!   models: "GLM-5.3,..."  该轮用到的模型（去重逗号拼接，含子代理），
+//!   sa: {avg,max,min,n}    该轮精确生成样本的速度聚合（V25 附加字段，
+//!                         见下方"速度聚合（sa）"说明；无精确样本时省略
+//!                         本键，旧渲染脚本忽略未知字段）
 //! }],
 //!   runs: [{              进行中轮实时聚合（v2 格式不变的附加字段，旧
 //!                         渲染脚本忽略未知字段，平滑兼容；空数组也输出）
@@ -72,8 +75,55 @@
 //!          空闲会话的速度/状态；runs 行不携带速度（秒级跳动值由
 //!          usage-speed.js 旁路 1 秒覆盖）。旧文件（无这些键）由注入版按
 //!          缺省 "–" 处理，首个导出周期（≤2 秒）自然补齐。
+//!   sa: {avg,max,min,n}    会话树（自身 + 全部后代）精确生成样本的速度
+//!                         聚合（V25 附加字段，口径见下方"速度聚合"节；
+//!                         无精确样本时省略本键）
+//!   models: [{model,tps,avg,max,min,n}]  窗口级模型分组速度（V25 附加
+//!                         字段，按最近使用降序至多 3 组；`model_id` 列
+//!                         缺失的老版本库整个键省略 → 渲染端不渲染模型行）
 //! }] }
 //! ```
+//!
+//! ## 速度聚合（sa / models，V25 附加字段，向后兼容）
+//!
+//! 每轮条与会话条的"平均 / 快 / 慢"聚合、会话条下方的模型分组速度行，
+//! 全部来自同一条**行级唯一真源**：`token_speed::generation_sample`（首字
+//! 到完成的精确生成样本，`first_token_at` / `completed_at` 齐全、时序正常、
+//! `output_tokens > 0`，且要求 `generation` 质量——`request_average` 近似
+//! 样本只服务"最近速度"位，绝不进聚合池，口径与免注入悬浮窗模型速度区
+//! 一字不差）：
+//! - `avg` = Σoutput_tokens × 1000 ÷ Σgeneration_ms（**加权均速**，不是各
+//!   笔速度的算术平均——长样本权重更高，与会话条 Σ 同源）；`max` / `min`
+//!   = 样本池内单笔最快 / 最慢；`n` = 样本笔数（渲染端 `n < 2` 隐藏聚合
+//!   段：单笔样本 均=快=慢 无信息量，隐藏判定在渲染端，数据端照常导出原值）；
+//! - 聚合为**流式累加**（Σ 相加、快慢逐笔比较，任何时刻都不排序、不留
+//!   样本向量），内存 O(键数) 而非 O(样本数)——(session,turn) / session /
+//!   model 三套键各自只留一个聚合值，样本量天然有界（无需按轮截断）；
+//! - 三套键的样本来源与防双计：
+//!   * `turns[].sa` 按 (session_id, turn_id) 聚合：主轮行的并入数值虽含
+//!     子代理 token（turn_usage 口径），但子代理请求在 model_usage 里
+//!     属**子代理会话自己的 (session,turn) 键**，只会进子代理"自身视图行"
+//!     （subagent:1）的 sa，主轮行 sa 只含主会话自身请求——两行并存、各
+//!     计一次，与 runs 侧 m:1 防双计同理无重复路径；
+//!   * `sess[].sa` 按会话树成员并集聚合（每个成员恰好贡献一次，树内任意
+//!     深度都不双计）；
+//!   * `models[]` 按 model_id 分组（窗口级）：key 为模型名，样本按 model_usage
+//!     行去重天然只计一次，与"主轮并入视图 / 子代理自身视图"两行并存无关
+//!     （模型分组不按轮归属，是模型维度的样本池）；`tps` = 该模型最近一笔
+//!     完成请求的速度（按请求排序时刻取最大，同刻后到者胜，与 `update_latest`
+//!     同语义），排序键 last_order 不导出（仅内存，见 ModelSpeedAgg）。
+//!     样本池范围 = 本次目录读取的会话集内全部精确样本：会话集已按导出
+//!     窗口收敛（turns 7 天 + runs + 各自树成员），但同一会话内更早的历史
+//!     请求行也随 session_id 等值查一并读出——对"这个模型最近有多快"这类
+//!     信息属于同会话的历史热度，无正确性影响（也无需额外窗口过滤；模型
+//!     分组不参与轮级/会话级口径）。
+//! - **只随 2 秒大文件发布**（turns[].sa / sess[].sa / models 都在
+//!   usage-data.js）：聚合是稳定值，且遍历是 O(行数) 的顺带累加；1 秒
+//!   usage-speed.js 旁路照旧只推活跃会话与进行中轮的最近速度，**绝不**携带
+//!   聚合字段（V24.1 大小文件分工铁律，见上方 usage-speed.js 节）；
+//! - 老库降级：`model_id` 列缺失时 `models` 键整体省略（渲染端不渲染模型
+//!   行）；两列缺 `first_token_at` / `completed_at`（无精确样本）时两处 sa
+//!   一并省略，既有字段与既有渲染路径零影响。
 //!
 //! `usage-speed.js` 的内容是只含定位键、速度快照和状态的窄数据：
 //! `window.__ZBAR_USAGE_SPEED__ = {v: 1, ts, turns, runs, sess}`。它不包含
@@ -265,8 +315,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::token_speed::{
-    is_completed_status, request_speed_at, PENDING_FRESH_MS, RequestTiming, SpeedSnapshot,
-    SpeedState,
+    generation_sample, is_completed_status, request_speed_at, GenerationSample, PENDING_FRESH_MS,
+    RequestTiming, SpeedSnapshot, SpeedState,
 };
 
 /// 当前唯一支持的目标应用（与 mod.rs 注册表一致；feed 挂载点均由
@@ -306,6 +356,11 @@ const INTERVAL_MS: u64 = 2000;
 /// 速度小文件刷新周期（毫秒）：只读取活动会话的请求级时间字段，绝不
 /// 重写 usage-data.js。可见页面的速度轮询也按此数量级运行。
 const SPEED_INTERVAL_MS: u64 = 1000;
+
+/// 模型分组速度区行数上限：按最近使用降序取前 N 个模型（对齐免注入悬浮
+/// 窗 HUD_MAX_MODEL_ROWS = 3，渲染端会话条下方最多 3 行；数据端截断，
+/// 渲染端再兜一刀）。取 3 是窄窗口下的可读上限，多余模型不进导出
+const MODEL_SPEED_ROWS: usize = 3;
 
 /// 导出连续失败的记日志间隔：连续失败达到该次数的整数倍时记一条 stderr
 /// 日志（150 × INTERVAL_MS ≈ 5 分钟一条——瞬态失败保持静默不刷屏，
@@ -381,6 +436,12 @@ pub(crate) struct UsageTurn {
     /// 该轮最新模型请求的速度；没有有效请求级时间数据时省略。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) speed: Option<SpeedSnapshot>,
+    /// 该轮精确生成样本的速度聚合（V25 附加字段，平均/快/慢 + 样本数）：
+    /// 按 (session_id, turn_id) 聚合——主轮行只含主会话自身请求，子代理
+    /// 请求归子代理"自身视图行"（两行各计一次，无重复路径，见模块头
+    /// "速度聚合"节）。无精确样本时省略本键（旧渲染脚本忽略未知字段）。
+    #[serde(rename = "sa", skip_serializing_if = "Option::is_none")]
+    pub(crate) speed_agg: Option<SpeedAggRow>,
 }
 
 /// 子代理并入聚合明细（usage.js hover 展示用）
@@ -831,7 +892,7 @@ fn export_once(
         // this export. In particular, no bare `turn_id IN (...)` query is
         // issued against the `(session_id, turn_id)` index.
         let speed_sessions = session_ids_for_stats(&conn, &turns, &runs, pending_session)?;
-        let speed_catalog = SpeedCatalog::load(&conn, &speed_sessions).unwrap_or_default();
+        let speed_catalog = SpeedCatalog::load(&conn, &speed_sessions, now_ms).unwrap_or_default();
         attach_turn_speeds(&speed_catalog, &mut turns, now_ms);
         attach_run_speeds(&speed_catalog, &mut runs, now_ms);
         let sess = collect_session_stats_with_catalog(
@@ -842,6 +903,9 @@ fn export_once(
             pending_user.as_ref(),
         )
         .unwrap_or_default();
+        // 模型分组速度区（V25）：窗口级、随 2 秒大文件发布。None = 老库
+        // 缺 model_id 列（省略 models 键，渲染端不渲染模型行）
+        let model_speeds = speed_catalog.model_speeds();
         let next_speed_view = SpeedView::from_rows(&runs, &sess, pending_session);
         flush_export(
             &dir,
@@ -850,6 +914,7 @@ fn export_once(
             &turns,
             &runs,
             &sess,
+            model_speeds.as_deref(),
             pending_user.as_ref().map(|pending| pending.time_created),
             active_tool,
             failure_event,
@@ -886,7 +951,9 @@ fn export_speed_once(speed_view: &mut SpeedView, speed_cache: &mut Option<String
         let conn = crate::zcode_sessions::open_main_db_readonly_uri()?;
         let now_ms = chrono::Utc::now().timestamp_millis();
         let sessions = speed_view.session_ids();
-        let catalog = SpeedCatalog::load(&conn, &sessions)?;
+        // 旁路只用"最近速度"位（大文件字段形状不变）；顺带累加的精确样本
+        // 聚合在此丢弃，绝不进 usage-speed.js（V24.1 大小文件分工铁律）
+        let catalog = SpeedCatalog::load(&conn, &sessions, now_ms)?;
         speed_view.refresh(&catalog, now_ms);
         let dir = store::app_dir(TARGET_APP_ID)?;
         fs::create_dir_all(&dir).map_err(|e| format!("创建主题目录失败: {e}"))?;
@@ -899,7 +966,8 @@ fn export_speed_once(speed_view: &mut SpeedView, speed_cache: &mut Option<String
 /// - 大文件 usage-data.js 按变化写（内容不变跳写，ts 保持最后数据
 ///   变化语义；la/pu/ta/fe 随内容透出——pu/ta/fe 参与内容对比，用户
 ///   发消息、工具开始/结束、失败轮落库本身就是数据变化；sess 为会话
-///   级统计附加数组，同样参与内容对比）；
+///   级统计附加数组、models 为模型分组速度数组（V25），同样参与内容
+///   对比）；
 /// - 心跳小文件 usage-data-hb.js 仅注入版宠物开启时每周期无条件重写
 ///   （大文件跳写周期里心跳仍独立推进）；宠物关闭时停写并清理残留
 ///   （remove 不存在的文件是常态失败，忽略）。
@@ -910,6 +978,7 @@ pub(crate) fn flush_export(
     turns: &[UsageTurn],
     runs: &[UsageRun],
     sess: &[UsageSessionStat],
+    model_speeds: Option<&[ModelSpeed]>,
     pending_user: Option<i64>,
     active_tool: Option<i64>,
     failure_event: Option<i64>,
@@ -931,9 +1000,26 @@ pub(crate) fn flush_export(
         .map_err(|e| format!("序列化进行中轮失败: {e}"))?;
     let sess_json =
         serde_json::to_string(sess).map_err(|e| format!("序列化会话统计失败: {e}"))?;
+    // V25 模型分组速度（窗口级）：None = 老库缺 model_id 列 → 省略 models
+    // 键（渲染端不渲染模型行），既有消费端零影响
+    let models_json = match model_speeds {
+        Some(models) => Some(
+            serde_json::to_string(models).map_err(|e| format!("序列化模型速度失败: {e}"))?,
+        ),
+        None => None,
+    };
     write_if_changed(
-        dir, cache, la, pending_user, active_tool, failure_event, &turns_json, &runs_json,
-        &sess_json, now_ms,
+        dir,
+        cache,
+        la,
+        pending_user,
+        active_tool,
+        failure_event,
+        &turns_json,
+        &runs_json,
+        &sess_json,
+        models_json.as_deref(),
+        now_ms,
     )?;
     if pet_enabled {
         write_heartbeat_file(dir, now_ms)?;
@@ -983,6 +1069,137 @@ struct LatestUsageRequest {
     timing: RequestTiming,
 }
 
+/// 精确生成样本的**流式聚合**（V25，turns/sess 的 sa 与 models 共用）。
+/// 口径见模块头"速度聚合"节：avg 为加权均速（Σ输出 ÷ Σ生成毫秒），
+/// max/min 为样本池内单笔极值，samples 为样本笔数。累加只做整型相加与
+/// 逐笔比较——不保留样本向量、任何时刻都不排序，内存 O(键数)。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct SpeedAgg {
+    /// Σ 合格输出 token（avg 分子）
+    sum_output: i64,
+    /// Σ 生成毫秒 = Σ(completed_at − first_token_at)（avg 分母）
+    sum_ms: i64,
+    /// 样本池内单笔最快速度 t/s
+    max_tps: f64,
+    /// 样本池内单笔最慢速度 t/s
+    min_tps: f64,
+    /// 样本笔数（通过 generation_sample 判定的请求数）
+    samples: i64,
+}
+
+impl SpeedAgg {
+    /// 无样本时为真（空聚合不写 sa 字段：无精确样本与"样本数 1"是两回事）
+    fn is_empty(&self) -> bool {
+        self.samples <= 0
+    }
+
+    /// 加权均速 t/s（Σ输出 ÷ Σ生成毫秒 × 1000）；无样本返回 0（调用方
+    /// 只在非空聚合上取值）
+    fn avg_tps(&self) -> f64 {
+        if self.sum_ms <= 0 || self.samples <= 0 {
+            return 0.0;
+        }
+        self.sum_output as f64 * 1000.0 / self.sum_ms as f64
+    }
+
+    /// 累入一笔精确生成样本：首笔初始化极值，其后逐笔比较 + Σ 相加
+    fn add(&mut self, sample: GenerationSample) {
+        if self.samples <= 0 {
+            self.max_tps = sample.tps;
+            self.min_tps = sample.tps;
+        } else {
+            if sample.tps > self.max_tps {
+                self.max_tps = sample.tps;
+            }
+            if sample.tps < self.min_tps {
+                self.min_tps = sample.tps;
+            }
+        }
+        self.sum_output += sample.output_tokens;
+        self.sum_ms += sample.generation_ms;
+        self.samples += 1;
+    }
+
+    /// 归并另一聚合（会话树按成员归并：Σ 相加、快慢取极值、样本数相加；
+    /// 成员之间互不重叠，无重复计数路径）
+    fn merge(&mut self, other: &SpeedAgg) {
+        if other.is_empty() {
+            return;
+        }
+        if self.is_empty() {
+            *self = *other;
+            return;
+        }
+        self.sum_output += other.sum_output;
+        self.sum_ms += other.sum_ms;
+        if other.max_tps > self.max_tps {
+            self.max_tps = other.max_tps;
+        }
+        if other.min_tps < self.min_tps {
+            self.min_tps = other.min_tps;
+        }
+        self.samples += other.samples;
+    }
+
+    /// 转数据契约形态；空聚合返回 None（不写 sa 键）。SpeedAgg 是 Copy
+    /// 的轻量聚合值，按值消费（调用点均为一次性转换）
+    fn to_row(self) -> Option<SpeedAggRow> {
+        if self.is_empty() || self.sum_ms <= 0 {
+            return None;
+        }
+        Some(SpeedAggRow {
+            avg: self.avg_tps(),
+            max: self.max_tps,
+            min: self.min_tps,
+            n: self.samples,
+        })
+    }
+}
+
+/// sa 字段的数据契约形态（usage-data.js 的 turns[].sa / sess[].sa，键名
+/// 与 usage.js 消费端一字不差；样本不足两个时由渲染端隐藏聚合段——数据
+/// 端照常导出原始值，隐藏属展示语义）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub(crate) struct SpeedAggRow {
+    /// 加权均速 t/s（Σ输出 ÷ Σ生成毫秒 × 1000）
+    avg: f64,
+    /// 样本池内单笔最快 t/s
+    max: f64,
+    /// 样本池内单笔最慢 t/s
+    min: f64,
+    /// 精确生成样本笔数
+    n: i64,
+}
+
+/// 单个模型的聚合中间值：样本流式聚合 + 最近一笔样本的排序键与速度
+///（最近值 = 排序时刻最大者，同刻后到者胜——与 update_latest 同语义）
+#[derive(Debug, Clone, Copy)]
+struct ModelSpeedAgg {
+    agg: SpeedAgg,
+    /// 最近一笔样本的排序时刻（request_order，越大越新）
+    last_order: i64,
+    /// 最近一笔样本的单笔速度 t/s（渲染端三档变色的取值）
+    last_tps: f64,
+}
+
+/// 模型分组速度行（usage-data.js 顶层 models[] 元素；字段语义对齐免注入
+/// 悬浮窗 HudModelSpeed，口径同 SpeedAggRow）。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct ModelSpeed {
+    /// 模型 id 原值（渲染端 truncate 展示 + title 给全名）
+    model: String,
+    /// 该模型最近一笔完成请求的生成速度 t/s
+    tps: f64,
+    /// 该模型样本的加权均速 t/s
+    avg: f64,
+    /// 该模型样本的单笔最快 t/s
+    max: f64,
+    /// 该模型样本的单笔最慢 t/s
+    min: f64,
+    /// 该模型精确生成样本笔数
+    n: i64,
+}
+
 /// All request-speed lookups needed by one usage export. The old implementation
 /// ran one `turn_id IN (...)` query for completed turns, another for runs, and a
 /// third `session_id IN (...)` query for session rows. `turn_id` is not the
@@ -991,14 +1208,32 @@ struct LatestUsageRequest {
 /// qualified read per export and indexes the result by both keys in memory.
 /// The query therefore uses the leading session column of the real index and
 /// never treats a bare turn id as globally indexed.
+///
+/// V25 起同一次读取顺带产出三套精确样本聚合（轮 / 会话 / 模型），见
+/// `by_turn_agg` / `by_session_agg` / `by_model`；样本判定复用
+/// `token_speed::generation_sample`（与免注入悬浮窗模型速度区同源），
+/// 因此本类型的 `load` 需要被观察时刻来拒绝未来时刻的脏行。
 #[derive(Debug, Clone, Default)]
 struct SpeedCatalog {
     by_turn: BTreeMap<(String, String), LatestUsageRequest>,
     by_session: BTreeMap<String, LatestUsageRequest>,
+    /// (session,turn) → 精确样本聚合（turns[].sa 数据源）
+    by_turn_agg: BTreeMap<(String, String), SpeedAgg>,
+    /// session → 精确样本聚合（sess[].sa 数据源，树归并见 agg_for_members）
+    by_session_agg: BTreeMap<String, SpeedAgg>,
+    /// model_id → 聚合（models[] 数据源；model_id 列缺失时恒为空）
+    by_model: BTreeMap<String, ModelSpeedAgg>,
+    /// `model_usage.model_id` 列是否存在（老库探测）：false 时 models 键
+    /// 整体省略（渲染端不渲染模型行），聚合与既有速度路径零影响
+    has_model_id: bool,
 }
 
 impl SpeedCatalog {
-    fn load(conn: &Connection, session_ids: &BTreeSet<String>) -> Result<Self, String> {
+    fn load(
+        conn: &Connection,
+        session_ids: &BTreeSet<String>,
+        observed_at_ms: i64,
+    ) -> Result<Self, String> {
         if session_ids.is_empty()
             || !has_table(conn, "model_usage")
             || !crate::db::has_column(conn, "model_usage", "session_id")
@@ -1014,12 +1249,16 @@ impl SpeedCatalog {
             opt_col(conn, "model_usage", "status"),
         );
         let turn = opt_col(conn, "model_usage", "turn_id");
+        // V25：模型分组速度需要 model_id；老版本库缺列时整列降级 NULL 并
+        // 记下探测结果（导出端据此省略 models 键，静默关闭新功能）
+        let has_model_id = crate::db::has_column(conn, "model_usage", "model_id");
+        let model = opt_col(conn, "model_usage", "model_id");
         let placeholders = vec!["?"; session_ids.len()].join(", ");
         // Do not add ORDER BY: the composite session/turn index can deliver
         // the session-qualified rows directly; latest selection is stable in
         // Rust and does not need a temporary sort.
         let sql = format!(
-            "SELECT session_id, {turn}, {out}, started_at, {first}, {completed}, {duration}, {status} \
+            "SELECT session_id, {turn}, {out}, started_at, {first}, {completed}, {duration}, {status}, {model} \
              FROM model_usage WHERE session_id IN ({placeholders})"
         );
         let mut stmt = conn
@@ -1036,11 +1275,15 @@ impl SpeedCatalog {
                     row.get::<_, Option<i64>>(5)?,
                     row.get::<_, Option<i64>>(6)?,
                     row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
                 ))
             })
             .map_err(|error| format!("读取请求速度失败: {error}"))?;
 
-        let mut catalog = Self::default();
+        let mut catalog = Self {
+            has_model_id,
+            ..Self::default()
+        };
         for row in rows {
             let (
                 Some(session_id),
@@ -1051,6 +1294,7 @@ impl SpeedCatalog {
                 completed_at,
                 duration_ms,
                 status,
+                model_id,
             ) = row.map_err(|error| format!("读取请求速度失败: {error}"))?
             else {
                 continue;
@@ -1070,20 +1314,95 @@ impl SpeedCatalog {
                 duration_ms,
                 request_id: None,
             };
-            let candidate = LatestUsageRequest {
-                order: request_order(&timing),
-                timing,
-            };
+            let order = request_order(&timing);
+            // V25 精确样本聚合：只有通过 generation_sample 判定的行进池
+            //（request_average 近似样本只服务"最近速度"位）。流式累加，
+            // 不保留样本向量、不排序（见模块头"速度聚合"节）。
+            let sample = generation_sample(&timing, observed_at_ms);
+            let candidate = LatestUsageRequest { order, timing };
             update_latest(&mut catalog.by_session, session_id.clone(), candidate.clone());
-            if let Some(turn_id) = turn_id.filter(|value| !value.is_empty()) {
-                update_latest(
-                    &mut catalog.by_turn,
-                    (session_id, turn_id),
-                    candidate,
-                );
+            let turn_key = turn_id
+                .filter(|value| !value.is_empty())
+                .map(|turn_id| (session_id.clone(), turn_id));
+            if let Some(key) = turn_key.clone() {
+                update_latest(&mut catalog.by_turn, key, candidate);
+            }
+            let Some(sample) = sample else { continue };
+            if let Some(key) = turn_key {
+                catalog.by_turn_agg.entry(key).or_default().add(sample);
+            }
+            catalog
+                .by_session_agg
+                .entry(session_id)
+                .or_default()
+                .add(sample);
+            if let Some(model_id) = model_id.filter(|value| !value.is_empty()) {
+                let entry = catalog.by_model.entry(model_id).or_insert(ModelSpeedAgg {
+                    agg: SpeedAgg::default(),
+                    last_order: i64::MIN,
+                    last_tps: 0.0,
+                });
+                // 最近值：排序时刻最大者（同刻后到者胜，与 update_latest
+                // 同语义——行序不稳定时仍确定性收敛）
+                if order >= entry.last_order {
+                    entry.last_order = order;
+                    entry.last_tps = sample.tps;
+                }
+                entry.agg.add(sample);
             }
         }
         Ok(catalog)
+    }
+
+    /// 该 (session,turn) 的精确样本聚合；无样本返回 None（不写 sa 键）
+    fn agg_for_turn(&self, session_id: &str, turn_id: &str) -> Option<SpeedAgg> {
+        self.by_turn_agg
+            .get(&(session_id.to_string(), turn_id.to_string()))
+            .copied()
+    }
+
+    /// 会话树（成员并集）的精确样本聚合；无样本返回 None。每个成员恰好
+    /// 贡献一次自己的会话聚合，树内任意深度都不双计
+    fn agg_for_members(&self, members: &[String]) -> Option<SpeedAgg> {
+        let mut agg = SpeedAgg::default();
+        for member in members {
+            if let Some(one) = self.by_session_agg.get(member) {
+                agg.merge(one);
+            }
+        }
+        (!agg.is_empty()).then_some(agg)
+    }
+
+    /// 窗口级模型分组速度（models[] 数据源）：按最近使用降序、至多
+    /// MODEL_SPEED_ROWS 组。`model_id` 列缺失（老版本库）返回 None →
+    /// 导出端省略 models 键（渲染端不渲染模型行），既有字段零影响
+    fn model_speeds(&self) -> Option<Vec<ModelSpeed>> {
+        if !self.has_model_id {
+            return None;
+        }
+        let mut rows: Vec<(i64, ModelSpeed)> = self
+            .by_model
+            .iter()
+            .filter(|(_, entry)| entry.agg.sum_ms > 0 && entry.agg.samples > 0)
+            .map(|(model, entry)| {
+                (
+                    entry.last_order,
+                    ModelSpeed {
+                        model: model.clone(),
+                        tps: entry.last_tps,
+                        avg: entry.agg.avg_tps(),
+                        max: entry.agg.max_tps,
+                        min: entry.agg.min_tps,
+                        n: entry.agg.samples,
+                    },
+                )
+            })
+            .collect();
+        // 最近使用降序（同刻按模型名稳定排序，与免注入悬浮窗模型速度区
+        // 同口径），截断到 3 行
+        rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.model.cmp(&b.1.model)));
+        rows.truncate(MODEL_SPEED_ROWS);
+        Some(rows.into_iter().map(|(_, row)| row).collect())
     }
 
     fn for_turn(&self, session_id: &str, turn_id: &str) -> Option<&LatestUsageRequest> {
@@ -1195,6 +1514,11 @@ fn attach_turn_speeds(catalog: &SpeedCatalog, turns: &mut [UsageTurn], observed_
             catalog.for_turn(&turn.session_id, &turn.turn_id),
             observed_at_ms,
         );
+        // V25：该轮精确样本聚合（平均/快/慢），随 2 秒大文件发布；无精确
+        // 样本保持 None（不写 sa 键）
+        turn.speed_agg = catalog
+            .agg_for_turn(&turn.session_id, &turn.turn_id)
+            .and_then(|agg| agg.to_row());
     }
 }
 
@@ -1234,8 +1558,9 @@ fn collect_turns_with_speed(
         return Ok(None);
     };
     let session_ids = session_ids_for_rows(&turns, &[], None);
-    let catalog = SpeedCatalog::load(conn, &session_ids)?;
-    attach_turn_speeds(&catalog, &mut turns, chrono::Utc::now().timestamp_millis());
+    let observed_at_ms = chrono::Utc::now().timestamp_millis();
+    let catalog = SpeedCatalog::load(conn, &session_ids, observed_at_ms)?;
+    attach_turn_speeds(&catalog, &mut turns, observed_at_ms);
     Ok(Some((turns, sub_orphans)))
 }
 
@@ -1307,6 +1632,7 @@ fn collect_turns_raw(
                 subagent: None,
                 models: String::new(),
                 speed: None,
+                speed_agg: None,
             })
         })
         .map_err(|e| format!("读取 turn_usage 失败: {e}"))?
@@ -1422,6 +1748,10 @@ fn collect_turns_raw(
             subagent: Some(1),
             models: String::new(),
             speed: None,
+            // V25 速度聚合由 attach_turn_speeds 在同一导出内按
+            // (session,turn) 键填充（自身视图行取子代理会话自己的样本，
+            // 与主轮并入视图各计一次）
+            speed_agg: None,
         })
         .collect();
     let (merged_pairs, sub_orphans) = merge_subagent_turns(&mut turns, subs);
@@ -2015,6 +2345,11 @@ pub(crate) struct UsageSessionStat {
     /// 当前会话树的速度状态；进行中且没有本轮确认请求时为 measuring。
     #[serde(rename = "speedState")]
     speed_state: SpeedState,
+    /// 会话树（自身 + 全部后代）精确生成样本的速度聚合（V25 附加字段，
+    /// 口径与 turns[].sa 同源：首字到完成的精确样本，成员互不重叠不双
+    /// 计）。无精确样本时省略本键。
+    #[serde(rename = "sa", skip_serializing_if = "Option::is_none")]
+    speed_agg: Option<SpeedAggRow>,
     /// Internal only: members used to calculate the root session's lifetime
     /// total and latest speed. The small speed side channel needs this after
     /// the full history export, but it is not part of either JS contract.
@@ -2066,7 +2401,7 @@ pub(crate) fn collect_session_stats(
     runs: &[UsageRun],
 ) -> Result<Vec<UsageSessionStat>, String> {
     let session_ids = session_ids_for_stats(conn, turns, runs, None)?;
-    let catalog = SpeedCatalog::load(conn, &session_ids)?;
+    let catalog = SpeedCatalog::load(conn, &session_ids, chrono::Utc::now().timestamp_millis())?;
     collect_session_stats_with_catalog(conn, turns, runs, &catalog, None)
 }
 
@@ -2200,6 +2535,12 @@ fn collect_session_stats_with_catalog(
         } else {
             SpeedState::Unavailable
         };
+        // V25：会话树精确样本聚合（平均/快/慢），随 2 秒大文件发布。与
+        // 上方的速度快照独立：快照要"最近一笔"（可能是近似样本），聚合
+        // 只要精确生成样本；无精确样本时省略 sa 键
+        let speed_agg = catalog
+            .agg_for_members(members)
+            .and_then(|agg| agg.to_row());
         out.push(UsageSessionStat {
             session_id: target.clone(),
             total: agg.total(),
@@ -2209,6 +2550,7 @@ fn collect_session_stats_with_catalog(
             requests: agg.requests,
             speed,
             speed_state,
+            speed_agg,
             member_session_ids: members.clone(),
             round_started_at,
             generating,
@@ -2264,7 +2606,9 @@ pub(crate) fn last_activity_ms(
 /// pu 为待处理用户消息时刻（V5 附加字段，null = 无待处理消息，宠物
 /// 预判通道的消费键，见模块头 pu 信号说明）；ta/fe 为活跃工具与失败
 /// 轮事件时刻（V6 附加字段，null = 无信号，宠物新状态通道的消费键，
-/// 见模块头 ta/fe 信号说明；旧渲染脚本按未知字段忽略）。
+/// 见模块头 ta/fe 信号说明；旧渲染脚本按未知字段忽略）；models_json
+/// 为模型分组速度数组（V25 附加字段，None = 老库缺 model_id 列 → 整个
+/// 键不写，渲染端据此不渲染模型行）。
 fn render_usage_js(
     ts_ms: i64,
     la_ms: i64,
@@ -2274,13 +2618,18 @@ fn render_usage_js(
     turns_json: &str,
     runs_json: &str,
     sess_json: &str,
+    models_json: Option<&str>,
 ) -> String {
     let opt = |v: Option<i64>| match v {
         Some(t) => t.to_string(),
         None => "null".to_string(),
     };
+    let models = match models_json {
+        Some(json) => format!(",\"models\":{json}"),
+        None => String::new(),
+    };
     format!(
-        "window.__ZBAR_USAGE__ = {{\"v\":2,\"ts\":{ts_ms},\"la\":{la_ms},\"pu\":{},\"ta\":{},\"fe\":{},\"turns\":{turns_json},\"runs\":{runs_json},\"sess\":{sess_json}}};\n",
+        "window.__ZBAR_USAGE__ = {{\"v\":2,\"ts\":{ts_ms},\"la\":{la_ms},\"pu\":{},\"ta\":{},\"fe\":{},\"turns\":{turns_json},\"runs\":{runs_json},\"sess\":{sess_json}{models}}};\n",
         opt(pending_user),
         opt(active_tool),
         opt(failure_event)
@@ -2291,7 +2640,9 @@ fn render_usage_js(
 /// keys plus a snapshot/null, never token counters or historical turn fields.
 /// A3：历史轮不进旁路（`turns` 恒为空数组，保留键以维持 v1 文件形态，
 /// 旧注入脚本按空数组合并无副作用）；稳定的历史轮速度随 2 秒大文件
-/// 发布。
+/// 发布。V25 的速度聚合（turns[].sa / sess[].sa / 顶层 models）**绝不
+/// 进旁路**：聚合是稳定值、样本遍历也只在 2 秒拍做（V24.1 大小文件
+/// 分工铁律——旁路只含活跃会话与进行中轮的最近速度，见模块头）。
 fn render_speed_js(
     ts_ms: i64,
     runs: &[SpeedRunEntry],
@@ -2359,7 +2710,9 @@ fn write_heartbeat_file(dir: &Path, now_ms: i64) -> Result<(), String> {
 /// 随内容参与变化语义——活动时刻变化本身就是数据变化；ts 字段不参与
 /// 比较——若参与则每轮 ts 都不同，跳写失效，ZCode 渲染层每 2 秒白重载
 /// 一次文件）；需要写出时先写 .tmp 再 rename，Electron 侧不会读到半截
-/// 文件。返回是否实际写盘。
+/// 文件。返回是否实际写盘。models_json（V25 模型分组速度）同样参与对比：
+/// 模型速度推进而 turns/runs/sess 未变时也要刷新文件，None（老库缺列）
+/// 用 '-' 占位与任何数组字节互不相同。
 fn write_if_changed(
     dir: &Path,
     cache: &mut Option<String>,
@@ -2370,15 +2723,22 @@ fn write_if_changed(
     turns_json: &str,
     runs_json: &str,
     sess_json: &str,
+    models_json: Option<&str>,
     ts_ms: i64,
 ) -> Result<bool, String> {
-    let mut payload =
-        String::with_capacity(turns_json.len() + runs_json.len() + sess_json.len() + 16);
+    let mut payload = String::with_capacity(
+        turns_json.len() + runs_json.len() + sess_json.len() + models_json.map_or(1, str::len) + 16,
+    );
     payload.push_str(turns_json);
     payload.push('\u{1}'); /* 不可见分隔符：防多段拼接的边界歧义 */
     payload.push_str(runs_json);
     payload.push('\u{1}');
     payload.push_str(sess_json);
+    payload.push('\u{1}');
+    match models_json {
+        Some(json) => payload.push_str(json),
+        None => payload.push('-'),
+    }
     payload.push('\u{1}');
     /* 附加信号形态并入对比键：None（'-'）与任一时刻值互不相同 */
     for sig in [pending_user, active_tool, failure_event] {
@@ -2404,6 +2764,7 @@ fn write_if_changed(
             turns_json,
             runs_json,
             sess_json,
+            models_json,
         ),
     )
     .map_err(|e| format!("写入 {} 失败: {e}", tmp.display()))?;
@@ -2444,6 +2805,7 @@ mod tests {
             subagent: None,
             models: String::new(),
             speed: None,
+            speed_agg: None,
         }
     }
 
@@ -2491,7 +2853,7 @@ mod tests {
             reasoning: 0,
         });
         t.models = "GLM-5.3".to_string();
-        let turns = vec![t];
+        let turns = vec![t.clone()];
         let json = serde_json::to_string(&turns).unwrap();
         // 短键名契约一字不差（usage.js 按名消费）
         for key in [
@@ -2539,16 +2901,7 @@ mod tests {
         // 字段（model_usage 全量合计）；旧消费端按未知字段忽略；
         // runs/sess 为空时也输出；心跳已拆独立小文件 usage-data-hb.js，
         // 大文件不再含 hb 字段）
-        let file = render_usage_js(
-            12345,
-            12000,
-            Some(11000),
-            Some(10500),
-            None,
-            &json,
-            "[]",
-            "[]",
-        );
+        let file = render_usage_js(12345, 12000, Some(11000), Some(10500), None, &json, "[]", "[]", None, );
         assert!(
             file.starts_with(
                 "window.__ZBAR_USAGE__ = {\"v\":2,\"ts\":12345,\"la\":12000,\"pu\":11000,\"ta\":10500,\"fe\":null,\"turns\":"
@@ -2556,7 +2909,7 @@ mod tests {
             "{file}"
         );
         // pu/ta/fe 缺失两态之一：None → null（旧消费端与宠物核心按缺失兼容）
-        let file_null = render_usage_js(12345, 12000, None, None, Some(9000), &json, "[]", "[]");
+        let file_null = render_usage_js(12345, 12000, None, None, Some(9000), &json, "[]", "[]", None);
         assert!(file_null.contains(",\"pu\":null,"), "{file_null}");
         assert!(file_null.contains(",\"ta\":null,"), "{file_null}");
         assert!(file_null.contains(",\"fe\":9000,"), "{file_null}");
@@ -2565,6 +2918,38 @@ mod tests {
         // sess 附加数组（V2 格式不变的追加字段，空数组也输出）
         assert!(file.contains(",\"sess\":[]};\n"), "{file}");
         assert!(file.ends_with("};\n"));
+        // V25 速度聚合短键 sa（turns 行与会话条按名消费）：空聚合不出现
+        //（上面的 t 未设 speed_agg → 键省略，旧渲染脚本零影响），非空时
+        // 为 {avg,max,min,n} 紧凑形态
+        assert!(!json.contains("\"sa\":"), "无精确样本不应写 sa 键：{json}");
+        t.speed_agg = Some(SpeedAggRow {
+            avg: 164.0,
+            max: 300.0,
+            min: 20.0,
+            n: 3,
+        });
+        let json_sa = serde_json::to_string(&vec![t]).unwrap();
+        assert!(
+            json_sa.contains("\"sa\":{\"avg\":164.0,\"max\":300.0,\"min\":20.0,\"n\":3}"),
+            "sa 短键形态不符：{json_sa}"
+        );
+        // V25 顶层 models 键（None = 老库缺列 → 整个键不写；Some 时在 sess
+        // 之后作末尾字段）
+        let file_no_models = render_usage_js(1, 1, None, None, None, "[]", "[]", "[]", None);
+        assert!(!file_no_models.contains("\"models\":["), "{file_no_models}");
+        let file_models = render_usage_js(
+            1,
+            1,
+            None,
+            None,
+            None,
+            "[]",
+            "[]",
+            "[]",
+            Some("[{\"model\":\"M1\",\"tps\":100.0,\"avg\":90.0,\"max\":120.0,\"min\":80.0,\"n\":3}]"),
+        );
+        assert!(file_models.contains("\"sess\":[],\"models\":["), "{file_models}");
+        assert!(file_models.ends_with("]};\n"), "{file_models}");
     }
 
     #[test]
@@ -2594,6 +2979,7 @@ mod tests {
             requests: 1,
             speed: Some(snapshot),
             speed_state: SpeedState::Recent,
+            speed_agg: None,
             member_session_ids: vec!["sess_speed".to_string()],
             round_started_at: None,
             generating: false,
@@ -2651,18 +3037,7 @@ mod tests {
                 request_id: None,
             }),
         };
-        flush_export(
-            &dir,
-            &mut history_cache,
-            false,
-            &turns,
-            &[run_row.clone()],
-            &sessions,
-            None,
-            None,
-            None,
-            12_000,
-        )
+        flush_export(&dir, &mut history_cache, false, &turns, &[run_row.clone()], &sessions, None, None, None, None, 12_000, )
         .unwrap();
         let history = fs::read_to_string(dir.join(store::USAGE_DATA_FILE)).unwrap();
         assert!(
@@ -2859,6 +3234,7 @@ mod tests {
                     request_id: None,
                 }),
                 speed_state: SpeedState::Recent,
+                speed_agg: None,
                 member_session_ids: vec![format!("sess_idle_{i}")],
                 round_started_at: None,
                 generating: false,
@@ -2873,6 +3249,7 @@ mod tests {
             requests: 4,
             speed: None,
             speed_state: SpeedState::Measuring,
+            speed_agg: None,
             member_session_ids: vec![
                 "sess_active".to_string(),
                 "sess_subagent_agent_1".to_string(),
@@ -3086,7 +3463,7 @@ mod tests {
         let mut cache: Option<String> = None;
         // 首次：写盘（la 为最后活动时刻，随内容透出）
         assert!(
-            write_if_changed(&dir, &mut cache, 900, None, None, None, "[{\"turn\":\"a\"}]", "[]", "[]", 1000)
+            write_if_changed(&dir, &mut cache, 900, None, None, None, "[{\"turn\":\"a\"}]", "[]", "[]", None, 1000)
                 .unwrap()
         );
         let first = fs::read_to_string(&target).unwrap();
@@ -3100,7 +3477,7 @@ mod tests {
         // 内容无变化（仅 ts/la 参数不同）→ 跳写，文件保持旧值（写放大
         // 修复：大文件恢复跳写策略，心跳由独立小文件承担）
         assert!(
-            !write_if_changed(&dir, &mut cache, 900, None, None, None, "[{\"turn\":\"a\"}]", "[]", "[]", 2000)
+            !write_if_changed(&dir, &mut cache, 900, None, None, None, "[{\"turn\":\"a\"}]", "[]", "[]", None, 2000)
                 .unwrap()
         );
         assert_eq!(
@@ -3110,7 +3487,7 @@ mod tests {
         );
         // turns 内容变化 → 重写为新 ts
         assert!(
-            write_if_changed(&dir, &mut cache, 900, None, None, None, "[{\"turn\":\"b\"}]", "[]", "[]", 3000)
+            write_if_changed(&dir, &mut cache, 900, None, None, None, "[{\"turn\":\"b\"}]", "[]", "[]", None, 3000)
                 .unwrap()
         );
         let third = fs::read_to_string(&target).unwrap();
@@ -3119,18 +3496,7 @@ mod tests {
         // runs 内容变化（turns 不变）同样触发重写——进行中轮实时聚合
         // 每 2 秒跳动天然走到这里
         assert!(
-            write_if_changed(
-                &dir,
-                &mut cache,
-                900,
-                None,
-                None,
-                None,
-                "[{\"turn\":\"b\"}]",
-                "[{\"sess\":\"s1\"}]",
-                "[]",
-                4000
-            )
+            write_if_changed(&dir, &mut cache, 900, None, None, None, "[{\"turn\":\"b\"}]", "[{\"sess\":\"s1\"}]", "[]", None, 4000)
             .unwrap()
         );
         let fourth = fs::read_to_string(&target).unwrap();
@@ -3139,18 +3505,7 @@ mod tests {
         // sess 内容变化（turns/runs 均不变）同样触发重写——会话级统计
         //（全量合计随请求落库推进）本身就是数据变化
         assert!(
-            write_if_changed(
-                &dir,
-                &mut cache,
-                900,
-                None,
-                None,
-                None,
-                "[{\"turn\":\"b\"}]",
-                "[{\"sess\":\"s1\"}]",
-                "[{\"s\":\"s1\",\"tt\":123}]",
-                4500
-            )
+            write_if_changed(&dir, &mut cache, 900, None, None, None, "[{\"turn\":\"b\"}]", "[{\"sess\":\"s1\"}]", "[{\"s\":\"s1\",\"tt\":123}]", None, 4500)
             .unwrap()
         );
         let fourth_half = fs::read_to_string(&target).unwrap();
@@ -3162,18 +3517,7 @@ mod tests {
         // pu 变化（turns/runs/sess 均不变）同样触发重写——用户发消息本身就是
         // 数据变化（V5）：ts 刷新、pu 透出、la 取大（900 → 5000）
         assert!(
-            write_if_changed(
-                &dir,
-                &mut cache,
-                5000,
-                Some(5000),
-                None,
-                None,
-                "[{\"turn\":\"b\"}]",
-                "[{\"sess\":\"s1\"}]",
-                "[{\"s\":\"s1\",\"tt\":123}]",
-                5000
-            )
+            write_if_changed(&dir, &mut cache, 5000, Some(5000), None, None, "[{\"turn\":\"b\"}]", "[{\"sess\":\"s1\"}]", "[{\"s\":\"s1\",\"tt\":123}]", None, 5000)
             .unwrap()
         );
         let fifth = fs::read_to_string(&target).unwrap();
@@ -3183,18 +3527,7 @@ mod tests {
         // ta/fe 变化（turns/runs/pu 均不变）同样触发重写——工具开始
         // （V6）本身就是数据变化：ts 刷新、ta/fe 透出、ta 参与 la 取大
         assert!(
-            write_if_changed(
-                &dir,
-                &mut cache,
-                6000,
-                Some(5000),
-                Some(6000),
-                None,
-                "[{\"turn\":\"b\"}]",
-                "[{\"sess\":\"s1\"}]",
-                "[{\"s\":\"s1\",\"tt\":123}]",
-                6000
-            )
+            write_if_changed(&dir, &mut cache, 6000, Some(5000), Some(6000), None, "[{\"turn\":\"b\"}]", "[{\"sess\":\"s1\"}]", "[{\"s\":\"s1\",\"tt\":123}]", None, 6000)
             .unwrap()
         );
         let sixth = fs::read_to_string(&target).unwrap();
@@ -3202,22 +3535,24 @@ mod tests {
         assert!(sixth.contains("\"ta\":6000"), "{sixth}");
         assert!(sixth.contains("\"la\":6000"), "ta 应参与 la 取大：{sixth}");
         assert!(
-            write_if_changed(
-                &dir,
-                &mut cache,
-                6000,
-                Some(5000),
-                Some(6000),
-                Some(5500),
-                "[{\"turn\":\"b\"}]",
-                "[{\"sess\":\"s1\"}]",
-                "[{\"s\":\"s1\",\"tt\":123}]",
-                7000
-            )
+            write_if_changed(&dir, &mut cache, 6000, Some(5000), Some(6000), Some(5500), "[{\"turn\":\"b\"}]", "[{\"sess\":\"s1\"}]", "[{\"s\":\"s1\",\"tt\":123}]", None, 7000)
             .unwrap()
         );
         let seventh = fs::read_to_string(&target).unwrap();
         assert!(seventh.contains("\"fe\":5500"), "{seventh}");
+        // V25 models 变化（turns/runs/sess/pu/ta/fe 均不变）同样触发重写
+        //——模型分组速度推进本身就是数据变化（ts 刷新、models 透出）；
+        // 缺列（None）与存在（数组字节）之间切换同样参与对比
+        assert!(
+            write_if_changed(&dir, &mut cache, 6000, Some(5000), Some(6000), Some(5500), "[{\"turn\":\"b\"}]", "[{\"sess\":\"s1\"}]", "[{\"s\":\"s1\",\"tt\":123}]", Some("[{\"model\":\"M1\",\"tps\":100.0,\"avg\":90.0,\"max\":120.0,\"min\":80.0,\"n\":3}]"), 8000)
+            .unwrap()
+        );
+        let eighth = fs::read_to_string(&target).unwrap();
+        assert!(eighth.contains("\"ts\":8000"), "{eighth}");
+        assert!(
+            eighth.contains("\"sess\":[{\"s\":\"s1\",\"tt\":123}],\"models\":[{\"model\":\"M1\""),
+            "models 应作为末尾字段随大文件发布：{eighth}"
+        );
         // 原子写不留 .tmp 残留
         assert!(!dir.join(format!("{}.tmp", store::USAGE_DATA_FILE)).exists());
 
@@ -3278,24 +3613,25 @@ mod tests {
             requests: 2,
             speed: None,
             speed_state: SpeedState::Unavailable,
+            speed_agg: None,
             member_session_ids: vec!["sess_1".to_string()],
             round_started_at: None,
             generating: false,
         }];
-        flush_export(&dir, &mut cache, false, &turns, &[], &sess, None, None, None, 1000).unwrap();
+        flush_export(&dir, &mut cache, false, &turns, &[], &sess, None, None, None, None, 1000).unwrap();
         assert!(big.exists(), "首次导出应写大文件");
         let first = fs::read_to_string(&big).unwrap();
         assert!(first.contains("\"ts\":1000"), "{first}");
         assert!(first.contains("\"pu\":null"), "{first}");
         assert!(!hb.exists(), "宠物关闭应清理心跳残留");
         // 内容不变 → 大文件跳写（mtime 不变以内容一致性表达），心跳仍不写
-        flush_export(&dir, &mut cache, false, &turns, &[], &sess, None, None, None, 2000).unwrap();
+        flush_export(&dir, &mut cache, false, &turns, &[], &sess, None, None, None, None, 2000).unwrap();
         assert_eq!(fs::read_to_string(&big).unwrap(), first, "内容未变不应重写大文件");
         assert!(!hb.exists(), "宠物关闭周期不应写心跳文件");
 
         // ---- 宠物开：心跳每周期无条件刷新、大文件仍按变化写 ----
         let mut cache_on: Option<String> = None;
-        flush_export(&dir, &mut cache_on, true, &turns, &[], &sess, Some(4500), None, None, 3000).unwrap();
+        flush_export(&dir, &mut cache_on, true, &turns, &[], &sess, None, Some(4500), None, None, 3000).unwrap();
         let big_on = fs::read_to_string(&big).unwrap();
         assert!(big_on.contains("\"ts\":3000"), "首次写盘 ts 应为当前周期");
         assert!(big_on.contains("\"la\":5000"), "la 应随内容透出：{big_on}");
@@ -3308,7 +3644,7 @@ mod tests {
             "window.__ZBAR_USAGE_HB__ = 3000;\n"
         );
         // 下一周期内容不变：大文件跳写（保持旧 ts），心跳刷新为当前周期
-        flush_export(&dir, &mut cache_on, true, &turns, &[], &sess, Some(4500), None, None, 5000).unwrap();
+        flush_export(&dir, &mut cache_on, true, &turns, &[], &sess, None, Some(4500), None, None, 5000).unwrap();
         assert_eq!(
             fs::read_to_string(&big).unwrap(),
             big_on,
@@ -3769,13 +4105,356 @@ mod tests {
         let old_elapsed = old_started.elapsed();
         let new_started = Instant::now();
         for _ in 0..20 {
-            let _ = SpeedCatalog::load(&conn, &sessions).unwrap();
+            let _ = SpeedCatalog::load(&conn, &sessions, 0).unwrap();
         }
         let new_elapsed = new_started.elapsed();
         eprintln!(
             "[speed-query-plan] 20x elapsed old={old_elapsed:?} new={new_elapsed:?}"
         );
         assert!(new_elapsed < old_elapsed, "联合索引查询应明显少于全表扫");
+
+        drop(conn);
+        let _ = fs::remove_file(&path);
+    }
+
+
+    /// V25 聚合测试库：model_usage 带精确样本所需列（first_token_at /
+    /// completed_at / status / model_id），turn_usage 只保留并入与自身
+    /// 视图行所需的最小列集
+    fn agg_db(name: &str) -> (Connection, std::path::PathBuf) {
+        let (conn, path) = temp_db(name);
+        conn.execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT);
+             CREATE TABLE turn_usage (
+                session_id TEXT, turn_id TEXT, status TEXT, started_at INTEGER,
+                completed_at INTEGER, user_message_id TEXT,
+                input_tokens INTEGER, output_tokens INTEGER, cache_read_input_tokens INTEGER,
+                model_request_count INTEGER);
+             CREATE TABLE model_usage (
+                session_id TEXT, turn_id TEXT, started_at INTEGER, status TEXT,
+                output_tokens INTEGER, input_tokens INTEGER, first_token_at INTEGER,
+                completed_at INTEGER, duration_ms INTEGER, model_id TEXT);",
+        )
+        .unwrap();
+        (conn, path)
+    }
+
+    /// 写入一笔精确生成样本。时间三件套打包为 (started, first, completed)
+    /// 元组（明细见调用点注释：生成毫秒 = completed − first，单笔 tps 由
+    /// 输出 token ÷ 生成毫秒决定）
+    fn insert_sample(
+        conn: &Connection,
+        sess: &str,
+        turn: &str,
+        (started, first, completed): (i64, i64, i64),
+        output: i64,
+        model: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO model_usage (session_id, turn_id, started_at, status, \
+                output_tokens, input_tokens, first_token_at, completed_at, duration_ms, model_id) \
+             VALUES (?1, ?2, ?3, 'completed', ?4, 10, ?5, ?6, 0, ?7)",
+            rusqlite::params![sess, turn, started, output, first, completed, model],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn 速度聚合_加权均速与单笔快慢() {
+        // 口径：avg = Σ输出 ÷ Σ生成毫秒（加权均速，不是各笔速度的算术
+        // 平均）、max/min = 样本池单笔极值、n = 精确样本笔数
+        let (conn, path) = agg_db("agg-weighted");
+        conn.execute_batch(
+            "INSERT INTO session VALUES ('sess_1', NULL);
+             INSERT INTO turn_usage VALUES ('sess_1', 'turn_1', 'completed', 1000, 9000, 'msg_1', 100, 500, 0, 3);",
+        )
+        .unwrap();
+        // 三笔样本：100 t/s（1000ms）、300 t/s（1000ms）、20 t/s（500ms）
+        insert_sample(&conn, "sess_1", "turn_1", (1_000, 2_000, 3_000), 100, "GLM-5.3");
+        insert_sample(&conn, "sess_1", "turn_1", (3_100, 4_000, 5_000), 300, "GLM-5.3");
+        insert_sample(&conn, "sess_1", "turn_1", (5_100, 6_000, 6_500), 10, "GLM-5.3");
+
+        let (turns, _) = collect_turns_with_speed(&conn, 0).unwrap().expect("应有输出");
+        let sa = turns[0].speed_agg.expect("应有速度聚合");
+        // 加权均速 = (100+300+10) × 1000 ÷ (1000+1000+500) = 164.0
+        //（算术平均 140.0 是错误口径，二者必须能区分）
+        assert!((sa.avg - 164.0).abs() < 1e-9, "avg 应为加权均速：{sa:?}");
+        assert!((sa.max - 300.0).abs() < 1e-9, "max 应为单笔最快：{sa:?}");
+        assert!((sa.min - 20.0).abs() < 1e-9, "min 应为单笔最慢：{sa:?}");
+        assert_eq!(sa.n, 3, "样本笔数：{sa:?}");
+
+        // 会话行同口径（同会话树只有本成员，聚合值应一致）
+        let sess = collect_session_stats(&conn, &turns, &[]).unwrap();
+        let sess_sa = sess[0].speed_agg.expect("会话行应有聚合");
+        assert_eq!(sess_sa, sa, "单成员会话树聚合应与轮级一致");
+
+        // 单笔样本：avg=max=min、n=1（渲染端据此隐藏聚合段，数据端照常导出）
+        let (conn2, path2) = agg_db("agg-single");
+        conn2
+            .execute_batch(
+                "INSERT INTO session VALUES ('sess_1', NULL);
+                 INSERT INTO turn_usage VALUES ('sess_1', 'turn_1', 'completed', 1000, 9000, 'msg_1', 100, 500, 0, 1);",
+            )
+            .unwrap();
+        insert_sample(&conn2, "sess_1", "turn_1", (1_000, 2_000, 3_000), 100, "GLM-5.3");
+        let (turns2, _) = collect_turns_with_speed(&conn2, 0).unwrap().expect("应有输出");
+        let sa2 = turns2[0].speed_agg.expect("单笔样本也应导出聚合");
+        assert_eq!((sa2.avg, sa2.max, sa2.min, sa2.n), (100.0, 100.0, 100.0, 1), "{sa2:?}");
+
+        drop(conn);
+        drop(conn2);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&path2);
+    }
+
+    #[test]
+    fn 速度聚合_近似样本与非精确行不进池() {
+        // request_average（无 first_token_at，只有总耗时）只服务"最近速度"
+        // 位，绝不进聚合池；未完成（running）与零输出行同样不进池；全部
+        // 被拒时省略 sa 键（渲染端整段不出现）
+        let (conn, path) = agg_db("agg-precise-only");
+        conn.execute_batch(
+            "INSERT INTO session VALUES ('sess_1', NULL);
+             INSERT INTO turn_usage VALUES ('sess_1', 'turn_1', 'completed', 1000, 9000, 'msg_1', 100, 500, 0, 3);
+             -- 近似样本（无首字时刻）：若误入池会拉出极不合理的速度
+             INSERT INTO model_usage (session_id, turn_id, started_at, status,
+                output_tokens, input_tokens, first_token_at, completed_at, duration_ms, model_id)
+             VALUES ('sess_1', 'turn_1', 100, 'completed', 9000, 10, NULL, 200, 0, 'GLM-5.3');
+             -- 进行中行：未完成不得进池
+             INSERT INTO model_usage (session_id, turn_id, started_at, status,
+                output_tokens, input_tokens, first_token_at, completed_at, duration_ms, model_id)
+             VALUES ('sess_1', 'turn_1', 200, 'running', 9000, 10, 150, NULL, 0, 'GLM-5.3');
+             -- 零输出行：无有效速度
+             INSERT INTO model_usage (session_id, turn_id, started_at, status,
+                output_tokens, input_tokens, first_token_at, completed_at, duration_ms, model_id)
+             VALUES ('sess_1', 'turn_1', 300, 'completed', 0, 10, 350, 400, 0, 'GLM-5.3');",
+        )
+        .unwrap();
+        let (turns, _) = collect_turns_with_speed(&conn, 0).unwrap().expect("应有输出");
+        assert!(
+            turns[0].speed_agg.is_none(),
+            "非精确样本不得进聚合池（应省略 sa）：{:?}",
+            turns[0].speed_agg
+        );
+        // 最近速度位走既有通道：本库最新 completed 行是零输出行 → 速度位
+        // 同样为空（V24.1 起"最新无效会清空"），聚合段已整套省略，
+        // 渲染端两处都不显示（与 V24 行为一致）
+        assert!(turns[0].speed.is_none(), "最新零输出行不应产出速度");
+
+        // 补一笔精确样本 → 聚合与最近速度位同时出现（两条通道互不干扰）
+        insert_sample(&conn, "sess_1", "turn_1", (1_000, 1_100, 1_300), 200, "GLM-5.3");
+        let (turns, _) = collect_turns_with_speed(&conn, 0).unwrap().expect("应有输出");
+        let sa = turns[0].speed_agg.expect("应出现聚合");
+        assert_eq!((sa.n, sa.max, sa.min), (1, 1000.0, 1000.0), "{sa:?}");
+        let speed = turns[0].speed.as_ref().expect("最近速度位应同时可用");
+        assert!((speed.value - 1000.0).abs() < 1e-9, "最近速度位不受聚合影响：{speed:?}");
+
+        drop(conn);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn 模型分组_按最近使用排序并截断三个() {
+        // 窗口级模型分组：按最近一笔样本的排序时刻降序、至多 3 组；
+        // tps = 最近一笔的速度，avg/max/min/n 与轮级/会话级共用同一精确
+        // 样本口径
+        let (conn, path) = agg_db("model-speeds");
+        conn.execute_batch(
+            "INSERT INTO session VALUES ('sess_1', NULL);
+             INSERT INTO turn_usage VALUES ('sess_1', 'turn_1', 'completed', 1000, 9000, 'msg_1', 100, 500, 0, 9);",
+        )
+        .unwrap();
+        // M1 两笔且最旧（校验最近值与聚合分开 + 被截断），M4 最新
+        insert_sample(&conn, "sess_1", "turn_1", (1_000, 1_100, 1_200), 100, "M1");
+        insert_sample(&conn, "sess_1", "turn_1", (1_300, 1_400, 1_500), 500, "M1");
+        insert_sample(&conn, "sess_1", "turn_1", (2_000, 2_100, 2_300), 30, "M2");
+        insert_sample(&conn, "sess_1", "turn_1", (3_000, 3_100, 3_200), 200, "M3");
+        insert_sample(&conn, "sess_1", "turn_1", (4_000, 4_100, 4_200), 50, "M4");
+
+        let ids = session_ids_for_rows(
+            &collect_turns(&conn, 0).unwrap().unwrap().0,
+            &[],
+            None,
+        );
+        let catalog = SpeedCatalog::load(&conn, &ids, 9_999_999).unwrap();
+        let models = catalog.model_speeds().expect("model_id 列存在应有输出");
+        let names: Vec<&str> = models.iter().map(|m| m.model.as_str()).collect();
+        assert_eq!(names, vec!["M4", "M3", "M2"], "应最近使用降序且截断到 3 组：{models:?}");
+        // M4：单笔样本（50 ÷ 100ms = 500 t/s），最近值 = 聚合值
+        let m4 = models.iter().find(|m| m.model == "M4").unwrap();
+        assert!((m4.tps - 500.0).abs() < 1e-9, "tps 应为最近一笔：{m4:?}");
+        assert_eq!(m4.n, 1);
+        // 被截断的 M1（两笔：1000 t/s 与 5000 t/s）仍留在目录内，只是不出
+        // 现在渲染出口；最近值取排序时刻最大者（completed 1500 那笔）
+        let m1 = catalog
+            .by_model
+            .get("M1")
+            .expect("M1 应仍在目录内（仅出口截断）");
+        assert!((m1.last_tps - 5000.0).abs() < 1e-9, "最近值应取排序时刻最大者");
+        assert_eq!(m1.agg.samples, 2);
+        assert!((m1.agg.max_tps - 5000.0).abs() < 1e-9);
+        assert!((m1.agg.min_tps - 1000.0).abs() < 1e-9);
+
+        drop(conn);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn 模型分组_老库缺列不写models键且导出照常() {
+        // 老版本库 model_usage 无 model_id 列：整套模型分组静默关闭
+        //（model_speeds 返回 None → 大文件省略 models 键，渲染端不渲染
+        // 模型行），既有字段与速度聚合零影响
+        let (conn, path) = temp_db("model-legacy");
+        conn.execute_batch(
+            "CREATE TABLE turn_usage (
+                session_id TEXT, turn_id TEXT, status TEXT, started_at INTEGER,
+                completed_at INTEGER, output_tokens INTEGER, model_request_count INTEGER);
+             CREATE TABLE model_usage (
+                session_id TEXT, turn_id TEXT, started_at INTEGER, status TEXT,
+                output_tokens INTEGER, first_token_at INTEGER, completed_at INTEGER);
+             INSERT INTO turn_usage VALUES ('sess_1', 'turn_1', 'completed', 1000, 3000, 100, 1);
+             INSERT INTO model_usage VALUES
+                ('sess_1', 'turn_1', 1000, 'completed', 100, 1100, 1300);",
+        )
+        .unwrap();
+        let (turns, _) = collect_turns_with_speed(&conn, 0).unwrap().expect("应有输出");
+        assert!(turns[0].speed_agg.is_some(), "缺 model_id 列不影响速度聚合");
+        let catalog = SpeedCatalog::load(
+            &conn,
+            &session_ids_for_rows(&turns, &[], None),
+            9_999_999,
+        )
+        .unwrap();
+        assert!(
+            catalog.model_speeds().is_none(),
+            "缺 model_id 列应关闭模型分组（None → 不写 models 键）"
+        );
+
+        // 导出落盘：models 键整体不出现（None），sa 照常出现
+        let dir = std::env::temp_dir().join(format!(
+            "zbar-usage-feed-models-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut cache = None;
+        flush_export(&dir, &mut cache, false, &turns, &[], &[], None, None, None, None, 1_000)
+            .unwrap();
+        let file = fs::read_to_string(dir.join(store::USAGE_DATA_FILE)).unwrap();
+        assert!(
+            !file.contains("\"models\":["),
+            "老库缺列不应写出顶层 models 数组键（轮行的 models 字符串字段不算）：{file}"
+        );
+        assert!(file.ends_with("\"sess\":[]};\n"), "缺列时 sest 仍为末尾字段：{file}");
+        assert!(file.contains("\"sa\":{\"avg\":"), "速度聚合应照常导出：{file}");
+
+        // 正例：有 model_id 列时 models 键在文件尾部（sess 之后）
+        let (conn2, path2) = agg_db("model-present");
+        conn2
+            .execute_batch(
+                "INSERT INTO session VALUES ('sess_1', NULL);
+                 INSERT INTO turn_usage VALUES ('sess_1', 'turn_1', 'completed', 1000, 3000, 'msg_1', 100, 100, 0, 1);",
+            )
+            .unwrap();
+        insert_sample(&conn2, "sess_1", "turn_1", (1_000, 1_100, 1_200), 100, "GLM-5.3");
+        let (turns2, _) = collect_turns_with_speed(&conn2, 0).unwrap().expect("应有输出");
+        let catalog2 = SpeedCatalog::load(
+            &conn2,
+            &session_ids_for_rows(&turns2, &[], None),
+            9_999_999,
+        )
+        .unwrap();
+        let models = catalog2.model_speeds().expect("有 model_id 列应有输出");
+        let mut cache2 = None;
+        flush_export(
+            &dir,
+            &mut cache2,
+            false,
+            &turns2,
+            &[],
+            &[],
+            Some(&models),
+            None,
+            None,
+            None,
+            2_000,
+        )
+        .unwrap();
+        let file2 = fs::read_to_string(dir.join(store::USAGE_DATA_FILE)).unwrap();
+        assert!(
+            file2.contains(
+                "\"models\":[{\"model\":\"GLM-5.3\",\"tps\":1000.0,\"avg\":1000.0,\"max\":1000.0,\"min\":1000.0,\"n\":1}]"
+            ),
+            "models 键形态不符：{file2}"
+        );
+        assert!(file2.ends_with("]};\n"), "models 应为大文件末尾字段：{file2}");
+
+        drop(conn);
+        drop(conn2);
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&path2);
+    }
+
+    #[test]
+    fn 速度聚合_主轮与子代理自身视图行各计一次() {
+        // 防双计：子代理请求在 model_usage 里属子代理会话自己的
+        // (session,turn) 键，只进子代理"自身视图行"（subagent:1）的 sa；
+        // 主轮行的 sa 只含主会话自身请求；会话树行的 sa = 成员并集
+        //（每个成员恰好一次）
+        let (conn, path) = agg_db("agg-double-count");
+        let now = 9_000_000_000_i64;
+        conn.execute_batch(&format!(
+            "INSERT INTO session VALUES
+               ('sess_main', NULL), ('sess_subagent_agent_1', 'sess_main');
+             INSERT INTO turn_usage VALUES
+               ('sess_main', 'turn_m', 'completed', {m1}, {m2}, 'msg_main', 100, 200, 0, 2),
+               ('sess_subagent_agent_1', 'turn_s', 'completed', {s1}, {s2}, 'msg_child', 30, 40, 0, 2);",
+            m1 = now - 60_000,
+            m2 = now - 30_000,
+            s1 = now - 55_000,
+            s2 = now - 50_000,
+        ))
+        .unwrap();
+        // 主会话两笔精确样本；子代理会话两笔精确样本（时间落在主轮区间内）
+        insert_sample(&conn, "sess_main", "turn_m", (now - 59_000, now - 58_000, now - 57_000), 100, "GLM-5.3");
+        insert_sample(&conn, "sess_main", "turn_m", (now - 56_000, now - 55_000, now - 54_000), 300, "GLM-5.3");
+        insert_sample(&conn, "sess_subagent_agent_1", "turn_s", (now - 54_000, now - 53_000, now - 52_000), 200, "GLM-4.7");
+        insert_sample(&conn, "sess_subagent_agent_1", "turn_s", (now - 51_000, now - 50_500, now - 50_000), 400, "GLM-4.7");
+
+        let (turns, _) = collect_turns_with_speed(&conn, now - WINDOW_MS)
+            .unwrap()
+            .expect("应有输出");
+        let main = turns.iter().find(|t| t.turn_id == "turn_m").unwrap();
+        let self_view = turns.iter().find(|t| t.turn_id == "turn_s").unwrap();
+        assert_eq!(self_view.subagent, Some(1), "子代理轮应导出自身视图行");
+        let main_sa = main.speed_agg.expect("主轮行应有 sa");
+        let self_sa = self_view.speed_agg.expect("自身视图行应有 sa");
+        assert_eq!(main_sa.n, 2, "主轮行 sa 只含主会话自身样本：{main_sa:?}");
+        assert_eq!(self_sa.n, 2, "自身视图行 sa 只含子代理样本：{self_sa:?}");
+        assert!(
+            (main_sa.max - 300.0).abs() < 1e-9 && (self_sa.max - 800.0).abs() < 1e-9,
+            "两行聚合不得互相混入：main={main_sa:?} self={self_sa:?}"
+        );
+
+        // 会话树行（主会话口径）：成员并集的聚合 = 两侧样本各一次
+        let sess = collect_session_stats(&conn, &turns, &[]).unwrap();
+        let root = sess.iter().find(|s| s.session_id == "sess_main").unwrap();
+        let root_sa = root.speed_agg.expect("根会话行应有聚合");
+        assert_eq!(root_sa.n, 4, "会话树聚合应含全部后代样本且不重复：{root_sa:?}");
+        assert!(
+            (root_sa.max - 800.0).abs() < 1e-9,
+            "会话树 max 应为全成员极值（子代理 800 > 主会话 300）：{root_sa:?}"
+        );
+        let child = sess
+            .iter()
+            .find(|s| s.session_id == "sess_subagent_agent_1")
+            .unwrap();
+        assert_eq!(
+            child.speed_agg.expect("子代理自身树行应有聚合").n,
+            2,
+            "子代理自身树行只含自身样本"
+        );
 
         drop(conn);
         let _ = fs::remove_file(&path);
@@ -3794,6 +4473,7 @@ mod tests {
             requests: 2,
             speed: None,
             speed_state: SpeedState::Unavailable,
+            speed_agg: None,
             member_session_ids: vec!["sess_1".to_string()],
             round_started_at: None,
             generating: false,
@@ -3814,6 +4494,7 @@ mod tests {
             requests: 0,
             speed: None,
             speed_state: SpeedState::Unavailable,
+            speed_agg: None,
             member_session_ids: vec!["sess_2".to_string()],
             round_started_at: None,
             generating: false,
@@ -3965,7 +4646,7 @@ mod tests {
             .expect("应识别待处理用户消息");
         assert_eq!(pending.session_id, "sess_old_active");
         let ids = session_ids_for_stats(&conn, &[], &[], Some(&pending.session_id)).unwrap();
-        let catalog = SpeedCatalog::load(&conn, &ids).unwrap();
+        let catalog = SpeedCatalog::load(&conn, &ids, 9_999_999).unwrap();
         let stats = collect_session_stats_with_catalog(
             &conn,
             &[],
@@ -4074,7 +4755,7 @@ mod tests {
             }),
         }];
         let ids = session_ids_for_stats(&conn, &[], &runs, None).unwrap();
-        let catalog = SpeedCatalog::load(&conn, &ids).unwrap();
+        let catalog = SpeedCatalog::load(&conn, &ids, 9_999_999).unwrap();
         let stats =
             collect_session_stats_with_catalog(&conn, &[], &runs, &catalog, Some(&pending))
                 .unwrap();
@@ -4098,7 +4779,7 @@ mod tests {
         )
         .unwrap();
         let ids = session_ids_for_stats(&conn, &[], &runs, None).unwrap();
-        let catalog = SpeedCatalog::load(&conn, &ids).unwrap();
+        let catalog = SpeedCatalog::load(&conn, &ids, 9_999_999).unwrap();
         let stats =
             collect_session_stats_with_catalog(&conn, &[], &runs, &catalog, Some(&pending))
                 .unwrap();

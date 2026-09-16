@@ -23,10 +23,19 @@
         会话行三行制：项目行（状态点·项目名·短标识·模型）+ 核心指标行
        （Σ 累计 · × 请求 · 速度 t/s · TTFT）+ 分解行（↑ 输入 ↓ 输出
         ⟲ 缓存读），每行 nowrap + overflow hidden 防御极端长值。
-      - 字体缩放：--hud-scale（fontScale 配置，header 中部 Aa 滑块调节）
-        对全部字号/行高/行高栅格 calc 缩放，Rust 侧 hud_height 同乘
-        font_scale 保持自适应高度与内容一致；用户拖拽过窗口（固定高度）
-        时内容超出部分由 #hud-list 纵向滚动消化。
+      - 字体缩放：--hud-scale（fontScale 配置，header 右侧"设置"按钮弹出的
+        设置面板内滑块调节）对全部字号/行高/行高栅格 calc 缩放，Rust 侧
+        hud_height 同乘 font_scale 保持自适应高度与内容一致；用户拖拽过
+        窗口（固定高度）时内容超出部分由 #hud-list 纵向滚动消化。
+      - 头部按钮与设置面板：#hud-settings-btn 点击在 header 正下方弹出
+        #hud-settings 面板（字体缩放 0.8~1.4 + 窗口透明度 25%~100% 两个
+        细轨道滑块，拖动即时生效 + 300ms 防抖落盘，见宿主壳）；再次点击
+        或点击面板外区域收起。#hud-close-btn 关闭悬浮窗功能（后端把总开关
+        置 false：停轮询 + 关窗，与设置页总开关关闭同一条路径）。两按钮
+        均为 button 元素（Tauri 拖拽区判定中 button 不触发窗口拖动）且
+        mousedown/pointerdown stopPropagation 双保险。面板 absolute 覆盖在
+        内容之上（z-index 高于拖拽热区层），不参与窗口高度自适应——Rust
+        侧 hud_height 公式不含面板，空态最小高 160px 已足够容纳。
       - 拖拽热区：#hud-resize-layer 为 src/hud-resize.ts 动态创建的 7 向
         隐形热区层（上/左边 8px、下边 14px / 四角 14px，东缘热区已删除，
         absolute inset 0
@@ -45,18 +54,23 @@
         background: transparent;
         overflow: hidden;
       }
-      /* 根节点即透明度作用层（设置卡透明度滑块 → CSS opacity）；
-         --hud-scale 为字体缩放基准（默认 1，由 header 滑块 /
+      /* 根节点即透明度作用层（设置面板透明度滑块 → CSS opacity）；
+         --hud-scale 为字体缩放基准（默认 1，由设置面板字体滑块 /
          fontScale 配置经 JS 写入内联样式覆盖）。
          主题 token：颜色全部收敛为 --hud-* 变量，默认值为亮色主题
-         （半透明白底 + 深色字，配主面板亮色玻璃质感）；主面板切到暗色
+         （纯白实底 + 深色字，配主面板亮色玻璃质感）；主面板切到暗色
          时由 session-hud-main.ts 给本窗口 <html> 加 .dark 类，下方
-         html.dark 块整体覆盖为原有深色壳配色（半透明深底 + 浅色字，
-         原样式原样迁入，暗色观感与历史版本一致），切换即时生效 */
+         html.dark 块整体覆盖为原有深色壳配色（深底实色 + 浅色字，
+         色相原样迁入，暗色观感与历史版本一致），切换即时生效。
+         底色 --hud-bg 必须完全不透明（V4 修复）：CSS opacity 是窗口
+         透明度的唯一来源——底色自身半透明时 100% 也透出桌面背景
+         （旧亮色 rgba(255,255,255,0.78) 恒透 22%）；边框/分隔线/轨道
+         等其它半透明 token 属视觉设计，保持不变 */
       #hud-root {
         --hud-scale: 1;
-        /* 亮色主题 token（默认值） */
-        --hud-bg: rgba(255, 255, 255, 0.78);
+        /* 亮色主题 token（默认值）。--hud-bg 为完全不透明实色（见上方
+           V4 修复说明），窗口透明度只由根节点 CSS opacity 控制 */
+        --hud-bg: rgb(255, 255, 255);
         --hud-border: rgba(15, 23, 42, 0.14);
         --hud-divider: rgba(15, 23, 42, 0.1);
         --hud-divider-soft: rgba(15, 23, 42, 0.08);
@@ -75,6 +89,10 @@
         --hud-thumb-active: #1e293b;
         --hud-scrollbar: rgba(15, 23, 42, 0.25);
         --hud-scrollbar-hover: rgba(15, 23, 42, 0.4);
+        /* 头部小按钮 hover 底色 + 设置面板投影（面板浮在列表上方需要
+           一层柔和投影拉开层次；底色已不透明，投影能正常生效） */
+        --hud-btn-hover: rgba(15, 23, 42, 0.08);
+        --hud-shadow: rgba(15, 23, 42, 0.2);
         --hud-flash-text: #0f172a;
         --hud-flash-glow: rgba(2, 132, 199, 0.45);
         position: relative;
@@ -92,9 +110,11 @@
         cursor: default;
       }
       /* 暗色主题 token：原有深色壳配色原样迁入（历史版本观感零变化）。
-         选择器带 .dark 提高特异性，覆盖上方同名默认值 */
+         选择器带 .dark 提高特异性，覆盖上方同名默认值。--hud-bg 取原
+         rgba(10, 14, 24, 0.72) 的等价实色（色相不变，仅去掉透明度，
+         见上方 V4 修复说明） */
       html.dark #hud-root {
-        --hud-bg: rgba(10, 14, 24, 0.72);
+        --hud-bg: rgb(10, 14, 24);
         --hud-border: rgba(148, 163, 184, 0.16);
         --hud-divider: rgba(148, 163, 184, 0.1);
         --hud-divider-soft: rgba(148, 163, 184, 0.08);
@@ -113,6 +133,8 @@
         --hud-thumb-active: #f8fafc;
         --hud-scrollbar: rgba(148, 163, 184, 0.35);
         --hud-scrollbar-hover: rgba(148, 163, 184, 0.55);
+        --hud-btn-hover: rgba(148, 163, 184, 0.18);
+        --hud-shadow: rgba(0, 0, 0, 0.5);
         --hud-flash-text: #e2e8f0;
         --hud-flash-glow: rgba(125, 211, 252, 0.55);
       }
@@ -138,6 +160,9 @@
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+        /* 允许收缩到内容宽度以下（默认 min-width:auto 会顶住，标题过长
+           时把右侧计数与两个按钮挤出头部）；省略号随 min-width:0 生效 */
+        min-width: 0;
       }
       #hud-count {
         margin-left: auto;
@@ -145,28 +170,125 @@
         color: var(--hud-text-3);
         white-space: nowrap;
       }
-      /* 字体缩放组合（header 中部，0.8~1.4）：Aa 小灰字标识 + 细轨道小圆点
-         滑块同排，整体约 80px；两侧 margin auto 在标题与计数之间水平居中。
-         不带 data-tauri-drag-region，且 mousedown/pointerdown
-         stopPropagation 双保险（见 session-hud-main.ts），拖动滑块不触发
-         窗口移动 */
-      #hud-font-box {
-        flex: 0 0 auto;
-        width: 80px;
-        margin: 0 auto;
+      /* 头部右侧小按钮（设置 / 关闭）：16px 见方、无边框透明底，hover
+         提亮 + 淡底反馈；不带 data-tauri-drag-region（button 元素在
+         Tauri 拖拽区判定中本身不触发窗口拖动），宿主壳再加
+         mousedown/pointerdown stopPropagation 双保险（见
+         session-hud-main.ts）。
+         命中区扩展（P2-3）：视觉盒保持 16px（hover 淡底也维持 16px），
+         由 ::after 伪元素各向外扩 4px 把可点区域做到 24px 左右（伪元素
+         不是独立目标，事件仍落在按钮上，无额外 JS）。外扩不越过头部
+         上下边（按钮上下各余 7px），与相邻元素也不重叠：右侧关窗按钮前
+         另有 6px 分隔（见 #hud-close-btn），两按钮的扩展区之间仍留约
+         3px 的头部空白可正常拖动窗口；最顶部 2~3px 归 #hud-resize-layer
+         的北向热区层优先（该层 z-index 高于头部内容），不影响左右与向下
+         方向的净扩展 */
+      .hud-btn {
+        position: relative;
+        flex: none;
+        width: calc(16px * var(--hud-scale));
+        height: calc(16px * var(--hud-scale));
+        padding: 0;
         display: flex;
         align-items: center;
-        gap: 4px;
+        justify-content: center;
+        box-sizing: border-box;
+        background: transparent;
+        border: none;
+        border-radius: 4px;
+        color: var(--hud-text-3);
+        cursor: pointer;
       }
-      /* Aa 标识：说明"这排是调字号的"，与标题同色系的次要灰 */
-      #hud-font-badge {
+      .hud-btn::after {
+        content: "";
+        position: absolute;
+        inset: calc(-4px * var(--hud-scale));
+      }
+      /* 内嵌 SVG 图标（滑杆图形 / ×）：随按钮尺寸缩放，颜色走
+         currentColor 跟随 hover 状态 */
+      .hud-btn svg {
+        width: calc(11px * var(--hud-scale));
+        height: calc(11px * var(--hud-scale));
+        display: block;
+      }
+      .hud-btn:hover {
+        color: var(--hud-text);
+        background: var(--hud-btn-hover);
+      }
+      .hud-btn:active {
+        color: var(--hud-text);
+      }
+      /* 关窗按钮与设置按钮拉开间距（P1-1，净 12px）：误触代价不成比例
+         （一点就关窗），与设置按钮保持明确间隔；间距随 --hud-scale 缩放
+         与相邻 gap 保持同比例 */
+      #hud-close-btn {
+        margin-left: calc(6px * var(--hud-scale));
+      }
+      /* 关窗按钮 hover 改警示色（P1-1）：只有图标染 --hud-err（淡底沿用
+         中性色，克制不刺眼），明确"这一点会关窗" */
+      #hud-close-btn:hover {
+        color: var(--hud-err);
+      }
+      #hud-close-btn:active {
+        color: var(--hud-err);
+      }
+      /* 设置按钮展开态：与 hover 同款高亮，标明面板归属 */
+      #hud-settings-btn.open {
+        color: var(--hud-text);
+        background: var(--hud-btn-hover);
+      }
+      /* 设置面板（设置按钮下拉小弹层）：锚在 header 正下方（3px 间隙）、
+         左右各留 8px，absolute 覆盖在列表上方——z-index 高于拖拽热区层
+         （100），面板区域内交互优先命中（面板内的 pointerdown 不会落到
+         热区上触发尺寸调整）。不改变窗口尺寸语义：窗口高度仍由 Rust 侧
+         按会话条数自适应（空态最小高 160px，装得下本面板） */
+      #hud-settings {
+        position: absolute;
+        top: calc(30px * var(--hud-scale) + 3px); /* HUD_HEADER_H + 间隙 */
+        left: 8px;
+        right: 8px;
+        z-index: 200;
+        display: none;
+        flex-direction: column;
+        gap: calc(7px * var(--hud-scale));
+        padding: calc(8px * var(--hud-scale)) 10px;
+        box-sizing: border-box;
+        background: var(--hud-bg);
+        border: 1px solid var(--hud-border);
+        border-radius: 10px;
+        box-shadow: 0 6px 18px var(--hud-shadow);
+      }
+      #hud-settings.open {
+        display: flex;
+      }
+      /* 面板内滑块行：左标签 + 中细轨道滑块 + 右读数（读数等宽右对齐，
+         拖动时数字宽度稳定不抖） */
+      .hud-set-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .hud-set-label {
         flex: none;
-        font-size: calc(10px * var(--hud-scale));
-        line-height: 1;
+        font-size: calc(9px * var(--hud-scale));
         color: var(--hud-text-2);
-        letter-spacing: 0.01em;
+        white-space: nowrap;
       }
-      #hud-font-slider {
+      .hud-set-value {
+        flex: none;
+        min-width: calc(32px * var(--hud-scale));
+        text-align: right;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas,
+          "Liberation Mono", monospace;
+        font-variant-numeric: tabular-nums;
+        font-size: calc(9px * var(--hud-scale));
+        color: var(--hud-text-3);
+      }
+      /* 细轨道滑块（字体缩放 / 窗口透明度共用，样式与原 header 字体滑块
+         同款）：不带 data-tauri-drag-region，宿主壳对
+         mousedown/pointerdown stopPropagation 双保险，拖动滑块不触发
+         窗口移动 */
+      .hud-set-slider {
         flex: 1 1 auto;
         min-width: 0;
         height: 12px;
@@ -178,13 +300,13 @@
         cursor: pointer;
       }
       /* 细轨道（2px 半透明）：随主题取深/浅半透明色，克制不抢视线 */
-      #hud-font-slider::-webkit-slider-runnable-track {
+      .hud-set-slider::-webkit-slider-runnable-track {
         height: 2px;
         border-radius: 1px;
         background: var(--hud-track);
       }
       /* 小圆点 thumb（8px）：垂直居中于 12px 输入框（(2−8)/2 = −3px） */
-      #hud-font-slider::-webkit-slider-thumb {
+      .hud-set-slider::-webkit-slider-thumb {
         -webkit-appearance: none;
         appearance: none;
         width: 8px;
@@ -194,33 +316,34 @@
         border-radius: 50%;
         background: var(--hud-thumb);
       }
-      #hud-font-slider:hover::-webkit-slider-thumb {
+      .hud-set-slider:hover::-webkit-slider-thumb {
         background: var(--hud-thumb-hover);
       }
-      #hud-font-slider:active::-webkit-slider-thumb {
+      .hud-set-slider:active::-webkit-slider-thumb {
         background: var(--hud-thumb-active);
       }
       /* Firefox 等价轨道 / 圆点（仅浏览器预览用；Tauri 侧命中 WebKit 规则） */
-      #hud-font-slider::-moz-range-track {
+      .hud-set-slider::-moz-range-track {
         height: 2px;
         border-radius: 1px;
         background: var(--hud-track);
       }
-      #hud-font-slider::-moz-range-thumb {
+      .hud-set-slider::-moz-range-thumb {
         width: 8px;
         height: 8px;
         border: none;
         border-radius: 50%;
         background: var(--hud-thumb);
       }
-      #hud-font-slider:hover::-moz-range-thumb {
+      .hud-set-slider:hover::-moz-range-thumb {
         background: var(--hud-thumb-hover);
       }
       /* 拖拽热区层（src/hud-resize.ts 动态创建 7 个 .hud-rz-*）：absolute 铺满
-         窗口、z 最高；容器自身 pointer-events none（不挡内容滚动与 header
-         拖动），仅热区 auto 拦截。上/左边 8px、下边 14px、四角 14px（东缘热区已删除，见
-         hud-resize.ts 的 DIRECTIONS 注释）；角规则在边规则之后声明并后插入
-         DOM，天然盖在边交叠处优先命中 */
+         窗口，z-index 100（高于全部内容层；仅设置面板的 200 在其上，
+         面板区域内交互不落热区）；容器自身 pointer-events none（不挡内容
+         滚动与 header 拖动），仅热区 auto 拦截。上/左边 8px、下边 14px、
+         四角 14px（东缘热区已删除，见 hud-resize.ts 的 DIRECTIONS 注释）；
+         角规则在边规则之后声明并后插入 DOM，天然盖在边交叠处优先命中 */
       #hud-resize-layer {
         position: absolute;
         inset: 0;
@@ -450,7 +573,10 @@
           opacity: 0.35;
         }
       }
-      /* 空态提示（空列表时占满窗口，显示"暂无活跃会话"而非 0 高） */
+      /* 空态提示（空列表时占满窗口，显示"暂无活跃会话"而非 0 高）。
+         空态时折叠行/今日行/模型速度区均不显示，窗口底部圆角由本元素
+         自带（半径与顶部 12px 一致，底边描边与其他底部承载行同款），
+         圆角闭环补全（V5，见下方"圆角闭环"注释） */
       #hud-empty {
         flex: 1 1 auto;
         display: flex;
@@ -460,6 +586,8 @@
         background: var(--hud-bg);
         border-left: 1px solid var(--hud-border);
         border-right: 1px solid var(--hud-border);
+        border-bottom: 1px solid var(--hud-border);
+        border-radius: 0 0 12px 12px;
         font-size: calc(10px * var(--hud-scale));
         color: var(--hud-text-3);
       }
@@ -580,7 +708,8 @@
       }
       /* 圆角闭环：列表区（首行/末行）与头尾容器拼接。无折叠行时最下方
          可见行承担底部圆角（renderShell 按今日行 > 模型速度区 > 列表的
-         优先级切换 rounded-bottom 类）。注意：本注释此前缺失闭合符，
+         优先级切换 rounded-bottom 类）；空态无这些行，由 #hud-empty
+         自带同半径底角（见上）。注意：本注释此前缺失闭合符，
          导致下面三条规则连同 .hidden（空态显隐）整段被浏览器当注释
          吞掉——空态元素永远 display:flex 与列表同屏、会话行被挤压
          裁切（V3 修复的高度/同屏 Bug 根因之一）。列表非空时的 1px
@@ -602,22 +731,98 @@
     <div id="hud-root">
       <div id="hud-header" data-tauri-drag-region="">
         <span id="hud-title" data-tauri-drag-region="">ZCode Sessions</span>
-        <!-- 字体缩放组合（0.8~1.4）：Aa 标识 + 细滑块，置于标题与计数之间
-             水平居中；不带 drag-region 属性且事件 stopPropagation（见
-             session-hud-main.ts），拖动滑块不移动窗口；title 文案由宿主壳
-             按语言偏好覆盖（此处为 zh 兜底文案） -->
-        <div id="hud-font-box" title="拖动调整文字大小">
-          <span id="hud-font-badge">Aa</span>
+        <span id="hud-count" data-tauri-drag-region=""></span>
+        <!-- 头部右侧两个小按钮（与标题/计数同排，计数靠 margin-left auto
+             顶到右侧）。设置按钮：点击在 header 下方开关设置面板；
+             关闭按钮：关闭悬浮窗功能（后端总开关置 false）。aria-label /
+             title 文案由宿主壳按语言覆盖（此处为 zh 兜底文档），内嵌 SVG
+             图标随 --hud-scale 缩放、颜色走 currentColor -->
+        <button
+          id="hud-settings-btn"
+          class="hud-btn"
+          type="button"
+          aria-label="设置"
+          aria-expanded="false"
+          title="设置"
+        >
+          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path
+              d="M2.5 5h6.6M13 5h.5M2.5 11h.5M6.9 11h6.6"
+              stroke="currentColor"
+              stroke-width="1.3"
+              stroke-linecap="round"
+            />
+            <circle
+              cx="11.1"
+              cy="5"
+              r="1.6"
+              stroke="currentColor"
+              stroke-width="1.3"
+            />
+            <circle
+              cx="4.9"
+              cy="11"
+              r="1.6"
+              stroke="currentColor"
+              stroke-width="1.3"
+            />
+          </svg>
+        </button>
+        <button
+          id="hud-close-btn"
+          class="hud-btn"
+          type="button"
+          aria-label="关闭悬浮窗"
+          title="关闭悬浮窗"
+        >
+          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path
+              d="M4.6 4.6l6.8 6.8M11.4 4.6l-6.8 6.8"
+              stroke="currentColor"
+              stroke-width="1.4"
+              stroke-linecap="round"
+            />
+          </svg>
+        </button>
+      </div>
+      <!-- 设置面板（设置按钮下拉，锚定 header 正下方）：字体缩放（0.8~1.4，
+           细轨道滑块 + 右上角读数）与窗口透明度（25%~100% 百分比刻度，存
+           opacity = 刻度/100）两行；拖动即时生效 + 300ms 防抖落盘（见
+           session-hud-main.ts）。role=dialog + aria-label 补无障碍名，文案
+           由宿主壳按语言覆盖（此处为 zh 兜底） -->
+      <div id="hud-settings" role="dialog" aria-label="设置">
+        <div class="hud-set-row" id="hud-font-box" title="拖动调整文字大小">
+          <span class="hud-set-label" id="hud-font-label">字体</span>
           <input
             id="hud-font-slider"
+            class="hud-set-slider"
             type="range"
             min="0.8"
             max="1.4"
             step="0.05"
             value="1"
+            aria-label="拖动调整文字大小"
           />
+          <span class="hud-set-value" id="hud-font-value">1.00×</span>
         </div>
-        <span id="hud-count" data-tauri-drag-region=""></span>
+        <div
+          class="hud-set-row"
+          id="hud-opacity-box"
+          title="拖动调整窗口不透明度"
+        >
+          <span class="hud-set-label" id="hud-opacity-label">透明度</span>
+          <input
+            id="hud-opacity-slider"
+            class="hud-set-slider"
+            type="range"
+            min="25"
+            max="100"
+            step="1"
+            value="92"
+            aria-label="拖动调整窗口不透明度"
+          />
+          <span class="hud-set-value" id="hud-opacity-value">92%</span>
+        </div>
       </div>
       <div id="hud-list"></div>
       <div id="hud-empty" class="hidden"></div>

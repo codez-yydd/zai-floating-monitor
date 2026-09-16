@@ -2182,7 +2182,11 @@ pub fn run() {
             pet::set_pet_config,
             session_hud::get_session_hud_config,
             session_hud::set_session_hud_config,
+            // 悬浮窗设置面板滑块专用轻量命令（只改一个字段 + 落盘 + 热推）
             session_hud::set_session_hud_font_scale,
+            session_hud::set_session_hud_opacity,
+            // 悬浮窗内"×"按钮：总开关置 false（停轮询 + 关窗，与设置页同路径）
+            session_hud::close_session_hud,
             // 悬浮窗热区拖拽尺寸会话："用户调整中"标志置位/清除 + 结束即时落盘核校
             session_hud::session_hud_resize_begin,
             session_hud::session_hud_resize_end,

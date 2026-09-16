@@ -86,7 +86,8 @@ pub const HUD_MIN_HEIGHT: f64 = 160.0;
 /// 拖拽尺寸上限（逻辑 px，防脏值/极端最大化落盘；正常屏幕远小于此）
 const HUD_MAX_WIDTH: f64 = 4096.0;
 const HUD_MAX_HEIGHT: f64 = 4096.0;
-/// 字体缩放合法域与默认值（header 滑块 0.8~1.4 步进 0.05；脏值回退默认）
+/// 字体缩放合法域与默认值（悬浮窗设置面板字体滑块 0.8~1.4 步进 0.05；
+/// 脏值回退默认）
 pub const HUD_FONT_SCALE_RANGE: (f64, f64) = (0.8, 1.4);
 pub const HUD_FONT_SCALE_DEFAULT: f64 = 1.0;
 /// 透明度默认值与合法域（前端经 CSS opacity 应用，见 HudParams）
@@ -195,11 +196,13 @@ pub struct SessionHudConfig {
     /// 自适应）。恢复自适应方式：配置文件把 height 手改为 null（无 UI
     /// 入口，属进阶操作）
     pub height: Option<f64>,
-    /// 字体缩放系数（0.8~1.4，悬浮窗 header 滑块调节）：页面经 CSS 变量
-    /// --hud-scale 对全部字号/行高/行高栅格 calc 缩放，自适应高度按
+    /// 字体缩放系数（0.8~1.4，悬浮窗设置面板字体滑块调节）：页面经 CSS
+    /// 变量 --hud-scale 对全部字号/行高/行高栅格 calc 缩放，自适应高度按
     /// hud_height × font_scale 同步缩放保持内容不被裁；脏值回退 1.0
     pub font_scale: f64,
-    /// 窗口不透明度（0.25~1.0，前端经 CSS opacity 应用到悬浮窗根节点）
+    /// 窗口不透明度（0.25~1.0，悬浮窗设置面板透明度滑块调节，前端经
+    /// CSS opacity 应用到悬浮窗根节点；底色 token 不透明，见
+    /// session-hud.html 的 V4 修复说明）
     pub opacity: f64,
     /// 活跃窗口档位（分钟）：5/10/30，0 = 不限（仍有 24h 兜底）
     pub window_minutes: u32,
@@ -293,19 +296,58 @@ pub fn get_session_hud_config() -> Result<SessionHudConfig, String> {
     Ok(load_session_hud_config().clamped())
 }
 
-/// 更新字体缩放（悬浮窗 header 滑块专用轻量命令）：只改 fontScale 一
-/// 个字段并落盘 + 热推参数，不走 set_session_hud_config 的建/关窗流程
-///（滑块在悬浮窗内，用户拖动的瞬间窗口一定存在，无需窗口操作；也避免
-/// 整份配置回传竞态——面板侧可能正持有旧快照）。返回 clamp 后的完整
-/// 配置供调用方回读校准。窗口不存在时仅落盘（下次开窗生效）。
+/// 局部更新配置的纯函数内核（悬浮窗内两个滑块命令共用，供单元测试直接
+/// 驱动）：只动目标字段，整体 clamp 收敛后返回——未涉及的字段（窗口
+/// 尺寸/位置/档位/开关等）原样保留，脏值不落盘。
+fn apply_partial_update(
+    cfg: SessionHudConfig,
+    update: impl FnOnce(&mut SessionHudConfig),
+) -> SessionHudConfig {
+    let mut next = cfg;
+    update(&mut next);
+    next.clamped()
+}
+
+/// 局部更新落盘的公共管道（字体缩放 / 透明度两个悬浮窗内滑块共用）：
+/// 读盘 → 更新单个字段并 clamp → 落盘 → 热推参数。不走
+/// set_session_hud_config 的建/关窗流程（滑块在悬浮窗内，用户拖动的瞬间
+/// 窗口一定存在，无需窗口操作；也避免整份配置回传竞态——面板侧可能正持有
+/// 旧快照）。窗口不存在时仅落盘（下次开窗生效）。
+fn save_partial_update(
+    app: &AppHandle,
+    update: impl FnOnce(&mut SessionHudConfig),
+) -> Result<SessionHudConfig, String> {
+    let cfg = apply_partial_update(load_session_hud_config(), update);
+    save_session_hud_config(&cfg)?;
+    push_session_hud_params(app, &cfg);
+    Ok(cfg)
+}
+
+/// 更新字体缩放（悬浮窗设置面板字体滑块专用轻量命令）：只改 fontScale
+/// 一个字段并落盘 + 热推参数。返回 clamp 后的完整配置供调用方回读校准。
 #[tauri::command]
 pub fn set_session_hud_font_scale(scale: f64, app: AppHandle) -> Result<SessionHudConfig, String> {
+    save_partial_update(&app, |cfg| cfg.font_scale = scale)
+}
+
+/// 更新窗口透明度（悬浮窗设置面板透明度滑块专用轻量命令）：只改 opacity
+/// 一个字段（刻度 / 100，clamp 到 0.25~1.0）并落盘 + 热推参数。返回
+/// clamp 后的完整配置供调用方回读校准（热推回环带回同一值，页面本地
+/// 已应用的值不会抖动）。
+#[tauri::command]
+pub fn set_session_hud_opacity(opacity: f64, app: AppHandle) -> Result<SessionHudConfig, String> {
+    save_partial_update(&app, |cfg| cfg.opacity = opacity)
+}
+
+/// 关闭悬浮窗（悬浮窗内"×"按钮）：总开关置 false 后走与设置页总开关
+/// 关闭完全同一条生效路径（停轮询 + 关窗），其余字段（位置/尺寸/透明度/
+/// 档位/显示项）原样保留，用户再次从设置页开启时恢复原样。窗口随后销毁，
+/// 前端不处理返回（Destroyed 挂点读到的开关已关，幂等不改写）。
+#[tauri::command]
+pub async fn close_session_hud(app: AppHandle) -> Result<SessionHudConfig, String> {
     let mut cfg = load_session_hud_config().clamped();
-    cfg.font_scale = scale;
-    let cfg = cfg.clamped();
-    save_session_hud_config(&cfg)?;
-    push_session_hud_params(&app, &cfg);
-    Ok(cfg)
+    cfg.enabled = false;
+    apply_session_hud_config(app, cfg).await
 }
 
 /// 用户拖拽热区调整尺寸：会话开始（悬浮窗热区 pointerdown 调用）。置位
@@ -448,17 +490,27 @@ fn read_window_logical_size(app: &AppHandle) -> Result<Option<(f64, f64)>, Strin
 /// - 其余字段变化：窗口存在时热推参数事件（页面即时应用透明度与
 ///   显示项；档位影响下一轮查询）。
 ///
-/// async 命令 + run_on_main_thread + channel + 超时等待：与 pet.rs
-/// 同款死锁防护（同步命令在 Windows 上占用主线程，建窗需要主线程
-/// 事件循环处理消息，直接调窗口 API 会自等待死锁，pet.rs 有事故
-/// 记载）。配置先落盘再动窗口：窗口操作失败配置不丢（下次启动
-/// start_if_enabled 按 enabled 恢复）；关闭分支先停轮询再落盘，
-/// Destroyed 复位路径（handle_session_hud_window_destroyed）读到
-/// 已关的开关不再改写，幂等。
+/// 命令本体（set_session_hud_config）与悬浮窗内关闭按钮
+/// （close_session_hud，只置 enabled = false 后走同一路径）共用本函数。
 #[tauri::command]
 pub async fn set_session_hud_config(
     config: SessionHudConfig,
     app: AppHandle,
+) -> Result<SessionHudConfig, String> {
+    apply_session_hud_config(app, config).await
+}
+
+/// apply 主体：见 set_session_hud_config 的 doc。
+///
+/// async + run_on_main_thread + channel + 超时等待：与 pet.rs 同款死锁
+/// 防护（同步命令在 Windows 上占用主线程，建窗需要主线程事件循环处理
+/// 消息，直接调窗口 API 会自等待死锁，pet.rs 有事故记载）。配置先落盘再
+/// 动窗口：窗口操作失败配置不丢（下次启动 start_if_enabled 按 enabled
+/// 恢复）；关闭分支先停轮询再落盘，Destroyed 复位路径
+/// （handle_session_hud_window_destroyed）读到已关的开关不再改写，幂等。
+async fn apply_session_hud_config(
+    app: AppHandle,
+    config: SessionHudConfig,
 ) -> Result<SessionHudConfig, String> {
     let next = config.clamped();
 
@@ -966,7 +1018,7 @@ fn ensure_session_hud_window(app: &AppHandle, cfg: &SessionHudConfig) -> Result<
 /// 向悬浮窗推送当前显示参数（透明度 + 显示项 + 活跃档位 + 字体缩放）。
 /// 透明度由页面经 CSS opacity 应用（窗口级 set_opacity 平台差异大，CSS
 /// 路径跨平台一致且作用于内容层）；字体缩放经 CSS 变量 --hud-scale 应
-/// 用并同步 header 滑块刻度。
+/// 用并同步设置面板字体滑块刻度与透明度滑块读数。
 fn push_session_hud_params(app: &AppHandle, cfg: &SessionHudConfig) {
     #[derive(Clone, Serialize)]
     #[serde(rename_all = "camelCase")]
@@ -3034,6 +3086,57 @@ mod tests {
         // 开关不被 clamp 改动
         let c = SessionHudConfig { enabled: true, ..SessionHudConfig::default() }.clamped();
         assert!(c.enabled);
+    }
+
+    #[test]
+    fn 配置_局部更新只改目标字段并收敛() {
+        // set_session_hud_font_scale / set_session_hud_opacity 的纯函数内核：
+        // 悬浮窗内滑块只能改自己的字段，窗口尺寸/位置/开关/档位/显示项
+        // 必须原样保留（否则拖一次滑块就把用户拖出的窗口尺寸或开关状态
+        // 覆盖掉）
+        let base = SessionHudConfig {
+            enabled: true,
+            pos: Some((12.0, 34.0)),
+            width: 420.0,
+            height: Some(300.0),
+            font_scale: 1.2,
+            opacity: 0.8,
+            window_minutes: 30,
+            show_tokens: false,
+            show_model: false,
+        };
+
+        // 字体缩放：只动 font_scale，其余字段逐字段保留
+        let font = apply_partial_update(base.clone(), |cfg| cfg.font_scale = 1.05);
+        assert_eq!(font.font_scale, 1.05);
+        assert_eq!(
+            SessionHudConfig { font_scale: 1.05, ..base.clone() },
+            font,
+            "字体缩放局部更新不得改动其它字段"
+        );
+
+        // 透明度：滑块刻度 / 100 的 0.25~1.0 内直通
+        let opacity = apply_partial_update(base.clone(), |cfg| cfg.opacity = 0.45);
+        assert_eq!(opacity.opacity, 0.45);
+        assert_eq!(
+            SessionHudConfig { opacity: 0.45, ..base.clone() },
+            opacity,
+            "透明度局部更新不得改动其它字段"
+        );
+
+        // 越界值仍走 clamp：透明度夹回合法域、字体缩放脏值回退默认
+        assert_eq!(
+            apply_partial_update(base.clone(), |cfg| cfg.opacity = 5.0).opacity,
+            HUD_OPACITY_RANGE.1
+        );
+        assert_eq!(
+            apply_partial_update(base.clone(), |cfg| cfg.opacity = f64::NAN).opacity,
+            HUD_OPACITY_DEFAULT
+        );
+        assert_eq!(
+            apply_partial_update(base, |cfg| cfg.font_scale = 9.0).font_scale,
+            HUD_FONT_SCALE_DEFAULT
+        );
     }
 
     #[test]

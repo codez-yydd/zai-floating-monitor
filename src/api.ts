@@ -627,7 +627,7 @@ export async function setSessionHudConfig(
 }
 
 /**
- * 更新会话悬浮窗字体缩放（悬浮窗 header 滑块专用轻量命令）：只改
+ * 更新会话悬浮窗字体缩放（悬浮窗设置面板字体滑块专用轻量命令）：只改
  * fontScale 一个字段并落盘 + 热推，不走建/关窗流程。返回收敛后的最终
  * 配置。
  */

@@ -1013,9 +1013,10 @@ export interface SessionHudConfig {
    *  时会话列表纵向滚动）；null = 从未拖拽（高度按会话条数自适应）。
    *  恢复自适应：配置文件把 height 手改为 null */
   height: number | null;
-  /** 字体缩放（0.8~1.4，悬浮窗 header 滑块调节；脏值回退 1.0） */
+  /** 字体缩放（0.8~1.4，悬浮窗设置面板字体滑块调节；脏值回退 1.0） */
   fontScale: number;
-  /** 窗口不透明度（0.25~1.0，悬浮窗内容层 CSS opacity） */
+  /** 窗口不透明度（0.25~1.0，悬浮窗设置面板透明度滑块调节，
+   *  悬浮窗内容层 CSS opacity；底色为不透明实色） */
   opacity: number;
   /** 活跃窗口档位（分钟）：5/10/30，0 = 不限（Rust 侧仍有 24h 兜底） */
   windowMinutes: number;
