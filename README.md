@@ -88,6 +88,16 @@
       <b>设备同步</b> — 多设备增量同步与数据管理
     </td>
   </tr>
+  <tr>
+    <td width="50%" align="center">
+      <img src="doc/img/speed.png" width="320" alt="模型速度排行"/><br/>
+      <b>模型速度排行</b> — 「速度」标签页：分位速度、首字延迟与成功率
+    </td>
+    <td width="50%" align="center">
+      <img src="doc/img/tokeninfo.png" width="320" alt="会话Token悬浮窗"/><br/>
+      <b>会话 Token 悬浮窗</b> — 免注入实时 Token、流式速度与模型速度行
+    </td>
+  </tr>
 </table>
 
 ---
@@ -102,6 +112,9 @@
 - **自动刷新** — 面板数据每 30 秒自动拉取一次。
 - **⌨️ 全局快捷键** — 默认 `alt+shift+z` 唤起 / 隐藏面板，可在设置中自定义或停用。
 - **🎨 动态壁纸** — 一键把动态视频壁纸注入 ZCode 桌面应用，作为对话背景；安装前自动备份原版、可随时还原。ZCode 升级后壁纸会失效，需重新安装；macOS 上注入后 ZCode 内置更新将不可用（还原也无法恢复），需前往官网重新下载。
+- **🖥 会话 Token 悬浮窗** — 免注入的桌面悬浮窗：实时展示 ZCode 各会话累计 Token（输入 / 输出 / 缓存 / 请求数）、流式生成速度（t/s 与首字延迟）与模型分组速度行，进行中的请求动态刷新。支持拖拽边缘 / 四角自由调整大小（尺寸与位置自动记忆），标题栏内置设置面板（字体大小 / 窗口透明度）与一键关闭；语言、主题跟随主面板。在「皮肤」页开启。
+- **🐶 桌面宠物** — 内置智谱娘默认形象，支持 Petdex 自定义形象导入；七状态任务联动动画随 ZCode 任务状态实时切换；注入版（嵌入 ZCode 界面，可拖拽）与悬浮窗双形态按需选择，按屏幕比例提供尺寸档位，皮肤页统一管理。
+- **🖼 皮肤分类页** — 「皮肤」入口（调色板图标）改为分类导航：会话悬浮窗、桌面宠物等免注入功能独立成页、秒开即用；动态壁纸等需注入功能单独一页，进入时才检测 ZCode 注入环境。
 
 **🤖 多服务用量统计**
 
@@ -118,7 +131,8 @@
   - **本地读取型**（零凭证）：Gemini（读取 Gemini CLI 登录态，自动刷新 token）、Grok（读取 grok CLI 登录态，支持多 token）、OpenCode Go（本地 SQLite 用量估算）
 - **🫘 火山引擎（Volcengine 火山方舟）** — 已预留入口，额度查询即将上线。
 - **🧭 多服务汇总视图** — 「汇总 / Z.ai / Codex / Claude / Cursor / Kimi」标签切换：多服务合计花费与 Token、订阅额度卡片、分时趋势图与模型排行。
-- **⚡ 速度与首字延迟** — 基于调用耗时统计**平均输出速度（tok/s）**与**首字延迟（TTFT）**，含噪声过滤口径（整块下发识别、计时异常剔除）。ZCode / Claude 面板可用；Kimi 面板可用 TPS（由请求耗时推算的输出速度口径、无 TTFT，首字延迟与 Claude 一样隐藏）；Codex / Cursor 数据源无耗时字段，自动隐藏。
+- **⚡ 速度与首字延迟** — 基于调用耗时统计**平均输出速度（tok/s）**与**首字延迟（TTFT）**，含噪声过滤口径（整块下发识别、计时异常剔除）。ZCode / Claude 面板可用；Kimi 面板可用 TPS（由请求耗时推算的输出速度口径、无 TTFT，首字延迟与 Claude 一样隐藏）；Codex / Cursor 数据源无耗时字段，自动隐藏。平均速度统一按「首 Token → 完成」的真实生成区间加权计算（带 ≈ 的为含等待时间的请求近似值）；注入 ZCode 界面的皮肤注入版同样在每轮 / 会话条展示「均 / 快 / 慢」聚合与模型分组速度行，与悬浮窗口径一致。
+- **🏎 模型速度排行** — 统计面板「速度」标签页按模型比较流式输出表现：平均速度与「慢 / 平均 / 快」分位（p10/p50/p90）、首字延迟、输入 / 输出 / 耗时明细、请求数与成功率，支持今日 / 7 天切换与 30 秒自动刷新，并区分展示真实「速度样本」数（与总请求数区分）。
 - **🎯 当前模型** — 各 Agent 面板显示「当前模型」（口径：最近一次调用使用的模型 + 相对时间），汇总页各服务分组同步展示。
 
 **💰 价格与计费**
@@ -166,6 +180,7 @@ zai-floating-monitor/
 │   ├── CodexPanel.tsx        # Codex 视图（AgentUsagePanel 品牌皮肤）
 │   ├── ClaudePanel.tsx       # Claude 视图（AgentUsagePanel 品牌皮肤）
 │   ├── KimiPanel.tsx         # Kimi 视图（AgentUsagePanel 品牌皮肤）
+│   ├── SkinHubPanel.tsx       # 皮肤分类导航页（免注入 / 需注入入口卡）
 │   ├── PricingPanel.tsx      # 价格配置面板
 │   ├── SettingsPanel.tsx     # 设置页（透明度 / 语言 / 开机自启 / 数据来源 / 汇率 / 快捷键）
 │   ├── QuotaPanel.tsx        # Coding Plan 额度监控
@@ -173,6 +188,8 @@ zai-floating-monitor/
 │   ├── ReportPanel.tsx       # 日报 / 周报（Markdown 导出）
 │   ├── SyncPanel.tsx         # 设备同步设置面板（注册 / 数据管理）
 │   ├── RangePicker.tsx       # 时间范围选择器
+│   ├── session-hud-main.ts    # 会话 Token 悬浮窗入口（免注入独立页）
+│   ├── pet-main.ts            # 桌面宠物悬浮形态入口
 │   ├── api.ts                # invoke 封装（调用 Rust 命令）
 │   ├── types.ts              # 与 Rust 结构一一对应的 TS 类型
 │   ├── format.ts             # Token / 金额 / 百分比格式化
@@ -188,6 +205,9 @@ zai-floating-monitor/
 │   │   ├── codex.rs          # Codex 用量统计（sessions 解析 + 实时订阅额度）
 │   │   ├── claude.rs         # Claude 用量统计（projects 解析 + OAuth 实时额度）
 │   │   ├── kimi.rs           # Kimi Code 用量统计（wire.jsonl 解析 + OAuth 内存续期额度）
+│   │   ├── session_hud.rs     # 会话 Token 悬浮窗（配置 / 建关窗 / 缩放记忆）
+│   │   ├── pets.rs            # 桌面宠物（内置形象 / Petdex 导入）
+│   │   ├── agent_theme/       # ZCode 界面注入（动态壁纸 / 注入版速度聚合）
 │   │   ├── shortcut.rs       # 全局快捷键配置
 │   │   ├── sync.rs           # 多设备同步（配置 / 增量上传 / 远端查询 / 清理）
 │   │   └── main.rs
@@ -199,6 +219,8 @@ zai-floating-monitor/
 │   ├── auth.py               # 鉴权（master token / device token）
 │   ├── config.py             # 配置（端口 / 数据目录）
 │   └── README.md             # 部署文档
+├── session-hud.html           # 会话 Token 悬浮窗页面
+├── pet.html                   # 桌面宠物页面
 ├── index.html
 └── vite.config.ts
 ```

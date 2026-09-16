@@ -88,6 +88,16 @@ Both repositories have exactly the same content — the latest version can be ob
       <b>Device sync</b> — Incremental multi-device sync & data management
     </td>
   </tr>
+  <tr>
+    <td width="50%" align="center">
+      <img src="doc/img/speed.png" width="320" alt="Model speed ranking"/><br/>
+      <b>Model speed ranking</b> — "Speed" tab: percentile speeds, TTFT & success rate
+    </td>
+    <td width="50%" align="center">
+      <img src="doc/img/tokeninfo.png" width="320" alt="Session token HUD"/><br/>
+      <b>Session token HUD</b> — injection-free live tokens, streaming speed & per-model rows
+    </td>
+  </tr>
 </table>
 
 ---
@@ -102,11 +112,15 @@ Both repositories have exactly the same content — the latest version can be ob
 - **Auto refresh** — panel data is re-fetched every 30 seconds.
 - **⌨️ Global hotkey** — summon / hide the panel with `alt+shift+z` by default; customizable or disable-able in settings.
 - **🎨 Dynamic wallpaper** — inject a live video wallpaper into the ZCode desktop app as the conversation background in one click; the original app is backed up automatically before installation and can be restored anytime. The wallpaper is invalidated after a ZCode upgrade and needs to be reinstalled; on macOS, ZCode's built-in updater becomes unavailable after injection (even restoring cannot bring it back) — re-download ZCode from the official site.
+- **🖥 Session token HUD** — an injection-free desktop overlay showing live per-session cumulative tokens (input / output / cache / request count), streaming speed (t/s & first-token latency) and per-model speed rows, refreshing as requests stream. Resize freely by dragging edges / corners (size & position remembered); a built-in settings panel (font size / opacity) and a one-click close button live in the title bar; language & theme follow the main panel. Enable it from the "Skins" page.
+- **🐶 Desktop pet** — ships with the default Zhipu-chan character and supports Petdex custom imports; a 7-state task-linked animation reacts to ZCode task states in real time; choose between the injected form (embedded in the ZCode UI, draggable) and the floating form, with screen-proportional size tiers; managed on the Skins page.
+- **🖼 Skins hub** — the "Skins" entry (palette icon) is now a category page: injection-free features (session HUD, desktop pet) get their own page and open instantly, while injection-required features (dynamic wallpaper) live on a separate page where the ZCode install is only scanned on entry.
 
 **🤖 Multi-service usage stats**
 
 - **Coding Plan quota monitor** — subscribers can view the **5-hour window**, **weekly quota** and **MCP monthly quota** progress bars at the top of the panel; the color escalates with usage (green → amber → red) and shows a reset countdown. Credentials and the API endpoint are read **automatically** from the local ZCode client's signed-in state (`~/.zcode/v2/config.json`) — zero configuration.
 - **🖥 Cursor usage stats** — reads the local Cursor app's login credentials automatically; tracks Pro / Auto / API plan quotas and per-model token costs, with USD costs converted at the FX rate and merged into the summary view. Cookies previously entered manually on the old settings page are **migrated automatically** into the credential system (a seamless upgrade for existing users), and multiple cookies can be added for stacked multi-account display.
+- **🟢 Codex usage stats** — parses local `~/.codex/sessions` records to tally token usage and cost; on machines signed in with a ChatGPT subscription, **5-hour / weekly** quota bars are also fetched live (hidden automatically in API relay mode).
 - **🟠 Claude usage stats** — parses local `~/.claude/projects` session records to tally token usage and cost (sub-agent sessions included, deduplicated by message); on machines signed in to claude.ai, subscription quotas are fetched live (**5-hour session / weekly**, hidden automatically in third-party relay modes). Subscription enhancements: **model-specific weekly quota windows** (separate Opus / Sonnet pools), an **extra usage** spend row, a clear error with re-auth guidance when credentials expire, plan-tier detection (Max 5x / Max 20x), and manual `sk-ant-oat` tokens for additional accounts (stacked in an "Other accounts" section).
 - **🌙 Kimi usage stats** — parses local `~/.kimi-code/sessions` session records (`wire.jsonl`) to tally token usage, cost and **token output speed (TPS)**; on machines signed in to the Kimi Code CLI, local credentials are detected automatically (OAuth expiry renewed in the background — no configuration needed) to fetch subscription quotas live: **5-hour rolling window / cycle quota** progress bars with reset countdowns, booster wallet balance and official membership tier name; a Kimi API Key can also be configured manually in settings.
 - **🔑 Universal credential manager** — every agent panel has a built-in credentials entry (no credential config on the settings page): each service accepts **multiple credentials** (multi-account / multi-subscription, displayed stacked), with notes (to distinguish plan tiers), editing and deletion; some services also offer a **region** choice (China / International). Credentials are stored in plain text locally under `~/.zbar/credentials/` (directory mode 700, file mode 600, this machine only). See [Credentials](#credentials).
@@ -116,8 +130,9 @@ Both repositories have exactly the same content — the latest version can be ob
   - **Manual token** (grab the token from the console and paste): StepFun (rate / credits dual-plan variants, Oasis-Token)
   - **Local read** (zero credentials): Gemini (reads the Gemini CLI signed-in state, auto token refresh), Grok (reads the grok CLI signed-in state, multiple tokens supported), OpenCode Go (usage estimated from a local SQLite DB)
 - **🫘 Volcengine (Ark)** — entry reserved; quota queries coming soon.
-- **🧭 Multi-service summary view** — summary / Z.ai / Cursor / Kimi tabs: total cost & tokens across services, subscription quota cards, hourly trend chart and model ranking.
-- **⚡ Speed & TTFT** — average output speed (tok/s) and first-token latency (TTFT) from per-call durations, with noise filtering (whole-block delivery detection, timing-outlier rejection). Available on ZCode / Claude / Kimi panels (Kimi's tok/s is a TPS estimate derived from request durations with no TTFT, so first-token latency is hidden there just like Claude; Codex / Cursor data sources carry no duration and auto-hide these columns).
+- **🧭 Multi-service summary view** — summary / Z.ai / Codex / Claude / Cursor / Kimi tabs: total cost & tokens across services, subscription quota cards, hourly trend chart and model ranking.
+- **⚡ Speed & TTFT** — average output speed (tok/s) and first-token latency (TTFT) from per-call durations, with noise filtering (whole-block delivery detection, timing-outlier rejection). Available on ZCode / Claude / Kimi panels (Kimi's tok/s is a TPS estimate derived from request durations with no TTFT, so first-token latency is hidden there just like Claude; Codex / Cursor data sources carry no duration and auto-hide these columns). Average speeds are weighted over the real generation span (first token → completion; ≈ marks request-level approximations that include waiting time); the injected ZCode skin likewise shows avg/fast/slow aggregates and per-model speed rows on each turn / session bar, aligned with the HUD's methodology.
+- **🏎 Model speed ranking** — the "Speed" tab in the stats panel compares streaming performance per model: average speed with slow / average / fast percentiles (p10/p50/p90), first-token latency, input / output / duration details, request counts and success rate; today / 7-day toggle with 30-second auto refresh, and a distinct "speed sample" count (separate from total requests).
 - **🎯 Current model** — each agent panel shows the "current model" (latest model actually used + relative time); the summary page shows it per service group.
 
 **💰 Pricing & billing**
@@ -162,6 +177,7 @@ zai-floating-monitor/
 │   ├── SummaryTab.tsx        # Summary view (multi-service totals / trend / model ranking)
 │   ├── CursorPanel.tsx       # Cursor view (quotas + usage stats)
 │   ├── KimiPanel.tsx         # Kimi view (quotas + usage stats)
+│   ├── SkinHubPanel.tsx       # Skins hub navigation page (injection-free / injection-required cards)
 │   ├── PricingPanel.tsx      # Pricing config panel
 │   ├── SettingsPanel.tsx     # Settings page (opacity / language / autostart / sources / FX rate / hotkey)
 │   ├── QuotaPanel.tsx        # Coding Plan quota monitor
@@ -169,6 +185,8 @@ zai-floating-monitor/
 │   ├── ReportPanel.tsx       # Daily / weekly reports (Markdown export)
 │   ├── SyncPanel.tsx         # Device sync settings (register / data management)
 │   ├── RangePicker.tsx       # Time-range picker
+│   ├── session-hud-main.ts    # Session token HUD entry (standalone injection-free page)
+│   ├── pet-main.ts            # Desktop pet floating-form entry
 │   ├── api.ts                # invoke wrappers (Rust commands)
 │   ├── types.ts              # TS types mirroring the Rust structs
 │   ├── format.ts             # Token / currency / percent formatting
@@ -182,11 +200,16 @@ zai-floating-monitor/
 │   │   ├── quota_history.rs  # Quota snapshot history (JSONL, 90-day retention)
 │   │   ├── cursor.rs         # Cursor usage stats (auto credentials / cookie / API)
 │   │   ├── kimi.rs           # Kimi Code usage stats (wire.jsonl parsing + OAuth in-memory renewal for live quotas)
+│   │   ├── session_hud.rs     # Session token HUD (config / open-close / resize memory)
+│   │   ├── pets.rs            # Desktop pets (built-in character / Petdex import)
+│   │   ├── agent_theme/       # ZCode UI injection (dynamic wallpaper / injected speed aggregates)
 │   │   ├── shortcut.rs       # Global hotkey config
 │   │   ├── sync.rs           # Multi-device sync (config / incremental upload / cleanup)
 │   │   └── main.rs
 │   ├── capabilities/         # Tauri permissions
 │   └── tauri.conf.json       # Window / bundling config
+├── session-hud.html           # Session token HUD page
+├── pet.html                   # Desktop pet page
 ├── index.html
 └── vite.config.ts
 ```
