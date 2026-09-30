@@ -39,4 +39,9 @@ export const pricing = {
   "pricing.applySelected": "应用选中",
   "pricing.applySelectedCount": "应用选中 ({count})",
   "pricing.noModels": "暂无模型数据。请确认 Z.ai 已产生使用记录。",
+
+  // 模型删除/隐藏
+  "pricing.removeModel": "从列表移除",
+  "pricing.hiddenCount": "已隐藏 {count} 个模型",
+  "pricing.restore": "恢复",
 };

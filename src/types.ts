@@ -92,6 +92,8 @@ export interface ModelPrice {
 
 export interface PricingConfig {
   usd: Record<string, ModelPrice>;
+  /** 隐藏名单：已从列表删除的模型 id（阻止其因数据库出现过再次出现在列表与差异提醒中） */
+  hidden?: string[];
 }
 
 export interface CostResult {

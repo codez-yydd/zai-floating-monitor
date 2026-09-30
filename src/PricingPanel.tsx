@@ -91,6 +91,14 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
   useLayoutEffect(() => {
     draftRef.current = draft;
   }, [draft]);
+  // pricing 的 ref 镜像：删除/恢复是即时落盘动作（不走草稿+保存），回调以稳定引用
+  // 绑进 memo 卡片与恢复面板，点击时经 ref 读最新配置，避免回调依赖 pricing
+  const pricingRef = useRef<PricingConfig | null>(null);
+  useLayoutEffect(() => {
+    pricingRef.current = pricing;
+  }, [pricing]);
+  // 隐藏名单小面板的展开状态（列表底部「已隐藏 N 个模型」）
+  const [hiddenOpen, setHiddenOpen] = useState(false);
 
   // 草稿变更（稳定引用）：单个输入框的键入只重渲染对应的 memo 模型卡片，而非整个列表
   const handleDraftChange = useCallback(
@@ -329,10 +337,72 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
     }
   };
 
+  // 从列表移除模型（明确动作，即时落盘，不走草稿+保存的按钮模式）：
+  // 1) 删 usd 价格条目（按归一键删该模型全部大小写/变体写法，与 commitDraft 合并域一致）；
+  // 2) 记入隐藏名单（阻止它因数据库出现过再次出现在列表与差异提醒中）；
+  // 3) 清该模型全部草稿（防止后续「保存」把已删模型经残留草稿写回）。
+  // 落盘失败报错并回滚本地状态
+  const handleRemove = useCallback(async (id: string) => {
+    const prev = pricingRef.current;
+    if (!prev) return;
+    const target = canonicalModelId(id);
+    const usd: Record<string, ModelPrice> = {};
+    for (const [k, v] of Object.entries(prev.usd ?? {})) {
+      if (canonicalModelId(k) === target) continue;
+      usd[k] = v;
+    }
+    const next: PricingConfig = {
+      ...prev,
+      usd,
+      hidden: [...new Set([...(prev.hidden ?? []), id])],
+    };
+    const prevDraft = draftRef.current;
+    const nextDraft: Record<string, string> = {};
+    for (const [dk, v] of Object.entries(prevDraft)) {
+      // 草稿键前缀按归一匹配：同模型任何写法的残留草稿都不会再被 handleSave 写回
+      if (canonicalModelId(dk.split("|")[0]) === target) continue;
+      nextDraft[dk] = v;
+    }
+    setDraft(nextDraft);
+    setPricing(next);
+    setError(null);
+    try {
+      await savePricing(next);
+    } catch (e) {
+      setPricing(prev);
+      setDraft(prevDraft);
+      setError(String(e));
+    }
+  }, []);
+
+  // 恢复隐藏模型（即时落盘）：从隐藏名单移除后重新出现在列表——价格已删的
+  // 以 0 占位，走现有编辑逻辑。按归一移除，同模型多种写法的隐藏条目一并清除，
+  // 避免恢复后仍被隐藏。落盘失败报错并回滚本地状态
+  const handleRestore = useCallback(async (id: string) => {
+    const prev = pricingRef.current;
+    if (!prev) return;
+    const target = canonicalModelId(id);
+    const next: PricingConfig = {
+      ...prev,
+      hidden: (prev.hidden ?? []).filter((h) => canonicalModelId(h) !== target),
+    };
+    setPricing(next);
+    setError(null);
+    try {
+      await savePricing(next);
+    } catch (e) {
+      setPricing(prev);
+      setError(String(e));
+    }
+  }, []);
+
   // 合并：数据库里的模型 + 价格表里手动加的模型（记忆化，避免每次渲染重算集合与排序）。
   // 必须位于下方 if (!pricing) 早退之前：条件早退会跳过 hooks，导致前后渲染 hooks 数不一致而崩溃
   const modelIds = useMemo(() => {
     if (!pricing) return [];
+    // 隐藏名单（已删除模型）：命中归一 key 的不再展示——数据库仍出现过也不显示，
+    // 与后端 diff 的遍历主体过滤同口径
+    const hiddenSet = new Set((pricing.hidden ?? []).map((h) => canonicalModelId(h)));
     // 按归一化名去重：本地/远端库里仅大小写或隐藏字符不同的写法只保留一行，
     // 首个原始写法作为展示名；另一变体的花费经「小写+点号归一」兜底仍能命中该价格
     const seen = new Set<string>();
@@ -342,6 +412,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
       ...Object.keys(pricing.usd),
     ]) {
       const k = canonicalModelId(id);
+      if (hiddenSet.has(k)) continue;
       if (!seen.has(k)) {
         seen.add(k);
         ids.push(id);
@@ -353,6 +424,7 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
   if (!pricing) {
     return <LoadingState text={t("pricing.loading")} />;
   }
+  const hiddenList = pricing.hidden ?? [];
 
   return (
     <PageShell>
@@ -571,11 +643,47 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
             dCache={draft[`${id}|cache_read`]}
             onDraftChange={handleDraftChange}
             onCommit={commitDraft}
+            onRemove={handleRemove}
           />
         ))}
         {modelIds.length === 0 && (
           <div className="text-center text-xs text-slate-500 py-8">
             {t("pricing.noModels")}
+          </div>
+        )}
+
+        {/* 已隐藏模型（删除过的）：折叠入口 + 恢复面板（N=0 时不渲染） */}
+        {hiddenList.length > 0 && (
+          <div className="card-base rounded-2xl p-3">
+            <button
+              type="button"
+              onClick={() => setHiddenOpen((o) => !o)}
+              className="text-[10px] text-slate-700/55 hover:text-slate-900/80 transition-colors"
+            >
+              {hiddenOpen ? "▾" : "▸"}{" "}
+              {t("pricing.hiddenCount", { count: hiddenList.length })}
+            </button>
+            {hiddenOpen && (
+              <ul className="mt-2 space-y-1">
+                {hiddenList.map((h) => (
+                  <li
+                    key={h}
+                    className="flex items-center justify-between gap-2"
+                  >
+                    <span className="min-w-0 break-all num text-[10px] text-slate-900/80">
+                      {h}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleRestore(h)}
+                      className="shrink-0 px-1.5 py-0.5 rounded text-[10px] text-sky-600/90 hover:bg-sky-500/10 transition-colors"
+                    >
+                      {t("pricing.restore")}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
       </PageBody>
@@ -584,7 +692,8 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
 }
 
 /** 单个模型的价格卡片（memo：草稿用三个原始类型 props 传递，
- *  键入时只重渲染这一张卡片而非整个模型列表）。表单恒定为美元编辑 */
+ *  键入时只重渲染这一张卡片而非整个模型列表）。表单恒定为美元编辑。
+ *  右上角删除按钮（hover 显示）：从列表移除该模型，即时落盘 */
 const ModelPriceRow = memo(function ModelPriceRow({
   id,
   price,
@@ -593,6 +702,7 @@ const ModelPriceRow = memo(function ModelPriceRow({
   dCache,
   onDraftChange,
   onCommit,
+  onRemove,
 }: {
   id: string;
   price: ModelPrice;
@@ -601,6 +711,7 @@ const ModelPriceRow = memo(function ModelPriceRow({
   dCache: string | undefined;
   onDraftChange: (id: string, key: keyof ModelPrice, v: string) => void;
   onCommit: (id: string, key: keyof ModelPrice) => void;
+  onRemove: (id: string) => void;
 }) {
   const { t } = useI18n();
   const drafts: Record<keyof ModelPrice, string | undefined> = {
@@ -609,8 +720,21 @@ const ModelPriceRow = memo(function ModelPriceRow({
     cache_read: dCache,
   };
   return (
-    <div className="card-base rounded-2xl p-3">
-      <div className="text-xs font-medium text-slate-900/90 mb-2">{id}</div>
+    <div className="card-base rounded-2xl p-3 group">
+      <div className="flex items-start justify-between gap-2 mb-2">
+        <div className="min-w-0 break-all text-xs font-medium text-slate-900/90">
+          {id}
+        </div>
+        <button
+          type="button"
+          title={t("pricing.removeModel")}
+          aria-label={t("pricing.removeModel")}
+          onClick={() => onRemove(id)}
+          className="shrink-0 px-1.5 rounded text-[10px] leading-5 text-slate-700/40 hover:text-red-600 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
+        >
+          ×
+        </button>
+      </div>
       <div className="grid grid-cols-3 gap-1.5">
         {FIELDS.map((f) => {
           const draftVal = drafts[f.key];

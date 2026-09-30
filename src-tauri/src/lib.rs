@@ -256,7 +256,9 @@ pub(crate) fn collect_relevant_models(
         relevant.insert(m.model_id);
     });
     relevant.extend(user.usd.keys().cloned());
-    Ok(relevant)
+    // 隐藏名单过滤：价格设置页「删除」过的模型不再进入差异检查主体——两个参考源
+    // （内置表/models.dev）共用本构建，同步生效；计费查找 cost_for 不受影响
+    Ok(pricing::filter_hidden_models(relevant, &user.hidden))
 }
 
 /// check_pricing_updates：对比用户当前配置与内置参考表（编译期嵌入），返回差异。

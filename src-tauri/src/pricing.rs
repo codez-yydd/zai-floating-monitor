@@ -30,12 +30,17 @@ impl Default for ModelPrice {
 pub struct PricingConfig {
     /// key = "model_id"，便于前端按模型查找
     pub usd: BTreeMap<String, ModelPrice>,
+    /// 隐藏名单：价格设置页「删除」过的模型 id（serde default 兼容旧格式文件）。
+    /// 仅用于把模型从列表与差异提醒中排除，不参与计费查找
+    #[serde(default)]
+    pub hidden: Vec<String>,
 }
 
 impl Default for PricingConfig {
     fn default() -> Self {
         Self {
             usd: BTreeMap::new(),
+            hidden: Vec::new(),
         }
     }
 }
@@ -150,6 +155,27 @@ pub(crate) fn normalize_dots(s: &str) -> String {
     s.replace('.', "-")
 }
 
+
+/// 从差异检查的遍历主体中剔除隐藏名单里的模型（价格设置页「删除」过的模型，
+/// 即使数据库仍出现过也不再进入 new/changed/missing 任何提醒）。
+/// 匹配口径与 diff 一致：小写 + 点号归一（"GPT-4.1" 与 hidden 里的 "gpt-4-1"
+/// 视为同一模型）。纯函数，供 collect_relevant_models（lib.rs）与单测复用。
+pub(crate) fn filter_hidden_models(
+    relevant: std::collections::HashSet<String>,
+    hidden: &[String],
+) -> std::collections::HashSet<String> {
+    if hidden.is_empty() {
+        return relevant;
+    }
+    let hidden_keys: std::collections::HashSet<String> = hidden
+        .iter()
+        .map(|h| normalize_dots(&h.to_lowercase()))
+        .collect();
+    relevant
+        .into_iter()
+        .filter(|id| !hidden_keys.contains(&normalize_dots(&id.to_lowercase())))
+        .collect()
+}
 
 /// 点号归一索引：归一 key → 参考表原始 key（参考表 key 全小写）
 fn build_norm_index(map: &BTreeMap<String, ModelPrice>) -> BTreeMap<String, String> {
@@ -556,6 +582,88 @@ mod tests {
         let diff = diff_with_reference(&configured, &relevant, &ref_usd, MODELSDEV_VERSION);
         assert_eq!(diff.changed.len(), 1, "与官方价不同应报 changed");
         assert_eq!(diff.changed[0].default, price(1.25, 10.0, 0.125));
+    }
+
+    /// 旧格式 pricing.json（无 hidden 字段）可正常解析：serde default 补空名单，
+    /// 向后兼容存量用户文件
+    #[test]
+    fn pricing_config_parses_legacy_json_without_hidden() {
+        let legacy = r#"{
+            "usd": {
+                "gpt-5": { "input": 1.25, "output": 10.0, "cache_read": 0.125 },
+                "glm-4.6": { "input": 0.6, "output": 2.2, "cache_read": 0.11 }
+            },
+            "cny": { "gpt-5": { "input": 9.0, "output": 72.0, "cache_read": 0.9 } }
+        }"#;
+        let cfg: PricingConfig = serde_json::from_str(legacy).unwrap();
+        assert_eq!(cfg.usd.len(), 2);
+        assert_eq!(cfg.usd["gpt-5"], price(1.25, 10.0, 0.125));
+        assert!(cfg.hidden.is_empty(), "旧格式无 hidden 字段应解析为空名单");
+        // 废弃 cny 字段被 serde 忽略，不进任何字段；usd 为 BTreeMap 按键序序列化
+        assert_eq!(
+            serde_json::to_string(&cfg).unwrap(),
+            r#"{"usd":{"glm-4.6":{"input":0.6,"output":2.2,"cache_read":0.11},"gpt-5":{"input":1.25,"output":10.0,"cache_read":0.125}},"hidden":[]}"#
+        );
+    }
+
+    /// 隐藏名单过滤：filter_hidden_models 剔除命中归一口径的模型（含大小写/
+    /// 点号变体写法），过滤后的遍历主体进 diff 时 new/changed/missing 全无该模型
+    #[test]
+    fn hidden_models_filtered_out_of_diff() {
+        let mut user = PricingConfig::default();
+        user.usd.insert("glm-4-air".into(), price(0.1, 0.4, 0.01));
+        // 用户把 gpt-4.1 配了价又从列表删除：usd 条目已被前端清掉，
+        // hidden 里记录 db 形态 gpt-4-1
+        user.hidden = vec!["gpt-4-1".to_string(), "glm-x-new".to_string()];
+
+        let relevant: std::collections::HashSet<String> = [
+            "GLM-4.6".to_string(),   // 未隐藏、未配置 → new（应保留）
+            "GPT-4-1".to_string(),   // hidden "gpt-4-1" 的大写变体 → 应剔除
+            "gpt-4.1".to_string(),   // hidden 的点号形态 → 应剔除
+            "glm-4-air".to_string(), // 已配置且与参考不同 → changed（应保留）
+            "GLM-X-NEW".to_string(), // hidden "glm-x-new" 的大写形态 → 应剔除
+        ]
+        .into_iter()
+        .collect();
+
+        let ref_usd = BTreeMap::from([
+            ("glm-4.6".to_string(), price(0.6, 2.2, 0.11)),
+            ("gpt-4.1".to_string(), price(2.0, 8.0, 0.4)),
+            ("glm-4-air".to_string(), price(0.11, 0.42, 0.011)),
+        ]);
+
+        // 模拟 collect_relevant_models 末尾的过滤调用
+        let filtered = filter_hidden_models(relevant, &user.hidden);
+        let diff = diff_with_reference(&user, &filtered, &ref_usd, "test");
+
+        // 隐藏模型不出现在任何差异条目
+        assert!(
+            !diff.new_models.iter().any(|i| i.model_id.to_lowercase().contains("gpt-4")),
+            "隐藏模型不应出现在 new：{:?}",
+            diff.new_models.iter().map(|i| &i.model_id).collect::<Vec<_>>()
+        );
+        assert!(
+            !diff.changed.iter().any(|i| i.model_id.to_lowercase().contains("gpt-4")),
+            "隐藏模型不应出现在 changed"
+        );
+        assert!(
+            !diff.missing.iter().any(|m| m.to_lowercase().contains("gpt-4")),
+            "隐藏模型不应出现在 missing"
+        );
+        // 未隐藏模型的正常提醒不受影响
+        assert_eq!(diff.new_models.len(), 1);
+        assert_eq!(diff.new_models[0].model_id, "GLM-4.6");
+        assert_eq!(diff.new_models[0].user, None);
+        assert_eq!(diff.new_models[0].default, price(0.6, 2.2, 0.11));
+        assert_eq!(diff.new_models[0].reference_id, None);
+        assert_eq!(diff.changed.len(), 1);
+        assert_eq!(diff.changed[0].model_id, "glm-4-air");
+        // 隐藏的 glm-x-new 不再以 missing 提醒
+        assert!(diff.missing.is_empty());
+
+        // 空名单直通：不过滤任何条目（常见路径零开销）
+        let keep: std::collections::HashSet<String> = ["a".to_string()].into_iter().collect();
+        assert_eq!(filter_hidden_models(keep, &[]).len(), 1);
     }
 }
 

@@ -268,6 +268,10 @@ export const en: typeof zh = {
     "pricing.applySelected": "Apply selected",
     "pricing.applySelectedCount": "Apply selected ({count})",
     "pricing.noModels": "No models yet. Make sure Z.ai has usage records.",
+
+    "pricing.removeModel": "Remove from list",
+    "pricing.hiddenCount": "{count} model(s) hidden",
+    "pricing.restore": "Restore",
   } satisfies typeof pricing),
 
   ...({
