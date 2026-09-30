@@ -248,7 +248,14 @@ body,
   cursor: pointer;
 }
 .btn-primary:hover { background: #0284c7; }
-.btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-primary:disabled {
+  /* 禁用态不用 opacity：透明窗口+popover 材质下 WKWebView 对快速 opacity
+   * 切换的合成层清理不彻底，重新启用后残留半透明旧层（文字重影+淡斑），
+   * 改用低透明度颜色表达，避免触发 opacity 合成层变化 */
+  background: rgba(14, 165, 233, 0.4);
+  color: rgba(255, 255, 255, 0.45);
+  cursor: not-allowed;
+}
 
 .btn-secondary {
   display: inline-flex;
@@ -265,7 +272,11 @@ body,
   cursor: pointer;
 }
 .btn-secondary:hover { background: rgba(15,23,42,0.09); color: rgba(15,23,42,0.85); }
-.btn-secondary:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-secondary:disabled {
+  background: rgba(15, 23, 42, 0.03);
+  color: rgba(15, 23, 42, 0.25);
+  cursor: not-allowed;
+}
 
 .btn-ghost {
   display: inline-flex;
@@ -289,6 +300,10 @@ body,
 .dark .btn-secondary:hover {
   background: rgba(226,232,240,0.12);
   color: rgba(226,232,240,0.9);
+}
+.dark .btn-secondary:disabled {
+  background: rgba(226, 232, 240, 0.03);
+  color: rgba(226, 232, 240, 0.3);
 }
 .dark .btn-ghost { color: rgba(226,232,240,0.55); }
 .dark .btn-ghost:hover { color: #38bdf8; background: rgba(56,189,248,0.08); }
