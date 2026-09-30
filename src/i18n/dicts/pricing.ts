@@ -9,13 +9,21 @@ export const pricing = {
   "pricing.usd": "$ 美元",
   "pricing.unitHint": "单位：$/百万 token。人民币按汇率 {rate} 自动折算。",
   "pricing.checkUpdates": "检查价格更新",
+  "pricing.syncModelsdev": "从 models.dev 同步",
+  "pricing.syncing": "同步中…",
+  "pricing.syncFailHint": "可在设置页配置网络代理后重试",
   "pricing.missingCount": "{count} 个模型未配价",
   "pricing.upToDate": "已是最新 ✓",
 
   // 差异面板
   "pricing.diffTitle": "价格更新 · 内置参考表",
+  "pricing.diffTitleModelsdev": "价格更新 · models.dev",
   "pricing.diffHint":
     "参考价离线对比不联网。带 ≈ 标记的是变体名匹配的基础模型参考价，应用前请确认。",
+  "pricing.diffHintModelsdev":
+    "官方厂商在线价格（仅白名单厂商，不含中转渠道）。带 ≈ 标记的仍是变体名匹配的基础模型参考价，应用前请确认。",
+  "pricing.modelsdevFetchedAt": "数据时间：{time}",
+  "pricing.modelsdevFromCache": "缓存（离线）",
   "pricing.missingWarn":
     "以下 {count} 个模型实际在用但未配置价格（花费按 0 计）：",
   "pricing.addPriceBelow": "请在下方模型列表中手动补价",

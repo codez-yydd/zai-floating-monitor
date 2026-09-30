@@ -20,6 +20,7 @@ mod minimax;
 mod mimo;
 mod model_speed;
 mod moonshot;
+mod net_config;
 mod opencodego;
 mod pet;
 mod pets;
@@ -217,49 +218,59 @@ fn set_currency(currency: String, app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// 汇总价格差异检查的遍历主体：「实际调用过 ∪ 用户已配置 ∪ 远端同步」的模型 id。
+/// check_pricing_updates（内置参考表）与 pricing::fetch_modelsdev_diff（在线官方价）
+/// 共用同一构建，保证两种参考源对同一模型的 new/changed/missing 结论口径一致。
+/// 多库查询（SQLite/文件 IO），须在 spawn_blocking 内调用。
+pub(crate) fn collect_relevant_models(
+    user: &PricingConfig,
+) -> Result<std::collections::HashSet<String>, String> {
+    // 相关模型 = 数据库里出现过的 + 用户已配置的
+    let mut relevant: std::collections::HashSet<String> = std::collections::HashSet::new();
+    db::list_models()?.into_iter().for_each(|m| {
+        relevant.insert(m.model_id);
+    });
+    // Codex 导入库出现过的模型也纳入检查主体（未安装/导入失败时静默跳过，
+    // 不影响 zcode 部分的检查）
+    if let Ok(models) = codex::list_models() {
+        models.into_iter().for_each(|m| {
+            relevant.insert(m.model_id);
+        });
+    }
+    // Claude 导入库同上
+    if let Ok(models) = claude::list_models() {
+        models.into_iter().for_each(|m| {
+            relevant.insert(m.model_id);
+        });
+    }
+    // Kimi 导入库同上
+    if let Ok(models) = kimi::list_models() {
+        models.into_iter().for_each(|m| {
+            relevant.insert(m.model_id);
+        });
+    }
+    // 远端同步（其他设备上传）的模型同样纳入：本机没有但其他设备在用的
+    // 模型（如 gpt-5.6-sol）也需要配价——参考表收录则提示新增可一键应用，
+    // 未收录则以 missing 暴露提醒手动补价；服务器不可用时静默降级为空
+    sync::remote_models_cached().into_iter().for_each(|m| {
+        relevant.insert(m.model_id);
+    });
+    relevant.extend(user.usd.keys().cloned());
+    Ok(relevant)
+}
+
 /// check_pricing_updates：对比用户当前配置与内置参考表（编译期嵌入），返回差异。
 /// 仅用于"检查更新"提示，绝不自动覆盖。价格对比本身无网络请求（唯一例外：
 /// 启用多设备同步时 remote_models_cached 缓存过期会顺带刷新一次设备模型清单）。
 /// 差异判定只看 USD 原始价（人民币按汇率折算展示，由前端实时计算）。
-/// 遍历主体 =「数据库实际调用过 ∪ 用户已手动配置 ∪ 远端同步（其他设备）」的模型：
-/// 实际在用但两边都没价格的模型会以 missing 暴露（花费按 0 计）。
+/// 遍历主体见 collect_relevant_models：实际在用但两边都没价格的模型会以
+/// missing 暴露（花费按 0 计）。
 /// async + spawn_blocking：多库查询（SQLite/文件 IO）不能跑在主线程。
 #[tauri::command]
 async fn check_pricing_updates() -> Result<pricing::PricingDiff, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let user = load_pricing()?;
-        // 相关模型 = 数据库里出现过的 + 用户已配置的
-        let mut relevant: std::collections::HashSet<String> = std::collections::HashSet::new();
-        db::list_models()?.into_iter().for_each(|m| {
-            relevant.insert(m.model_id);
-        });
-        // Codex 导入库出现过的模型也纳入检查主体（未安装/导入失败时静默跳过，
-        // 不影响 zcode 部分的检查）
-        if let Ok(models) = codex::list_models() {
-            models.into_iter().for_each(|m| {
-                relevant.insert(m.model_id);
-            });
-        }
-        // Claude 导入库同上
-        if let Ok(models) = claude::list_models() {
-            models.into_iter().for_each(|m| {
-                relevant.insert(m.model_id);
-            });
-        }
-        // Kimi 导入库同上
-        if let Ok(models) = kimi::list_models() {
-            models.into_iter().for_each(|m| {
-                relevant.insert(m.model_id);
-            });
-        }
-        // 远端同步（其他设备上传）的模型同样纳入：本机没有但其他设备在用的
-        // 模型（如 gpt-5.6-sol）也需要配价——内置表收录则提示新增可一键应用，
-        // 未收录则以 missing 暴露提醒手动补价；服务器不可用时静默降级为空
-        sync::remote_models_cached().into_iter().for_each(|m| {
-            relevant.insert(m.model_id);
-        });
-        relevant.extend(user.usd.keys().cloned());
-
+        let relevant = collect_relevant_models(&user)?;
         Ok(pricing::diff_pricing(&user, &relevant))
     })
     .await
@@ -645,6 +656,48 @@ async fn fetch_fx_rate() -> Result<(f64, String), String> {
     tauri::async_runtime::spawn_blocking(cursor::fetch_fx_rate)
         .await
         .map_err(|e| format!("汇率获取任务失败: {e}"))?
+}
+
+// ===== 网络代理（models.dev 价格同步与汇率更新共用）=====
+
+/// get_proxy_config：读取网络代理配置（proxy 为空 = 直连）
+#[tauri::command]
+fn get_proxy_config() -> Result<net_config::ProxyConfig, String> {
+    net_config::load_proxy_config()
+}
+
+/// set_proxy_config：保存网络代理配置（仅持久化，不发探测请求——
+/// 代理是否可用以实际同步/汇率更新时的报错为准）
+#[tauri::command]
+fn set_proxy_config(proxy: String) -> Result<(), String> {
+    net_config::save_proxy_config(&proxy)
+}
+
+/// sync_modelsdev_pricing 命令的返回结构
+#[derive(Debug, Serialize)]
+struct ModelsdevSyncResult {
+    /// 与内置检查同构的价格差异（version 固定为 "models.dev"）
+    diff: pricing::PricingDiff,
+    /// 数据抓取时间（ms 时间戳，前端格式化为"数据时间"）
+    fetched_at: i64,
+    /// 是否来自本地缓存（网络失败降级，前端标注"缓存（离线）"）
+    from_cache: bool,
+}
+
+/// sync_modelsdev_pricing：从 models.dev 在线同步官方厂商价格并生成差异
+/// （仅用户手动触发，不做自动定时同步）。代理走 net_config 统一配置。
+/// async + spawn_blocking：内部为同步 HTTP（ureq，约 5MB 下载，超时 30s），
+/// 必须卸载到阻塞线程池，避免网络慢冻结托盘/窗口事件（与 fetch_fx_rate 同款模式）。
+#[tauri::command]
+async fn sync_modelsdev_pricing() -> Result<ModelsdevSyncResult, String> {
+    tauri::async_runtime::spawn_blocking(pricing::fetch_modelsdev_diff)
+        .await
+        .map_err(|e| format!("models.dev 同步任务失败: {e}"))?
+        .map(|(diff, fetched_at, from_cache)| ModelsdevSyncResult {
+            diff,
+            fetched_at,
+            from_cache,
+        })
 }
 
 // ===== Codex 用量统计 =====
@@ -2150,6 +2203,9 @@ pub fn run() {
             get_cursor_config,
             set_cursor_config,
             fetch_fx_rate,
+            get_proxy_config,
+            set_proxy_config,
+            sync_modelsdev_pricing,
             get_codex_usage,
             get_codex_debug,
             get_claude_usage,

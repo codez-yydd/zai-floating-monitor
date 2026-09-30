@@ -465,6 +465,98 @@ mod tests {
         assert_eq!(d.usd["claude-sonnet-5"], price(3.0, 15.0, 0.3));
         assert!(d.usd.contains_key("glm-4.5"), "Z.ai 特有模型应保留");
     }
+
+    /// models.dev 解析（白名单 + 真实接口形态的小样例）：
+    /// 白名单外厂商跳过、key 取 "/" 最后一段并小写、cost 缺失字段按 0
+    #[test]
+    fn modelsdev_parse_filters_whitelist_and_normalizes_keys() {
+        // 样例结构照 /tmp/modelsdev.json 实测：顶层按 provider 分组，
+        // 模型带 cost{input,output,cache_read,cache_write}（cache_write 不入库）
+        let sample = r#"{
+            "deepinfra": { "models": {
+                "meta-llama/Llama-3.3-70B-Instruct-Turbo": {
+                    "cost": { "input": 0.01, "output": 0.02, "cache_read": 0.001 }
+                }
+            }},
+            "zai": { "models": {
+                "glm-4.6": { "cost": { "input": 0.6, "output": 2.2, "cache_read": 0.11, "cache_write": 0.0 } },
+                "GLM-4.5-Air": { "cost": { "input": 0.11, "output": 0.42 } }
+            }},
+            "anthropic": { "models": {
+                "claude-sonnet-4-5": { "cost": { "input": 3.0, "output": 15.0, "cache_read": 0.3 } },
+                "org-prefix/claude-haiku-4-5": { "cost": { "input": 1.0, "output": 5.0, "cache_read": 0.1 } }
+            }},
+            "openai": { "models": {
+                "gpt-image-1": { "id": "gpt-image-1" },
+                "gpt-image-2": { "cost": null }
+            }},
+            "moonshotai-cn": { "models": {
+                "kimi-k2.7-code": { "cost": { "input": 1.0, "output": 5.0, "cache_read": 0.1 } }
+            }},
+            "qwen": {}
+        }"#;
+        let root: serde_json::Value = serde_json::from_str(sample).unwrap();
+        let m = parse_modelsdev_prices(&root);
+
+        // 白名单外（deepinfra）不收录
+        assert!(!m.contains_key("llama-3.3-70b-instruct-turbo"), "白名单外厂商应跳过");
+        // 白名单内但无 models 的厂商（qwen）自然跳过，不影响其他厂商
+        assert_eq!(m.get("glm-4.6"), Some(&price(0.6, 2.2, 0.11)));
+        // 模型 id 大写归一小写；cost 缺 cache_read 按 0
+        assert_eq!(m.get("glm-4.5-air"), Some(&price(0.11, 0.42, 0.0)));
+        // 带 org 前缀的 id 取 "/" 最后一段
+        assert_eq!(m.get("claude-haiku-4-5"), Some(&price(1.0, 5.0, 0.1)));
+        assert_eq!(m.get("claude-sonnet-4-5"), Some(&price(3.0, 15.0, 0.3)));
+        // Moonshot 官方价实际挂在 moonshotai / moonshotai-cn（moonshot id 不存在）
+        assert_eq!(m.get("kimi-k2.7-code"), Some(&price(1.0, 5.0, 0.1)));
+        // 完全没有 cost 的条目（官方未公布价格）跳过，不生成全 0 参考价
+        assert!(!m.contains_key("gpt-image-1"), "无 cost 的条目应跳过");
+        // cost 为 JSON null 同样视为未公布，跳过不生成全 0 参考价
+        assert!(!m.contains_key("gpt-image-2"), "cost=null 的条目应跳过");
+    }
+
+    /// 同一 key 重复（多家厂商各有一份同 id 价）保留首个，且
+    /// 提取结果可直接喂给 diff_with_reference 当参考表
+    #[test]
+    fn modelsdev_duplicate_key_keeps_first_and_feeds_diff() {
+        let sample = r#"{
+            "openai": { "models": {
+                "gpt-5": { "cost": { "input": 1.25, "output": 10.0, "cache_read": 0.125 } }
+            }},
+            "azure": { "models": {
+                "gpt-5": { "cost": { "input": 9.9, "output": 9.9, "cache_read": 9.9 } }
+            }}
+        }"#;
+        let root: serde_json::Value = serde_json::from_str(sample).unwrap();
+        let ref_usd = parse_modelsdev_prices(&root);
+        assert_eq!(
+            ref_usd.get("gpt-5"),
+            Some(&price(1.25, 10.0, 0.125)),
+            "重复 key 应保留首个（openai）"
+        );
+
+        // 提取表可作为 diff_with_reference 的参考表（在线同步的复用路径）：
+        // 未配置 → new，参考表与本地都没有 → missing。
+        // 注意第二个 id 不能形如 "gpt-5-xxx"——变体名回退会命中 gpt-5 进 new
+        let user = PricingConfig::default();
+        let relevant: std::collections::HashSet<String> =
+            ["gpt-5".to_string(), "totally-unknown".to_string()]
+                .into_iter()
+                .collect();
+        let diff = diff_with_reference(&user, &relevant, &ref_usd, MODELSDEV_VERSION);
+        assert_eq!(diff.new_models.len(), 1);
+        assert_eq!(diff.new_models[0].model_id, "gpt-5");
+        assert_eq!(diff.new_models[0].default, price(1.25, 10.0, 0.125));
+        // 参考表没有的模型照常走 missing
+        assert_eq!(diff.missing, vec!["totally-unknown".to_string()]);
+        assert_eq!(diff.version, "models.dev");
+
+        let mut configured = PricingConfig::default();
+        configured.usd.insert("gpt-5".to_string(), price(2.0, 8.0, 0.1));
+        let diff = diff_with_reference(&configured, &relevant, &ref_usd, MODELSDEV_VERSION);
+        assert_eq!(diff.changed.len(), 1, "与官方价不同应报 changed");
+        assert_eq!(diff.changed[0].default, price(1.25, 10.0, 0.125));
+    }
 }
 
 /// 把用户勾选的若干 (model_id, currency, price) 合并进 pricing 并保存。
@@ -522,4 +614,170 @@ pub fn save_currency(currency: &str) -> Result<(), String> {
 #[derive(Debug, Serialize, Deserialize)]
 struct CurrencyPref {
     currency: String,
+}
+
+// ===== models.dev 官方价格在线同步（用户手动触发，含本地缓存降级）=====
+
+/// models.dev 在线价格源（GET 无鉴权，约 5MB JSON；顶层按 provider 分组）
+const MODELSDEV_URL: &str = "https://models.dev/api.json";
+/// 在线参考表的版本号（前端差异面板标题直接展示该值）
+pub const MODELSDEV_VERSION: &str = "models.dev";
+
+/// 只采信这些官方厂商的自营价格：社区/中转站在 models.dev 上的价格不可信，
+/// 白名单外的厂商直接跳过（不存在的 id 同样自然跳过，不报错）。
+const MODELSDEV_PROVIDERS: &[&str] = &[
+    "anthropic",
+    "openai",
+    "google",
+    "zai",
+    "deepseek",
+    // Moonshot 官方价实际挂在 moonshotai / moonshotai-cn 两家（models.dev 上
+    // 不存在 moonshot、baidu 这两个 id）：两家模型集互补，同 key 保留首条的
+    // 解析语义下互补模型都能入库
+    "moonshotai",
+    "moonshotai-cn",
+    "minimax",
+    "xai",
+    "mistral",
+    "cohere",
+    "alibaba",
+    "qwen",
+    "stepfun",
+    "perplexity",
+    "amazon-bedrock",
+    "azure",
+];
+
+/// models.dev 同步结果的本地缓存（~/.zbar/modelsdev-cache.json）。
+/// 只存白名单厂商提取后的参考表（数百条，远小于源 JSON）：
+/// 网络失败时降级用上次成功数据，保证离线也能出差异。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelsdevCache {
+    /// 抓取时间（ms 时间戳，前端展示"数据时间"）
+    pub fetched_at: i64,
+    /// 官方参考价（USD/百万 token），key = 小写模型 id
+    pub usd: BTreeMap<String, ModelPrice>,
+}
+
+/// 缓存文件路径
+fn modelsdev_cache_path() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join("modelsdev-cache.json"))
+}
+
+/// 读取 modelsdev 缓存；文件不存在或损坏返回 Err（调用方决定是否报错）
+fn load_modelsdev_cache() -> Result<ModelsdevCache, String> {
+    let path = modelsdev_cache_path()?;
+    if !path.exists() {
+        return Err("暂无 models.dev 本地缓存".to_string());
+    }
+    let data =
+        fs::read_to_string(&path).map_err(|e| format!("读取 models.dev 缓存失败: {e}"))?;
+    serde_json::from_str(&data).map_err(|e| format!("解析 models.dev 缓存失败: {e}"))
+}
+
+/// 写入 modelsdev 缓存
+fn save_modelsdev_cache(cache: &ModelsdevCache) -> Result<(), String> {
+    let dir = config_dir()?;
+    fs::create_dir_all(&dir).map_err(|e| format!("创建配置目录失败: {e}"))?;
+    let data =
+        serde_json::to_string(cache).map_err(|e| format!("序列化 models.dev 缓存失败: {e}"))?;
+    fs::write(modelsdev_cache_path()?, data).map_err(|e| format!("写入 models.dev 缓存失败: {e}"))
+}
+
+/// 从 models.dev 顶层 JSON（serde_json::Value，避免为 225 家厂商建全量结构体）
+/// 提取白名单厂商的参考价表。纯函数，供在线同步与单测复用：
+/// - key = model_id 的 "/" 最后一段 to_lowercase（官方家多为裸 id，个别带
+///   org 前缀；与本应用"参考表 key 全小写"的口径对齐）；
+/// - 同一 key 重复时保留首个（不同厂商偶然同名时以先遍历到的为准，不抖动）；
+/// - cost 缺失或为 null 的条目（官方未公布价格）跳过；cost 存在但缺
+///   input/output/cache_read 某字段时按 0.0；cache_write 不入库
+///   （本应用计费口径只有三项）。
+fn parse_modelsdev_prices(root: &serde_json::Value) -> BTreeMap<String, ModelPrice> {
+    let mut out = BTreeMap::new();
+    for pid in MODELSDEV_PROVIDERS {
+        let Some(models) = root
+            .get(*pid)
+            .and_then(|p| p.get("models"))
+            .and_then(|m| m.as_object())
+        else {
+            continue;
+        };
+        for (model_id, mv) in models {
+            // cost 需存在且为对象才入表：完全没有 cost（如 openai 的图像模型）或
+            // cost 为 JSON null 都是官方未公布价格，跳过而不是按全 0 入表，否则会
+            // 把用户已配的价格误报成"变动 → $0"（new_models 默认勾选，一键应用即写 0）。
+            // cost 存在但缺 input/output/cache_read 某个字段时才按 0.0
+            let Some(cost_obj) = mv.get("cost").and_then(|c| c.as_object()) else {
+                continue;
+            };
+            let key = model_id.rsplit('/').next().unwrap_or(model_id).to_lowercase();
+            let cost = |name: &str| {
+                cost_obj
+                    .get(name)
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0)
+            };
+            out.entry(key).or_insert(ModelPrice {
+                input: cost("input"),
+                output: cost("output"),
+                cache_read: cost("cache_read"),
+            });
+        }
+    }
+    out
+}
+
+/// 从 models.dev 在线同步官方厂商价格并生成差异（复用内置检查的判定逻辑）。
+/// 返回 (差异, 数据抓取时间 ms, 是否来自缓存)。
+/// - 网络走 net_config 的统一代理配置（空 = 直连），读取超时 30s；
+/// - 成功后写缓存（fetched_at = 当前毫秒）；写入失败仅记日志不阻断（缓存
+///   只是降级手段，不影响本次结果）；
+/// - 拉取/解析失败时降级用本地合法缓存（from_cache = true）；无缓存才报错。
+pub fn fetch_modelsdev_diff() -> Result<(PricingDiff, i64, bool), String> {
+    let fetched: Result<(BTreeMap<String, ModelPrice>, i64), String> = (|| {
+        let agent = crate::net_config::http_agent(30)?;
+        let resp = agent
+            .get(MODELSDEV_URL)
+            .set("Accept", "application/json")
+            .call()
+            .map_err(|e| format!("拉取 models.dev 价格失败: {e}"))?;
+        let root: serde_json::Value = resp
+            .into_json()
+            .map_err(|e| format!("解析 models.dev 响应失败: {e}"))?;
+        let prices = parse_modelsdev_prices(&root);
+        // 空表说明响应结构与预期不符（如被网关劫持返回错误页 JSON）：
+        // 不能当"白名单厂商都没价"处理，否则会误导用户清空参考价
+        if prices.is_empty() {
+            return Err("models.dev 响应中未找到白名单厂商的价格数据".to_string());
+        }
+        Ok((prices, chrono::Utc::now().timestamp_millis()))
+    })();
+
+    let (ref_usd, fetched_at, from_cache) = match fetched {
+        Ok((prices, at)) => {
+            let cache = ModelsdevCache {
+                fetched_at: at,
+                usd: prices.clone(),
+            };
+            if let Err(e) = save_modelsdev_cache(&cache) {
+                eprintln!("[zbar-pricing] models.dev 缓存写入失败: {e}");
+            }
+            (prices, at, false)
+        }
+        Err(net_err) => match load_modelsdev_cache() {
+            // 合法缓存才降级：空表缓存与无缓存同等对待
+            Ok(cache) if !cache.usd.is_empty() => {
+                eprintln!("[zbar-pricing] models.dev 拉取失败，降级用本地缓存: {net_err}");
+                (cache.usd, cache.fetched_at, true)
+            }
+            _ => return Err(net_err),
+        },
+    };
+
+    // 遍历主体与判定逻辑与内置检查完全一致（collect_relevant_models 在 lib.rs，
+    // 两种来源的差异口径共用一套，避免同一模型两处结论矛盾）
+    let user = load_pricing()?;
+    let relevant = crate::collect_relevant_models(&user)?;
+    let diff = diff_with_reference(&user, &relevant, &ref_usd, MODELSDEV_VERSION);
+    Ok((diff, fetched_at, from_cache))
 }

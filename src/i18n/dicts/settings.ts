@@ -90,6 +90,12 @@ export const settings = {
   "settings.fxNote":
     "模型价格只存美元，人民币花费按此汇率自动折算（价格设置页的 ¥ 视图同源）。",
 
+  // ===== 网络代理（models.dev 价格同步与汇率更新共用）=====
+  "settings.proxyCard": "网络代理",
+  "settings.proxyHint":
+    "模型价格在线同步与汇率更新走此代理出站，支持 http:// 与 socks5:// 地址，留空则直连。",
+  "settings.proxyDirect": "未配置，当前直连",
+
   // ===== 全局快捷键 =====
   "settings.shortcut": "全局快捷键",
   "settings.shortcutHint":

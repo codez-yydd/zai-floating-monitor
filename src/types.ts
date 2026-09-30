@@ -414,6 +414,26 @@ export interface ApplyPriceItem {
   price: ModelPrice;
 }
 
+// ===== 网络代理（~/.zbar/proxy.json，models.dev 同步与汇率更新共用）=====
+
+/** 网络代理配置 */
+export interface ProxyConfig {
+  /** 代理地址，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:7890；空串 = 直连 */
+  proxy: string;
+}
+
+// ===== models.dev 官方价格在线同步 =====
+
+/** models.dev 在线同步结果 */
+export interface ModelsdevSyncResult {
+  /** 与内置检查同构的价格差异（version 固定为 "models.dev"） */
+  diff: PricingDiff;
+  /** 数据抓取时间（ms 时间戳，前端格式化为"数据时间"） */
+  fetched_at: number;
+  /** 是否来自本地缓存（网络失败降级，前端标注"缓存（离线）"） */
+  from_cache: boolean;
+}
+
 // ===== 全局快捷键（~/.zbar/shortcut.json）=====
 
 /** 全局快捷键配置 */

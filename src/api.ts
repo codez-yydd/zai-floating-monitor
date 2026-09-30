@@ -22,11 +22,13 @@ import type {
   MergeResult,
   ModelInfo,
   ModelSpeedStat,
+  ModelsdevSyncResult,
   PricingConfig,
   PricingDiff,
   ApplyPriceItem,
   ProjectSummary,
   ProviderQuotaEntry,
+  ProxyConfig,
   QuotaResult,
   QuotaSnapshot,
   RegisterRequest,
@@ -90,6 +92,23 @@ export async function applyPricingUpdates(
   items: ApplyPriceItem[]
 ): Promise<PricingConfig> {
   return invoke<PricingConfig>("apply_pricing_updates", { items });
+}
+
+// ===== 网络代理（models.dev 价格同步与汇率更新共用）=====
+
+/** 读取网络代理配置（proxy 为空 = 直连） */
+export async function getProxyConfig(): Promise<ProxyConfig> {
+  return invoke<ProxyConfig>("get_proxy_config");
+}
+
+/** 保存网络代理配置（仅持久化，代理是否可用以实际联网时的报错为准） */
+export async function setProxyConfig(config: ProxyConfig): Promise<void> {
+  await invoke("set_proxy_config", { proxy: config.proxy });
+}
+
+/** 从 models.dev 在线同步官方厂商价格并返回差异（网络失败自动降级本地缓存） */
+export async function syncModelsdevPricing(): Promise<ModelsdevSyncResult> {
+  return invoke<ModelsdevSyncResult>("sync_modelsdev_pricing");
 }
 
 export async function fetchQuota(): Promise<QuotaResult> {

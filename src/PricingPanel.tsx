@@ -14,6 +14,7 @@ import {
   fetchPricing,
   getCursorConfig,
   savePricing,
+  syncModelsdevPricing,
 } from "./api";
 import { canonicalModelId, lookupPrice } from "./modelName";
 import {
@@ -65,6 +66,13 @@ function scaleCny(p: ModelPrice, rate: number): ModelPrice {
 /// 无价格模型的占位（复用同一引用，保证 memo 的模型卡片不会因 fallback 新对象而失效）
 const ZERO_PRICE: ModelPrice = { input: 0, output: 0, cache_read: 0 };
 
+/// models.dev 数据时间格式化（本地时区，YYYY-MM-DD HH:mm）
+function fmtStamp(ms: number): string {
+  const d = new Date(ms);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
   const { t } = useI18n();
   const [pricing, setPricing] = useState<PricingConfig | null>(null);
@@ -97,6 +105,21 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
   const [updateCount, setUpdateCount] = useState(0);
   const [diffPanel, setDiffPanel] = useState(false);
   const [diff, setDiff] = useState<PricingDiff | null>(null);
+  // 差异参考源：builtin = 编译期内置表（检查更新）；modelsdev = models.dev 在线官方价。
+  // 两个来源互斥展示：点哪个按钮就用哪个结果覆盖当前 diff 状态
+  const [diffSource, setDiffSource] = useState<"builtin" | "modelsdev">("builtin");
+  // diffSource 的 ref 镜像（与 draftRef 同模式）：晚到的异步结果落地前校验当前来源，
+  // 避免把回调绑进依赖导致重复执行
+  const diffSourceRef = useRef<"builtin" | "modelsdev">("builtin");
+  useLayoutEffect(() => {
+    diffSourceRef.current = diffSource;
+  }, [diffSource]);
+  // models.dev 同步进行中（防重复点击）+ 最近一次结果的数据元信息
+  const [syncing, setSyncing] = useState(false);
+  const [modelsdevMeta, setModelsdevMeta] = useState<{
+    fetchedAt: number;
+    fromCache: boolean;
+  } | null>(null);
   // 用户勾选的模型 id 集合（差异条目为模型级）
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [applying, setApplying] = useState(false);
@@ -116,20 +139,27 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
       .catch(() => {});
   }, []);
 
+  // 把某个来源的 diff 结果写入共享状态（更新差异数 + 默认勾选全部新增项，
+  // 变动项默认不勾以保护用户自定义）
+  const applyDiffState = (d: PricingDiff) => {
+    setDiff(d);
+    setUpdateCount(d.new_models.length + d.changed.length);
+    setSelected(new Set(d.new_models.map((i) => i.model_id)));
+  };
+
   // 进入价格设置时静默检查一次差异，有差异则在按钮显示红点（纯本地对比，秒回不联网）。
   // 差异判定只看 USD 原始价（人民币按汇率折算展示，不参与判定）。
   useEffect(() => {
     checkPricingUpdates()
       .then((d) => {
-        const n = d.new_models.length + d.changed.length;
-        setUpdateCount(n);
-        setDiff(d);
-        // 默认勾选：新增模型全勾，变动项默认不勾（保护用户自定义）
-        const sel = new Set<string>();
-        d.new_models.forEach((i) => sel.add(i.model_id));
-        setSelected(sel);
+        // 内置检查内部含 codex 导入冷启动、可能晚到数秒：期间用户若已切到
+        // models.dev 来源，丢弃这份过期结果，避免覆盖在线同步的 diff
+        // 造成"来源标注 modelsdev、数据却是 builtin"的错位（红点也随之不更新）
+        if (diffSourceRef.current !== "builtin") return;
+        applyDiffState(d);
       })
       .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // 切换某条差异的勾选状态
@@ -159,13 +189,18 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
       const updated = await applyPricingUpdates(items);
       setPricing(updated);
       setDraft({});
-      // 重新检查差异
-      const d = await checkPricingUpdates();
-      const n = d.new_models.length + d.changed.length;
-      setDiff(d);
-      setUpdateCount(n);
-      setSelected(new Set(d.new_models.map((i) => i.model_id)));
-      if (n === 0) setDiffPanel(false);
+      // 重新检查差异：与当前展示的参考源保持一致（两种来源互斥展示，若应用
+      // models.dev 价后改用内置表复查，会把刚应用的官方价误报为"变动"）
+      if (diffSource === "modelsdev") {
+        const r = await syncModelsdevPricing();
+        setModelsdevMeta({ fetchedAt: r.fetched_at, fromCache: r.from_cache });
+        applyDiffState(r.diff);
+        if (r.diff.new_models.length + r.diff.changed.length === 0) setDiffPanel(false);
+      } else {
+        const d = await checkPricingUpdates();
+        applyDiffState(d);
+        if (d.new_models.length + d.changed.length === 0) setDiffPanel(false);
+      }
     } catch (e) {
       setError(String(e));
     } finally {
@@ -178,12 +213,30 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
     setError(null);
     try {
       const d = await checkPricingUpdates();
-      setDiff(d);
-      setUpdateCount(d.new_models.length + d.changed.length);
-      setSelected(new Set(d.new_models.map((i) => i.model_id)));
+      setDiffSource("builtin");
+      setModelsdevMeta(null);
+      applyDiffState(d);
       setDiffPanel(true);
     } catch (e) {
       setError(String(e));
+    }
+  };
+
+  // 从 models.dev 在线同步官方厂商价格（网络失败自动降级本地缓存）。
+  // 结果与内置表来源互斥：直接覆盖当前 diff 状态
+  const runModelsdevSync = async () => {
+    setError(null);
+    setSyncing(true);
+    try {
+      const r = await syncModelsdevPricing();
+      setDiffSource("modelsdev");
+      setModelsdevMeta({ fetchedAt: r.fetched_at, fromCache: r.from_cache });
+      applyDiffState(r.diff);
+      setDiffPanel(true);
+    } catch (e) {
+      setError(`${String(e)}（${t("pricing.syncFailHint")}）`);
+    } finally {
+      setSyncing(false);
     }
   };
 
@@ -328,14 +381,21 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
               {t("pricing.unitHint", { rate: fxRate })}
             </p>
             <div className="mt-2 flex items-center justify-between">
-              <BtnSecondary onClick={runDiff} className="relative">
-                {t("pricing.checkUpdates")}
-                {updateCount > 0 && (
-                  <span className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-1 flex items-center justify-center rounded-full bg-rose-500 text-white text-[9px] leading-none">
-                    {updateCount}
-                  </span>
-                )}
-              </BtnSecondary>
+              <div className="flex items-center gap-1.5">
+                <BtnSecondary onClick={runDiff} className="relative">
+                  {t("pricing.checkUpdates")}
+                  {/* 红点只对内置表来源展示：models.dev 的差异数在面板内呈现，
+                      避免在线同步结果误挂在"检查更新"按钮上 */}
+                  {diffSource === "builtin" && updateCount > 0 && (
+                    <span className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-1 flex items-center justify-center rounded-full bg-rose-500 text-white text-[9px] leading-none">
+                      {updateCount}
+                    </span>
+                  )}
+                </BtnSecondary>
+                <BtnSecondary onClick={runModelsdevSync} disabled={syncing}>
+                  {syncing ? t("pricing.syncing") : t("pricing.syncModelsdev")}
+                </BtnSecondary>
+              </div>
               {diff && updateCount === 0 && !diffPanel && (
                 <span className={`text-[10px] ${diff.missing.length > 0 ? "text-amber-600" : "text-emerald-600"}`}>
                   {diff.missing.length > 0
@@ -354,12 +414,29 @@ export function PricingPanel({ currency, onCurrencyChange, onBack }: Props) {
         {diffPanel && diff && (
           <SectionCard
             title={
-              t("pricing.diffTitle") + (diff.version ? ` v${diff.version}` : "")
+              diffSource === "modelsdev"
+                ? t("pricing.diffTitleModelsdev")
+                : t("pricing.diffTitle") + (diff.version ? ` v${diff.version}` : "")
             }
           >
             <p className="text-[9px] text-slate-500 mb-2 leading-relaxed">
-              {t("pricing.diffHint")}
+              {diffSource === "modelsdev"
+                ? t("pricing.diffHintModelsdev")
+                : t("pricing.diffHint")}
             </p>
+            {/* models.dev 数据时间 + 离线缓存标注（在线同步特有） */}
+            {diffSource === "modelsdev" && modelsdevMeta && (
+              <p className="text-[9px] text-slate-500 -mt-1.5 mb-2">
+                {t("pricing.modelsdevFetchedAt", {
+                  time: fmtStamp(modelsdevMeta.fetchedAt),
+                })}
+                {modelsdevMeta.fromCache && (
+                  <span className="ml-1 text-amber-600">
+                    {t("pricing.modelsdevFromCache")}
+                  </span>
+                )}
+              </p>
+            )}
             {/* 无价格模型警示：实际在用但两边都没价格，花费按 0 计 */}
             {diff.missing.length > 0 && (
               <div className="mb-2 rounded-md bg-amber-500/10 border border-amber-500/20 px-2 py-1.5">

@@ -239,12 +239,20 @@ export const en: typeof zh = {
     "pricing.usd": "$ USD",
     "pricing.unitHint": "Unit: $/M tokens. CNY converted at {rate}.",
     "pricing.checkUpdates": "Check updates",
+    "pricing.syncModelsdev": "Sync from models.dev",
+    "pricing.syncing": "Syncing…",
+    "pricing.syncFailHint": "configure a network proxy in Settings and retry",
     "pricing.missingCount": "{count} models unpriced",
     "pricing.upToDate": "Up to date ✓",
 
     "pricing.diffTitle": "Price updates · built-in reference",
+    "pricing.diffTitleModelsdev": "Price updates · models.dev",
     "pricing.diffHint":
       "Compared offline against the built-in reference. Items marked ≈ inherit a base model's price by variant name — verify before applying.",
+    "pricing.diffHintModelsdev":
+      "Official vendor prices fetched online (whitelisted vendors only, no resellers). Items marked ≈ still inherit a base model's price by variant name — verify before applying.",
+    "pricing.modelsdevFetchedAt": "Data as of {time}",
+    "pricing.modelsdevFromCache": "cache (offline)",
     "pricing.missingWarn":
       "{count} models in use have no price (their cost counts as 0):",
     "pricing.addPriceBelow": "Add prices manually in the list below",
@@ -553,6 +561,12 @@ export const en: typeof zh = {
     "settings.updateNowTitle": "Fetch the latest rate online (multiple free sources with fallback)",
     "settings.fxNote":
       "Prices are stored in USD; CNY costs are converted at this rate (same source as the ¥ view in Pricing).",
+
+    // Network proxy (shared by models.dev pricing sync and rate refresh)
+    "settings.proxyCard": "Network proxy",
+    "settings.proxyHint":
+      "Outbound proxy for online model-pricing sync and rate refresh. Accepts http:// and socks5:// addresses; leave empty for direct connection.",
+    "settings.proxyDirect": "Not configured — direct connection",
 
     "settings.shortcut": "Global shortcut",
     "settings.shortcutHint":

@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import type { CursorConfig, ShortcutConfig } from "./types";
+import type { CursorConfig, ProxyConfig, ShortcutConfig } from "./types";
 import {
   fetchFxRate,
   getCursorConfig,
+  getProxyConfig,
   getShortcutConfig,
   setCursorConfig,
+  setProxyConfig,
   setShortcutConfig,
 } from "./api";
 import {
@@ -133,6 +135,14 @@ export function SettingsPanel({
   // 汇率手动输入草稿：失焦再解析，避免清空输入时被 parseFloat(NaN) 立即跳回默认值
   const [fxDraft, setFxDraft] = useState<string | null>(null);
 
+  // ===== 网络代理（models.dev 价格同步与汇率更新共用的出站代理）=====
+  // proxySaved：已持久化的地址（空串 = 直连）；proxyDraft：输入草稿（null = 未编辑）
+  const [proxySaved, setProxySaved] = useState("");
+  const [proxyDraft, setProxyDraft] = useState<string | null>(null);
+  const [savingProxy, setSavingProxy] = useState(false);
+  const [proxySavedFlash, setProxySavedFlash] = useState(false);
+  const [proxyError, setProxyError] = useState<string | null>(null);
+
   // 卸载时冲掉未落盘的透明度防抖（离开设置页前保证最后一次调整已持久化）
   useEffect(() => {
     return () => {
@@ -144,11 +154,12 @@ export function SettingsPanel({
   }, []);
 
   useEffect(() => {
-    Promise.all([getShortcutConfig(), getCursorConfig()])
-      .then(([s, cc]) => {
+    Promise.all([getShortcutConfig(), getCursorConfig(), getProxyConfig()])
+      .then(([s, cc, pc]: [ShortcutConfig, CursorConfig, ProxyConfig]) => {
         setShortcutCfg(s);
         setShortcutDraft(s.accelerator);
         setCursorCfg(cc);
+        setProxySaved(pc.proxy);
         setLoaded(true);
       })
       .catch((e) => setError(String(e)));
@@ -202,6 +213,28 @@ export function SettingsPanel({
       setFxUpdateResult(`✗ ${String(e)}`);
     } finally {
       setFxUpdating(false);
+    }
+  };
+
+  // 保存代理地址：草稿失焦才提交（与手动汇率输入同款），空串 = 直连。
+  // 仅持久化不探测——代理是否可用由实际同步/汇率更新时的报错暴露
+  const commitProxy = async () => {
+    if (proxyDraft === null) return;
+    const v = proxyDraft.trim();
+    setProxyDraft(null);
+    if (v === proxySaved) return;
+    setSavingProxy(true);
+    setProxyError(null);
+    try {
+      await setProxyConfig({ proxy: v });
+      setProxySaved(v);
+      setProxySavedFlash(true);
+      setTimeout(() => setProxySavedFlash(false), 1500);
+    } catch (e) {
+      // 保存失败：输入框回到已保存值，错误单独展示（与快捷键卡片同款）
+      setProxyError(String(e));
+    } finally {
+      setSavingProxy(false);
     }
   };
 
@@ -604,6 +637,37 @@ export function SettingsPanel({
           <p className="text-[8px] text-slate-700/40 mt-0.5">
             {t("settings.fxNote")}
           </p>
+        </SettingsCard>
+
+        {/* 网络代理：models.dev 价格在线同步与汇率更新共用的出站代理（空 = 直连） */}
+        <SettingsCard title={t("settings.proxyCard")} hint={t("settings.proxyHint")}>
+          <div className="input-group">
+            <input
+              type="text"
+              value={proxyDraft ?? proxySaved}
+              placeholder="http://127.0.0.1:7890"
+              disabled={savingProxy}
+              onChange={(e) => setProxyDraft(e.target.value)}
+              onBlur={commitProxy}
+              className="num"
+            />
+          </div>
+          <div className="flex items-center gap-1.5 mt-1">
+            {savingProxy ? (
+              <span className="text-[9px] text-slate-500">{t("common.saving")}</span>
+            ) : proxySavedFlash ? (
+              <span className="text-[9px] text-emerald-600">{t("common.saved")}</span>
+            ) : (
+              <span className="text-[9px] text-slate-700/45">
+                {proxySaved === "" ? t("settings.proxyDirect") : proxySaved}
+              </span>
+            )}
+          </div>
+          {proxyError && (
+            <p className="text-[9px] text-rose-600 mt-1 leading-relaxed break-all">
+              {proxyError}
+            </p>
+          )}
         </SettingsCard>
 
         {shortcutCfg && (

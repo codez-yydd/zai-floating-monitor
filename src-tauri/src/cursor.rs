@@ -189,11 +189,13 @@ const FX_RATE_SOURCES: &[(&str, &str)] = &[
     ("exchangerate-api", "https://api.exchangerate-api.com/v4/latest/USD"),
 ];
 
-/// 从单个源拉取 USD→CNY 汇率（超时 15s）
+/// 从单个源拉取 USD→CNY 汇率（分阶段超时：连接 10s、读/写各 15s，
+/// 慢速小响应的实际耗时与原整请求 15s 口径相当）。
+/// 经 net_config 的统一代理出站（模型价格在线同步共用同一代理；
+/// 代理为空/未配置时行为与原直连完全一致；代理串非法返回中文错误，
+/// 多源容错会继续尝试下一个源）。
 fn fetch_fx_rate_from(source: &str, url: &str) -> Result<f64, String> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(15))
-        .build();
+    let agent = crate::net_config::http_agent(15)?;
     let resp = agent
         .get(url)
         .set("Accept", "application/json")
