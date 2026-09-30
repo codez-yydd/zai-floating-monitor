@@ -2,6 +2,10 @@
  * 边缘拖拽热区：面板四边 / 四角的无形热区，8 向调整窗口尺寸；结果换算为工作区
  * 百分比落盘（windowSize.ts），成功后广播 zbar-win-size-changed 供设置页刷新档位。
  *
+ * 右缘让位：滚动条贴窗口右缘，East / NorthEast / SouthEast 热区内移
+ * EAST_CLEAR_PX，避免热区盖住纵向滚动条导致其完全无法拖动（推导见
+ * EAST_CLEAR_PX 注释）。
+ *
  * 平台分流：
  * - 明确识别为 Windows / macOS 时，纯尺寸方向使用前端 JS resize 会话，
  *   需要同时改位置与尺寸的顶/左方向优先使用系统原子 resize，失败再回退
@@ -95,15 +99,23 @@ type TauriResizeDirection =
 const EDGE_PX = "calc(8px / var(--ui-scale))";
 const CORNER_PX = "calc(14px / var(--ui-scale))";
 
+/** 右侧热区对内容滚动条的让位偏移（逻辑 px）：滚动条贴窗口右缘，
+ *  East 及 East 侧角热区整体内移该距离，避免盖住滚动条导致无法拖动；
+ *  除以 --ui-scale 抵消 #root 缩放（滚动条视觉宽随 scale 放大，取 14px
+ *  在最大字体档位下仍留出间隙） */
+const EAST_CLEAR_PX = "calc(14px / var(--ui-scale))";
+
+/* East / NorthEast / SouthEast 用 right: EAST_CLEAR_PX 让位纵向滚动条；
+ * 其余方向贴边不变。 */
 const HANDLES: { dir: TauriResizeDirection; style: CSSProperties }[] = [
   { dir: "North", style: { top: 0, left: 0, right: 0, height: EDGE_PX, cursor: "ns-resize" } },
   { dir: "South", style: { bottom: 0, left: 0, right: 0, height: EDGE_PX, cursor: "ns-resize" } },
   { dir: "West", style: { top: 0, bottom: 0, left: 0, width: EDGE_PX, cursor: "ew-resize" } },
-  { dir: "East", style: { top: 0, bottom: 0, right: 0, width: EDGE_PX, cursor: "ew-resize" } },
+  { dir: "East", style: { top: 0, bottom: 0, right: EAST_CLEAR_PX, width: EDGE_PX, cursor: "ew-resize" } },
   { dir: "NorthWest", style: { top: 0, left: 0, width: CORNER_PX, height: CORNER_PX, cursor: "nwse-resize" } },
-  { dir: "NorthEast", style: { top: 0, right: 0, width: CORNER_PX, height: CORNER_PX, cursor: "nesw-resize" } },
+  { dir: "NorthEast", style: { top: 0, right: EAST_CLEAR_PX, width: CORNER_PX, height: CORNER_PX, cursor: "nesw-resize" } },
   { dir: "SouthWest", style: { bottom: 0, left: 0, width: CORNER_PX, height: CORNER_PX, cursor: "nesw-resize" } },
-  { dir: "SouthEast", style: { bottom: 0, right: 0, width: CORNER_PX, height: CORNER_PX, cursor: "nwse-resize" } },
+  { dir: "SouthEast", style: { bottom: 0, right: EAST_CLEAR_PX, width: CORNER_PX, height: CORNER_PX, cursor: "nwse-resize" } },
 ];
 
 /** 拖拽静止后的落盘防抖（ms）：拖拽期间连续 onResized 不断重置计时 */

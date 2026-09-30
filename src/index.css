@@ -559,8 +559,10 @@ body,
 }
 
 /* 滚动条 */
+/* 纵向 8px：滚动条贴窗口右缘，宽度太细（原 5px）命中困难；加宽改善拖动手感。
+ * 横向保持 5px：底部 South 热区未让位，加宽横向条会新增遮挡。 */
 ::-webkit-scrollbar {
-  width: 5px;
+  width: 8px;
   height: 5px;
 }
 ::-webkit-scrollbar-track {
