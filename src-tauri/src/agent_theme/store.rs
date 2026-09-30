@@ -74,6 +74,12 @@ pub const USAGE_SPEED_FILE: &str = "usage-speed.js";
 /// 时间戳重载读取喂给宠物核心（与大文件的 hb 写放大权衡见 usage_feed
 /// 模块头）；宠物关闭时停止写出并清理残留
 pub const USAGE_HB_FILE: &str = "usage-data-hb.js";
+/// 额度旁路小文件（usage_feed 独立额度线程周期查询后写出，非模板不做
+/// 版本化）：内容 `window.__ZBAR_QUOTA__ = {"v":1,"ts":<ms>,"h5":<5小时
+/// 窗口剩余%>,"wk":<周窗口剩余%>}`，注入版 usage.js 30 秒低频重载渲染
+/// 会话条尾部的额度段（查询失败静默保留上次内容，契约见 usage_feed
+/// 模块头"额度旁路"节；绝不并入 usage-data.js / usage-speed.js）
+pub const USAGE_QUOTA_FILE: &str = "usage-quota.js";
 pub const WALLPAPERS_DIR: &str = "wallpapers";
 pub const BACKUP_DIR: &str = "backup";
 pub const BACKUP_META_FILE: &str = "meta.json";
@@ -134,6 +140,20 @@ pub const DEFAULT_USAGE_SESSION_BAR: bool = true;
 /// TTFT），默认开启；usage.js V19 起消费 --zbar-usage-turn-bar（1/0）
 /// 决定渲染，随热重载即时生效
 pub const DEFAULT_USAGE_TURN_BAR: bool = true;
+/// 输入框额度行默认开关（用户可调参数 usage_quota_bar）：usage.js V28
+/// 起在 ZCode 输入框卡片底部外侧渲染的独立额度行（"额度 5h 余78% ·
+/// 周余93%"，V29 起删除更新时间尾段、空会话页隐藏；数据来自
+/// usage-quota.js 额度旁路），默认开启；开关经 variables.css 的
+/// --zbar-usage-quota-bar（1/0）随热重载即时生效（usage.js 侧变量缺失
+/// 视为开启，兼容旧 variables.css）
+pub const DEFAULT_USAGE_QUOTA_BAR: bool = true;
+/// 模型速度行默认开关（用户可调参数 usage_model_rows）：usage.js V29
+/// 起在 ZCode 输入框上方渲染的按模型分组的速度行（最近值三档变色 +
+/// 均/快/慢聚合，最多 3 行；V29 起自会话累计条拆出为独立容器）——会话
+/// 累计条开关关闭时模型行照常显示，两者独立控制，默认开启；开关经
+/// variables.css 的 --zbar-usage-model-rows（1/0）随热重载即时生效
+/// （usage.js 侧变量缺失视为开启，兼容旧 variables.css）
+pub const DEFAULT_USAGE_MODEL_ROWS: bool = true;
 /* 宠物参数（开关/形象/尺寸）自本版起从 ThemeParams 移除：宠物配置统一
 收敛到 pet::PetConfig（~/.zbar/pet.json，含总开关与形态二选一，默认注入
 版），注入版渲染由 refresh_variables_css_in 按 PetConfig 计算
@@ -216,6 +236,22 @@ pub struct ThemeParams {
     /// 的 --zbar-usage-turn-bar（1/0）热重载即时生效
     /// （usage.js 侧变量缺失视为开启，兼容旧 variables.css）
     pub usage_turn_bar: bool,
+    /// 输入框额度行开关（默认 true）：控制 ZCode 输入框卡片底部外侧的
+    /// 独立额度行渲染（V28 起从会话条尾部移出改版："额度 5h 余78% ·
+    /// 周余93%"，V29 起删除更新时间尾段、空会话页隐藏，数据来自
+    /// usage-quota.js 额度旁路，字号/不透明度复用 usage_font_size /
+    /// usage_opacity）；开关经 variables.css 的 --zbar-usage-quota-bar
+    /// （1/0）热重载即时生效（usage.js 侧变量缺失视为开启，兼容旧
+    /// variables.css）
+    pub usage_quota_bar: bool,
+    /// 模型速度行开关（默认 true）：控制 ZCode 输入框上方按模型分组的
+    /// 速度行渲染（V29 起自会话累计条拆出为独立容器
+    /// data-zbar-usage-models——会话累计条开关关闭/无数据时模型行照常
+    /// 显示，两者独立控制；字号/不透明度复用 usage_font_size /
+    /// usage_opacity）；开关经 variables.css 的 --zbar-usage-model-rows
+    /// （1/0）热重载即时生效（usage.js 侧变量缺失视为开启，兼容旧
+    /// variables.css）
+    pub usage_model_rows: bool,
     /// 当前壁纸指向。语义（V3 起扩展）：
     /// - 绝对路径（以 / 或 Windows 盘符开头）→ 直接引用该文件
     /// - 相对文件名 → wallpapers/ 目录下的文件（如 "default.mp4"）
@@ -242,6 +278,8 @@ impl Default for ThemeParams {
             usage_opacity: DEFAULT_USAGE_OPACITY,
             usage_session_bar: DEFAULT_USAGE_SESSION_BAR,
             usage_turn_bar: DEFAULT_USAGE_TURN_BAR,
+            usage_quota_bar: DEFAULT_USAGE_QUOTA_BAR,
+            usage_model_rows: DEFAULT_USAGE_MODEL_ROWS,
             wallpaper_file: Some(DEFAULT_WALLPAPER_FILE.to_string()),
             wallpaper_dir: None,
         }
@@ -1059,6 +1097,49 @@ pub const EFFECTS_JS_VERSION: u32 = 5;
 /// 字号与底板几何精确计算（修复 V25 固定 14px/行在字号调大或底板增高
 /// 后第三行压到输入面板）；e) tooltip 固定两行模板（消除悬挂分隔符与
 /// 自动换行参差）。
+/// V27：会话条尾部追加订阅额度段 + 缓存写/缓存命中率展示——a) 数据端
+/// usage_feed 新增独立额度线程（60s 节拍、首拍立即查询；HTTP 15s 超时
+/// 绝不进 2s 导出线程与 1s 速度旁路），成功后原子写出同目录
+/// usage-quota.js（window.__ZBAR_QUOTA__ = {v:1,ts,h5,wk}，剩余 = 100 −
+/// 已用百分比；失败静默保留上次文件），本脚本 30s 低频重载（隐藏降频
+/// 60s），会话条尾部追加 "5h余22% · 周余7%"（数据缺失/查询未成功时
+/// 对应段不入行，无空白分隔符残留；剩余 <30 黄、<10 红，充足继承行
+/// 色）；b) 每轮条三态 ⟲ 缓存读段后补 ✚ 缓存写段（turns/runs 既有 cw
+/// 字段，数据端零改动）；c) 会话条 ⟲ 段升级为 token + 缓存命中率
+/// （cr / (cr + 非缓存输入)，分母 0 显示 —）并新增 ✚ 缓存写段——sess
+/// 行新增 cw 附加字段（数据端 SUM(cache_creation_input_tokens)，列缺
+/// 失降级 0；V22 曾删除的 CTX cw 是上下文窗口容量，与本字段无关），
+/// V21 双口径回退路径 sessionTotals/sessionRunTotals 同步补 cw 累计；
+/// Σ = ↑+↓+⟲ 口径不变，usage-data.js 契约 v 保持 2。
+/// V28：额度展示改版（仅渲染端，usage_feed 额度线程与 usage-quota.js
+/// 契约零改动，usage-data.js 契约 v 保持 2）——额度从会话条尾部移出，
+/// 改为输入框卡片底部外侧的独立额度行（renderQuotaBar：右对齐小号灰
+/// 字 "额度 5h 余78% · 周余93% · 18:18 更新"，尾段消费 quotaData.ts
+/// 格式化本地 HH:mm 更新时间；absolute 定位不占布局空间，region 缺失
+/// 回退 fixed 贴底右侧）；新增独立开关参数 usage_quota_bar（默认
+/// true），经 variables.css 的 --zbar-usage-quota-bar（1/0）热重载生
+/// 效（变量缺失视为开启，与 session/turn 开关同惯例）；h5/wk 缺失段
+/// 隐藏、两窗口全缺失整行隐藏、三档配色（<30 黄 / <10 红 / 充足继承
+/// 行色）与 30s 低频重载（隐藏降频 60s）机制原样保留。
+/// V29：注入统计条实机反馈三修复（仅渲染端，usage_feed 额度线程与
+/// usage-quota.js 契约零改动，usage-data.js 契约 v 保持 2）——a) 额度
+/// 行样式修正：字号取消 ×0.9 缩小与统计元素同级、整行继承灰白行色
+/// （删除「额度」前缀与时间戳尾段的专用着色）、删除更新时间戳尾段
+/// （fmtClock/词表 updated/zbar-usage-qb-time 样式一并移除，行内容精
+/// 简为 "额度 5h 余89% · 周余93%"），bottom 负偏移 -14 → -16、行高
+/// 1.5 → 1.4；b) 空会话隐藏额度行：sessionDataEmpty（turns/runs/sess
+/// 全空判定）+ renderAll 空轮分支 removeQuotaBar——新建任务（draft）
+/// 页不再出现孤立悬浮、压着输入框下边框的额度行，第一条消息发出后恢
+/// 复；c) 模型速度行独立开关与容器：模型行容器从会话条 bar 内拆出为
+/// 独立元素（data-zbar-usage-models，独立 ensure/remove 与挂载兜底），
+/// 渲染从 renderSessionBar 内部移出、renderAll 独立调用——会话条开关
+/// 关闭/无数据时模型行照常显示；新增独立开关参数 usage_model_rows（默
+/// 认 true），经 variables.css 的 --zbar-usage-model-rows（1/0）热重
+/// 载生效（变量缺失视为开启，与 session/turn/quota 开关同惯例）；留
+/// 白几何拆分——padForModels 的「会话条行 + 模型行」合计改为
+/// syncComposerPad 统一计算，会话条行随会话条挂载态计入、模型底板高
+/// 随模型行开关与数据计入、两者独立叠加、全关还原基数 26px
+/// （COMPOSER_PAD_TOP_PX，V13 起既有基础留白语义不变）。
 /// V20：配合数据端双修复——a) turns 新增子代理自身视图行（sess 为子代
 /// 理会话 id、umid 为子轮自己的用户消息 id、数值与 dur/ttft 为子轮自身
 /// 口径，带 subagent:1 标记；主轮行仍照常含并入的 sub 数值，两行并存）：
@@ -1068,7 +1149,10 @@ pub const EFFECTS_JS_VERSION: u32 = 5;
 /// sessionTotals 按 t.sess 精确匹配无任何双计路径，渲染管线零改动；
 /// b) 数据端 usage_feed 父会话保活：主轮派发子代理后自身静默不再满 10
 /// 分钟被踢出 runs，主轮条、会话累计与子代理孤儿并入保持实时值。
-pub const USAGE_JS_VERSION: u32 = 26;
+/// V30：仅渲染端微调，数据契约零改动——额度行 bottom 负偏移 -16 →
+/// -20；缓存命中率自会话条 ⟲ 段挪至底部额度行「缓存 88.7%」段
+/// （renderQuotaBar 接收 anchor 按会话条同款双口径自算，分母 0 隐藏）。
+pub const USAGE_JS_VERSION: u32 = 30;
 
 /// 桌面像素宠物脚本 pet.js 的版本化落盘标记。
 /// 版本头写在模板首行注释（ZBAR-THEME-V 标记，提取器与
@@ -1332,6 +1416,8 @@ mod tests {
         assert_eq!(default.usage_opacity, DEFAULT_USAGE_OPACITY);
         assert_eq!(default.usage_session_bar, DEFAULT_USAGE_SESSION_BAR);
         assert_eq!(default.usage_turn_bar, DEFAULT_USAGE_TURN_BAR);
+        assert_eq!(default.usage_quota_bar, DEFAULT_USAGE_QUOTA_BAR);
+        assert_eq!(default.usage_model_rows, DEFAULT_USAGE_MODEL_ROWS);
         assert_eq!(default.wallpaper_file.as_deref(), Some(DEFAULT_WALLPAPER_FILE));
         assert_eq!(default.wallpaper_dir, None);
 
@@ -1346,6 +1432,7 @@ mod tests {
             "panelOpacity", "sidebarOpacity", "sidebarRightOpacity",
             "playbackRate", "baseAlpha", "textShadow",
             "usageFontSize", "usageOpacity", "usageSessionBar", "usageTurnBar",
+            "usageQuotaBar", "usageModelRows",
             "wallpaperFile", "wallpaperDir",
         ] {
             assert!(text.contains(key), "params.json 缺少字段 {key}");
@@ -1387,6 +1474,10 @@ mod tests {
         assert_eq!(p.usage_session_bar, DEFAULT_USAGE_SESSION_BAR);
         // V19 每轮统计条开关：旧版 params.json 缺字段按默认开启补齐
         assert_eq!(p.usage_turn_bar, DEFAULT_USAGE_TURN_BAR);
+        // V28 输入框额度行开关：旧版 params.json 缺字段按默认开启补齐
+        assert_eq!(p.usage_quota_bar, DEFAULT_USAGE_QUOTA_BAR);
+        // V29 模型速度行开关：旧版 params.json 缺字段按默认开启补齐
+        assert_eq!(p.usage_model_rows, DEFAULT_USAGE_MODEL_ROWS);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1542,6 +1633,68 @@ mod tests {
     }
 
     #[test]
+    fn usage_quota_bar_开关序列化与兼容() {
+        let dir = test_dir("usage-quota-bar");
+        let path = dir.join(PARAMS_FILE);
+
+        // 显式关闭 → 落盘读回保持 false（不被默认值 true 覆盖），
+        // camelCase 键名落盘
+        let mut p = ThemeParams::default();
+        p.usage_quota_bar = false;
+        write_params_file(&path, &p).unwrap();
+        let back = read_params_file(&path).unwrap();
+        assert!(!back.usage_quota_bar, "显式关闭的开关读回应保持 false");
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("\"usageQuotaBar\": false"),
+            "params.json 应含 camelCase 键 usageQuotaBar 且值为 false：{text}"
+        );
+        // clamp 收敛只针对数值/文本参数，开关布尔值原样保留
+        assert!(!back.clamped().usage_quota_bar, "clamped 不应改动开关值");
+
+        // 旧版 params.json 缺该字段 → serde default 补默认值 true
+        fs::write(&path, r#"{"wpBrightness":0.9,"wallpaperFile":"a.mp4"}"#).unwrap();
+        let legacy = read_params_file(&path).unwrap();
+        assert!(
+            legacy.usage_quota_bar,
+            "旧版文件缺 usageQuotaBar 应按默认开启补齐"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn usage_model_rows_开关序列化与兼容() {
+        let dir = test_dir("usage-model-rows");
+        let path = dir.join(PARAMS_FILE);
+
+        // 显式关闭 → 落盘读回保持 false（不被默认值 true 覆盖），
+        // camelCase 键名落盘
+        let mut p = ThemeParams::default();
+        p.usage_model_rows = false;
+        write_params_file(&path, &p).unwrap();
+        let back = read_params_file(&path).unwrap();
+        assert!(!back.usage_model_rows, "显式关闭的开关读回应保持 false");
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("\"usageModelRows\": false"),
+            "params.json 应含 camelCase 键 usageModelRows 且值为 false：{text}"
+        );
+        // clamp 收敛只针对数值/文本参数，开关布尔值原样保留
+        assert!(!back.clamped().usage_model_rows, "clamped 不应改动开关值");
+
+        // 旧版 params.json 缺该字段 → serde default 补默认值 true
+        fs::write(&path, r#"{"wpBrightness":0.9,"wallpaperFile":"a.mp4"}"#).unwrap();
+        let legacy = read_params_file(&path).unwrap();
+        assert!(
+            legacy.usage_model_rows,
+            "旧版文件缺 usageModelRows 应按默认开启补齐"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn params_越界值被收敛() {
         let mut p = ThemeParams {
             wp_brightness: 9.0,
@@ -1558,6 +1711,8 @@ mod tests {
             usage_opacity: 5.0,
             usage_session_bar: false,
             usage_turn_bar: false,
+            usage_quota_bar: false,
+            usage_model_rows: false,
             wallpaper_file: Some("  ".into()),
             wallpaper_dir: None,
         }

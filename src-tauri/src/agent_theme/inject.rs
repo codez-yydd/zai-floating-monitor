@@ -656,14 +656,142 @@ pub const EFFECTS_JS: &str = r#"// =============================================
 /// 宽度锚定，行内弹性布局（截断只发生在模型名，数值永不截断）；留白
 /// 按实际字号与底板几何精确计算（修复压输入面板）；tooltip 固定两行
 /// 模板（见模板头 V26 变更）。
+/// V27 起会话条尾部追加订阅额度段、缓存维度升级——a) 数据端 usage_feed
+/// 新增独立额度线程（60s 节拍、首拍立即查询 BigModel 额度接口，HTTP 15s
+/// 超时绝不进 2s 导出线程与 1s 速度旁路），成功后原子写出同目录
+/// usage-quota.js 小文件（window.__ZBAR_QUOTA__ = {v:1,ts,h5,wk}，剩余 =
+/// 100 − 已用百分比；失败静默保留上次文件），本脚本 30s 低频重载，会话
+/// 条尾部追加 "5h余22% · 周余7%"（数据缺失/查询未成功时对应段不入行，
+/// 无空白分隔符残留；剩余 <30% 黄、<10% 红，其余继承行色）；b) 每轮条
+/// 三态 ⟲ 缓存读段后补 ✚ 缓存写段（turns/runs 既有 cw 字段，数据端零
+/// 改动）；c) 会话条 ⟲ 段升级为 token + 缓存命中率（cr / (cr + 非缓存
+/// 输入)，分母 0 显示 —），新增 ✚ 缓存写段——sess 行新增 cw 附加字段，
+/// V21 双口径回退路径 sessionTotals/sessionRunTotals 同步补 cw 累计；
+/// Σ = ↑+↓+⟲ 口径不变，usage-data.js 契约 v 保持 2。
+/// V28 起额度展示改版（仅渲染端，usage_feed 额度线程与 usage-quota.js
+/// 契约 {v:1,ts,h5,wk} 零改动）：额度从会话条尾部移出，改为输入框卡片
+/// 底部外侧的独立一行（renderQuotaBar：右对齐小号灰字 "额度 5h 余78% ·
+/// 周余93% · 18:18 更新"，尾段消费 quotaData.ts 格式化的本地 HH:mm 更
+/// 新时间），absolute 定位不占布局空间（region 缺失回退 fixed 贴底右
+/// 侧）；新增独立开关参数 usage_quota_bar（默认 true），经 variables.css
+/// 的 --zbar-usage-quota-bar（1/0）热重载生效，变量缺失视为开启；三档
+/// 配色、30s 低频重载（隐藏降频 60s）与缺失段隐藏机制原样保留。
+/// V29 起注入统计条实机反馈三修复（仅渲染端，usage_feed 与三个数据文
+/// 件契约零改动）：a) 额度行样式修正——字号升回 --zbar-usage-font-size
+/// 基准（取消 ×0.9 缩小）、整行继承灰白行色（仅百分比数值保留三档变
+/// 色）、删除更新时间戳尾段（行内容精简为 "额度 5h 余89% · 周余93%"，
+/// bottom 负偏移微调 -16、行高压缩 1.4）；b) 空会话隐藏额度行与模型
+/// 行——currentSessionHasData 会话级判定（提炼 renderSessionBar
+/// removeBar 同款条件；实机复检后取代初版全局判定 sessionDataEmpty，
+/// 后者在多会话保活下任一旧会话有数据即放行、新建任务页仍出现孤立额
+/// 度行）+ renderAll 空轮分支双重闸，新建任务页不再出现孤立悬浮的额
+/// 度行/模型行；c) 模型速度行从会话条内
+/// 拆出为独立容器（data-zbar-usage-models）并新增独立开关
+/// usage_model_rows（默认 true，经 --zbar-usage-model-rows 热重载生
+/// 效）——会话条开关关闭时模型行照常显示，输入区顶部留白由
+/// syncComposerPad 按两个开关独立叠加（全关还原基数 26px）。
+/// V30 起额度行 bottom 负偏移再加深至 -20，缓存命中率自会话条 ⟲ 段挪
+/// 至底部额度行「缓存 88.7%」段（分母 0 隐藏，数据端零改动）。
 /// 数据源为本目录下 usage-data.js（键名契约见 usage_feed 模块头；每轮
-/// 条匹配键为 umid 字段）。版本化落盘（头部 ZBAR-THEME-V 标记，见
-/// store::ensure_versioned_template）。风格与 effects.js 同款：自愈、
-/// 静默失败、空值防御；DOM 选择器集中在头部常量，便于实机比对调整。
+/// 条匹配键为 umid 字段）与 usage-quota.js（V27 额度旁路）。版本化落盘
+/// （头部 ZBAR-THEME-V 标记，见 store::ensure_versioned_template）。风格
+/// 与 effects.js 同款：自愈、静默失败、空值防御；DOM 选择器集中在头部
+/// 常量，便于实机比对调整。
 pub const USAGE_JS: &str = r#"// ============================================================
-// ZBAR-THEME-V26
+// ZBAR-THEME-V30
 // ZBar Agent 对话页用量统计条（由 ZBar 落盘并随版本升级覆盖）
 // ============================================================
+// V30 变更（额度行微调 + 缓存命中率挪位，数据端零改动）：
+//   a) 额度行 bottom 负偏移 -16 → -20（QUOTA_BAR_BOTTOM_PX），贴卡观
+//      感再加深；
+//   b) 缓存命中率由会话条 ⟲ 段后缀挪至底部额度行「缓存 88.7%」段——
+//      renderQuotaBar 新增 anchor 入参、按 renderSessionBar 同款双口
+//      径算当前会话命中率（cacheHitText 复用，分母 0 不入段），会话条
+//      ⟲ 段回归纯 token，行形 "额度 5h 余89% · 周余93% · 缓存 88.7%"。
+// V29 变更（注入统计条实机反馈三修复：额度行样式、空会话隐藏（实机
+//   复检升级为会话级口径）、模型速度行独立开关。数据端零改动——
+//   usage-data.js 契约 v:2、usage-speed.js v:1、usage-quota.js 契约
+//   {v:1,ts,h5,wk} 不变）：
+//   a) 额度行样式修正：字号取消 ×0.9 缩小（此前是全页最小字、灰字对
+//      比度也低），与统计元素同级消费 --zbar-usage-font-size 基准；整
+//      行继承灰白行色——删除「额度」前缀与时间戳尾段的专用着色（此前
+//      偏橙黄，与统计条灰白风格不统一），仅百分比数值保留三档阈值变
+//      色（<30 黄 / <10 红，quotaClassOf 保留）；删除更新时间戳尾段
+//      （fmtClock、词表 updated、时间戳专用样式一并移除——
+//      实机上增加行宽与视觉噪音），行内容精简为 "额度 5h 余89% ·
+//      周余93%"；bottom 负偏移 -14 → -16、行高 1.5 → 1.4（贴卡片更
+//      自然且不超窗口底边）。
+//   b) 空会话隐藏额度行（实机复检后口径从全局级升级为会话级）：初版
+//      sessionDataEmpty 只判 turns/runs/sess 全局全空——多会话保活下
+//      旧会话容器仍挂载 DOM、任一旧会话有数据即放行，新建任务页仍出
+//      现孤立额度行（实机复现），已删除。改为会话级判定
+//      currentSessionHasData：提炼 renderSessionBar「无数据即
+//      removeBar」的同款条件（当前会话 id 无 sess 全量合计行、无归属
+//      完成轮/进行中 run/活动轮，锚点或会话 id 缺失同判无数据），
+//      renderAll 主路径求值一次（sessHasData）作为模型行与额度行的渲
+//      染闸——多会话保活的新建任务页三元素（会话条/模型行/额度行）一
+//      并隐藏，切回有数据会话由既有 MutationObserver/兜底渲染拍自愈
+//      恢复；renderAll 空轮分支（整页无轮节点）的三清理保留不动。第
+//      一条消息发出、数据就位后恢复显示，开关 usage_quota_bar 逻辑不
+//      变。
+//   c) 模型速度行独立开关与容器（本次重点）：模型行容器从会话条 bar
+//      内拆出为独立元素（ATTR_MODELS = data-zbar-usage-models，独立
+//      ensureModelsBox/removeModelsBox 与挂载兜底标记
+//      ATTR_MODELS_FIXED），挂进 .chat-composer-region（会话条已挂进
+//      region 时跟随同一容器共享留白几何，否则取第一个可见 region；
+//      region 缺失回退 body + fixed 贴底，照会话条/额度行既有模式）；
+//      渲染从 renderSessionBar 内部移出、renderAll 独立调用——会话条
+//      开关关闭时模型行照常显示（用户核心诉求），当前会话无数据时随
+//      会话条一并隐藏（b 项 sessHasData 渲染闸）；新增独立开关
+//      参数 usage_model_rows（默认 true），经 variables.css 的
+//      --zbar-usage-model-rows（1/0）热重载生效（变量缺失视为开启，
+//      与 session/turn/quota 开关同惯例）。留白几何拆分：padForModels
+//      的「会话条行 + 模型行」合计改为 syncComposerPad 统一计算（每
+//      拍渲染尾部求一次值，防两条渲染路径互相覆盖）——会话条行
+//      （SESSION_BAR_TOP_PX + 字号×1.5）随会话条挂载态计入，模型底板
+//      高（modelsPlateHeight）随模型行开关与数据计入，两者独立叠加，
+//      全关还原基数 26px（COMPOSER_PAD_TOP_PX，V13 起既有基础留白，
+//      CSS 规则静态生效，语义不变）；模型底板 top 恒定在会话行下方
+//      MODELS_MARGIN_TOP_PX 处，会话条开关切换不引起模型行跳位。
+// V28 变更（额度展示改版：从会话条尾部移出，改为输入框卡片底部外侧
+//   的独立一行。数据端零改动——usage_feed 额度线程与 usage-quota.js
+//   契约 {v:1,ts,h5,wk} 不变，usage-data.js 契约 v:2 不变）：
+//   a) 独立额度行：新增 renderQuotaBar，把额度渲染为 .chat-composer-
+//      region 容器内 absolute 定位、贴输入卡片下边缘外侧（bottom 负偏
+//      移 QUOTA_BAR_BOTTOM_PX）右对齐的单行小字——"额度 5h 余78% ·
+//      周余93% · 18:18 更新"（en 同构 Quota 5h 78% · wk 93% · 18:18
+//      updated）；不占布局空间、pointer-events:none，与输入区顶部留白
+//      几何（COMPOSER_PAD_TOP_PX/padForModels）无联动；region 缺失回
+//      退挂 body + fixed 贴底右侧（标记属性切换定位，同会话条兜底模
+//      式）。
+//   b) 内容分段：h5/wk 缺失段照旧隐藏（逐段机制无分隔符残留），查询
+//      未成功/两窗口全缺失整行隐藏（不渲染空行）；新增更新时间戳尾
+//      段——消费 quotaData.ts（毫秒）格式化本地 HH:mm + 词表「更新」，
+//      ts 缺失/无效时尾段不出现；三档配色保留（<30 黄 #fbbf24、<10
+//      红 #f87171、充足继承行色灰白）。
+//   c) 独立开关：新增参数 usage_quota_bar（默认 true），经 variables.css
+//      的 --zbar-usage-quota-bar（1/0）热重载生效，变量缺失视为开启
+//      （与 session/turn 开关同惯例）；额度行在 renderAll 每拍渲染——
+//      额度数据 onload 与开关切换直接生效，不依赖会话条渲染节奏（会
+//      话条关闭/无数据时额度行照常独立渲染；页面隐藏降频 60s 保留）。
+// V27 变更（额度段 + 缓存写段 + 缓存命中率。usage-data.js 契约 v:2 键名
+//   不变，仅 sess 行附加 cw 字段，旧脚本忽略未知字段平滑兼容）：
+//   a) 额度段：数据端 usage_feed 新增独立额度线程（60s 节拍，首拍启动
+//      后立即查询）调 BigModel 额度接口，写出同目录 usage-quota.js 小
+//      文件（window.__ZBAR_QUOTA__ = {v:1, ts, h5, wk}，h5/wk = 5 小时/
+//      周窗口剩余百分比 = 100 − 已用；查询失败静默保留上次文件）。本
+//      脚本以独立 30s 低频重载（页面隐藏降频 60s），会话条尾部追加
+//      "5h余22% · 周余7%" 两段；数据缺失/查询未成功（无全局对象或
+//      h5/wk 为 null）时对应段不入行，无空白分隔符残留；剩余 <30% 黄、
+//      <10% 红，其余继承行色灰白（醒目不刺眼）。额度绝不进 2s 大文件
+//      与 1s 速度旁路。
+//   b) 每轮条（三态统一结构）⟲ 缓存读段后补 ✚ 缓存写段（数据端
+//      turns/runs 既有 cw 字段，零数据改动；live 行含并入的 sub.cw）。
+//   c) 会话条 ⟲ 段升级为 "⟲ <token>·<命中率>"：命中率 = cr / (cr + 非缓
+//      存输入)，保留一位小数，分母为 0 显示 —；新增 ✚ 缓存写段（sess
+//      行新增 cw 附加字段；V21 双口径回退路径 sessionTotals/
+//      sessionRunTotals 同步补 cw 累计，sess 命中/回退两分支都覆盖）。
+//      Σ = ↑+↓+⟲ 口径不变（✚ 段与命中率只是新增展示，不改变 Σ 定义）。
 // V26 变更（速度展示视觉与语言修复。用户实测反馈：中文界面全部显示英文
 //   标签（navigator.language 在 ZCode 的 WebView 里返回英文，判定不可
 //   靠）、模型速度行无底板直接叠在动态壁纸上混成一片、模型区与会话行
@@ -1018,16 +1146,24 @@ pub const USAGE_JS: &str = r#"// ===============================================
 //     in / out / cr / cw / rt / req  该轮已完成请求的聚合
 //     start              首个请求开始毫秒
 //   }],
-//     sess: [{ s, tt, up, down, cr, rq, speed, speedState, sa }]  会话级
+//     sess: [{ s, tt, up, down, cr, cw, rq, speed, speedState, sa }]  会话级
 //     统计（V21 附加数组，model_usage 全量合计；V25 起带会话树口径的
-//     sa 聚合）
+//     sa 聚合；V27 起带 ✚ 缓存写 cw——不参与 tt 口径）
 //     models: [{ model, tps, avg, max, min, n }]  V25 窗口级模型分组速度
 //     （按最近使用降序至多 3 组；model_id 列缺失的老版本库整个键省略 →
 //     本脚本不渲染模型行）
 //   } }
+// 额度源（V27）：同目录 usage-quota.js——数据端独立额度线程 60s 查询
+//   写盘（window.__ZBAR_QUOTA__ = { v:1, ts, h5, wk }，h5/wk = 5 小时/周
+//   窗口剩余百分比；查询失败保留上次文件），本脚本 30s 低频重载，V28
+//   起渲染为输入框底部外侧的独立额度行（"额度 5h 余78% · 周余93%"，
+//   见 renderQuotaBar；V29 删除时间戳尾段，且空会话——turns/runs/sess
+//   全空或页面无轮节点——整行隐藏），数据缺失/查询未成功时隐藏对应段。
 // 导出窗口：turns 最近 7 天、至多 3000 轮；runs 近 10 分钟内有请求的
 //   进行中轮（turn_usage 已有行的完成轮不进 runs）。
-// 展示口径：↑ = in − cr（非缓存输入），↓ = out，⟲ = cr，× = req；
+// 展示口径：↑ = in − cr（非缓存输入），↓ = out，⟲ = cr（V27–V29 曾带
+//   缓存命中率后缀 cr/(cr+非缓存输入)，V30 起命中率移至底部额度行
+//   「缓存」段），✚ = cw（V27 起新增），× = req；
 //   速度来自最近一笔完成 model_usage 请求的 speed 快照。generation 为
 //   首字到完成的精确速度，request_average 为仅有总耗时的近似速度并带 ≈；
 //   缺失/无效快照显示 "–"，TTFT 缺失同样显示 "–"。
@@ -1035,8 +1171,9 @@ pub const USAGE_JS: &str = r#"// ===============================================
 //   V25 变更 a），与上方的"最近速度"是两条独立通道（后者可能是近似
 //   样本）；聚合段在样本 n < 2 时隐藏，模型行则始终显示"最近值 + 聚合"
 //   （对齐免注入悬浮窗模型速度区）。
-// 行格式（V10 起三态统一固定结构）：每轮条任何状态都渲染
-//   "↑ <in> ↓ <out> ⟲ <cr> · × <req> · <speed> t/s · TTFT <ttft>"，
+// 行格式（V10 起三态统一固定结构；V27 ⟲ 后补 ✚ 缓存写段）：每轮条任何
+//   状态都渲染
+//   "↑ <in> ↓ <out> ⟲ <cr> ✚ <cw> · × <req> · <speed> t/s · TTFT <ttft>"，
 //   各字段等宽补位（token 5 字符 / req 3 字符 / 速度与 TTFT 各 4 字
 //   符），等宽字体 + tabular-nums 下整行宽度恒定，只更新字段数值不改变
 //   结构；request_average 的 ≈ 前缀由速度字段自身表达近似质量。
@@ -1045,8 +1182,10 @@ pub const USAGE_JS: &str = r#"// ===============================================
 // 行为：usage-data.js 每 2 秒以 script 标签重载（只承载历史计数，先删旧
 //   再插新，加载失败保留上次数据；页面隐藏降频 10 秒）；速度则以独立的
 //   usage-speed.js 小文件每 1 秒重载，速度变更不会触发大文件重写或历史
-//   索引重建。v !== 2 / speed v !== 1 视为无效并保留上次数据；各自 ts
-//   与上次相同则跳过对应的索引/渲染。
+//   索引重建。V27 起额度以独立的 usage-quota.js 小文件每 30 秒低频重载
+//   （页面隐藏降频 60 秒），只承载剩余百分比，不触发历史索引重建。
+//   v !== 2 / speed v !== 1 / quota v !== 1 视为无效并保留上次数据；各自
+//   ts 与上次相同则跳过对应的索引/渲染。
 //   MutationObserver + 首次全量扫描定位 [data-turn-id]（V9 起扫描
 //   document 级，覆盖主对话与子代理详情面板）；每轮条按优先级渲染：
 //   完成数据按 umid 命中（同 umid 多节点只在 DOM 顺序最后一个节点出）
@@ -1073,9 +1212,13 @@ pub const USAGE_JS: &str = r#"// ===============================================
   var STYLE_ID = "zbar-usage-style";
   var LOADER_ID = "zbar-usage-data-loader";
   var SPEED_LOADER_ID = "zbar-usage-speed-loader";
+  var QUOTA_LOADER_ID = "zbar-usage-quota-loader";
   var POLL_MS = 2000; /* 历史用量大文件重载周期 */
   var SPEED_POLL_MS = 1000; /* 速度小文件重载周期；不重载大文件 */
   var POLL_HIDDEN_MS = 10000; /* 页面隐藏时降频 */
+  var QUOTA_POLL_MS = 30000; /* V27 额度小文件重载周期（数据端 60s 节拍
+    写盘；低频——额度是慢变量，重载只解析几十字节） */
+  var QUOTA_POLL_HIDDEN_MS = 60000; /* 页面隐藏时额度重载降频 */
   var FALLBACK_RENDER_MS = 15000; /* 低频兜底渲染周期（死锁/漏渲染自愈） */
   /* ---- 会话级实时统计条常量（V5，实机调参集中在此处） ---- */
   var SEL_SESSION_ID = "[data-session-id]"; /* 当前会话锚点（属性值为会话 id） */
@@ -1100,29 +1243,82 @@ pub const USAGE_JS: &str = r#"// ===============================================
   var SESSION_BAR_Z = 30; /* 会话条 z-index：适度抬高，不遮挡弹层 */
   var VAR_SESSION_BAR = "--zbar-usage-session-bar"; /* 开关变量（variables.css 渲染 1/0） */
   var VAR_TURN_BAR = "--zbar-usage-turn-bar"; /* 每轮统计条开关变量（variables.css 渲染 1/0） */
+  /* ---- V28：独立额度行常量（输入框卡片底部外侧的右对齐单行小字）---- */
+  var VAR_QUOTA_BAR = "--zbar-usage-quota-bar"; /* 额度行开关变量（variables.css
+    渲染 1/0；缺失视为开启，与 session/turn 开关同惯例） */
+  var ATTR_QUOTA_BAR = "data-zbar-usage-quota"; /* 额度行标记（防重复挂载） */
+  var ATTR_QUOTA_BAR_FIXED = "data-zbar-usage-quota-fixed"; /* 额度行兜底
+    定位标记：region 缺失退回 fixed 时打上，样式表据此把 absolute 切换
+    为 fixed 贴底右侧；迁回 region 时移除自动还原（同会话条
+    ATTR_SESSION_BAR_FIXED 模式） */
+  var QUOTA_BAR_BOTTOM_PX = -20; /* 额度行 bottom 负偏移（px）：absolute
+    定位到输入卡片下边缘外侧（负值 = 容器底边之下），紧贴卡片不遮内
+    容、不占布局空间；V29 由 -14 微调——字号升回基准后行盒更高，加深
+    偏移并把行高压缩到 1.4；V30 再由 -16 加深至 -20（行尾新增「缓存」
+    段后行内容更宽，保持贴卡观感且不超窗口底边）；实机可调 */
+  var QUOTA_BAR_FALLBACK_RIGHT_PX = 18; /* region 缺失兜底 fixed 的右边距
+    （与宠物默认位置边距同款） */
+  var QUOTA_BAR_FALLBACK_BOTTOM_PX = 10; /* region 缺失兜底 fixed 的下边距 */
+  /* ---- V29：独立模型行容器常量（模型分组速度行自会话条拆出，独立
+   * 开关控制；挂载/兜底照会话条与额度行既有模式）---- */
+  var VAR_MODEL_ROWS = "--zbar-usage-model-rows"; /* 模型速度行开关变量
+    （variables.css 渲染 1/0；缺失视为开启，与 session/turn/quota 开关
+    同惯例） */
+  var ATTR_MODELS = "data-zbar-usage-models"; /* 模型行容器标记（防重复
+    挂载；容器同时保留 .zbar-usage-models 类名供样式定位） */
+  var ATTR_MODELS_FIXED = "data-zbar-usage-models-fixed"; /* 模型行容器
+    兜底定位标记：region 缺失退回 fixed 时打上，迁回 region 时移除自
+    动还原（同会话条 ATTR_SESSION_BAR_FIXED 模式） */
+  var MODELS_FALLBACK_BOTTOM_PX = 120; /* 模型行容器兜底 fixed 的
+    bottom：位于会话条兜底（SESSION_BAR_BOTTOM_PX = 96）之上，留出会
+    话行高与底板间距 */
   /* ---- V25：速度聚合段与模型分组速度行常量 ---- */
   var VAR_PAD_TOP = "--zbar-usage-pad-top"; /* 输入区容器顶部留白（px）：
-    renderSessionBar 在模型行显示时以行内变量动态抬高（V26 起按
-    padForModels 以实际字号与底板几何精确计算，基数 26px 兜底），
-    隐藏/迁移/移除会话条时 removeProperty 还原 CSS 兜底 26px */
+    syncComposerPad 按会话条与模型行两个开关的挂载态统一计算后施加
+    （V29 起两个注入层独立叠加，见几何常量注释块；基数 26px 兜底），
+    全关/迁移/移除时 removeProperty 还原 CSS 兜底 26px */
   var MODEL_ROWS_MAX = 3; /* 模型行上限（数据端已截断到 3，渲染端再兜一刀） */
-  /* ---- V26：模型区底板几何常量（留白计算的唯一依据，与 ensureStyle
-   * 里 .zbar-usage-models / .zbar-usage-mrow 的 CSS 数值一一同步，改任
-   * 一侧必须同步另一侧）。V25 的留白增量 = 行数 × 固定 14px，字号调大
-   * 或底板自带内边距/行距/边框增高后，第三行即压到输入面板（用户实测
-   * 截图）；V26 改按实际渲染几何求和，并以 --zbar-usage-font-size 的
-   * 实际值（而非写死 10px）参与计算，字号调大留白同步放大 ---- */
+  /* ---- V26/V29 模型区底板几何常量（留白计算的唯一依据，与
+   * ensureStyle 里 .zbar-usage-mrow / ATTR_MODELS 容器的 CSS 数值一
+   * 一同步，改任一侧必须同步另一侧）。V25 的留白增量 = 行数 × 固定
+   * 14px，字号调大或底板自带内边距/行距/边框增高后，第三行即压到输
+   * 入面板（用户实测截图）；V26 改按实际渲染几何求和，并以
+   * --zbar-usage-font-size 的实际值（而非写死 10px）参与计算，字号
+   * 调大留白同步放大。V29 留白拆分——padForModels 的「会话条行 +
+   * 模型行」合计改为 syncComposerPad 统一计算（每拍渲染尾部求一次
+   * 值，防会话条/模型行两条渲染路径互相覆盖），两个开关独立叠加：
+   *   会话条开（挂进 region）→ need = SESSION_BAR_TOP_PX + 字号×1.5
+   *     （会话行底缘，行高系数与容器 line-height 同源）
+   *   模型行开（容器挂进 region 且有数据）→ need = SESSION_BAR_TOP_PX
+   *     + 字号×1.5 + MODELS_MARGIN_TOP_PX + modelsPlateHeight(有效行
+   *     数, 字号) + MODELS_CLEARANCE_PX（底板 top 恒定在会话行下方，
+   *     见 ATTR_MODELS 定位样式——会话条关闭时底板位置不变，故两种
+   *     组合的需求值相同，取前者即被后者覆盖）
+   *   两者全关 → 还原基数 COMPOSER_PAD_TOP_PX（26px：V13 起输入区顶
+   *     部留白基数，CSS 规则静态生效、与会话条 top:4px + 默认字号行
+   *     高的原始组合对应；两者全关保持 V13 以来行为，不新增"移除留
+   *     白"路径）
+   *   结果取 max(26, need) 后经 --zbar-usage-pad-top 行内变量施加 ---- */
   var SESSION_BAR_TOP_PX = 4; /* 会话条容器 top（CSS 内写死 top:4px 须与
-    本常量同步，同 COMPOSER_PAD_TOP_PX 模式；仅留白计算消费） */
+    本常量同步，同 COMPOSER_PAD_TOP_PX 模式；V29 起同时参与模型底板
+    的 top calc 与留白计算） */
   var MODEL_ROW_H_FACTOR = 1.6; /* 模型行高系数（.zbar-usage-mrow height
     calc(字号 * 1.6) 同源；V25 为 1.4，行距过小一并放宽） */
   var MODEL_ROW_GAP_PX = 3; /* 模型行间距（.zbar-usage-models 的 gap 同步） */
   var MODELS_PAD_V_PX = 5; /* 底板纵向内边距（padding:5px 9px 纵向值同步） */
-  var MODELS_MARGIN_TOP_PX = 5; /* 底板与会话行的间距（margin-top 同步） */
+  var MODELS_MARGIN_TOP_PX = 5; /* 底板与会话行的间距（V25~V28 为容器
+    margin-top；V29 起消费方为独立容器的 top calc 与留白计算，数值
+    语义不变） */
   var MODELS_CLEARANCE_PX = 6; /* 底板下沿与输入卡片的安全间隙 */
   /* 模型行三档变色阈值（与免注入悬浮窗模型速度区、主面板速度卡同阈值） */
   var TPS_FAST_MIN = 70; /* ≥ 绿 */
   var TPS_MID_MIN = 40; /* ≥ 黄，其余红 */
+  /* ---- V27：额度三档阈值（剩余百分比；V28 起段文本 "额度 5h 余78%"/
+   * "周余7%" 于独立额度行渲染）----
+   * 剩余充足（≥30）继承行颜色（灰白，不抢视觉）；偏低（<30）黄、
+   * 紧张（<10）红——与模型行三档同色系（#fbbf24/#f87171），醒目不刺眼 */
+  var QUOTA_MID_REMAIN = 30;
+  var QUOTA_LOW_REMAIN = 10;
   /* ---- V26：语言判定（三信号优先级，任一命中即定，缓存一次） ----
    * V25 只按 navigator.language 判定，在 ZCode 的 WebView 里返回英文，
    * 中文界面全部显示英文标签（用户实测反馈）。V26 改：
@@ -1160,7 +1356,12 @@ pub const USAGE_JS: &str = r#"// ===============================================
    * - avg/fast/slow：紧凑聚合段（"均38 快72 慢12"）与模型行跟随小字
    *   （"· 均 38.4 · 快 71.6 · 慢 12.4"）共用同一组标签；
    * - sep：标签与数值间是否插空格（中文紧邻"均38"，英文插空格"avg 38"）；
-   * - latest / n：tooltip 的"最近/latest"与样本数单位"笔/requests"。
+   * - latest / n：tooltip 的"最近/latest"与样本数单位"笔/requests"；
+   * - quotaLead/quota5h/quotaWk：V28 独立额度行（zh "额度 5h 余78% ·
+   *   周余93%"，en "Quota 5h 78% · wk 93%"）；V29 删除 updated 更新时
+   *   间戳尾段词（时间戳整体下线）；V30 起行尾再补 cachePct「缓存」
+   *   段（当前会话命中率，zh "缓存" / en "cache"），行形 "额度 5h 余
+   *   89% · 周余93% · 缓存 88.7%"。
    * en 词表保留为完整对照（判定三信号全为 zh 命中，见 LANG_ZH），后续
    * 若需放开英文界面或测试驱动可直接切换 */
   var WORDS = {
@@ -1170,7 +1371,11 @@ pub const USAGE_JS: &str = r#"// ===============================================
       slow: "慢",
       sep: "",
       latest: "最近",
-      n: "笔"
+      n: "笔",
+      quotaLead: "额度",
+      quota5h: "5h 余",
+      quotaWk: "周余",
+      cachePct: "缓存"
     },
     en: {
       avg: "avg",
@@ -1178,7 +1383,11 @@ pub const USAGE_JS: &str = r#"// ===============================================
       slow: "slow",
       sep: " ",
       latest: "latest",
-      n: "requests"
+      n: "requests",
+      quotaLead: "Quota",
+      quota5h: "5h ",
+      quotaWk: "wk ",
+      cachePct: "cache"
     }
   };
   var W = WORDS[LANG_ZH ? "zh" : "en"];
@@ -1186,6 +1395,7 @@ pub const USAGE_JS: &str = r#"// ===============================================
   /* ---- 定位同目录 usage-data.js：由注入行自身 src 推导目录 ---- */
   var dataUrl = "";
   var speedUrl = "";
+  var quotaUrl = "";
   try {
     var tag =
       document.currentScript ||
@@ -1195,6 +1405,7 @@ pub const USAGE_JS: &str = r#"// ===============================================
       var baseUrl = tag.src.split("?")[0].replace(/[^/]*$/, "");
       dataUrl = baseUrl + "usage-data.js";
       speedUrl = baseUrl + "usage-speed.js";
+      quotaUrl = baseUrl + "usage-quota.js"; /* V27 额度旁路小文件 */
     }
   } catch (e) {
     dataUrl = "";
@@ -1249,7 +1460,10 @@ pub const USAGE_JS: &str = r#"// ===============================================
        * 对齐；绝对定位的 left/translateX 仍按条宽水平居中不变）。
        * V26：整条低透明（--zbar-usage-opacity）从容器下移到会话行——
        * 模型底板自供对比度（深色半透明底 + 近白文字），不吃低透明，
-       * 否则底板与文字同被压暗、壁纸上仍不可读（用户实测反馈主因） */
+       * 否则底板与文字同被压暗、壁纸上仍不可读（用户实测反馈主因）。
+       * V29：模型行容器拆出为独立元素（ATTR_MODELS，独立开关），本容
+       * 器现仅承载逐段 span 行；纵向 flex/stretch 结构保留（单行场景
+       * 行为与块级等价，避免无谓改写定位几何） */
       "[" + ATTR_SESSION_BAR + "]{" +
       "position:absolute;top:4px;left:50%;transform:translateX(-50%);" +
       "z-index:" + SESSION_BAR_Z + ";" +
@@ -1262,73 +1476,126 @@ pub const USAGE_JS: &str = r#"// ===============================================
       "user-select:none;-webkit-user-select:none;" +
       "pointer-events:none;white-space:nowrap;}" +
       /* V26：会话行承接原容器低透明（观感与 V25 及更早版本一致）。
-       * 本行也是 V25 会话条总量行的逐段 span 宿主——旧实现直接写在
-       * 会话条容器上，现在容器被模型行共用，行内文本比对与重建只在
-       * 行元素上进行 */
+       * 本行是 V25 会话条总量行的逐段 span 宿主——旧实现直接写在
+       * 会话条容器上，行内文本比对与重建只在行元素上进行（V29 起模
+       * 型行容器已拆出，行元素是本容器唯一子节点） */
       "[" + ATTR_SESSION_BAR + "] .zbar-usage-sb-line{" +
       "white-space:nowrap;opacity:var(--zbar-usage-opacity,.55);}" +
       /* V13 兜底：region 缺失时条挂 body 并打上标记，退回旧 V5 行为
        * （fixed 贴窗底，bottom 见 SESSION_BAR_BOTTOM_PX） */
       "[" + ATTR_SESSION_BAR + "][" + ATTR_SESSION_BAR_FIXED + "]{" +
       "position:fixed;top:auto;bottom:" + SESSION_BAR_BOTTOM_PX + "px;}" +
-      "[" + ATTR_SESSION_BAR + "] .zbar-usage-models{" +
-      /* V26 模型区底板组件：半透明深色底 + 细边框 + 圆角 + 毛玻璃 +
-       * 内边距，任何壁纸上可读（用户实测：无底板三行小字与动态壁纸混
-       * 成一片）。亮暗两档背景随 prefers-color-scheme 适配（同为深色，
-       * 亮色档降不透明度、提边框亮度以贴近亮色界面）；:empty 整体隐藏
-       * （无模型行时不得露出空底板），行距 gap 与 margin-top 见几何
-       * 常量（MODEL_ROW_GAP_PX / MODELS_MARGIN_TOP_PX，两处须同步） */
+      /* V29 独立模型行容器（自会话条拆出）：absolute 挂进输入区容器顶
+       * 部留白、住进会话行下方——top = 会话条 top + 会话行高（字号 ×
+       * 1.5，与容器 line-height 同源）+ 底板间距，常量经字符串拼接与
+       * SESSION_BAR_TOP_PX / MODELS_MARGIN_TOP_PX 一一同步；top 恒定，
+       * 会话条开关切换（会话行出现/消失）不引起模型行跳位。left +
+       * translateX 按自身宽度水平居中（与上方会话行同一轴线）。容器
+       * pointer-events:none 不挡输入区，行内 auto 保 title 悬浮（与会
+       * 话条容器同款语义）。底板组件（V26）：半透明深色底 + 细边框 +
+       * 圆角 + 毛玻璃 + 内边距，任何壁纸上可读；亮暗两档背景随
+       * prefers-color-scheme 适配；:empty 整体隐藏（无模型行时不得露
+       * 出空底板），行距 gap 见几何常量（MODEL_ROW_GAP_PX 同步） */
+      "[" + ATTR_MODELS + "]{" +
+      "position:absolute;" +
+      "top:calc(" + SESSION_BAR_TOP_PX + "px + var(--zbar-usage-font-size,10px) * 1.5 + " + MODELS_MARGIN_TOP_PX + "px);" +
+      "left:50%;transform:translateX(-50%);" +
+      "z-index:" + SESSION_BAR_Z + ";" +
       "display:flex;flex-direction:column;align-items:stretch;" +
       "gap:" + MODEL_ROW_GAP_PX + "px;" +
-      "margin-top:" + MODELS_MARGIN_TOP_PX + "px;" +
+      "font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;" +
+      "font-size:var(--zbar-usage-font-size,10px);" +
+      "line-height:1;" +
       "padding:" + MODELS_PAD_V_PX + "px 9px;box-sizing:border-box;" +
       "border-radius:8px;border:1px solid rgba(148,163,184,.28);" +
       "background:rgba(2,6,23,.72);" +
       "-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);" +
-      "color:rgba(241,245,249,.92);opacity:1;}" +
+      "color:rgba(241,245,249,.92);opacity:1;" +
+      "pointer-events:none;white-space:nowrap;}" +
+      /* V29 兜底：region 缺失时挂 body 并打上标记，退回 fixed 贴底
+       * （bottom 见 MODELS_FALLBACK_BOTTOM_PX，位于会话条兜底之上；
+       * left/translateX 居中沿用基础规则） */
+      "[" + ATTR_MODELS + "][" + ATTR_MODELS_FIXED + "]{" +
+      "position:fixed;top:auto;bottom:" + MODELS_FALLBACK_BOTTOM_PX + "px;}" +
       "@media (prefers-color-scheme: light){" +
-      "[" + ATTR_SESSION_BAR + "] .zbar-usage-models{" +
+      "[" + ATTR_MODELS + "]{" +
       "background:rgba(15,23,42,.6);border-color:rgba(248,250,252,.38);}}" +
-      "[" + ATTR_SESSION_BAR + "] .zbar-usage-models:empty{display:none;}" +
+      "[" + ATTR_MODELS + "]:empty{display:none;}" +
       /* V25 模型分组速度行（对齐免注入悬浮窗模型速度区：小号、等宽、
        * 最近值三档变色 + 单位 + 跟随灰字）。V26：行内改弹性——模型名
        * flex:1 1 auto 占满余量（min-width:0 + ellipsis，截断只发生在
        * 模型名），数值区 flex:none + nowrap 永不截断（用户实测行尾
        * worst 值被整段裁掉，根因是 mextra flex:0 1 auto 可收缩）；删除
-       * 旧 70vw/420px 双上限的独立宽度（宽度随底板锚定，与上面
-       * 会话行同缘）；行高 = 字号 × 1.6（与 MODEL_ROW_H_FACTOR 同源，
-       * 须同步），pointer-events:auto 让行可悬浮出 title（整条会话条为
+       * 旧 70vw/420px 双上限的独立宽度（宽度随底板自适应）；行高 =
+       * 字号 × 1.6（与 MODEL_ROW_H_FACTOR 同源，须同步），
+       * pointer-events:auto 让行可悬浮出 title（容器为
        * pointer-events:none 不挡输入区，模型行住在上方留白里、不与输入
        * 卡片重叠） */
-      "[" + ATTR_SESSION_BAR + "] .zbar-usage-mrow{" +
+      "[" + ATTR_MODELS + "] .zbar-usage-mrow{" +
       "display:flex;align-items:center;gap:6px;" +
       "height:calc(var(--zbar-usage-font-size,10px) * " + MODEL_ROW_H_FACTOR + ");" +
       "font-size:calc(var(--zbar-usage-font-size,10px) * .9);" +
       "line-height:1;pointer-events:auto;cursor:default;}" +
       /* 行间细分割线（底板上同样式的中性半透明；行距由容器 gap 承担） */
-      "[" + ATTR_SESSION_BAR + "] .zbar-usage-mrow + .zbar-usage-mrow{" +
+      "[" + ATTR_MODELS + "] .zbar-usage-mrow + .zbar-usage-mrow{" +
       "border-top:1px solid rgba(148,163,184,.22);}" +
       /* 模型名：唯一可收缩截断的段（flex:1 1 auto 吃掉余量，数值区恒
        * 右缘对齐；名字过长时 ellipsis，行 title 兜底全名） */
-      "[" + ATTR_SESSION_BAR + "] .zbar-usage-mname{" +
+      "[" + ATTR_MODELS + "] .zbar-usage-mname{" +
       "flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}" +
       /* 数值区（最近值三档变色）：永不收缩、永不截断 */
-      "[" + ATTR_SESSION_BAR + "] .zbar-usage-mval{" +
+      "[" + ATTR_MODELS + "] .zbar-usage-mval{" +
       "flex:none;white-space:nowrap;font-variant-numeric:tabular-nums;}" +
       /* 单位后缀：独立静态节点，不参与三档变色（同免注入模型速度区） */
-      "[" + ATTR_SESSION_BAR + "] .zbar-usage-munit{" +
+      "[" + ATTR_MODELS + "] .zbar-usage-munit{" +
       "flex:none;white-space:nowrap;font-size:calc(var(--zbar-usage-font-size,10px) * .8);opacity:.75;}" +
       /* 均 / 快 / 慢跟随小字：更暗一档表达层级；flex:none 保证数值永不
        * 截断（V26 修复，原 flex:0 1 auto 会被行尾裁切） */
-      "[" + ATTR_SESSION_BAR + "] .zbar-usage-mextra{" +
+      "[" + ATTR_MODELS + "] .zbar-usage-mextra{" +
       "flex:none;white-space:nowrap;" +
       "font-size:calc(var(--zbar-usage-font-size,10px) * .8);opacity:.72;}" +
-      /* 三档变色：V26 起恒用亮色系——底板恒为深色（见 .zbar-usage-models），
-       * 原亮色主题的暗色系（#059669/#d97706/#dc2626）在深底上对比度不
-       * 足，删除原亮暗两套媒体查询 */
-      "[" + ATTR_SESSION_BAR + "] .zbar-usage-tps-fast{color:#34d399;}" +
-      "[" + ATTR_SESSION_BAR + "] .zbar-usage-tps-mid{color:#fbbf24;}" +
-      "[" + ATTR_SESSION_BAR + "] .zbar-usage-tps-slow{color:#f87171;}";
+      /* 三档变色：V26 起恒用亮色系——底板恒为深色（见 ATTR_MODELS 容
+       * 器背景），原亮色主题的暗色系（#059669/#d97706/#dc2626）在深底
+       * 上对比度不足，删除原亮暗两套媒体查询 */
+      "[" + ATTR_MODELS + "] .zbar-usage-tps-fast{color:#34d399;}" +
+      "[" + ATTR_MODELS + "] .zbar-usage-tps-mid{color:#fbbf24;}" +
+      "[" + ATTR_MODELS + "] .zbar-usage-tps-slow{color:#f87171;}" +
+      /* V27 额度段三档配色：剩余充足（≥30）继承会话行颜色（无 class，
+       * 灰白不抢视觉），偏低（<30）黄、紧张（<10）红——与模型行三档
+       * 同色系（醒目不刺眼，底色随壁纸但行色已由主题保证可读）。
+       * V28 起该配色由独立额度行消费（会话条不再携带额度段，规则保留
+       * 供旧落盘脚本过渡期渲染，随版本覆盖自然消失） */
+      "[" + ATTR_SESSION_BAR + "] .zbar-usage-quota-mid{color:#fbbf24;}" +
+      "[" + ATTR_SESSION_BAR + "] .zbar-usage-quota-low{color:#f87171;}" +
+      /* V28 独立额度行：输入框卡片底部外侧的右对齐单行小字——absolute
+       * + bottom 负偏移（QUOTA_BAR_BOTTOM_PX）贴卡片下边缘、不占布局
+       * 空间（与输入区顶部留白几何无联动），pointer-events:none 不挡
+       * 输入区交互。V29：字号升回 --zbar-usage-font-size 基准（取消
+       * ×0.9 缩小——此前是全页最小字且灰字对比度低），行高压缩 1.4
+       * （bottom 加深后行盒不超窗口底边），整行继承灰白行色（「额度」
+       * 前缀与时间戳的专用着色删除），透明度沿用 --zbar-usage-opacity
+       * （随热重载即时生效，模板内仅保留兜底值） */
+      "[" + ATTR_QUOTA_BAR + "]{" +
+      "position:absolute;bottom:" + QUOTA_BAR_BOTTOM_PX + "px;right:0;" +
+      "z-index:" + SESSION_BAR_Z + ";" +
+      "font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;" +
+      "font-size:var(--zbar-usage-font-size,10px);" +
+      "font-weight:400;line-height:1.4;" +
+      "letter-spacing:.02em;color:inherit;" +
+      "font-variant-numeric:tabular-nums;" +
+      "user-select:none;-webkit-user-select:none;" +
+      "pointer-events:none;white-space:nowrap;}" +
+      "[" + ATTR_QUOTA_BAR + "] .zbar-usage-qb-line{" +
+      "white-space:nowrap;opacity:var(--zbar-usage-opacity,.55);}" +
+      /* V28 兜底：region 缺失时挂 body 并打上标记，退回 fixed 贴底右
+       * 侧（边距见 QUOTA_BAR_FALLBACK_* 常量，迁回 region 自动还原） */
+      "[" + ATTR_QUOTA_BAR + "][" + ATTR_QUOTA_BAR_FIXED + "]{" +
+      "position:fixed;top:auto;right:" + QUOTA_BAR_FALLBACK_RIGHT_PX +
+      "px;bottom:" + QUOTA_BAR_FALLBACK_BOTTOM_PX + "px;}" +
+      /* V29 额度行三档配色（充足继承行色灰白、<30 黄、<10 红）；V28 的
+       * 时间戳尾段更暗样式已随尾段删除（无渲染路径再产出该 class） */
+      "[" + ATTR_QUOTA_BAR + "] .zbar-usage-quota-mid{color:#fbbf24;}" +
+      "[" + ATTR_QUOTA_BAR + "] .zbar-usage-quota-low{color:#f87171;}";
       /* V21 的 CTX 三档变色样式（黄/红两个 class 规则）已随 V22 CTX 段
        * 删除（无渲染路径再产出这两个 class） */
     (document.head || document.documentElement).appendChild(st);
@@ -1527,6 +1794,49 @@ pub const USAGE_JS: &str = r#"// ===============================================
     setTimeout(speedPollLoop, document.hidden ? POLL_HIDDEN_MS : SPEED_POLL_MS);
   }
 
+  /* ---- V27 额度小文件轮询：独立低频节拍（数据端 60s 写盘、本端 30s
+   *      重载），只承载 5h/周窗口剩余百分比，绝不进历史大文件与速度
+   *      旁路；查询未成功（数据端从未写出/文件缺失）时 quotaData 保持
+   *      null，V28 起独立额度行整行隐藏（无内容可显示），加载失败保
+   *      留上次额度 ---- */
+  var quotaLoading = false;
+  var quotaData = null; /* { v:1, ts, h5, wk }；h5/wk 可为 null（窗口缺失） */
+
+  function loadQuota() {
+    if (quotaLoading || !quotaUrl) return;
+    quotaLoading = true;
+    var old = document.getElementById(QUOTA_LOADER_ID);
+    if (old && old.parentNode) old.parentNode.removeChild(old);
+    var s = document.createElement("script");
+    s.id = QUOTA_LOADER_ID;
+    s.onload = function () {
+      quotaLoading = false;
+      try {
+        var q = window.__ZBAR_QUOTA__;
+        /* 版本不符视为无效数据，保留上次额度（与数据/速度旁路同款） */
+        if (!q || q.v !== 1) return;
+        quotaData = q;
+        scheduleRender();
+      } catch (e) {
+        /* 额度旁路失败不影响统计条 */
+      }
+    };
+    s.onerror = function () {
+      quotaLoading = false; /* 加载失败保留上次额度 */
+    };
+    s.src = quotaUrl + "?t=" + Date.now();
+    (document.head || document.documentElement).appendChild(s);
+  }
+
+  function quotaPollLoop() {
+    try {
+      loadQuota();
+    } catch (e) {
+      /* 静默 */
+    }
+    setTimeout(quotaPollLoop, document.hidden ? QUOTA_POLL_HIDDEN_MS : QUOTA_POLL_MS);
+  }
+
   /* ---- 格式化（速度口径见文件头说明） ---- */
   function trimTail(s) {
     return s.replace(/\.0$/, "");
@@ -1620,8 +1930,28 @@ pub const USAGE_JS: &str = r#"// ===============================================
     return "zbar-usage-tps-slow";
   }
 
+  /* V27 额度三档配色 class（剩余百分比）：紧张（<10）红、偏低（<30）
+   * 黄、充足继承行颜色（返回空 class，灰白不抢视觉）。V28 起消费方为
+   * 独立额度行（会话条不再携带额度段） */
+  function quotaClassOf(remain) {
+    if (typeof remain !== "number" || !isFinite(remain)) return "";
+    if (remain < QUOTA_LOW_REMAIN) return "zbar-usage-quota-low";
+    if (remain < QUOTA_MID_REMAIN) return "zbar-usage-quota-mid";
+    return "";
+  }
+
+  /* V27 缓存命中率：cr / (cr + 非缓存输入)，保留一位小数；分母为 0
+   * （该会话无任何输入）显示 —。V27–V29 曾作会话条 ⟲ 段后缀，V30 起
+   * 消费方为底部额度行「缓存」段（renderQuotaBar 调用方判 "—" 不入
+   * 段），Σ 与 ⟲ 的 token 数值口径不受影响 */
+  function cacheHitText(cr, plainIn) {
+    var denom = (cr || 0) + (plainIn || 0);
+    if (denom <= 0) return "—";
+    return ((cr / denom) * 100).toFixed(1) + "%";
+  }
+
   /* ---- 统一行格式（V10）：三态共用同一固定结构，只更新字段数值 ----
-   * "↑ <in> ↓ <out> ⟲ <cr> · × <req> · <speed> t/s · TTFT <ttft>"
+   * "↑ <in> ↓ <out> ⟲ <cr> ✚ <cw> · × <req> · <speed> t/s · TTFT <ttft>"
    * 各字段等宽补位（等宽字体 + tabular-nums 下整行宽度恒定）：
    * - token 字段经 fmtTokens 恒定 5 字符；
    * - req padStart(3)；
@@ -1630,6 +1960,8 @@ pub const USAGE_JS: &str = r#"// ===============================================
    *   失）显示 "–" 占位；
    * - 速度快照的 request_average 质量由 padSpeed 添加 ≈ 前缀；没有快照
    *   时使用等待占位，计数位始终只来自确认数据。
+   * V27：⟲ 缓存读段后补 ✚ 缓存写段（数据端 turns/runs 既有 cw 字段；
+   * live 行与启动窗口占位同样渲染该位，占位恒 0，整行结构不变）。
    * V25：v.agg（数据端 sa）存在且样本 ≥ 2 时，速度位之后追加紧凑聚合段
    * "· 均38 快71 慢12"；三处调用点差异——完成态传聚合、live 行与启动
    * 窗口占位不传（进行中轮数据端不产出 sa，见文件头 V25 变更 b）。
@@ -1641,6 +1973,7 @@ pub const USAGE_JS: &str = r#"// ===============================================
       "↑ " + fmtTokens(v.inp) +
       " ↓ " + fmtTokens(v.out) +
       " ⟲ " + fmtTokens(v.cr) +
+      " ✚ " + fmtTokens(v.cw) +
       " · × " + String(v.req).padStart(3, " ") +
       " · " + padSpeed(v.speed) + " t/s" +
       (agg ? " · " + agg : "") +
@@ -1653,6 +1986,7 @@ pub const USAGE_JS: &str = r#"// ===============================================
       inp: Math.max(0, (t["in"] || 0) - (t.cr || 0)),
       out: t.out || 0,
       cr: t.cr || 0,
+      cw: t.cw || 0,
       req: t.req || 0,
       speed: t.speed || null,
       agg: t.sa || null,
@@ -1663,17 +1997,19 @@ pub const USAGE_JS: &str = r#"// ===============================================
   /* ---- 进行中轮行：只显示已完成 model_usage 请求的确认聚合；尚未有
    *      请求级速度时保留 "–"，不从 DOM 文本推算 token 或 t/s。
    *      V25：进行中轮不显示聚合段（数据端 runs 行不产出 sa，聚合属于
-   *      完成态口径）。 ---- */
+   *      完成态口径）。V27：✚ 段同口径并入子代理 sub.cw。 ---- */
   function liveLineOf(r) {
     var s = r.sub;
     var inp = (r["in"] || 0) + (s ? s["in"] || 0 : 0);
     var out = (r.out || 0) + (s ? s.out || 0 : 0);
     var cr = (r.cr || 0) + (s ? s.cr || 0 : 0);
+    var cw = (r.cw || 0) + (s ? s.cw || 0 : 0);
     var req = (r.req || 0) + (s ? s.req || 0 : 0);
     return barLineOf({
       inp: Math.max(0, inp - cr),
       out: out,
       cr: cr,
+      cw: cw,
       req: req,
       speed: r.speed || null,
        ttft: null
@@ -1729,6 +2065,7 @@ pub const USAGE_JS: &str = r#"// ===============================================
           inp: 0,
           out: 0,
           cr: 0,
+          cw: 0,
           req: 0,
           speed: null,
           ttft: null,
@@ -1854,8 +2191,9 @@ pub const USAGE_JS: &str = r#"// ===============================================
    * ② 旧口径（回退）：数据无 sess 字段（旧数据文件/查询降级）时按
    *    sess 过滤 turns 原始数组聚合完成轮真实值 + 调用方叠加
    *    sessionRunTotals 的进行中合计（V6/V9 既有行为）。
-   * 两套口径返回同构 {tin, tout, tcr, treq}（↑ 均为逐笔/逐轮 clamp 的
-   * 非缓存输入），渲染端无感切换。
+   * 两套口径返回同构 {tin, tout, tcr, tcw, treq}（↑ 均为逐笔/逐轮 clamp
+   * 的非缓存输入；tcw = ✚ 缓存写合计，V27 起两口径同步累计），
+   * 渲染端无感切换。
    * V20：turns 含子代理自身视图行（sess 为子代理会话 id、带
    * subagent:1），按 sess 精确匹配天然隔离——主会话视图不命中子代理
    * 自身行（其数值经主轮行的并入值计入），子代理视图（面板锚点外通常
@@ -1864,7 +2202,13 @@ pub const USAGE_JS: &str = r#"// ===============================================
     /* ① 新口径：sess 全量合计行 */
     var sv = sessIndex[sessId];
     if (sv && sv.tt != null) {
-      return { tin: sv.up || 0, tout: sv.down || 0, tcr: sv.cr || 0, treq: sv.rq || 0 };
+      return {
+        tin: sv.up || 0,
+        tout: sv.down || 0,
+        tcr: sv.cr || 0,
+        tcw: sv.cw || 0,
+        treq: sv.rq || 0
+      };
     }
     /* ② 旧口径回退：该会话无任何完成轮返回 null——V6 起不再据此直接
      * 放弃渲染（V5 根因 a)：新会话首轮生成期间 totals 恒为 null，动态
@@ -1872,6 +2216,7 @@ pub const USAGE_JS: &str = r#"// ===============================================
     var tin = 0,
       tout = 0,
       tcr = 0,
+      tcw = 0,
       treq = 0,
       found = false;
     for (var i = 0; i < lastTurns.length; i++) {
@@ -1882,9 +2227,10 @@ pub const USAGE_JS: &str = r#"// ===============================================
       tin += Math.max(0, (t["in"] || 0) - (t.cr || 0));
       tout += t.out || 0;
       tcr += t.cr || 0;
+      tcw += t.cw || 0;
       treq += t.req || 0;
     }
-    return found ? { tin: tin, tout: tout, tcr: tcr, treq: treq } : null;
+    return found ? { tin: tin, tout: tout, tcr: tcr, tcw: tcw, treq: treq } : null;
   }
 
   /* 进行中 run 合计（V6 引入，V9 口径修正）：本会话行（sess 命中，含
@@ -1895,11 +2241,12 @@ pub const USAGE_JS: &str = r#"// ===============================================
    *    数值同口径合计计入——子代理消耗实时反映在会话累计条上；
    * c) 父会话暂无主轮行（主轮首笔请求未完成）的子代理行不带 m，仍按
    *    psess 在此并入，主轮行出现后自动切换口径，无缝衔接。
-   * 无命中返回 null */
+   * V27：✚ 缓存写按同口径累计（r.cw 与 r.sub.cw）。无命中返回 null */
   function sessionRunTotals(sessId) {
     var tin = 0,
       tout = 0,
       tcr = 0,
+      tcw = 0,
       treq = 0,
       found = false;
     for (var i = 0; i < lastRuns.length; i++) {
@@ -1910,15 +2257,17 @@ pub const USAGE_JS: &str = r#"// ===============================================
       tin += Math.max(0, (r["in"] || 0) - (r.cr || 0));
       tout += r.out || 0;
       tcr += r.cr || 0;
+      tcw += r.cw || 0;
       treq += r.req || 0;
       if (r.sub) {
         tin += Math.max(0, (r.sub["in"] || 0) - (r.sub.cr || 0));
         tout += r.sub.out || 0;
         tcr += r.sub.cr || 0;
+        tcw += r.sub.cw || 0;
         treq += r.sub.req || 0;
       }
     }
-    return found ? { tin: tin, tout: tout, tcr: tcr, treq: treq } : null;
+    return found ? { tin: tin, tout: tout, tcr: tcr, tcw: tcw, treq: treq } : null;
   }
 
   /* 活动轮判定（V8 DOM 驱动，V9 多容器化）：遍历 document 上所有
@@ -1969,7 +2318,9 @@ pub const USAGE_JS: &str = r#"// ===============================================
 
   /* V13：ensureBar 只负责单例创建与断连自愈，挂载位置（region 正常路
    * 径 / body 兜底路径）由 renderSessionBar 依 region 是否存在决定。
-   * V25：条容器改为两段式（行 + 模型行容器），两者各自按内容比对重建 */
+   * V25：条容器改为两段式（行 + 模型行容器），两者各自按内容比对重建；
+   * V29：模型行容器拆出为独立元素（ensureModelsBox 不再挂在条内），
+   * 本容器现仅承载逐段 span 行 */
   function ensureBar() {
     if (sessionBar && sessionBar.isConnected) {
       return sessionBar;
@@ -1981,9 +2332,9 @@ pub const USAGE_JS: &str = r#"// ===============================================
     return bar;
   }
 
-  /* V25 行元素（总量 · 速度 · 聚合段）与模型行容器：都是条的直属子节点，
-   * 按类名幂等取用（条被重建时元素随之新建，比对自然不命中 → 重渲；
-   * 这正是既有的"元素即状态"自愈策略） */
+  /* V25 行元素（总量 · 速度 · 聚合段）：条的直属子节点，按类名幂等取
+   * 用（条被重建时元素随之新建，比对自然不命中 → 重渲；这正是既有的
+   * "元素即状态"自愈策略） */
   function ensureBarLine(bar) {
     var line = bar.querySelector(":scope > .zbar-usage-sb-line");
     if (!line) {
@@ -1992,16 +2343,6 @@ pub const USAGE_JS: &str = r#"// ===============================================
       bar.appendChild(line);
     }
     return line;
-  }
-
-  function ensureModelsBox(bar) {
-    var box = bar.querySelector(":scope > .zbar-usage-models");
-    if (!box) {
-      box = document.createElement("div");
-      box.className = "zbar-usage-models";
-      bar.appendChild(box);
-    }
-    return box;
   }
 
   /* ---- V26 动态留白精确计算（修复 V25 模型行压到输入面板）----
@@ -2034,28 +2375,70 @@ pub const USAGE_JS: &str = r#"// ===============================================
     return n;
   }
 
-  /* 需求留白 = 条 top + 会话行高（字号 × 1.5，与容器 line-height 同源）
-   * + 底板间距 + 底板高（行数 × 行高系数 × 字号 + 行距 × (行数-1)
-   * + 纵向内边距 × 2 + 边框 1px × 2）+ 安全间隙；不低于基数 26px
-   * （无模型行时等价于 V25 之前的原状） */
-  function padForModels(rows, fs) {
-    if (rows <= 0) return COMPOSER_PAD_TOP_PX;
-    var need =
-      SESSION_BAR_TOP_PX +
-      fs * 1.5 +
-      MODELS_MARGIN_TOP_PX +
+  /* 模型底板高度（行数 × 行高系数 × 字号 + 行距 × (行数-1) + 纵向内
+   * 边距 × 2 + 边框 1px × 2），与 ATTR_MODELS 容器 / .zbar-usage-mrow
+   * 的 CSS 数值一一同步（见常量区注释块）。rows 恒 > 0（调用方以
+   * validModelCount() > 0 为前提） */
+  function modelsPlateHeight(rows, fs) {
+    return (
       rows * fs * MODEL_ROW_H_FACTOR +
       (rows - 1) * MODEL_ROW_GAP_PX +
       MODELS_PAD_V_PX * 2 +
-      2 +
-      MODELS_CLEARANCE_PX;
-    return Math.max(COMPOSER_PAD_TOP_PX, Math.round(need));
+      2
+    );
+  }
+
+  /* V29 留白统一写入口：会话条行与模型底板两个成分按各自开关/挂载态
+   * 独立叠加（四种组合见常量区注释块），每拍渲染只求一次值——
+   * renderAll 主路径在会话条/模型行/额度行渲染完成后调用，空轮分支在
+   * 三层注入清干净后调用。region 归属：会话条挂载的 region 优先（会
+   * 条是留白的原始宿主，模型行挂载时也跟随它），会话条不在 region 时
+   * 用模型底板挂载的 region；两者都不在 region（含兜底 fixed 路径）
+   * 时不施加变量，旧 region 的变量经 setRegionPad 迁移逻辑还原 */
+  function syncComposerPad() {
+    var sessIn =
+      sessionBarEnabled() &&
+      !!sessionBar &&
+      sessionBar.isConnected &&
+      !!sessionBar.parentElement &&
+      !sessionBar.hasAttribute(ATTR_SESSION_BAR_FIXED);
+    var modelsIn =
+      modelRowsEnabled() &&
+      validModelCount() > 0 &&
+      !!modelsBox &&
+      modelsBox.isConnected &&
+      !!modelsBox.parentElement &&
+      !modelsBox.hasAttribute(ATTR_MODELS_FIXED);
+    var region = null;
+    if (sessIn) {
+      region = sessionBar.parentElement;
+    } else if (modelsIn) {
+      region = modelsBox.parentElement;
+    }
+    var px = COMPOSER_PAD_TOP_PX;
+    if (region) {
+      var fs = usageFontSize();
+      /* 会话条行底缘 = top + 行高（字号 × 1.5，与容器 line-height 同源）；
+       * 模型行开时底板需求（含会话行槽位）覆盖该值 */
+      var need = SESSION_BAR_TOP_PX + fs * 1.5;
+      if (modelsIn) {
+        need =
+          SESSION_BAR_TOP_PX +
+          fs * 1.5 +
+          MODELS_MARGIN_TOP_PX +
+          modelsPlateHeight(validModelCount(), fs) +
+          MODELS_CLEARANCE_PX;
+      }
+      px = Math.max(COMPOSER_PAD_TOP_PX, Math.round(need));
+    }
+    setRegionPad(region, px);
   }
 
   /* V25 动态留白：模型行住进输入区容器顶部留白的增量部分。变量只施加在
-   * 当前挂载的 region 上——会话条迁移到另一个 region（多会话保活切换）
+   * 当前挂载的 region 上——注入层迁移到另一个 region（多会话保活切换）
    * 或隐藏时，旧 region 的变量必须移除，否则旧输入区永久多出几十像素。
-   * px <= 基数时不设变量（回落到 CSS 兜底 26px，等价于无模型行） */
+   * px <= 基数时不设变量（回落到 CSS 兜底 26px）。V29 起唯一调用方为
+   * syncComposerPad（统一计算，防两条渲染路径互相覆盖） */
   var paddedRegion = null; /* 已施加增量留白的 region（迁移/隐藏时还原） */
   function setRegionPad(region, px) {
     if (paddedRegion && paddedRegion !== region) {
@@ -2084,7 +2467,9 @@ pub const USAGE_JS: &str = r#"// ===============================================
       sessionBar.parentNode.removeChild(sessionBar);
     }
     sessionBar = null;
-    setRegionPad(null, 0);
+    /* V29：留白不再在此处还原——syncComposerPad 按会话条/模型行两个
+     * 注入层的挂载态统一计算（renderAll 尾部/空轮分支调用），避免会
+     * 条先清理时把模型行需要的留白一并抹掉 */
   }
 
   /* 节点所属会话 id（V9）：向上取最近 [data-session-id] 容器属性值；
@@ -2123,6 +2508,33 @@ pub const USAGE_JS: &str = r#"// ===============================================
     }
   }
 
+  /* V29（P1 修复）：当前会话数据判定——renderSessionBar「无数据即
+   * removeBar」条件的同口径提炼（勿另造口径）：当前渲染目标会话
+   * （currentSessionId：焦点容器优先，退第一个可见容器）满足以下任一
+   * 即有数据——
+   * ① sess 全量合计行命中（sv.tt != null，V21 新口径）；
+   * ② 该会话存在完成轮（sessionTotals 旧口径归集 turns）；
+   * ③ 该会话存在进行中 run/未并入子代理行（sessionRunTotals）；
+   * ④ 该会话存在活动轮（activeMap.has，DOM 驱动，覆盖启动窗口）。
+   * 全不满足、或无锚点/无会话 id（renderSessionBar 同款 removeBar 分
+   * 支）即「当前会话无数据」返回 false。与被取代的全局级判定
+   * sessionDataEmpty（turns/runs/sess 任一非空即有数据）的本质区别：
+   * 多会话保活下旧会话容器仍挂载 DOM、其数据不再作为当前 draft/新建
+   * 任务页的渲染依据——判定只看当前会话自身的四路数据源。会话条开
+   * 关不参与判定（开关关闭时模型行/额度行照常显示的 V29 解耦语义不
+   * 变）。纯计算无 DOM 写操作（currentSessionId 内部自含 try/catch），
+   * renderAll 主路径每拍求值一次后传给 renderModelRows/renderQuotaBar */
+  function currentSessionHasData(anchor, activeMap) {
+    var sessId = currentSessionId(anchor);
+    if (!anchor || !sessId) return false;
+    var sv = sessIndex[sessId];
+    if (sv && sv.tt != null) return true; /* ① V21 新口径命中 */
+    /* ②③④：即 renderSessionBar 的
+     * !useSess && !totals && !runTotals && !active → removeBar 取反 */
+    return !!(sessionTotals(sessId) || sessionRunTotals(sessId) ||
+      activeMap.has(sessId));
+  }
+
   function renderSessionBar(anchor, activeMap) {
     if (!sessionBarEnabled()) {
       /* 会话条独立开关；每轮统计条仍由 turnBarEnabled 单独控制。 */
@@ -2155,7 +2567,9 @@ pub const USAGE_JS: &str = r#"// ===============================================
       return;
     }
     /* Σ 口径：新数据使用 model_usage 全量会话树合计；旧数据文件回退
-     * 完成轮 + 已确认进行中请求。DOM 文本永远不进入这些数字。 */
+     * 完成轮 + 已确认进行中请求。DOM 文本永远不进入这些数字。
+     * V27：tcw（✚ 缓存写）两口径同步累计——sess 行 cw / 回退路径
+     * totals.tcw + runTotals.tcw（V21 防双计判定不变）。 */
     var tin = useSess ? (sv.up || 0) : (totals ? totals.tin : 0) + (runTotals ? runTotals.tin : 0);
     var tout = useSess
       ? sv.down || 0
@@ -2163,6 +2577,9 @@ pub const USAGE_JS: &str = r#"// ===============================================
     var tcr = useSess
       ? sv.cr || 0
       : (totals ? totals.tcr : 0) + (runTotals ? runTotals.tcr : 0);
+    var tcw = useSess
+      ? sv.cw || 0
+      : (totals ? totals.tcw : 0) + (runTotals ? runTotals.tcw : 0);
     var treq = useSess
       ? sv.rq || 0
       : (totals ? totals.treq : 0) + (runTotals ? runTotals.treq : 0);
@@ -2173,13 +2590,19 @@ pub const USAGE_JS: &str = r#"// ===============================================
      * V21：parts 改段对象 {t: 文本, c: 可选配色 class}——会话条由单
      * textContent 改为逐段 span 渲染（当时为 CTX 段级变色引入）。V22
      * 删除 CTX 段后已无带配色的段，结构保留（未来段级配色零成本复
-     * 用，全部段无 class 时行为与单串等价） */
+     * 用，全部段无 class 时行为与单串等价）。
+     * V27：⟲ 段曾升级为 token + 缓存命中率后缀（cr / (cr + 非缓存输
+     * 入)，cacheHitText 分母 0 显示 —）并新增 ✚ 缓存写段——Σ =
+     * ↑+↓+⟲ 口径不变（tsum 不含 tcw）。V30：命中率后缀挪至底部额度
+     * 行「缓存 NN%」段（cacheHitText 由 renderQuotaBar 复用），⟲ 段
+     * 回归纯 token——对齐参考图底部行口径，会话条行宽不再被后缀挤占。 */
     var tsum = tin + tout + tcr;
     var segs = [
       { t: "Σ " + fmtTokens(tsum) },
       { t: "↑ " + fmtTokens(tin) },
       { t: "↓ " + fmtTokens(tout) },
       { t: "⟲ " + fmtTokens(tcr) },
+      { t: "✚ " + fmtTokens(tcw) },
       { t: "× " + String(treq).padStart(3, " ") }
     ];
     /* 速度字段来自会话级 model_usage 请求快照；新一轮尚未出现确认请求
@@ -2202,9 +2625,12 @@ pub const USAGE_JS: &str = r#"// ===============================================
      * 发布，1 秒旁路不携带，故它随大文件拍自然刷新。 */
     var aggText = aggTextOf(sv && sv.sa);
     if (aggText) segs.push({ t: aggText });
-    /* V21 曾在此追加 "CTX NN%" 上下文占用段（三档变色，消费 sess 行的
-     * cp 字段），V22 随展示下线删除（数据端 cp/cu/cw 字段一并移除，
-     * 旧数据文件残留值被忽略） */
+    /* V27 曾在此追加额度段（会话条尾部 "5h余/周余"），V28 随额度展示
+     * 改版移出——额度行独立渲染（renderQuotaBar，输入框卡片底部外侧），
+     * 不再随会话条渲染节奏/开关联动；V21 曾在此追加 "CTX NN%" 上下文
+     * 占用段（三档变色，消费 sess 行的 cp 字段），V22 随展示下线删除
+     * （数据端 cp/cu/cw 字段一并移除，旧数据文件残留值被忽略；V27 的
+     * cw 是缓存写合计，与旧 CTX cw 无关） */
     var text = "";
     for (var si = 0; si < segs.length; si++) {
       text += (si ? " · " : "") + segs[si].t;
@@ -2216,9 +2642,9 @@ pub const USAGE_JS: &str = r#"// ===============================================
      * 活时不再首中隐藏旧会话的输入区容器）。region 缺失（选择器失效/
      * 结构变更）退回旧路径：挂 body、打兜底标记切 fixed +
      * SESSION_BAR_BOTTOM_PX（迁回 region 时移除标记自动还原）。
-     * V26：留白按 padForModels 以实际字号与底板几何精确计算（修复 V25
-     * 固定 14px/行在字号调大或底板增高后压到输入面板）——挂进 region 时
-     * 按有效行数抬高、无模型行或走 body 兜底路径时还原 26px */
+     * V29：留白不再在此处施加——renderAll 尾部 syncComposerPad 按会
+     * 话条/模型行两个注入层的挂载态统一计算（本函数只负责条的挂载与
+     * 清理） */
     try {
       var region = pickComposerRegion(sessId);
       if (region) {
@@ -2226,13 +2652,11 @@ pub const USAGE_JS: &str = r#"// ===============================================
         if (bar.hasAttribute(ATTR_SESSION_BAR_FIXED)) {
           bar.removeAttribute(ATTR_SESSION_BAR_FIXED);
         }
-        setRegionPad(region, padForModels(validModelCount(), usageFontSize()));
       } else {
         if (bar.parentElement !== document.body) {
           document.body.appendChild(bar);
         }
         bar.setAttribute(ATTR_SESSION_BAR_FIXED, "");
-        setRegionPad(null, 0); /* 兜底路径 fixed 贴底，不需要输入区留白 */
       }
     } catch (e) {
       /* 挂载异常：一次性告警（V14 前此处静默吞掉了 ReferenceError，
@@ -2243,10 +2667,12 @@ pub const USAGE_JS: &str = r#"// ===============================================
       }
     }
     /* V21：内容变化时逐段重建（行元素 textContent 读值含全部段文本，
-     * 拼接串比对与旧单串比对等价）；无变化零 DOM 操作。V25：行与模型行
-     * 容器分离，行元素只承载总量/速度/聚合段，模型行各自重建 */
+     * 拼接串比对与旧单串比对等价）；无变化零 DOM 操作。V25：行与模型
+     * 行容器分离，行元素只承载总量/速度/聚合段；V29：模型行容器拆出
+     * 为独立元素，由 renderAll 独立渲染（会话条开关关闭时模型行照常
+     * 显示；当前会话无数据时模型行经 sessHasData 闸随会话条一并隐藏，
+     * 见独立容器一节与 currentSessionHasData） */
     renderBarLine(bar, text, segs);
-    renderModelRows(bar);
   }
 
   /* V25 会话条行重建：与旧实现同款"逐段 span + 全串比对"（textContent
@@ -2265,18 +2691,103 @@ pub const USAGE_JS: &str = r#"// ===============================================
     }
   }
 
-  /* V25 模型分组速度行（会话条下方，最多 3 行；对齐免注入悬浮窗模型速度
+  /* ---- V29 独立模型行容器（模型分组速度行，最多 3 行）----
+   * V25 时容器挂在会话条 bar 内、随会话条开关联动渲染；V29 拆出为独
+   * 立元素（ATTR_MODELS）——数据（lastModels）/容器/渲染三重解耦，
+   * renderAll 独立调用，会话条开关关闭时模型行照常显示（用户核心诉
+   * 求）；当前会话无数据时经 sessHasData 闸随会话条一并隐藏（P1 修
+   * 复——多会话保活下新建任务页不再出现孤立模型行，见
+   * currentSessionHasData）。开关经 --zbar-usage-model-rows
+   * （variables.css 渲染 1/0，缺失视为开启，与 session/turn/quota 开
+   * 关同惯例） */
+  var modelsBox = null; /* 已挂载的模型行容器（跨渲染复用，幂等更新） */
+  var modelsMountWarned = false; /* 挂载异常一次性告警标志（同会话条
+    mountWarned 的 V14 模式） */
+
+  function modelRowsEnabled() {
+    try {
+      var v = (
+        getComputedStyle(document.documentElement).getPropertyValue(
+          VAR_MODEL_ROWS
+        ) || ""
+      ).trim();
+      return v !== "0";
+    } catch (e) {
+      return true; /* 读不到变量（旧 variables.css）按默认开启 */
+    }
+  }
+
+  /* 单例创建与断连自愈（同 ensureBar 的"元素即状态"策略）：挂载位置
+   * 由 renderModelRows 依会话条挂载态与 region 是否存在决定 */
+  function ensureModelsBox() {
+    if (modelsBox && modelsBox.isConnected) {
+      return modelsBox;
+    }
+    removeModelsBox(); /* 断连后重建（页面清掉注入层时自愈） */
+    var box = document.createElement("div");
+    box.className = "zbar-usage-models";
+    box.setAttribute(ATTR_MODELS, "");
+    modelsBox = box;
+    return box;
+  }
+
+  function removeModelsBox() {
+    if (modelsBox && modelsBox.parentNode) {
+      modelsBox.parentNode.removeChild(modelsBox);
+    }
+    modelsBox = null;
+  }
+
+  /* V25 模型分组速度行渲染（V29 起独立管线；对齐免注入悬浮窗模型速度
    * 区：模型名 truncate + 最近值等宽三档变色 + 单位小字 + 跟随灰字）。
    * V26：行内弹性布局——模型名是唯一可截断段（ellipsis），数值区
-   * flex:none 永不截断；底板宽度随会话条锚定（与上方会话行同左缘）；
-   * 聚合小字与 title 统一走 WORDS 词表（均/快/慢 ↔ avg/fast/slow），
-   * title 为固定两行模板。各节点一律用 textContent 写外部字符串（无
-   * HTML 注入面）；内容比对用行容器的整体签名属性（容器被重建时属性
-   * 缺失 → 自动重渲），无变化零 DOM 操作。数据端 models 为空（旧数据
-   * 文件/老库缺列/无样本）时清空容器，:empty 规则隐藏空底板，不渲染
-   * 任何行 */
-  function renderModelRows(bar) {
-    var box = ensureModelsBox(bar);
+   * flex:none 永不截断；聚合小字与 title 统一走 WORDS 词表（均/快/慢
+   * ↔ avg/fast/slow），title 为固定两行模板。各节点一律用 textContent
+   * 写外部字符串（无 HTML 注入面）；内容比对用行容器的整体签名属性
+   * （容器被重建时属性缺失 → 自动重渲），无变化零 DOM 操作。V29 P1
+   * 修复：入参 sessHasData 为会话级判定闸（renderAll 主路径经
+   * currentSessionHasData 求值，会话条 removeBar 同口径）——当前会话
+   * 无数据（多会话保活下的新建任务/draft 页）时移除容器不渲染，切换
+   * 回有数据会话后由既有 MutationObserver/兜底渲染拍自愈恢复。开关关
+   * 闭或数据端 models 为空（旧数据文件/老库缺列/无样本）时同样移除容
+   * 器，不渲染任何行；留白由 renderAll 尾部 syncComposerPad 统一计
+   * 算 */
+  function renderModelRows(sessHasData) {
+    if (!sessHasData || !modelRowsEnabled() || !validModelCount()) {
+      removeModelsBox();
+      return;
+    }
+    var box = ensureModelsBox();
+    try {
+      /* 挂载（幂等迁移，照会话条/额度行既有模式）：会话条已挂进
+       * region 时跟随同一容器（两注入层共享同一留白几何，V26 的
+       * padForModels 语义在独立容器下延续）；会话条关闭/兜底/未渲染
+       * 时取第一个可见 region（模型行是窗口级数据，无会话归属）。
+       * region 缺失（选择器失效/结构变更）退回 body + fixed 贴底（标
+       * 记属性切换定位，迁回自动还原，同会话条兜底模式） */
+      var region =
+        sessionBar && sessionBar.isConnected &&
+        !sessionBar.hasAttribute(ATTR_SESSION_BAR_FIXED)
+          ? sessionBar.parentElement
+          : pickComposerRegion("");
+      if (region) {
+        if (box.parentElement !== region) region.appendChild(box);
+        if (box.hasAttribute(ATTR_MODELS_FIXED)) {
+          box.removeAttribute(ATTR_MODELS_FIXED);
+        }
+      } else {
+        if (box.parentElement !== document.body) {
+          document.body.appendChild(box);
+        }
+        box.setAttribute(ATTR_MODELS_FIXED, "");
+      }
+    } catch (e) {
+      /* 挂载异常：一次性告警（同会话条 V14 模式），之后每周期静默重试 */
+      if (!modelsMountWarned) {
+        modelsMountWarned = true;
+        try { console.warn("[ZBar] usage model rows mount error:", e); } catch (e2) {}
+      }
+    }
     var rows = [];
     var sig = "";
     for (var mi = 0; mi < lastModels.length && mi < MODEL_ROWS_MAX; mi++) {
@@ -2316,6 +2827,185 @@ pub const USAGE_JS: &str = r#"// ===============================================
     box.setAttribute("data-zbar-usage-msig", sig);
   }
 
+  /* ---- V28/V29 独立额度行（输入框卡片底部外侧，右对齐单行小字）----
+   * V27 的额度段曾拼在会话条 segs 尾部；V28 移出为独立一行：额度是账
+   * 号级慢变量，不随会话切换/清空变化，也不该被会话条开关连带隐藏。
+   * V29 补充空会话隐藏（实机复检后从全局级升级为会话级口径）：
+   * renderQuotaBar 新增 sessHasData 入参闸（renderAll 主路径经
+   * currentSessionHasData 求值，与会话条 removeBar 同口径）——当前会
+   * 话无数据整行隐藏；多会话保活下旧会话有数据不再放行新建任务页
+   * （初版全局判定 sessionDataEmpty 在该场景失效——任一旧会话有数据
+   * 即放行，实机复现新建任务页孤立额度行，已删除）；整页无 DOM 轮节
+   * 点的清理由 renderAll 空轮分支的 removeQuotaBar 承担。该页没有会
+   * 话条承载视觉上下文，孤立额度行压着输入框下边框（实机反馈），与
+   * 「会话条/每轮条无数据不显示」的自然逻辑对齐，第一条消息发出后恢
+   * 复。挂载照会话条 V13
+   * 模式——absolute 挂进 .chat-composer-region（复用
+   * pickComposerRegion，额度无会话归属、传空 id 即取第一个可见容
+   * 器），bottom 负偏移（QUOTA_BAR_BOTTOM_PX）贴输入卡片下边缘外侧，
+   * 不占布局空间、不与顶部留白几何联动；region 缺失回退挂 body +
+   * fixed 贴底右侧（标记属性切换定位，迁回自动还原，同会话条兜底模
+   * 式）。渲染节拍：renderAll 主路径每拍调用——额度数据 onload 与开
+   * 关热重载都直接生效，不依赖会话条渲染节奏。开关经
+   * --zbar-usage-quota-bar（variables.css 渲染 1/0，缺失视为开启，与
+   * session/turn/model 开关同惯例）。页面隐藏降频 60s 的额度重载节拍
+   * （QUOTA_POLL_HIDDEN_MS）不变。V30：新增 anchor 入参（renderAll 主
+   * 路径把锚点一并传入）——周余段之后追加当前会话缓存命中率「缓存
+   * NN%」段（renderSessionBar 同款双口径自算，不依赖会话条；分母 0
+   * 不入段），额度行不再只承载账号级额度 ---- */
+  var quotaBar = null; /* 已挂载的额度行元素（跨渲染复用，幂等更新） */
+  var quotaMountWarned = false; /* 挂载异常一次性告警标志（同会话条
+    mountWarned 的 V14 模式：此前类问题曾被 catch 静默吞掉无从发现） */
+
+  function quotaBarEnabled() {
+    try {
+      var v = (
+        getComputedStyle(document.documentElement).getPropertyValue(
+          VAR_QUOTA_BAR
+        ) || ""
+      ).trim();
+      return v !== "0";
+    } catch (e) {
+      return true; /* 读不到变量（旧 variables.css）按默认开启 */
+    }
+  }
+
+  /* V29 初版的全局级空判定 sessionDataEmpty（turns/runs/sess 任一非
+   * 空即有数据）已删除：多会话保活下旧会话容器仍挂载 DOM、任一旧会话
+   * 有数据即放行，新建任务页仍出现孤立额度行（实机复现）。空会话隐
+   * 藏由会话级判定 currentSessionHasData（renderSessionBar removeBar
+   * 同口径）经 renderAll 求值后以 sessHasData 入参承担，见上方段注释 */
+
+  /* 单例创建与断连自愈（同 ensureBar 的"元素即状态"策略）：挂载位置
+   * （region 正常路径 / body 兜底路径）由 renderQuotaBar 依 region 是
+   * 否存在决定 */
+  function ensureQuotaBar() {
+    if (quotaBar && quotaBar.isConnected) {
+      return quotaBar;
+    }
+    removeQuotaBar(); /* 断连后重建（页面清掉注入层时自愈） */
+    var bar = document.createElement("div");
+    bar.setAttribute(ATTR_QUOTA_BAR, "");
+    quotaBar = bar;
+    return bar;
+  }
+
+  function removeQuotaBar() {
+    if (quotaBar && quotaBar.parentNode) {
+      quotaBar.parentNode.removeChild(quotaBar);
+    }
+    quotaBar = null;
+  }
+
+  function renderQuotaBar(sessHasData, anchor) {
+    if (!sessHasData || !quotaBarEnabled()) {
+      /* 当前会话无数据（会话级判定闸，见 currentSessionHasData——多
+       * 会话保活下的新建任务/draft 页同样命中，V29 P1 修复），或开关
+       * 关闭（变量缺失视为开启，与 session/turn 开关同惯例）：移除额
+       * 度行 */
+      removeQuotaBar();
+      return;
+    }
+    var qd = quotaData && quotaData.v === 1 ? quotaData : null;
+    /* 段对象 {t, c} 机制与会话条 segs 同款：h5/wk 任一缺失（接口未返
+     * 回该窗口）只隐藏对应段，无空白分隔符残留；剩余 <30 黄、<10 红，
+     * 充足继承行色（quotaClassOf 返回空）。查询未成功（quotaData 为
+     * null，数据端从未写出文件）或两窗口全缺失 → 无内容可显示，整行
+     * 隐藏（不渲染空行/占位）。额度绝不进 2s 大文件与 1s 速度旁路，
+     * 随 30s 额度拍自然刷新 */
+    var segs = [];
+    if (qd && typeof qd.h5 === "number" && isFinite(qd.h5)) {
+      segs.push({
+        t: W.quotaLead + " " + W.quota5h + Math.round(qd.h5) + "%",
+        c: quotaClassOf(qd.h5)
+      });
+    }
+    if (qd && typeof qd.wk === "number" && isFinite(qd.wk)) {
+      segs.push({
+        t: W.quotaWk + Math.round(qd.wk) + "%",
+        c: quotaClassOf(qd.wk)
+      });
+    }
+    /* V30：周余段之后追加当前会话缓存命中率「缓存 NN%」段（灰白继承
+     * 行色，c 为空串不高亮）——参考图底部行口径，命中率自会话条 ⟲ 段
+     * 挪入本行。双口径计算照抄 renderSessionBar（V21：sess 全量合计行
+     * 命中即消费 sess 行，否则 totals + runTotals 回退叠加），anchor 由
+     * renderAll 主路径传入（与 sessHasData 同源同拍）。分母为 0
+     * （cacheHitText 返回 "—"，新会话无任何输入数据）不入段，不留残
+     * 留；quota 查询未成功时该段可独立成行，随逐段隐藏机制自然展示 */
+    var sessId = currentSessionId(anchor);
+    var sv = sessId ? sessIndex[sessId] : null;
+    var useSess = !!(sv && sv.tt != null);
+    var totals = sessId ? sessionTotals(sessId) : null;
+    var runTotals = useSess ? null : (sessId ? sessionRunTotals(sessId) : null);
+    var tcr = useSess
+      ? sv.cr || 0
+      : (totals ? totals.tcr : 0) + (runTotals ? runTotals.tcr : 0);
+    var tin = useSess ? (sv.up || 0) : (totals ? totals.tin : 0) + (runTotals ? runTotals.tin : 0);
+    var hit = cacheHitText(tcr, tin);
+    if (hit !== "—") {
+      segs.push({ t: W.cachePct + " " + hit, c: "" });
+    }
+    if (!segs.length) {
+      removeQuotaBar();
+      return;
+    }
+    /* V29：更新时间戳尾段删除（fmtClock + 词表 updated + 专用样式一并
+     * 移除——实机上增加行宽与视觉噪音，参考图里价值有限），行内容精
+     * 简为 "额度 5h 余89% · 周余93%" */
+    var text = "";
+    for (var qi = 0; qi < segs.length; qi++) {
+      text += (qi ? " · " : "") + segs[qi].t;
+    }
+    var bar = ensureQuotaBar();
+    try {
+      /* 额度无会话归属：pickComposerRegion 传空 id 即取第一个可见容器
+       * （多会话保活下同样成立——所有会话共享同一账号额度，任一可见
+       * 输入区都是正确挂载点）。region 缺失（选择器失效/结构变更）退
+       * 回旧路径：挂 body、打兜底标记切 fixed 贴底右侧 */
+      var region = pickComposerRegion("");
+      if (region) {
+        if (bar.parentElement !== region) region.appendChild(bar);
+        if (bar.hasAttribute(ATTR_QUOTA_BAR_FIXED)) {
+          bar.removeAttribute(ATTR_QUOTA_BAR_FIXED);
+        }
+      } else {
+        if (bar.parentElement !== document.body) {
+          document.body.appendChild(bar);
+        }
+        bar.setAttribute(ATTR_QUOTA_BAR_FIXED, "");
+      }
+    } catch (e) {
+      /* 挂载异常：一次性告警（同会话条 V14 模式），之后每周期静默重试 */
+      if (!quotaMountWarned) {
+        quotaMountWarned = true;
+        try { console.warn("[ZBar] usage quota bar mount error:", e); } catch (e2) {}
+      }
+    }
+    /* 逐段 span + 全串比对（同 renderBarLine 的自愈语义：行元素被重
+     * 建时 textContent 为空，比对自然不命中 → 自动重渲；无变化零 DOM
+     * 操作） */
+    renderQuotaLine(bar, text, segs);
+  }
+
+  function renderQuotaLine(bar, text, segs) {
+    var line = bar.querySelector(":scope > .zbar-usage-qb-line");
+    if (!line) {
+      line = document.createElement("div");
+      line.className = "zbar-usage-qb-line";
+      bar.appendChild(line);
+    }
+    if (line.textContent === text) return;
+    while (line.firstChild) line.removeChild(line.firstChild);
+    for (var qj = 0; qj < segs.length; qj++) {
+      if (qj) line.appendChild(document.createTextNode(" · "));
+      var sp = document.createElement("span");
+      if (segs[qj].c) sp.className = segs[qj].c;
+      sp.textContent = segs[qj].t;
+      line.appendChild(sp);
+    }
+  }
+
   function renderAll() {
     /* V9：document 级扫描——子代理详情面板与主对话同 document 且在
      * workspace-main 锚点之外，每轮条扫描不再限定锚点（35 节点量级，
@@ -2328,6 +3018,17 @@ pub const USAGE_JS: &str = r#"// ===============================================
        * 累计值永不消失（实机复现：新任务容器 data-session-id="draft"
        * 可见且含焦点，V17 的会话判定本身正确，缺的就是这一步） */
       removeBar();
+      /* V29：空会话页同步清理额度行与模型行容器——额度行 V28 曾在此
+       * 照常渲染，是新建任务页额度行孤立悬浮在输入框与快捷建议之间、
+       * 压着输入框下边框的来源（该页没有会话条承载视觉上下文）；模型
+       * 行容器自会话条拆出后同样在此清理（保持 V28 及之前空会话页无
+       * 模型行的观感）。与「会话条/每轮条无数据不显示」的自然逻辑一
+       * 致，第一条消息发出后由主路径恢复渲染 */
+      removeQuotaBar();
+      removeModelsBox();
+      /* 拆出后的留白由 syncComposerPad 统一计算：两个注入层清干净后
+       * 在此同步一次，输入区还原基础留白（26px） */
+      syncComposerPad();
       return;
     }
     /* 第一遍：按 DOM 顺序确定每个 umid 的最后一个节点（querySelectorAll
@@ -2344,6 +3045,13 @@ pub const USAGE_JS: &str = r#"// ===============================================
     /* 多容器活动轮判定（每会话一个活动轮，Map：sess → 节点）；它只
      * 决定启动窗口等待行，不采样 DOM 文本。 */
     var activeMap = findLiveNodes();
+    /* V29（P1 修复）：当前会话数据判定（renderSessionBar「无数据即
+     * removeBar」条件的同口径提炼，见 currentSessionHasData）——多会
+     * 话保活下主路径因旧会话轮节点仍挂载 DOM 而照常执行，模型行/额度
+     * 行改以本判定作渲染闸：当前会话（draft/新建任务）无数据时三元素
+     * （会话条/模型行/额度行）一并隐藏，切回有数据会话后由既有
+     * MutationObserver/兜底渲染拍自愈恢复 */
+    var sessHasData = currentSessionHasData(anchor, activeMap);
     /* 第二遍：逐节点渲染（仅"最后一个"节点出内容，其余节点清旧行）。
      * V19：每轮统计条开关——循环前读一次 --zbar-usage-turn-bar（变量
      * 缺失视为开启，兼容旧 variables.css），关闭时对全部轮节点
@@ -2367,6 +3075,34 @@ pub const USAGE_JS: &str = r#"// ===============================================
       renderSessionBar(anchor, activeMap);
     } catch (e) {
       /* 会话条失败静默，下个变更/兜底周期重试 */
+    }
+    /* V29：模型速度行独立渲染（容器/开关/管线均已从会话条解耦）——
+     * 有模型数据且开关开启才渲染容器；会话条开关关闭时模型行照常显示
+     * （这是拆出的核心诉求），当前会话无数据时经 sessHasData 闸随会
+     * 话条一并隐藏（P1 修复）。失败静默，下个周期重试。 */
+    try {
+      renderModelRows(sessHasData);
+    } catch (e) {
+      /* 模型行失败静默，下个变更/兜底周期重试 */
+    }
+    /* V28：独立额度行与会话条解耦渲染——会话条开关关闭/数据缺失/挂
+     * 载失败都不影响额度行（V29 P1 修复：当前会话无数据时经
+     * sessHasData 闸隐藏，取代初版全局级 sessionDataEmpty 判定）；额
+     * 度数据 onload 与开关热重载随本渲染节拍直接生效，不依赖会话条渲
+     * 染节奏。V30：调用再传 anchor，额度行自算当前会话缓存命中率
+     * （「缓存 NN%」段，与会话条同拍同口径）。 */
+    try {
+      renderQuotaBar(sessHasData, anchor);
+    } catch (e) {
+      /* 额度行失败静默，下个变更/兜底周期重试 */
+    }
+    /* V29：输入区顶部留白统一计算——会话条与模型行两个注入层状态就
+     * 位后求一次值（syncComposerPad 按两个开关的挂载态独立叠加，防两
+     * 条渲染路径互相覆盖）。失败静默（内联样式异常已在其内部自愈）。 */
+    try {
+      syncComposerPad();
+    } catch (e) {
+      /* 留白计算失败静默，下个变更/兜底周期重试 */
     }
   }
 
@@ -2410,6 +3146,7 @@ pub const USAGE_JS: &str = r#"// ===============================================
   scheduleRender(); /* 立即渲染已挂载的轮次，不等首个数据周期 */
   pollLoop();
   speedPollLoop();
+  quotaPollLoop(); /* V27：额度旁路低频重载（独立于大文件/速度节拍） */
   /* 死锁/漏渲染兜底：低频定时器不经过 scheduled 检查直接调用一次
    * renderAll——即使未来出现新的意外状态（调度标志卡死、事件丢失等）
    * 也能在一个兜底周期内自愈，恢复统计条显示 */
@@ -3020,6 +3757,16 @@ pub fn file_url(path: &Path) -> String {
 /// usage_turn_bar 渲染 1/0）：usage.js V19 起 renderAll 第二遍渲染前读它
 /// 决定是否渲染每轮条（变量缺失视为开启，与默认值 true 一致），同样随
 /// 每秒热重载即时生效。
+/// --zbar-usage-quota-bar 为输入框额度行的开关（V28 新增，由用户参数
+/// usage_quota_bar 渲染 1/0）：usage.js V28 起读它决定是否渲染输入框
+/// 卡片底部外侧的独立额度行（额度 5h/周剩余百分比，V29 起空会话隐藏、
+/// 时间戳尾段删除；变量缺失视为开启，与默认值 true 一致），随每秒热
+/// 重载即时生效。
+/// --zbar-usage-model-rows 为输入框上方模型速度行的开关（V29 新增，由
+/// 用户参数 usage_model_rows 渲染 1/0）：usage.js V29 起读它决定是否
+/// 渲染独立挂载的模型分组速度行（自会话条拆出的独立容器，与会话累计
+/// 条开关相互独立——会话条关闭时模型行照常显示；变量缺失视为开启，与
+/// 默认值 true 一致），随每秒热重载即时生效。
 /// --zbar-pet-enabled 为桌面像素宠物的开关（由 PetConfig 的
 /// enabled && mode==injected 渲染 1/0，默认 0——宠物配置统一收敛到
 /// pet.json 后，ThemeParams 不再承载宠物参数）：pet.js 读它决定渲染
@@ -3066,6 +3813,8 @@ pub fn render_variables_css(
          \x20 --zbar-usage-opacity: {usage_opacity};\n\
          \x20 --zbar-usage-session-bar: {usage_session_bar};\n\
          \x20 --zbar-usage-turn-bar: {usage_turn_bar};\n\
+         \x20 --zbar-usage-quota-bar: {usage_quota_bar};\n\
+         \x20 --zbar-usage-model-rows: {usage_model_rows};\n\
          \x20 --zbar-pet-enabled: {pet_enabled};\n\
          \x20 --zbar-pet-style: {pet_style};\n\
          \x20 --zbar-pet-size: {pet_size}px;\n\
@@ -3086,6 +3835,8 @@ pub fn render_variables_css(
         usage_opacity = params.usage_opacity,
         usage_session_bar = if params.usage_session_bar { 1 } else { 0 },
         usage_turn_bar = if params.usage_turn_bar { 1 } else { 0 },
+        usage_quota_bar = if params.usage_quota_bar { 1 } else { 0 },
+        usage_model_rows = if params.usage_model_rows { 1 } else { 0 },
         pet_enabled = pet_enabled,
         pet_style = pet_style,
         pet_size = pet_size_px,
@@ -3352,6 +4103,8 @@ mod tests {
             "--zbar-usage-opacity",
             "--zbar-usage-session-bar",
             "--zbar-usage-turn-bar",
+            "--zbar-usage-quota-bar",
+            "--zbar-usage-model-rows",
             "--zbar-pet-enabled",
             "--zbar-pet-style",
             "--zbar-pet-size",
@@ -3385,6 +4138,8 @@ mod tests {
         assert!(css.contains("--zbar-usage-opacity: 0.55;"));
         assert!(css.contains("--zbar-usage-session-bar: 1;"), "{css}");
         assert!(css.contains("--zbar-usage-turn-bar: 1;"), "{css}");
+        assert!(css.contains("--zbar-usage-quota-bar: 1;"), "{css}");
+        assert!(css.contains("--zbar-usage-model-rows: 1;"), "{css}");
         assert!(css.contains("--zbar-playback-rate: 1;"));
         // 非 ASCII 壁纸名在 url 里必须已编码（不出现裸中文）
         assert!(!css.contains("我的壁纸"));
@@ -3426,6 +4181,26 @@ mod tests {
         p.usage_turn_bar = true;
         let css = render_variables_css(&p, url, "", 1, crate::pet::DEFAULT_PET_STYLE, 108);
         assert!(css.contains("--zbar-usage-turn-bar: 1;"), "{css}");
+
+        // V28：输入框额度行开关同样按参数渲染 1/0（关闭时 usage.js 移
+        // 除独立额度行，随热重载约 1 秒生效）
+        let mut p = ThemeParams::default();
+        p.usage_quota_bar = false;
+        let css = render_variables_css(&p, url, "", 1, crate::pet::DEFAULT_PET_STYLE, 108);
+        assert!(css.contains("--zbar-usage-quota-bar: 0;"), "{css}");
+        p.usage_quota_bar = true;
+        let css = render_variables_css(&p, url, "", 1, crate::pet::DEFAULT_PET_STYLE, 108);
+        assert!(css.contains("--zbar-usage-quota-bar: 1;"), "{css}");
+
+        // V29：模型速度行开关同样按参数渲染 1/0（关闭时 usage.js 移除
+        // 独立模型行容器，会话条开关不受影响，随热重载约 1 秒生效）
+        let mut p = ThemeParams::default();
+        p.usage_model_rows = false;
+        let css = render_variables_css(&p, url, "", 1, crate::pet::DEFAULT_PET_STYLE, 108);
+        assert!(css.contains("--zbar-usage-model-rows: 0;"), "{css}");
+        p.usage_model_rows = true;
+        let css = render_variables_css(&p, url, "", 1, crate::pet::DEFAULT_PET_STYLE, 108);
+        assert!(css.contains("--zbar-usage-model-rows: 1;"), "{css}");
 
         // 桌面宠物三变量按显式入参渲染真值（PetConfig 统一后 store.rs
         // 传入 pet_enabled/style/size_px）：默认关闭渲染 0（pet.js 读值
@@ -3876,8 +4651,27 @@ mod tests {
         // 会话条下方追加模型分组速度行；数据端 usage_feed 同步新增
         // turns[].sa / sess[].sa / 顶层 models[]，随 2 秒大文件发布，
         // usage-data.js 的 v 保持 2、usage-speed.js 内容不变）
-        assert!(USAGE_JS.contains("ZBAR-THEME-V26"));
-        assert!(!USAGE_JS.contains("ZBAR-THEME-V25"), "版本头应已升到 V26");
+        // V28（额度展示改版：额度从会话条 segs 移出，改为输入框卡片底
+        // 部外侧的独立额度行 renderQuotaBar + 独立开关
+        // --zbar-usage-quota-bar；数据端零改动，usage-quota.js 契约与
+        // V27 额度线程不变）
+        // V29（实机反馈三修复：额度行样式修正（字号取消 ×0.9、整行灰
+        // 白、删除更新时间戳尾段）；空会话隐藏额度行与模型行
+        // （currentSessionHasData 会话级判定 + renderAll 空轮分支双重
+        // 闸，实机复检后取代全局级 sessionDataEmpty）；模型速度行拆出
+        // 为独立容器（data-zbar-usage-models）+ 独立开关
+        // usage_model_rows / --zbar-usage-model-rows + 留白几何拆分
+        // syncComposerPad；数据端零改动，三个数据文件契约不变）
+        // V30（额度行微调 + 缓存命中率挪位：bottom 负偏移 -16 → -20；
+        // 会话条 ⟲ 段命中率后缀移除，改由额度行新增「缓存 NN%」段承载
+        // ——renderQuotaBar 接收 anchor、按 renderSessionBar 同款双口
+        // 径算当前会话命中率，分母 0 不入段；数据端零改动）
+        assert!(USAGE_JS.contains("ZBAR-THEME-V30"));
+        assert!(!USAGE_JS.contains("ZBAR-THEME-V29"), "版本头应已升到 V30");
+        assert!(!USAGE_JS.contains("ZBAR-THEME-V28"), "版本头不应回退");
+        assert!(!USAGE_JS.contains("ZBAR-THEME-V27"), "版本头不应回退");
+        assert!(!USAGE_JS.contains("ZBAR-THEME-V26"), "版本头不应回退");
+        assert!(!USAGE_JS.contains("ZBAR-THEME-V25"), "版本头不应回退");
         assert!(!USAGE_JS.contains("ZBAR-THEME-V24"), "版本头不应回退");
         assert!(!USAGE_JS.contains("ZBAR-THEME-V23"), "版本头不应回退");
         assert!(!USAGE_JS.contains("ZBAR-THEME-V19"), "版本头不应回退");
@@ -3899,6 +4693,304 @@ mod tests {
         assert!(speed_loader_body.contains("SPEED_LOADER_ID"));
         assert!(speed_loader_body.contains("speedUrl"));
         assert!(!speed_loader_body.contains("dataUrl"));
+        // V27 额度旁路：独立小文件 + 独立 loader + 独立低频节拍（30s，
+        // 隐藏降频 60s），绝不进大文件/速度旁路；消费 window.__ZBAR_QUOTA__
+        // 且版本不符保留上次额度
+        assert!(USAGE_JS.contains("usage-quota.js"), "应定位额度小文件");
+        assert!(USAGE_JS.contains("var QUOTA_LOADER_ID = \"zbar-usage-quota-loader\""));
+        assert!(USAGE_JS.contains("var QUOTA_POLL_MS = 30000"));
+        assert!(USAGE_JS.contains("var QUOTA_POLL_HIDDEN_MS = 60000"));
+        assert!(USAGE_JS.contains("function loadQuota"));
+        assert!(USAGE_JS.contains("function quotaPollLoop"));
+        let quota_lo = USAGE_JS.find("function loadQuota").expect("loadQuota 应存在");
+        let quota_hi = USAGE_JS
+            .find("function quotaPollLoop")
+            .expect("quotaPollLoop 应存在");
+        let quota_loader_body = &USAGE_JS[quota_lo..quota_hi];
+        assert!(
+            quota_loader_body.contains("window.__ZBAR_QUOTA__")
+                && quota_loader_body.contains("q.v !== 1")
+                && quota_loader_body.contains("quotaData = q;"),
+            "额度 loader 应消费 __ZBAR_QUOTA__ 并做版本校验：{quota_loader_body}"
+        );
+        assert!(
+            !quota_loader_body.contains("dataUrl") && !quota_loader_body.contains("speedUrl"),
+            "额度 loader 不得触碰大文件/速度旁路地址：{quota_loader_body}"
+        );
+        // V28/V29 独立额度行特征（V27 额度段从会话条 segs 移出改版；V29
+        // 样式修正）：独立渲染/挂载/移除函数 + 开关读取函数；右对齐 +
+        // 底部外侧负偏移挂载；region 缺失兜底 fixed 标记；词表双语标签
+        // （V29 删除更新时间词）；三档配色阈值与 class 保留
+        assert!(
+            USAGE_JS.contains("function renderQuotaBar")
+                && USAGE_JS.contains("function renderQuotaLine")
+                && USAGE_JS.contains("function quotaBarEnabled")
+                && USAGE_JS.contains("function ensureQuotaBar")
+                && USAGE_JS.contains("function removeQuotaBar"),
+            "V28 应新增独立额度行的渲染/挂载/移除与开关读取函数"
+        );
+        assert!(
+            USAGE_JS.contains("ATTR_QUOTA_BAR = \"data-zbar-usage-quota\"")
+                && USAGE_JS.contains("VAR_QUOTA_BAR = \"--zbar-usage-quota-bar\""),
+            "额度行应有防重复标记属性与独立开关变量（variables.css 渲染 1/0，缺失视为开启）"
+        );
+        assert!(
+            USAGE_JS
+                .contains("position:absolute;bottom:\" + QUOTA_BAR_BOTTOM_PX + \"px;right:0;"),
+            "额度行应 absolute 定位到输入卡片底部外侧（bottom 负偏移）并右对齐"
+        );
+        assert!(
+            USAGE_JS.contains("ATTR_QUOTA_BAR_FIXED")
+                && USAGE_JS.contains("QUOTA_BAR_FALLBACK_RIGHT_PX")
+                && USAGE_JS.contains("QUOTA_BAR_FALLBACK_BOTTOM_PX"),
+            "region 缺失兜底路径应有 fixed 切换标记与贴底右侧常量（同会话条兜底模式）"
+        );
+        assert!(
+            USAGE_JS.contains("quotaLead: \"额度\"")
+                && USAGE_JS.contains("quota5h: \"5h 余\"")
+                && USAGE_JS.contains("quotaWk: \"周余\"")
+                && USAGE_JS.contains("cachePct: \"缓存\""),
+            "zh 词表应含额度行标签（V29 删除更新时间词）与 V30 缓存段标签"
+        );
+        assert!(
+            USAGE_JS.contains("quotaLead: \"Quota\"")
+                && USAGE_JS.contains("quota5h: \"5h \"")
+                && USAGE_JS.contains("quotaWk: \"wk \"")
+                && USAGE_JS.contains("cachePct: \"cache\""),
+            "en 词表应含额度行标签（V29 删除更新时间词）与 V30 缓存段标签"
+        );
+        assert!(
+            USAGE_JS.contains("var QUOTA_MID_REMAIN = 30")
+                && USAGE_JS.contains("var QUOTA_LOW_REMAIN = 10"),
+            "额度三档阈值应集中常量区"
+        );
+        assert!(
+            USAGE_JS.contains("function quotaClassOf")
+                && USAGE_JS.contains(".zbar-usage-quota-mid{color:#fbbf24;}")
+                && USAGE_JS.contains(".zbar-usage-quota-low{color:#f87171;}"),
+            "额度行应有三档配色（<30 黄 / <10 红 / 充足继承行色）"
+        );
+        // V29 时间戳尾段整体删除：fmtClock、词表 updated、专用样式全无
+        // 残留（负向断言防回归）
+        assert!(
+            !USAGE_JS.contains("function fmtClock")
+                && !USAGE_JS.contains("W.updated")
+                && !USAGE_JS.contains("zbar-usage-qb-time"),
+            "V29 应删除更新时间戳尾段（fmtClock/词表 updated/专用样式全删）"
+        );
+        // V29 额度行样式修正：字号升回基准（取消 ×0.9 缩小）、行高压缩
+        // 1.4（限定额度行 CSS 块切片断言，避免与模型行 ×0.9 规则串味）
+        let qcss_lo = USAGE_JS
+            .find("\"[\" + ATTR_QUOTA_BAR + \"]{\"")
+            .expect("额度行样式块应存在");
+        let qcss = &USAGE_JS[qcss_lo..qcss_lo + 700];
+        assert!(
+            qcss.contains("font-size:var(--zbar-usage-font-size,10px);")
+                && !qcss.contains("* .9"),
+            "额度行字号应与统计元素同级（取消 ×0.9 缩小）: {qcss}"
+        );
+        assert!(
+            qcss.contains("line-height:1.4;"),
+            "额度行行高应压缩（bottom 负偏移加深后不超窗口底边）: {qcss}"
+        );
+        assert!(
+            USAGE_JS.contains("var QUOTA_BAR_BOTTOM_PX = -20")
+                && !USAGE_JS.contains("var QUOTA_BAR_BOTTOM_PX = -16"),
+            "V30 额度行 bottom 负偏移应再加深至 -20（行尾新增缓存段后贴卡观感不变）"
+        );
+        // renderQuotaBar 体内：会话级无数据/开关关闭移除（V29 P1 修复：
+        // sessHasData 入参闸取代初版全局判定 sessionDataEmpty——后者
+        // 在多会话保活下任一旧会话有数据即放行，新建任务页仍出现孤立
+        // 额度行）+ 额度数据分段（缺失不入段）+ 全缺失整行隐藏 + 复用
+        // pickComposerRegion 挂载 + 无 HTML 注入面
+        let qb_lo = USAGE_JS
+            .find("function renderQuotaBar(sessHasData, anchor)")
+            .expect("renderQuotaBar 应存在");
+        let qb_hi = USAGE_JS
+            .find("function renderQuotaLine")
+            .expect("renderQuotaLine 应存在");
+        let quota_body = &USAGE_JS[qb_lo..qb_hi];
+        assert!(
+            quota_body.contains("if (!sessHasData || !quotaBarEnabled()) {")
+                && quota_body.contains("removeQuotaBar();"),
+            "当前会话无数据（会话级判定）或开关关闭都应移除额度行: {quota_body}"
+        );
+        assert!(
+            !USAGE_JS.contains("function sessionDataEmpty")
+                && !USAGE_JS.contains("lastTurns.length || lastRuns.length"),
+            "全局级空判定 sessionDataEmpty 应由会话级判定取代并删除（负向断言防回归）"
+        );
+        // V29 P1 修复：会话级数据判定 currentSessionHasData——提炼
+        // renderSessionBar「无数据即 removeBar」的同款条件：锚点/会话
+        // id 缺失同判无数据；有数据 = sess 全量合计行命中（V21 新口
+        // 径）或归属完成轮/进行中 run/活动轮任一存在。多会话保活下判
+        // 定只看当前会话自身数据源，旧会话数据不再作为新建任务页的渲
+        // 染依据
+        assert!(
+            USAGE_JS.contains("function currentSessionHasData(anchor, activeMap)")
+                && USAGE_JS.contains("if (!anchor || !sessId) return false;")
+                && USAGE_JS.contains("if (sv && sv.tt != null) return true;")
+                && USAGE_JS.contains(
+                    "sessionTotals(sessId) || sessionRunTotals(sessId) ||\n      activeMap.has(sessId)"
+                ),
+            "会话级判定应与 renderSessionBar removeBar 同口径（锚点/id 缺失 + 四路数据源任一）"
+        );
+        // renderAll 主路径求值一次并作为模型行/额度行的渲染闸（当前会
+        // 话无数据时不渲染，与会话条 removeBar 同拍生效）
+        assert!(
+            USAGE_JS.contains("var sessHasData = currentSessionHasData(anchor, activeMap);"),
+            "renderAll 主路径应求值会话级判定（sessHasData）"
+        );
+        assert!(
+            quota_body.contains("W.quotaLead + \" \" + W.quota5h + Math.round(qd.h5) + \"%\"")
+                && quota_body.contains("W.quotaWk + Math.round(qd.wk) + \"%\"")
+                && quota_body.contains("quotaClassOf(qd.h5)")
+                && quota_body.contains("quotaClassOf(qd.wk)"),
+            "额度行应按额度旁路数据渲染 5h/周剩余段（缺失不入段，无分隔符残留）: {quota_body}"
+        );
+        // V30 缓存命中率段：签名带 anchor（renderAll 主路径与 sessHasData
+        // 同源传入），函数体内按 renderSessionBar 同款双口径算当前会话
+        // tcr/tin（sess 全量合计命中即消费 sess 行，否则 totals +
+        // runTotals 回退叠加），周余段之后追加「缓存 NN%」段（灰白不高
+        // 亮）；分母为 0（cacheHitText 返回 "—"）不入段，不留残留
+        assert!(
+            USAGE_JS.contains("function renderQuotaBar(sessHasData, anchor)")
+                && quota_body.contains("var sessId = currentSessionId(anchor);")
+                && quota_body.contains("var useSess = !!(sv && sv.tt != null);")
+                && quota_body.contains("(totals ? totals.tcr : 0) + (runTotals ? runTotals.tcr : 0)")
+                && quota_body.contains("(totals ? totals.tin : 0) + (runTotals ? runTotals.tin : 0)"),
+            "renderQuotaBar 应接收 anchor 并按 renderSessionBar 同款双口径算当前会话命中率: {quota_body}"
+        );
+        assert!(
+            quota_body.contains("var hit = cacheHitText(tcr, tin);")
+                && quota_body.contains("if (hit !== \"—\") {")
+                && quota_body.contains("segs.push({ t: W.cachePct + \" \" + hit, c: \"\" });"),
+            "额度行应在周余段后追加「缓存」段（灰白继承行色），分母为 0 时不入段: {quota_body}"
+        );
+        assert!(
+            quota_body.contains("if (!segs.length) {"),
+            "查询未成功/h5 与 wk 全缺失时整行隐藏，不渲染空行"
+        );
+        assert!(
+            quota_body.contains("pickComposerRegion(\"\")"),
+            "额度行应复用 pickComposerRegion 挂进输入区容器（空 id = 第一个可见容器）"
+        );
+        assert!(
+            !quota_body.contains("innerHTML"),
+            "额度行同样只用 textContent 写入外部字符串（无注入面）"
+        );
+        // 额度行随 renderAll 主路径每拍渲染（数据 onload 与开关热重载直
+        // 接生效，不依赖会话条渲染节奏）；V29 P1 修复起调用携带会话级
+        // 判定闸，V30 起再传 anchor（当前会话缓存命中率口径），主路径
+        // 仅剩一处调用
+        let ra_lo = USAGE_JS
+            .find("function renderAll")
+            .expect("renderAll 应存在");
+        let ra_all = &USAGE_JS[ra_lo..];
+        assert_eq!(
+            ra_all.matches("renderQuotaBar(sessHasData, anchor);").count(),
+            1,
+            "renderAll 应只在主路径调用 renderQuotaBar（携带会话级判定闸与锚点；空轮分支改为 removeQuotaBar 隐藏）"
+        );
+        // 会话条不再承载额度段（V28 移出）：renderSessionBar 体内不得再
+        // 出现额度数据消费与额度标签；CTX 负向断言保留。V29：模型行渲
+        // 染同样从 renderSessionBar 内部移出（renderAll 独立调用）
+        let sbq_lo = USAGE_JS
+            .find("function renderSessionBar")
+            .expect("renderSessionBar 应存在");
+        let sbq_hi = USAGE_JS
+            .find("function renderBarLine")
+            .expect("renderBarLine 应存在");
+        let sess_bar_body = &USAGE_JS[sbq_lo..sbq_hi];
+        assert!(
+            !sess_bar_body.contains("quotaData")
+                && !sess_bar_body.contains("W.quota5h")
+                && !sess_bar_body.contains("W.quotaWk"),
+            "V28 起额度段应从会话条 segs 移出（由独立额度行承载）: {sess_bar_body}"
+        );
+        assert!(
+            !sess_bar_body.contains("renderModelRows")
+                && !sess_bar_body.contains("ensureModelsBox"),
+            "V29 起模型行渲染与容器应从 renderSessionBar 内部移出（独立开关控制）: {sess_bar_body}"
+        );
+        assert!(
+            !sess_bar_body.contains("\"CTX \""),
+            "CTX 段不应因额度行改版而回归（V22 已删）"
+        );
+        // V29 模型行渲染解耦：renderAll 主路径独立调用 renderModelRows
+        // （携带会话级判定闸，P1 修复），留白统一入口在主路径与空轮分
+        // 支各同步一次
+        assert_eq!(
+            ra_all.matches("renderModelRows(sessHasData);").count(),
+            1,
+            "renderAll 应独立调用 renderModelRows（不随会话条开关联动；携带会话级判定闸）"
+        );
+        assert_eq!(
+            ra_all.matches("syncComposerPad();").count(),
+            2,
+            "renderAll 应在主路径与空轮分支各调用一次 syncComposerPad（留白统一计算）"
+        );
+        // V27 缓存维度特征：每轮条 ⟲ 后补 ✚ 缓存写段（fmtTokens 等宽补
+        // 位）；会话条 ⟲ 段 V27–V29 曾带 token + 命中率后缀（分母 0 显
+        // 示 —），V30 起命中率挪至底部额度行「缓存」段、⟲ 段回归纯
+        // token；Σ 口径不变（tsum 不含 tcw）；V21 双口径回退路径
+        // sessionTotals/sessionRunTotals 同步累计 tcw（sess 命中分支读
+        // sv.cw），防双计判定两分支都覆盖
+        let cw_lo = USAGE_JS.find("function barLineOf").expect("barLineOf 应存在");
+        let cw_hi = USAGE_JS.find("function lineOf").expect("lineOf 应存在");
+        let bar_body = &USAGE_JS[cw_lo..cw_hi];
+        assert!(
+            bar_body.contains("\" ⟲ \" + fmtTokens(v.cr) +\n      \" ✚ \" + fmtTokens(v.cw)"),
+            "每轮条统一格式应在 ⟲ 缓存读段后渲染 ✚ 缓存写段：{bar_body}"
+        );
+        assert!(
+            USAGE_JS.contains("function cacheHitText")
+                && USAGE_JS.contains("if (denom <= 0) return \"—\";"),
+            "缓存命中率应在分母为 0 时显示 —"
+        );
+        assert!(
+            sess_bar_body.contains("{ t: \"⟲ \" + fmtTokens(tcr) }")
+                && !sess_bar_body.contains("cacheHitText(tcr, tin)")
+                && sess_bar_body.contains("{ t: \"✚ \" + fmtTokens(tcw) }"),
+            "V30 起会话条 ⟲ 段应回归纯 token（命中率后缀挪至额度行「缓存」段），✚ 缓存写段保留: {sess_bar_body}"
+        );
+        assert!(
+            sess_bar_body.contains("var tcw = useSess\n      ? sv.cw || 0"),
+            "sess 命中分支应读 sv.cw（防双计判定不变）：{sess_bar_body}"
+        );
+        assert!(
+            sess_bar_body.contains("(totals ? totals.tcw : 0) + (runTotals ? runTotals.tcw : 0)"),
+            "回退分支应累计 totals.tcw + runTotals.tcw（V21 双口径都覆盖）：{sess_bar_body}"
+        );
+        assert!(
+            sess_bar_body.contains("var tsum = tin + tout + tcr;")
+                && !sess_bar_body.contains("tin + tout + tcr + tcw"),
+            "Σ = ↑+↓+⟲ 口径不变（✚ 段与命中率不改变 Σ 定义）：{sess_bar_body}"
+        );
+        let st_lo = USAGE_JS.find("function sessionTotals").expect("sessionTotals 应存在");
+        let st_hi = USAGE_JS.find("function sessionRunTotals").expect("sessionRunTotals 应存在");
+        let totals_body = &USAGE_JS[st_lo..st_hi];
+        assert!(
+            totals_body.contains("tcw: sv.cw || 0") && totals_body.contains("tcw += t.cw || 0;"),
+            "sessionTotals 两口径都应累计缓存写（sess 行 cw / turns 逐轮 cw）：{totals_body}"
+        );
+        let rt_lo = USAGE_JS.find("function sessionRunTotals").expect("sessionRunTotals 应存在");
+        let rt_hi = USAGE_JS
+            .find("/* 活动轮判定（V8 DOM 驱动，V9 多容器化）")
+            .expect("活动轮判定注释应存在");
+        let run_totals_body = &USAGE_JS[rt_lo..rt_hi];
+        assert!(
+            run_totals_body.contains("tcw += r.cw || 0;") && run_totals_body.contains("tcw += r.sub.cw || 0;"),
+            "sessionRunTotals 应累计 runs 行与并入 sub 的缓存写：{run_totals_body}"
+        );
+        assert!(
+            USAGE_JS.contains("cw: t.cw || 0,"),
+            "完成态每轮条应透传 turns 行 cw 字段"
+        );
+        assert!(
+            USAGE_JS.contains("var cw = (r.cw || 0) + (s ? s.cw || 0 : 0);"),
+            "live 行缓存写应同口径并入子代理 sub.cw"
+        );
         // V25 速度聚合段特征：语言词典（zh → 均/快/慢，其余 → avg/fast/min）
         // + 样本 < 2 隐藏 + 取整紧凑格式；聚合只在完成态入行（liveLineOf
         // 不传 agg），且位于速度位之后、TTFT 之前
@@ -3980,6 +5072,38 @@ mod tests {
         assert!(USAGE_JS.contains("\"zbar-usage-mrow\""));
         assert!(USAGE_JS.contains("zbar-usage-tps-fast"));
         assert!(USAGE_JS.contains("TPS_FAST_MIN = 70") && USAGE_JS.contains("TPS_MID_MIN = 40"));
+        // V29 P1 修复：模型行渲染带会话级判定闸——当前会话无数据时随
+        // 会话条一并隐藏（多会话保活下新建任务页不再出现孤立模型行），
+        // 会话条开关关闭照常显示的解耦语义不变
+        assert!(
+            USAGE_JS.contains("function renderModelRows(sessHasData)")
+                && USAGE_JS.contains(
+                    "if (!sessHasData || !modelRowsEnabled() || !validModelCount()) {"
+                ),
+            "模型行应携带会话级判定闸（当前会话无数据时移除容器）"
+        );
+        // V29 模型速度行独立容器与开关（自会话条拆出，用户核心诉求是会
+        // 话条关闭时模型行照常显示）：独立标记/开关变量/兜底定位常量 +
+        // 独立开关读取与单例创建/移除函数（挂载/兜底照会话条/额度行既
+        // 有模式）
+        assert!(
+            USAGE_JS.contains("ATTR_MODELS = \"data-zbar-usage-models\"")
+                && USAGE_JS.contains("VAR_MODEL_ROWS = \"--zbar-usage-model-rows\"")
+                && USAGE_JS.contains("ATTR_MODELS_FIXED")
+                && USAGE_JS.contains("MODELS_FALLBACK_BOTTOM_PX"),
+            "模型行容器应有独立标记、开关变量与兜底定位常量（同会话条/额度行模式）"
+        );
+        assert!(
+            USAGE_JS.contains("function modelRowsEnabled")
+                && USAGE_JS.contains("function ensureModelsBox()")
+                && USAGE_JS.contains("function removeModelsBox"),
+            "模型行容器应有独立开关读取与单例创建/移除函数"
+        );
+        assert!(
+            USAGE_JS.contains("box.setAttribute(ATTR_MODELS, \"\")")
+                && USAGE_JS.contains("box.setAttribute(ATTR_MODELS_FIXED, \"\")"),
+            "模型行容器应挂进 region 并在缺失时退回 body + fixed（幂等迁移）"
+        );
         assert!(
             USAGE_JS.contains("VAR_PAD_TOP = \"--zbar-usage-pad-top\""),
             "V25 模型行留白应走 --zbar-usage-pad-top 变量"
@@ -4009,12 +5133,12 @@ mod tests {
             "底板背景应随 prefers-color-scheme 亮暗两档适配"
         );
         assert!(
-            USAGE_JS.contains("zbar-usage-models:empty{display:none;"),
+            USAGE_JS.contains("ATTR_MODELS + \"]:empty{display:none;}\""),
             "无模型行时空底板应整体隐藏"
         );
         assert!(
             USAGE_JS.contains("flex-direction:column;align-items:stretch;"),
-            "会话条容器应 stretch 对齐（模型区与会话行同一左边界/宽度锚定）"
+            "会话条容器应 stretch 对齐（V29 起容器仅承载逐段 span 行，模型区独立居中）"
         );
         assert!(
             USAGE_JS.contains(
@@ -4036,14 +5160,21 @@ mod tests {
                 && !USAGE_JS.contains("color:#059669;"),
             "三档变色应恒用亮色系（底板恒深色，暗色系对比度不足）"
         );
-        // V26 留白精确计算与 tooltip 特征：按实际字号与底板几何求和
-        // （修复 V25 固定 14px/行在字号调大或底板增高后压到输入面板）；
-        // tooltip 固定两行模板（显式 \n，无悬挂分隔符、无冗余分档说明）
+        // V26/V29 留白精确计算与统一施加特征：按实际字号与底板几何求和
+        // （修复 V25 固定 14px/行在字号调大或底板增高后压到输入面板），
+        // V29 起由 syncComposerPad 统一计算（会话条行/模型底板两个开关
+        // 独立叠加，每拍渲染尾部求一次值）；tooltip 固定两行模板（显式
+        // \n，无悬挂分隔符、无冗余分档说明）
         assert!(
             USAGE_JS.contains("function usageFontSize")
-                && USAGE_JS.contains("function padForModels")
-                && USAGE_JS.contains("padForModels(validModelCount(), usageFontSize())"),
-            "留白应按实际字号与有效行数精确计算（字号调大留白同步放大）"
+                && USAGE_JS.contains("function modelsPlateHeight")
+                && USAGE_JS.contains("function syncComposerPad")
+                && USAGE_JS.contains("modelsPlateHeight(validModelCount(), fs)"),
+            "留白应按实际字号与有效行数精确计算并由统一入口施加（两个开关独立叠加）"
+        );
+        assert!(
+            USAGE_JS.contains("SESSION_BAR_TOP_PX + fs * 1.5"),
+            "会话条行留白应含条 top 与行高（会话条开关独立计入）"
         );
         assert!(
             USAGE_JS.contains("--zbar-usage-font-size")
@@ -4125,6 +5256,14 @@ mod tests {
         assert!(
             empty_branch.contains("removeBar();"),
             "V18 空轮分支应调用 removeBar（空会话时移除会话条，防残留上一会话累计）: {empty_branch}"
+        );
+        // V29 空会话页隐藏额度行与模型行容器（新建任务页不再出现孤立悬
+        // 浮的注入层），并把两个注入层清干净后的留白同步还原
+        assert!(
+            empty_branch.contains("removeQuotaBar();")
+                && empty_branch.contains("removeModelsBox();")
+                && empty_branch.contains("syncComposerPad();"),
+            "V29 空轮分支应移除额度行与模型行容器并同步留白: {empty_branch}"
         );
         // V17 会话选择修复特征：可见性 helper（保活面板隐藏时跳过）、
         // composer 挂载点选择函数；旧 querySelector 首中写法应已删除

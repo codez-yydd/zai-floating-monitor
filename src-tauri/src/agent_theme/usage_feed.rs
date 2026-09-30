@@ -69,6 +69,8 @@
 //!      会话累计优先消费本通道，渲染端无本字段时回退旧口径）：
 //!   tt: Σ = up+down+cr,   全量合计总量
 //!   up / down / cr:       ↑ 非缓存输入（逐笔 clamp）/ ↓ 输出 / ⟲ 缓存读
+//!   cw: 缓存写             ✚ 缓存写合计（V27 附加字段，不参与 tt 口径；
+//!                         列缺失时数据端按 num_col 降级为 0）
 //!   rq: 请求笔数          model_usage 行数（每行一笔请求）
 //!   speed / speedState: V24.1 起大文件承载**稳定**速度——turns 行携带该
 //!          完成轮最新请求的速度快照（轮完成后不再变化），sess 行携带
@@ -232,6 +234,21 @@
 //! - 独立悬浮窗宠物（pet.rs 轮询器）经 Tauri 事件推流，事件本身自带
 //!   新鲜度（查询成功才推），不消费心跳文件。
 //!
+//! ## 额度旁路 usage-quota.js 与独立额度线程（V27）
+//!
+//! 订阅额度（5 小时/周窗口剩余百分比）来自 BigModel 额度接口（
+//! `crate::quota::query_quota`，HTTP 请求总超时 15 秒）。查询跑在**独立
+//! 额度线程**（60 秒节拍，首拍启动后立即查询一次），绝不进 2 秒导出线程
+//! ——一次网络抖动即把 usage-data.js 的节拍拖住 15 秒；也绝不进 1 秒速度
+//! 旁路（大小文件分工铁律：旁路只带速度，不带额度/聚合字段）。查询成功
+//! 后原子写出（.tmp + rename）几十字节的
+//! `window.__ZBAR_QUOTA__ = {"v":1,"ts":<查询成功时刻ms>,"h5":<5小时窗口
+//! 剩余%>,"wk":<周窗口剩余%>}`；剩余 = 100 − 已用百分比（clamp 0..100）；
+//! 窗口缺失（接口未返回该窗口）为 null，渲染端隐藏对应段；**查询失败
+//! 静默保留上次文件内容**（未登录/网络异常属常态，不刷日志）。线程启停
+//! 挂点与导出线程完全一致（start/stop 同点触发，句柄幂等模式同款；安装
+//! 状态每周期复核，皮肤异常还原时自动退出）。
+//!
 //! ## runs（进行中轮）口径（实库验证结论）
 //!
 //! `model_usage` 每次模型请求完成即落一行（无 running 行），而
@@ -356,6 +373,12 @@ const INTERVAL_MS: u64 = 2000;
 /// 速度小文件刷新周期（毫秒）：只读取活动会话的请求级时间字段，绝不
 /// 重写 usage-data.js。可见页面的速度轮询也按此数量级运行。
 const SPEED_INTERVAL_MS: u64 = 1000;
+
+/// 额度小文件刷新周期（毫秒）：订阅额度是慢变量（5 小时/周窗口），60 秒
+/// 足够。查询跑在**独立额度线程**（quota_loop，见模块头"额度旁路"节），
+/// 绝不串进 2 秒导出线程——quota::query_quota 的 HTTP 总超时 15 秒，一次
+/// 网络抖动即把 usage-data.js 的节拍拖住 15 秒；也绝不进 1 秒速度旁路。
+const QUOTA_INTERVAL_MS: u64 = 60_000;
 
 /// 模型分组速度区行数上限：按最近使用降序取前 N 个模型（对齐免注入悬浮
 /// 窗 HUD_MAX_MODEL_ROWS = 3，渲染端会话条下方最多 3 行；数据端截断，
@@ -608,6 +631,16 @@ fn feed_handle() -> &'static Mutex<Option<thread::JoinHandle<()>>> {
     FEED_HANDLE.get_or_init(|| Mutex::new(None))
 }
 
+/// 额度线程停止标记与句柄（与导出线程同款模式；启停挂点跟随 start/stop
+/// ——额度查询含最长 15 秒的 HTTP 等待，必须独立线程，绝不能阻塞 2 秒
+/// 导出节拍）
+static QUOTA_STOP: AtomicBool = AtomicBool::new(false);
+static QUOTA_HANDLE: OnceLock<Mutex<Option<thread::JoinHandle<()>>>> = OnceLock::new();
+
+fn quota_handle() -> &'static Mutex<Option<thread::JoinHandle<()>>> {
+    QUOTA_HANDLE.get_or_init(|| Mutex::new(None))
+}
+
 /// 应用启动挂点：皮肤已安装时启动导出线程（未安装不启动，零开销）。
 pub fn start_if_installed() {
     if store::load_state(TARGET_APP_ID).is_installed() {
@@ -617,6 +650,7 @@ pub fn start_if_installed() {
 
 /// 启动导出线程（安装成功挂点调用）。已在运行时为幂等 no-op（只清掉可能
 /// 残留的停止标记，覆盖 stop 后线程未退完又立即 start 的窄窗口）。
+/// 额度线程在同一挂点一并启动（启停挂点完全一致，见 start_quota_thread）。
 pub fn start() {
     let mut guard = match feed_handle().lock() {
         Ok(g) => g,
@@ -624,6 +658,7 @@ pub fn start() {
     };
     if guard.as_ref().is_some_and(|h| !h.is_finished()) {
         FEED_STOP.store(false, Ordering::Relaxed);
+        start_quota_thread();
         return;
     }
     FEED_STOP.store(false, Ordering::Relaxed);
@@ -634,13 +669,114 @@ pub fn start() {
     {
         *guard = Some(h);
     }
+    // 额度旁路线程：独立运行（60s 节拍 + HTTP 15s 超时上限），启停挂点
+    // 与导出线程一致，绝不阻塞 2 秒导出节拍
+    start_quota_thread();
+}
+
+/// 启动额度线程（start 内部挂点；句柄幂等与停止标记清理模式照抄导出
+/// 线程：已在运行时为幂等 no-op，stop 后未退完又立即 start 的窄窗口由
+/// 停止标记复位覆盖）。
+fn start_quota_thread() {
+    let mut guard = match quota_handle().lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if guard.as_ref().is_some_and(|h| !h.is_finished()) {
+        QUOTA_STOP.store(false, Ordering::Relaxed);
+        return;
+    }
+    QUOTA_STOP.store(false, Ordering::Relaxed);
+    if let Ok(h) = thread::Builder::new()
+        .name("zbar-usage-quota".into())
+        .spawn(quota_loop)
+    {
+        *guard = Some(h);
+    }
 }
 
 /// 停止导出线程（卸载/还原成功挂点调用）。仅置位停止标记，不 join 不等待；
 /// 线程完成当前导出周期（含可能的 DB busy 等待，最长约 3 秒余）后，
-/// 于下一个检查点退出。
+/// 于下一个检查点退出。额度线程同挂点停止（查询期间不响应，HTTP 15s
+/// 超时封顶后于下一检查点退出）。
 pub fn stop() {
     FEED_STOP.store(true, Ordering::Relaxed);
+    QUOTA_STOP.store(true, Ordering::Relaxed);
+}
+
+/// 额度线程主循环（独立线程，60 秒节拍、首拍启动后立即查询一次）：
+/// 每周期复核停止标记与安装状态（皮肤被异常还原时自动退出，不留空转
+/// 线程），查询成功原子写出 usage-quota.js，失败静默保留上次文件。
+fn quota_loop() {
+    loop {
+        if QUOTA_STOP.load(Ordering::Relaxed) {
+            return;
+        }
+        // 与 feed_loop 同款安装状态核对：皮肤被异常还原（state 复位而
+        // 未走 stop 挂点）时自动退出
+        if !store::load_state(TARGET_APP_ID).is_installed() {
+            return;
+        }
+        quota_query_once();
+        // 分段睡眠：sleep 期间可及时感知 stop（查询期间不响应，HTTP
+        // 总超时 15 秒封顶，随后在下一检查点退出）。
+        for _ in 0..(QUOTA_INTERVAL_MS / 100) {
+            if QUOTA_STOP.load(Ordering::Relaxed) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+/// 单次额度查询与写盘：调用 quota::query_quota（内部含 15s HTTP 总超时，
+/// 本函数只消费不改动其查询逻辑），成功才原子写出 usage-quota.js 小文件
+/// （.tmp + rename，与速度/心跳小文件同款）；失败静默保留上次文件内容
+/// （未登录/网络异常属常态，不刷日志——渲染端停留在上次成功值，下周期
+/// 自然重试）。usage-speed.js 旁路绝不携带额度字段，额度只走本文件。
+fn quota_query_once() {
+    let result = (|| -> Result<(), String> {
+        let quota = crate::quota::query_quota()?;
+        // 卸载竞态防护：HTTP 查询期间（最长 15 秒）皮肤可能已被还原/卸载并
+        // 清理主题目录，写盘前复核安装状态，已卸载则直接返回，不重建目录
+        if !store::load_state(TARGET_APP_ID).is_installed() {
+            return Ok(());
+        }
+        let dir = store::app_dir(TARGET_APP_ID)?;
+        fs::create_dir_all(&dir).map_err(|e| format!("创建主题目录失败: {e}"))?;
+        // 剩余 = 100 − 已用百分比（0-100），clamp 防接口异常值；窗口缺失
+        // （接口未返回该窗口）为 null，渲染端隐藏对应段
+        let remain = |used: Option<&crate::quota::QuotaLimit>| -> Option<i64> {
+            used.map(|l| (100 - l.percentage as i64).clamp(0, 100))
+        };
+        let js = render_quota_js(
+            remain(quota.hour5.as_ref()),
+            remain(quota.weekly.as_ref()),
+            chrono::Utc::now().timestamp_millis(),
+        );
+        let target = dir.join(store::USAGE_QUOTA_FILE);
+        let tmp = dir.join(format!("{}.tmp", store::USAGE_QUOTA_FILE));
+        fs::write(&tmp, js).map_err(|e| format!("写入 {} 失败: {e}", tmp.display()))?;
+        fs::rename(&tmp, &target)
+            .map_err(|e| format!("替换 {} 失败: {e}", target.display()))
+    })();
+    // 失败静默（结果仅用于"保留上次文件"的语义，不外泄不刷日志）
+    let _ = result;
+}
+
+/// 渲染额度小文件内容（几十字节）。契约键名与 inject::USAGE_JS 消费端
+/// 一字不差，勿改：`window.__ZBAR_QUOTA__ = {"v":1,"ts":<查询成功时刻ms>,
+/// "h5":<5小时窗口剩余%>,"wk":<周窗口剩余%>}`；窗口缺失为 null。
+fn render_quota_js(hour5_remain: Option<i64>, weekly_remain: Option<i64>, ts_ms: i64) -> String {
+    let opt = |v: Option<i64>| match v {
+        Some(t) => t.to_string(),
+        None => "null".to_string(),
+    };
+    format!(
+        "window.__ZBAR_QUOTA__ = {{\"v\":1,\"ts\":{ts_ms},\"h5\":{},\"wk\":{}}};\n",
+        opt(hour5_remain),
+        opt(weekly_remain)
+    )
 }
 
 fn feed_loop() {
@@ -2311,10 +2447,11 @@ fn attach_models(
 
 /// 会话级统计行（sess 数组元素，v2 附加字段，旧渲染脚本忽略未知字段）。
 /// 键名即 usage.js 消费端契约，勿改。内容为会话树内 model_usage 逐笔
-/// 累加的**全量合计**（tt/up/down/cr/rq，含失败/中断轮——turn_usage 覆盖
-/// 不全，轮正常结束才落库，按轮聚合的旧口径会话累计系统性偏小，本通道
-/// 修正为请求级全量）；↑ 口径 = 逐笔 max(0, input − cache_read)（与
-/// 悬浮窗 Σ/注入版会话条一致）。
+/// 累加的**全量合计**（tt/up/down/cr/cw/rq，含失败/中断轮——turn_usage
+/// 覆盖不全，轮正常结束才落库，按轮聚合的旧口径会话累计系统性偏小，
+/// 本通道修正为请求级全量）；↑ 口径 = 逐笔 max(0, input − cache_read)
+/// （与悬浮窗 Σ/注入版会话条一致）；cw = 缓存写合计（V27 附加字段，
+/// 不参与 tt 口径）。
 /// 历史注记：V21 曾携带 CTX 上下文占用三字段（cp/cu/cw，树内最近一笔
 /// completed 请求的 input ÷ 窗口容量），V22 随展示下线一并删除（数据端
 /// 不再查询/序列化，context_window 模块随之移除）。
@@ -2336,6 +2473,12 @@ pub(crate) struct UsageSessionStat {
     /// 全量合计 ⟲ 缓存读
     #[serde(rename = "cr")]
     cache_read: i64,
+    /// 全量合计 ✚ 缓存写（V27 附加字段，旧渲染脚本忽略未知字段平滑
+    /// 兼容；不参与 tt = ↑+↓+⟲ 口径，仅作会话条 ✚ 展示段的消费键）。
+    /// 注：与 V22 随 CTX 展示下线删除的旧 cw（上下文窗口容量）无关，
+    /// 本字段是 model_usage 的缓存写 token 合计
+    #[serde(rename = "cw")]
+    cache_write: i64,
     /// 全量合计 × 请求笔数（model_usage 行数）
     #[serde(rename = "rq")]
     requests: i64,
@@ -2373,6 +2516,8 @@ struct SessionUsageAgg {
     plain_in: i64,
     out_tokens: i64,
     cache_read: i64,
+    /// 缓存写合计（V27 附加字段；不参与 total() = ↑+↓+⟲ 口径）
+    cache_write: i64,
     requests: i64,
 }
 
@@ -2455,15 +2600,16 @@ fn collect_session_stats_with_catalog(
     // 5) 全量合计：成员并集一次 IN 等值查（走 session_turn 前缀索引），
     //    逐笔 clamp 的 ↑ 在 SQL 内完成（SQLite 双参 MAX 为标量函数）
     let member_list: Vec<String> = all_members.into_iter().collect();
-    let (inp, out, cr) = (
+    let (inp, out, cr, cw) = (
         num_col(conn, "model_usage", "input_tokens"),
         num_col(conn, "model_usage", "output_tokens"),
         num_col(conn, "model_usage", "cache_read_input_tokens"),
+        num_col(conn, "model_usage", "cache_creation_input_tokens"),
     );
     let placeholders = vec!["?"; member_list.len()].join(", ");
     let agg_sql = format!(
         "SELECT session_id, \
-                SUM(MAX({inp} - {cr}, 0)), SUM({out}), SUM({cr}), COUNT(*) \
+                SUM(MAX({inp} - {cr}, 0)), SUM({out}), SUM({cr}), SUM({cw}), COUNT(*) \
          FROM model_usage WHERE session_id IN ({placeholders}) \
          GROUP BY session_id"
     );
@@ -2478,6 +2624,7 @@ fn collect_session_stats_with_catalog(
                 row.get::<_, i64>(2)?,
                 row.get::<_, i64>(3)?,
                 row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
             ))
         })
         .map_err(|e| format!("查询会话合计失败: {e}"))?
@@ -2485,13 +2632,14 @@ fn collect_session_stats_with_catalog(
         .map_err(|e| format!("读取会话合计失败: {e}"))?;
     let agg_by_session: BTreeMap<String, SessionUsageAgg> = agg_rows
         .into_iter()
-        .map(|(sid, up, out, cr, rq)| {
+        .map(|(sid, up, out, cr, cw, rq)| {
             (
                 sid,
                 SessionUsageAgg {
                     plain_in: up.max(0),
                     out_tokens: out.max(0),
                     cache_read: cr.max(0),
+                    cache_write: cw.max(0),
                     requests: rq.max(0),
                 },
             )
@@ -2509,6 +2657,7 @@ fn collect_session_stats_with_catalog(
                 agg.plain_in += a.plain_in;
                 agg.out_tokens += a.out_tokens;
                 agg.cache_read += a.cache_read;
+                agg.cache_write += a.cache_write;
                 agg.requests += a.requests;
             }
         }
@@ -2547,6 +2696,7 @@ fn collect_session_stats_with_catalog(
             plain_in: agg.plain_in,
             out_tokens: agg.out_tokens,
             cache_read: agg.cache_read,
+            cache_write: agg.cache_write,
             requests: agg.requests,
             speed,
             speed_state,
@@ -2953,6 +3103,25 @@ mod tests {
     }
 
     #[test]
+    fn 额度小文件_窄契约与窗口缺失形态() {
+        // V27 额度旁路契约：v:1 + ts + h5/wk（剩余百分比），几十字节，
+        // 与 usage-data.js / usage-speed.js 完全独立
+        let js = render_quota_js(Some(22), Some(7), 12345);
+        assert_eq!(
+            js,
+            "window.__ZBAR_QUOTA__ = {\"v\":1,\"ts\":12345,\"h5\":22,\"wk\":7};\n",
+            "{js}"
+        );
+        // 窗口缺失（接口未返回该窗口）→ null，渲染端隐藏对应段
+        let js_null = render_quota_js(None, Some(0), 1);
+        assert_eq!(
+            js_null,
+            "window.__ZBAR_QUOTA__ = {\"v\":1,\"ts\":1,\"h5\":null,\"wk\":0};\n",
+            "{js_null}"
+        );
+    }
+
+    #[test]
     fn 速度小文件_只含窄快照且与大历史文件独立() {
         let dir = std::env::temp_dir().join(format!(
             "zbar-usage-speed-write-{}",
@@ -2976,6 +3145,7 @@ mod tests {
             plain_in: 100,
             out_tokens: 1_000,
             cache_read: 100,
+            cache_write: 0,
             requests: 1,
             speed: Some(snapshot),
             speed_state: SpeedState::Recent,
@@ -3226,6 +3396,7 @@ mod tests {
                 plain_in: 100,
                 out_tokens: 800,
                 cache_read: 100,
+                cache_write: 0,
                 requests: 9,
                 speed: Some(SpeedSnapshot {
                     value: 120.0,
@@ -3246,6 +3417,7 @@ mod tests {
             plain_in: 200,
             out_tokens: 1_600,
             cache_read: 200,
+            cache_write: 0,
             requests: 4,
             speed: None,
             speed_state: SpeedState::Measuring,
@@ -3610,6 +3782,7 @@ mod tests {
             plain_in: 100,
             out_tokens: 200,
             cache_read: 50,
+            cache_write: 30,
             requests: 2,
             speed: None,
             speed_state: SpeedState::Unavailable,
@@ -4462,14 +4635,17 @@ mod tests {
 
     #[test]
     fn sess序列化_键名契约与全零形态() {
-        // 短键名一字不差（usage.js 按名消费）；V22 起 cp/cu/cw 已随 CTX
-        // 展示下线删除，不再出现在序列化输出
+        // 短键名一字不差（usage.js 按名消费）；cw = 缓存写合计（V27 附加
+        // 字段，介于 cr 与 rq 之间）；V22 起 cp/cu 已随 CTX 展示下线删除，
+        // 不再出现在序列化输出（V22 删除的旧 cw 是上下文窗口容量，与
+        // V27 重新引入的缓存写 cw 无关）
         let row = UsageSessionStat {
             session_id: "sess_1".to_string(),
             total: 1110,
             plain_in: 100,
             out_tokens: 200,
             cache_read: 50,
+            cache_write: 30,
             requests: 2,
             speed: None,
             speed_state: SpeedState::Unavailable,
@@ -4481,7 +4657,7 @@ mod tests {
         let json = serde_json::to_string(&vec![row]).unwrap();
         assert_eq!(
             json,
-            "[{\"s\":\"sess_1\",\"tt\":1110,\"up\":100,\"down\":200,\"cr\":50,\"rq\":2,\"speedState\":\"unavailable\"}]",
+            "[{\"s\":\"sess_1\",\"tt\":1110,\"up\":100,\"down\":200,\"cr\":50,\"cw\":30,\"rq\":2,\"speedState\":\"unavailable\"}]",
             "sess 行序列化形态不符：{json}"
         );
         // 全零行（无任何请求）：各合计为 0
@@ -4491,6 +4667,7 @@ mod tests {
             plain_in: 0,
             out_tokens: 0,
             cache_read: 0,
+            cache_write: 0,
             requests: 0,
             speed: None,
             speed_state: SpeedState::Unavailable,
@@ -4502,11 +4679,11 @@ mod tests {
         let json = serde_json::to_string(&vec![none_row]).unwrap();
         assert_eq!(
             json,
-            "[{\"s\":\"sess_2\",\"tt\":0,\"up\":0,\"down\":0,\"cr\":0,\"rq\":0,\"speedState\":\"unavailable\"}]",
+            "[{\"s\":\"sess_2\",\"tt\":0,\"up\":0,\"down\":0,\"cr\":0,\"cw\":0,\"rq\":0,\"speedState\":\"unavailable\"}]",
             "{json}"
         );
-        // CTX 短键零残留（V22 删除 cp/cu/cw）
-        assert!(!json.contains("\"cp\"") && !json.contains("\"cu\"") && !json.contains("\"cw\""));
+        // CTX 短键零残留（V22 删除 cp/cu；cw 已由 V27 以缓存写语义重新引入）
+        assert!(!json.contains("\"cp\"") && !json.contains("\"cu\""));
     }
 
     #[test]
@@ -4522,7 +4699,7 @@ mod tests {
              CREATE TABLE model_usage (
                 session_id TEXT, turn_id TEXT, started_at INTEGER, model_id TEXT,
                 status TEXT, input_tokens INTEGER, output_tokens INTEGER,
-                cache_read_input_tokens INTEGER);",
+                cache_read_input_tokens INTEGER, cache_creation_input_tokens INTEGER);",
         )
         .unwrap();
         conn.execute_batch(
@@ -4531,15 +4708,15 @@ mod tests {
                ('sess_sub2', 'sess_main'), ('sess_sub2_child', 'sess_sub2');
              INSERT INTO model_usage VALUES
                -- 主会话：完成请求 + 失败请求（无 turn_usage 行，旧口径漏计）
-               ('sess_main', 't1', 1000, 'GLM-4.6', 'completed', 100, 200, 40),
-               ('sess_main', 't2', 2000, 'GLM-4.6', 'error', 50, 0, 0),
+               ('sess_main', 't1', 1000, 'GLM-4.6', 'completed', 100, 200, 40, 5),
+               ('sess_main', 't2', 2000, 'GLM-4.6', 'error', 50, 0, 0, 0),
                -- turn_id NULL 的后台请求（session_title 等）：计入合计
-               ('sess_main', NULL, 1500, 'GLM-4.6', 'completed', 10, 5, 0),
+               ('sess_main', NULL, 1500, 'GLM-4.6', 'completed', 10, 5, 0, 1),
                -- 子代理 1：完成请求（started_at 最大）
-               ('sess_sub1', 't3', 5000, 'GLM-5.3', 'completed', 13107, 300, 100),
+               ('sess_sub1', 't3', 5000, 'GLM-5.3', 'completed', 13107, 300, 100, 60),
                -- 子代理 2 及其嵌套子代理
-               ('sess_sub2', 't4', 3000, 'GLM-4.7', 'completed', 30, 40, 20),
-               ('sess_sub2_child', 't5', 3500, 'GLM-4.7', 'completed', 30, 10, 10);",
+               ('sess_sub2', 't4', 3000, 'GLM-4.7', 'completed', 30, 40, 20, 8),
+               ('sess_sub2_child', 't5', 3500, 'GLM-4.7', 'completed', 30, 10, 10, 4);",
         )
         .unwrap();
         // 出现过的会话：turns 携带 sess_main（模拟 turns/runs 的出现集合）
@@ -4558,6 +4735,9 @@ mod tests {
         assert_eq!(main.out_tokens, 555);
         // ⟲ = 40 + 100 + 20 + 10
         assert_eq!(main.cache_read, 170);
+        // ✚ 缓存写（V27）= 5 + 0 + 1 + 60 + 8 + 4，树成员并集各计一次，
+        // 且不参与 tt = ↑+↓+⟲ 口径
+        assert_eq!(main.cache_write, 5 + 0 + 1 + 60 + 8 + 4);
         assert_eq!(main.requests, 6, "失败轮与 NULL turn_id 行均计入");
         assert_eq!(main.total, main.plain_in + main.out_tokens + main.cache_read);
         drop(conn);
@@ -4615,6 +4795,10 @@ mod tests {
         // 子代理自身树行 = 仅自身（↑ = 10）
         assert_eq!(sub.plain_in, 10);
         assert_eq!(sub.requests, 1);
+        // 缓存写列缺失（本测试库无 cache_creation_input_tokens）：
+        // num_col 降级为 0，查询与导出不失败（V27 附加字段的降级口径）
+        assert_eq!(main.cache_write, 0, "缺列应降级为 0");
+        assert_eq!(sub.cache_write, 0, "缺列应降级为 0");
         drop(conn);
         let _ = fs::remove_file(&path);
     }

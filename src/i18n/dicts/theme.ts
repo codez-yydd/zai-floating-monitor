@@ -115,6 +115,15 @@ export const theme = {
   "theme.usageTurnBar": "每轮统计条",
   "theme.usageTurnBarHint":
     "在每轮对话末尾显示该轮用量（↑ 输入 ↓ 输出 · ⟲ 缓存读 · × 请求数 · 速度 · TTFT），字号与不透明度沿用上方滑块",
+  // 输入框额度行开关（usage.js V28/V29：输入框卡片底部外侧的独立额度行）
+  "theme.usageQuotaBar": "输入框额度行",
+  "theme.usageQuotaBarHint":
+    "在输入框底部显示剩余额度（5 小时/每周窗口百分比，右对齐小字），字号与不透明度沿用上方滑块",
+  // 模型速度行开关（usage.js V29：输入框上方按模型分组的速度行，
+  // 自会话累计条拆出的独立容器，两者独立控制）
+  "theme.usageModelRows": "模型速度行",
+  "theme.usageModelRowsHint":
+    "在输入框上方按模型分组显示速度行（最近值三档变色与均/快/慢聚合），与会话累计条独立控制，字号与不透明度沿用上方滑块",
   // 统计条符号图例（与 usage.js 行格式一一对应）
   "theme.usageLegend":
     "↑ 输入（非缓存） · ↓ 输出 · ⟲ 缓存读 · × 模型请求数 · t/s 输出速度 · TTFT 首字延迟 · Σ 会话总 Token（输入+输出+缓存读） · ≈ 生成中输出估算（未计入累计）",

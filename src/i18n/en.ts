@@ -726,6 +726,15 @@ export const en: typeof zh = {
     "theme.usageTurnBar": "Per-turn usage bar",
     "theme.usageTurnBarHint":
       "Shows each turn's usage at the end of every chat turn (↑ input ↓ output · ⟲ cache read · × requests · speed · TTFT); font size and opacity follow the sliders above",
+    // Quota row toggle (usage.js V28/V29: standalone quota line below the input box)
+    "theme.usageQuotaBar": "Input quota row",
+    "theme.usageQuotaBarHint":
+      "Shows the remaining quota under the input box (5-hour/weekly window percentages, small right-aligned text); font size and opacity follow the sliders above",
+    // Model speed rows toggle (usage.js V29: per-model speed rows above the
+    // input box, split out of the session total bar as an independent container)
+    "theme.usageModelRows": "Model speed rows",
+    "theme.usageModelRowsHint":
+      "Shows per-model speed rows above the input box (latest value color-coded with avg/fast/slow), controlled independently of the session total bar; font size and opacity follow the sliders above",
     // Symbol legend (mirrors the usage.js line format)
     "theme.usageLegend":
       "↑ input (non-cached) · ↓ output · ⟲ cache read · × model requests · t/s output speed · TTFT time to first token · Σ session total tokens (input+output+cache read) · ≈ in-flight output estimate (excluded from totals)",

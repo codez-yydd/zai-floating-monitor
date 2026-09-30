@@ -898,6 +898,15 @@ export interface ThemeParams {
    *  （↑输入 ↓输出 · ⟲缓存读 · ×请求数 · 速度 · TTFT）；经 variables.css
    *  --zbar-usage-turn-bar（1/0）热重载生效 */
   usageTurnBar: boolean;
+  /** 输入框额度行开关（默认 true）：在 ZCode 输入框卡片底部外侧显示
+   *  独立额度行（5 小时/每周窗口剩余百分比，右对齐小字；空会话页自动
+   *  隐藏）；经 variables.css --zbar-usage-quota-bar（1/0）热重载生效 */
+  usageQuotaBar: boolean;
+  /** 模型速度行开关（默认 true）：在 ZCode 输入框上方显示按模型分组
+   *  的速度行（最近值三档变色 + 均/快/慢聚合）；与会话累计条独立控制，
+   *  会话累计条关闭时照常显示；经 variables.css
+   *  --zbar-usage-model-rows（1/0）热重载生效 */
+  usageModelRows: boolean;
   /** 当前壁纸指向（未设置为 null）。相对文件名 = wallpapers/ 目录内
    *  文件（如 "default.mp4"）；绝对路径 = 直接引用 */
   wallpaperFile: string | null;

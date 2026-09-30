@@ -78,7 +78,12 @@ const STAGE_KEYS: Record<string, MessageKey> = {
 interface SliderDef {
   key: keyof Omit<
     ThemeParams,
-    "wallpaperFile" | "wallpaperDir" | "usageSessionBar" | "usageTurnBar"
+    | "wallpaperFile"
+    | "wallpaperDir"
+    | "usageSessionBar"
+    | "usageTurnBar"
+    | "usageQuotaBar"
+    | "usageModelRows"
   >;
   labelKey: MessageKey;
   /** 可选滑块说明（渲染在滑块下方的小字；仅部分参数提供） */
@@ -568,6 +573,33 @@ export function ThemePanel({ onBack }: Props) {
     const cur = paramsRef.current;
     if (!cur) return;
     const next = { ...cur, usageTurnBar: checked };
+    setParams(next);
+    scheduleParamsSave(next);
+  };
+
+  /**
+   * 输入框额度行开关变更（布尔参数，不走滑块刻度换算）：本地即时反馈，
+   * 防抖保存管道与滑块共用；Rust 侧落盘后经 variables.css 的
+   * --zbar-usage-quota-bar 热重载透传给注入侧 usage.js（约 1 秒生效）。
+   */
+  const handleUsageQuotaBar = (checked: boolean) => {
+    const cur = paramsRef.current;
+    if (!cur) return;
+    const next = { ...cur, usageQuotaBar: checked };
+    setParams(next);
+    scheduleParamsSave(next);
+  };
+
+  /**
+   * 模型速度行开关变更（布尔参数，不走滑块刻度换算）：本地即时反馈，
+   * 防抖保存管道与滑块共用；Rust 侧落盘后经 variables.css 的
+   * --zbar-usage-model-rows 热重载透传给注入侧 usage.js（约 1 秒生效）。
+   * 注入侧自 V29 起模型速度行为独立容器，与会话累计条开关互不影响。
+   */
+  const handleUsageModelRows = (checked: boolean) => {
+    const cur = paramsRef.current;
+    if (!cur) return;
+    const next = { ...cur, usageModelRows: checked };
     setParams(next);
     scheduleParamsSave(next);
   };
@@ -1186,6 +1218,52 @@ export function ThemePanel({ onBack }: Props) {
                     checked={params.usageSessionBar}
                     disabled={actionsDisabled}
                     onChange={(e) => handleUsageSessionBar(e.target.checked)}
+                    className="accent-sky-500 h-3 w-3 shrink-0 disabled:opacity-40"
+                  />
+                </label>
+
+                {/* 输入框额度行开关（usage.js V28/V29）：输入框卡片底部
+                    外侧的独立额度行（5 小时/每周剩余百分比，右对齐小
+                    字；空会话页自动隐藏），与会话条开关联动解耦；字号/
+                    不透明度复用上方两个滑块，开关经 variables.css 热重
+                    载生效 */}
+                <label className="flex items-center justify-between gap-2 cursor-pointer pt-2">
+                  <span className="min-w-0">
+                    <span className="block text-[10px] text-slate-600">
+                      {t("theme.usageQuotaBar")}
+                    </span>
+                    <span className="block text-[9px] text-slate-500 leading-relaxed">
+                      {t("theme.usageQuotaBarHint")}
+                    </span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={params.usageQuotaBar}
+                    disabled={actionsDisabled}
+                    onChange={(e) => handleUsageQuotaBar(e.target.checked)}
+                    className="accent-sky-500 h-3 w-3 shrink-0 disabled:opacity-40"
+                  />
+                </label>
+
+                {/* 模型速度行开关（usage.js V29）：输入框上方按模型分组
+                    的速度行，自 V29 起从会话累计条中拆出为独立容器，与
+                    会话条开关独立控制（会话条关闭时照常显示）；字号/
+                    不透明度复用上方两个滑块，开关经 variables.css 热重
+                    载生效 */}
+                <label className="flex items-center justify-between gap-2 cursor-pointer pt-2">
+                  <span className="min-w-0">
+                    <span className="block text-[10px] text-slate-600">
+                      {t("theme.usageModelRows")}
+                    </span>
+                    <span className="block text-[9px] text-slate-500 leading-relaxed">
+                      {t("theme.usageModelRowsHint")}
+                    </span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={params.usageModelRows}
+                    disabled={actionsDisabled}
+                    onChange={(e) => handleUsageModelRows(e.target.checked)}
                     className="accent-sky-500 h-3 w-3 shrink-0 disabled:opacity-40"
                   />
                 </label>
